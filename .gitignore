@@ -1,0 +1,12 @@
+/w3goaudit
+.env
+.vscode/
+.agent/
+.cursor/
+.idea/
+.claude/
+scripts/
+report/
+templates/4naly3er-inspired/
+templates/realworld-inspired/
+templates/slither-inspired/

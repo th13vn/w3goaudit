@@ -1,0 +1,151 @@
+{
+  "schema_version": "1.0",
+  "name": "W3GoAudit security benchmark seed corpus",
+  "description": "Compiler-valid Solidity fixtures with labeled arbitrary transferFrom and reentrancy findings.",
+  "categories": {
+    "arbitrary-transferfrom": {
+      "title": "Arbitrary ERC20 transferFrom",
+      "aliases": {
+        "w3goaudit": [
+          "SEC-ERC20-001"
+        ],
+        "slither": [
+          "arbitrary-send-erc20"
+        ],
+        "aderyn": [
+          "arbitrary-transfer-from",
+          "arbitrary-transferfrom",
+          "arbitrary erc20 transfer"
+        ],
+        "semgrep": [
+          "arbitrary-transferfrom",
+          "arbitrary-send-erc20",
+          "transferfrom"
+        ],
+        "solhint": []
+      }
+    },
+    "reentrancy": {
+      "title": "Reentrancy",
+      "aliases": {
+        "w3goaudit": [
+          "SEC-GEN-REENTRANCY"
+        ],
+        "slither": [
+          "reentrancy-eth",
+          "reentrancy-no-eth",
+          "reentrancy-benign",
+          "reentrancy-events",
+          "reentrancy-unlimited-gas"
+        ],
+        "aderyn": [
+          "reentrancy"
+        ],
+        "semgrep": [
+          "reentrancy"
+        ],
+        "solhint": [
+          "reentrancy"
+        ]
+      }
+    }
+  },
+  "cases": [
+    {
+      "id": "arbitrary-transferfrom",
+      "title": "Arbitrary transferFrom access-control and interprocedural taint fixtures",
+      "targets": [
+        "test-data/security/test-arbitrary-transferfrom.sol",
+        "test-data/security/test-interprocedural-taint.sol"
+      ],
+      "templates": "templates/security/arbitrary_transferfrom.yaml",
+      "requires_compilation": true,
+      "expected": [
+        {
+          "category": "arbitrary-transferfrom",
+          "contract": "VulnerableDeposit",
+          "function": "deposit"
+        },
+        {
+          "category": "arbitrary-transferfrom",
+          "contract": "VulnerableBatchDeposit",
+          "function": "batchDeposit"
+        },
+        {
+          "category": "arbitrary-transferfrom",
+          "contract": "VulnerableStaking",
+          "function": "stake"
+        },
+        {
+          "category": "arbitrary-transferfrom",
+          "contract": "VulnerableSwap",
+          "function": "swap"
+        },
+        {
+          "category": "arbitrary-transferfrom",
+          "contract": "VulnerableNoAuth",
+          "function": "withdrawFrom"
+        },
+        {
+          "category": "arbitrary-transferfrom",
+          "contract": "VulnerableInternalForward",
+          "function": "depositFrom"
+        },
+        {
+          "category": "arbitrary-transferfrom",
+          "contract": "VulnerableAliasForward",
+          "function": "depositFrom"
+        },
+        {
+          "category": "arbitrary-transferfrom",
+          "contract": "VulnerableNestedForward",
+          "function": "depositFrom"
+        },
+        {
+          "category": "arbitrary-transferfrom",
+          "contract": "VulnerableAliasReassignmentForward",
+          "function": "depositFrom"
+        },
+        {
+          "category": "arbitrary-transferfrom",
+          "contract": "VulnerableStructForward",
+          "function": "deposit"
+        }
+      ]
+    },
+    {
+      "id": "reentrancy",
+      "title": "Checks-effects-interactions reentrancy fixture",
+      "target": "test-data/security/test-reentrancy.sol",
+      "templates": "templates/security/reentrancy_pattern.yaml",
+      "requires_compilation": true,
+      "expected": [
+        {
+          "category": "reentrancy",
+          "contract": "VulnerableBank1",
+          "function": "withdraw"
+        },
+        {
+          "category": "reentrancy",
+          "contract": "VulnerableBank2",
+          "function": "withdrawAll"
+        },
+        {
+          "category": "reentrancy",
+          "contract": "VulnerableBank3",
+          "function": "withdraw"
+        },
+        {
+          "category": "reentrancy",
+          "contract": "VulnerableVault",
+          "function": "withdraw"
+        },
+        {
+          "category": "reentrancy",
+          "contract": "VulnerableAuction",
+          "function": "refund"
+        }
+      ]
+    }
+  ]
+}
