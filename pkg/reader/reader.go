@@ -10,7 +10,7 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/th13vn/w3goaudit-engine/pkg/types"
+	"github.com/th13vn/w3goaudit/pkg/types"
 )
 
 // Reader handles reading Solidity files and directories

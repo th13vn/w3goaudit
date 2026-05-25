@@ -31,8 +31,8 @@ Complete guide for using W3GoAudit as a CLI tool and Go SDK.
 
 ```bash
 # Clone the repository
-git clone https://github.com/th13vn/w3goaudit-engine
-cd w3goaudit-engine
+git clone https://github.com/th13vn/w3goaudit
+cd w3goaudit
 
 # Build the binary
 go build -o w3goaudit ./cmd/w3goaudit
@@ -48,7 +48,7 @@ w3goaudit version
 
 ```bash
 # Install directly from repository
-go install github.com/th13vn/w3goaudit-engine/cmd/w3goaudit@latest
+go install github.com/th13vn/w3goaudit/cmd/w3goaudit@latest
 
 # Verify installation (ensure $GOPATH/bin is in your PATH)
 w3goaudit version
@@ -553,7 +553,7 @@ Use W3GoAudit as a Go library in your projects.
 ### Installation
 
 ```bash
-go get github.com/th13vn/w3goaudit-engine
+go get github.com/th13vn/w3goaudit
 ```
 
 ### Basic Example
@@ -565,9 +565,9 @@ import (
     "fmt"
     "log"
 
-    "github.com/th13vn/w3goaudit-engine/pkg/builder"
-    "github.com/th13vn/w3goaudit-engine/pkg/engine"
-    "github.com/th13vn/w3goaudit-engine/pkg/reader"
+    "github.com/th13vn/w3goaudit/pkg/builder"
+    "github.com/th13vn/w3goaudit/pkg/engine"
+    "github.com/th13vn/w3goaudit/pkg/reader"
 )
 
 func main() {

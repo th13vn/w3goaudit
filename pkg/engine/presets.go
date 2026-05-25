@@ -1,7 +1,7 @@
 package engine
 
 import (
-	"github.com/th13vn/w3goaudit-engine/pkg/types"
+	"github.com/th13vn/w3goaudit/pkg/types"
 )
 
 // PresetFunc is a function type for preset checks

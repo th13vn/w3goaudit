@@ -37,18 +37,18 @@ pkg/
 ## Installation
 
 ```bash
-go get github.com/th13vn/w3goaudit-engine
+go get github.com/th13vn/w3goaudit
 ```
 
 **Import packages:**
 
 ```go
 import (
-    "github.com/th13vn/w3goaudit-engine/pkg/reader"
-    "github.com/th13vn/w3goaudit-engine/pkg/builder"
-    "github.com/th13vn/w3goaudit-engine/pkg/engine"
-    "github.com/th13vn/w3goaudit-engine/pkg/types"
-    "github.com/th13vn/w3goaudit-engine/pkg/report"
+    "github.com/th13vn/w3goaudit/pkg/reader"
+    "github.com/th13vn/w3goaudit/pkg/builder"
+    "github.com/th13vn/w3goaudit/pkg/engine"
+    "github.com/th13vn/w3goaudit/pkg/types"
+    "github.com/th13vn/w3goaudit/pkg/report"
 )
 ```
 
@@ -248,9 +248,9 @@ import (
     "fmt"
     "log"
     
-    "github.com/th13vn/w3goaudit-engine/pkg/builder"
-    "github.com/th13vn/w3goaudit-engine/pkg/engine"
-    "github.com/th13vn/w3goaudit-engine/pkg/reader"
+    "github.com/th13vn/w3goaudit/pkg/builder"
+    "github.com/th13vn/w3goaudit/pkg/engine"
+    "github.com/th13vn/w3goaudit/pkg/reader"
 )
 
 func main() {
@@ -1025,10 +1025,10 @@ import (
     "fmt"
     "os"
     
-    "github.com/th13vn/w3goaudit-engine/pkg/builder"
-    "github.com/th13vn/w3goaudit-engine/pkg/engine"
-    "github.com/th13vn/w3goaudit-engine/pkg/reader"
-    "github.com/th13vn/w3goaudit-engine/pkg/types"
+    "github.com/th13vn/w3goaudit/pkg/builder"
+    "github.com/th13vn/w3goaudit/pkg/engine"
+    "github.com/th13vn/w3goaudit/pkg/reader"
+    "github.com/th13vn/w3goaudit/pkg/types"
 )
 
 func main() {
@@ -1151,9 +1151,9 @@ package main
 import (
     \"os\"
     
-    \"github.com/th13vn/w3goaudit-engine/pkg/builder\"
-    \"github.com/th13vn/w3goaudit-engine/pkg/engine\"
-    \"github.com/th13vn/w3goaudit-engine/pkg/reader\"
+    \"github.com/th13vn/w3goaudit/pkg/builder\"
+    \"github.com/th13vn/w3goaudit/pkg/engine\"
+    \"github.com/th13vn/w3goaudit/pkg/reader\"
 )
 
 func main() {
@@ -1240,9 +1240,9 @@ import (
     "fmt"
     "os"
     
-    "github.com/th13vn/w3goaudit-engine/pkg/builder"
-    "github.com/th13vn/w3goaudit-engine/pkg/engine"
-    "github.com/th13vn/w3goaudit-engine/pkg/reader"
+    "github.com/th13vn/w3goaudit/pkg/builder"
+    "github.com/th13vn/w3goaudit/pkg/engine"
+    "github.com/th13vn/w3goaudit/pkg/reader"
 )
 
 func main() {
@@ -1326,9 +1326,9 @@ import (
     "sort"
     "strings"
     
-    "github.com/th13vn/w3goaudit-engine/pkg/builder"
-    "github.com/th13vn/w3goaudit-engine/pkg/engine"
-    "github.com/th13vn/w3goaudit-engine/pkg/reader"
+    "github.com/th13vn/w3goaudit/pkg/builder"
+    "github.com/th13vn/w3goaudit/pkg/engine"
+    "github.com/th13vn/w3goaudit/pkg/reader"
 )
 
 func main() {

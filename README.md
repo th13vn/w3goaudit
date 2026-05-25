@@ -1,4 +1,4 @@
-# W3GoAudit Engine
+# W3GoAudit
 
 A Go-based CLI & SDK for auditing Solidity smart contracts using rule-based templates with WQL query language.
 
@@ -8,7 +8,7 @@ A Go-based CLI & SDK for auditing Solidity smart contracts using rule-based temp
 
 ```bash
 # Install
-go install github.com/th13vn/w3goaudit-engine/cmd/w3goaudit@latest
+go install github.com/th13vn/w3goaudit/cmd/w3goaudit@latest
 
 # Scan contracts (default command)
 w3goaudit ./contracts/ --template ./templates/
@@ -59,8 +59,8 @@ Comprehensive guides available in [`docs/`](./docs):
 
 ```bash
 # Clone the repository
-git clone https://github.com/th13vn/w3goaudit-engine
-cd w3goaudit-engine
+git clone https://github.com/th13vn/w3goaudit
+cd w3goaudit
 
 # Build
 go build -o w3goaudit ./cmd/w3goaudit
@@ -72,7 +72,7 @@ sudo mv w3goaudit /usr/local/bin/
 ### Via Go Install
 
 ```bash
-go install github.com/th13vn/w3goaudit-engine/cmd/w3goaudit@latest
+go install github.com/th13vn/w3goaudit/cmd/w3goaudit@latest
 ```
 
 ---
@@ -148,9 +148,9 @@ For complete usage, see [Usage Guide](./docs/usage.md).
 
 ```go
 import (
-    "github.com/th13vn/w3goaudit-engine/pkg/reader"
-    "github.com/th13vn/w3goaudit-engine/pkg/builder"
-    "github.com/th13vn/w3goaudit-engine/pkg/engine"
+    "github.com/th13vn/w3goaudit/pkg/reader"
+    "github.com/th13vn/w3goaudit/pkg/builder"
+    "github.com/th13vn/w3goaudit/pkg/engine"
 )
 
 // Read sources

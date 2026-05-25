@@ -2,7 +2,7 @@ package builder
 
 import (
 	"github.com/th13vn/solast-go/pkg/ast"
-	"github.com/th13vn/w3goaudit-engine/pkg/types"
+	"github.com/th13vn/w3goaudit/pkg/types"
 )
 
 // ContractExtractor extracts contracts from AST

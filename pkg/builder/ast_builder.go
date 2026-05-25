@@ -4,7 +4,7 @@ import (
 	"fmt"
 
 	"github.com/th13vn/solast-go/pkg/ast"
-	"github.com/th13vn/w3goaudit-engine/pkg/types"
+	"github.com/th13vn/w3goaudit/pkg/types"
 )
 
 // ASTBuilder builds w3goaudit AST from Solidity AST

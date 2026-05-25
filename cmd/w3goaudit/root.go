@@ -9,9 +9,9 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
-	"github.com/th13vn/w3goaudit-engine/pkg/engine"
-	"github.com/th13vn/w3goaudit-engine/pkg/report"
-	"github.com/th13vn/w3goaudit-engine/pkg/types"
+	"github.com/th13vn/w3goaudit/pkg/engine"
+	"github.com/th13vn/w3goaudit/pkg/report"
+	"github.com/th13vn/w3goaudit/pkg/types"
 )
 
 // Version information

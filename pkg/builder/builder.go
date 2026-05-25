@@ -6,7 +6,7 @@ import (
 
 	"github.com/th13vn/solast-go/pkg/ast"
 	"github.com/th13vn/solast-go/pkg/parser"
-	"github.com/th13vn/w3goaudit-engine/pkg/types"
+	"github.com/th13vn/w3goaudit/pkg/types"
 )
 
 // Builder constructs the contract database

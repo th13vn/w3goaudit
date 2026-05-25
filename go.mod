@@ -1,4 +1,4 @@
-module github.com/th13vn/w3goaudit-engine
+module github.com/th13vn/w3goaudit
 
 go 1.24.2
 

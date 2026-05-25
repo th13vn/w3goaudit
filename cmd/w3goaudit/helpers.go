@@ -4,11 +4,11 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/th13vn/w3goaudit-engine/pkg/builder"
-	"github.com/th13vn/w3goaudit-engine/pkg/engine"
-	"github.com/th13vn/w3goaudit-engine/pkg/reader"
-	"github.com/th13vn/w3goaudit-engine/pkg/report"
-	"github.com/th13vn/w3goaudit-engine/pkg/types"
+	"github.com/th13vn/w3goaudit/pkg/builder"
+	"github.com/th13vn/w3goaudit/pkg/engine"
+	"github.com/th13vn/w3goaudit/pkg/reader"
+	"github.com/th13vn/w3goaudit/pkg/report"
+	"github.com/th13vn/w3goaudit/pkg/types"
 )
 
 // verboseFile holds the current verbose file handle (if any)

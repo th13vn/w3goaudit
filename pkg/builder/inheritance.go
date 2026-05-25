@@ -3,7 +3,7 @@ package builder
 import (
 	"fmt"
 
-	"github.com/th13vn/w3goaudit-engine/pkg/types"
+	"github.com/th13vn/w3goaudit/pkg/types"
 )
 
 // InheritanceBuilder builds the inheritance tree for contracts

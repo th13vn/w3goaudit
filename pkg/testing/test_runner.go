@@ -8,10 +8,10 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/th13vn/w3goaudit-engine/pkg/builder"
-	"github.com/th13vn/w3goaudit-engine/pkg/engine"
-	"github.com/th13vn/w3goaudit-engine/pkg/reader"
-	"github.com/th13vn/w3goaudit-engine/pkg/types"
+	"github.com/th13vn/w3goaudit/pkg/builder"
+	"github.com/th13vn/w3goaudit/pkg/engine"
+	"github.com/th13vn/w3goaudit/pkg/reader"
+	"github.com/th13vn/w3goaudit/pkg/types"
 )
 
 // TestCase represents a single test case

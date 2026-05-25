@@ -8,8 +8,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/th13vn/w3goaudit-engine/pkg/builder"
-	"github.com/th13vn/w3goaudit-engine/pkg/reader"
+	"github.com/th13vn/w3goaudit/pkg/builder"
+	"github.com/th13vn/w3goaudit/pkg/reader"
 )
 
 func TestInterproceduralTaintForInternalTransferFrom(t *testing.T) {

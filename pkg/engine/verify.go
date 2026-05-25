@@ -7,7 +7,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/th13vn/w3goaudit-engine/pkg/types"
+	"github.com/th13vn/w3goaudit/pkg/types"
 )
 
 // Verify checks if an AST node matches a rule (main recursive verification function).

@@ -3,7 +3,7 @@ package engine
 import (
 	"testing"
 
-	"github.com/th13vn/w3goaudit-engine/pkg/types"
+	"github.com/th13vn/w3goaudit/pkg/types"
 )
 
 // ─── Token Call & Guard Alias ────────────────────────────────────────────────

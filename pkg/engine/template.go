@@ -9,7 +9,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/th13vn/w3goaudit-engine/pkg/types"
+	"github.com/th13vn/w3goaudit/pkg/types"
 	"gopkg.in/yaml.v3"
 )
 

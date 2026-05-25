@@ -1,7 +1,7 @@
 package engine
 
 import (
-	"github.com/th13vn/w3goaudit-engine/pkg/types"
+	"github.com/th13vn/w3goaudit/pkg/types"
 )
 
 // MaxRuleRecursionDepth caps how deep Verify is allowed to recurse into a
