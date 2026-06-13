@@ -1,0 +1,33 @@
+meta:
+  id: SEC-MATH-001
+  title: Arithmetic in Unchecked Block (Potential Overflow)
+  severity: MEDIUM
+  confidence: HIGH
+  description: >
+    Arithmetic operations (+ - * /) are performed inside an unchecked block
+    in a contract compiled with Solidity >=0.8.0. The unchecked keyword removes
+    the automatic overflow/underflow protection added in 0.8.0, making the
+    code behave like pre-0.8.0 — overflows will silently wrap rather than revert.
+    This is intentional in some cases (e.g., gas optimization) but dangerous
+    when applied to critical accounting logic.
+  recommendation: >
+    Remove the unchecked block if overflow/underflow protection is needed.
+    If unchecked is used intentionally for gas optimization, add a comment
+    explaining why it is safe, and add an explicit bounds check before the
+    unchecked block.
+  references:
+    - https://swcregistry.io/docs/SWC-101
+    - https://docs.soliditylang.org/en/latest/control-structures.html#checked-or-unchecked-arithmetic
+
+query:
+  scope: function
+
+  filter:
+    version: ">=0.8.0"
+
+  match:
+    contains:
+      kind: stmt.unchecked
+      contains:
+        kind: expr.binary_op
+        operator: "[+\\-*/]"

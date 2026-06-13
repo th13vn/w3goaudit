@@ -1,0 +1,70 @@
+meta:
+  id: SEC-ETH-001
+  title: "Unprotected ETH Withdrawal"
+  severity: HIGH
+  confidence: MEDIUM
+  description: >
+    An external entry point sends ETH (`.transfer` / `.send` / `.call{value:}`)
+    without enforcing access control. Any caller can drain ETH from the
+    contract. Equivalent to Slither's arbitrary-send-eth detector.
+  recommendation: >
+    Add an access modifier (onlyOwner, onlyRole, or role-based check) to the
+    function, or restrict the recipient/amount so that arbitrary callers cannot
+    drain ETH. Prefer pull-payment (receiver pulls funds for themselves) over
+    push-payment with arbitrary destinations.
+  references:
+    - https://github.com/crytic/slither/wiki/Detector-Documentation#functions-that-send-ether-to-arbitrary-destinations
+    - https://swcregistry.io/docs/SWC-105
+
+query:
+  scope: entrypoint
+
+  filter:
+    # The unAuthenticated preset walks modifiers + inline msg.sender/owner
+    # guards + recursive auth-checks in callees — strictly stronger than a
+    # plain modifier regex.
+    preset: unAuthenticated
+
+  match:
+    # Engine fixes that make this template precise:
+    #   - P0-1 (ast_builder.go:603): ERC20 `.transfer(to, amt)` is now
+    #     call.external, NOT call.builtin.transfer. So matching the builtin
+    #     here no longer FPs on ERC20s.
+    #   - P0-2 (ast_builder.go:582): `.call{value: x}(data)` now carries a
+    #     `has_value: true` attribute, letting us distinguish ETH-sending
+    #     `.call{value:}` from plain function-routing `.call(data)`.
+    any:
+      # ETH built-ins (.transfer(amt) reverts on failure; .send(amt) returns
+      # bool). Both are unambiguously ETH-only after P0-1.
+      - contains:
+          kind: call.builtin.transfer
+          contains:
+            attr:
+              call_receiver: true
+            tainted_from: parameter
+      - contains:
+          kind: call.builtin.send
+          contains:
+            attr:
+              call_receiver: true
+            tainted_from: parameter
+      # `.call{value: ...}(data)` — ETH-bearing low-level call.
+      - contains:
+          kind: call.lowlevel.call
+          attr:
+            has_value: true
+          # Forwarding exactly `msg.value` to a caller-chosen receiver is usually
+          # a payment-router pattern, not a drain of existing contract funds.
+          not:
+            contains:
+              kind: expr.member_access
+              attr:
+                call_option: value
+              name: ^value$
+              left:
+                kind: expr.identifier
+                name: ^msg$
+          contains:
+            attr:
+              call_receiver: true
+            tainted_from: parameter

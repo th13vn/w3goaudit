@@ -1,5 +1,9 @@
 # W3GoAudit
 
+[![CI](https://github.com/th13vn/w3goaudit/actions/workflows/ci.yml/badge.svg)](https://github.com/th13vn/w3goaudit/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](./LICENSE)
+[![Go Reference](https://pkg.go.dev/badge/github.com/th13vn/w3goaudit.svg)](https://pkg.go.dev/github.com/th13vn/w3goaudit)
+
 A Go-based CLI & SDK for auditing Solidity smart contracts using rule-based templates with WQL query language.
 
 ---
@@ -7,18 +11,35 @@ A Go-based CLI & SDK for auditing Solidity smart contracts using rule-based temp
 ## Quick Start
 
 ```bash
-# Install
+# Install (the official detector pack is embedded in the binary)
 go install github.com/th13vn/w3goaudit/cmd/w3goaudit@latest
 
-# Scan contracts (default command)
-w3goaudit ./contracts/ --template ./templates/
+# Scan contracts — uses the built-in official pack by default
+w3goaudit ./contracts/
+
+# Or point at a custom template directory
+w3goaudit ./contracts/ --template ./my-templates/
+
+# CI gating: exit non-zero (code 2) on any HIGH+ finding, emit SARIF
+w3goaudit ./contracts/ --fail-on high --sarif -o report.sarif
 
 # Build database
 w3goaudit build ./contracts/ -o database.json
 
-# Extract contract info
+# Extract contract info — every extract subcommand can build from a source
+# path (like the scan) or load a pre-built database with --db
+w3goaudit extract main ./contracts/
+w3goaudit extract inheritance MyToken ./contracts/
 w3goaudit extract entry MyToken --db database.json
-w3goaudit extract inheritance MyToken --db database.json
+```
+
+Example console output:
+
+```
+81 findings: 65 HIGH, 16 MEDIUM · scanned 74 contracts in 51ms
+── Findings ──────────────────────────────────────────────
+  🟠 HIGH (65 findings)
+  🟡 MEDIUM (16 findings)
 ```
 
 ---
@@ -27,13 +48,15 @@ w3goaudit extract inheritance MyToken --db database.json
 
 - **AST Parsing** - Parse Solidity using [solast-go](https://github.com/th13vn/solast-go)
 - **Contract Database** - Comprehensive database with inheritance, entry points, call graphs
+- **Semantic Type Facts** - Parameters, state variables, locals, casts, and call receivers carry lightweight type facts so WQL can stay simple while call classification becomes more precise
 - **C3 Linearization** - Proper Solidity inheritance resolution
 - **Function Selectors** - Calculate 4-byte keccak256 selectors
 - **Call Graph** - Recursive tracing with filtered built-ins and optimized styling
-- **WQL Templates** - Powerful query language for security pattern matching, with load-time validation (regex, preset names, filter/match placement) so typos fail fast instead of producing silent zero-finding scans
+- **WQL Templates** - Powerful query language for security pattern matching, with load-time validation (regex, preset names, filter/match placement) so typos fail fast instead of producing silent zero-finding scans. Includes scope-aware `source_regex` for rare raw-source predicates.
 - **Multiple Outputs** - JSON (versioned schema), Markdown, HTML (interactive, PDF export), Console, **SARIF 2.1.0** (GitHub Code Scanning, with portable relative URIs + `srcRoot`)
 - **Two-File Reports** - File output always splits into `<name>.overview.<ext>` (project structure) and `<name>.findings.<ext>` (issues), so reviewers can diff them independently
-- **CI-Ready** - SARIF 2.1.0 for GitHub Code Scanning, CWE/OWASP metadata on findings, `NO_COLOR`-aware console, overwrite warnings on existing `-o` targets
+- **Reachability-Aware Findings** - Every finding can carry the full call chain from an externally-callable entry down to the function that hosts the dangerous statement: structured `reachability.steps[]` + `entryPoint` (auditor's fix-here pointer) + `primaryAst` in JSON, `relatedLocations` in SARIF, dotted-level trace block in Markdown / HTML, `↳ via …` continuation line in console. Opt in to matched-node `Location` attribution (Slither/Semgrep-style) with `--location-source matched` or `WGAUDIT_LOCATION_FROM_MATCHED_NODE=1`.
+- **CI-Ready** - SARIF 2.1.0 for GitHub Code Scanning, fail-closed template loading, checked file writes, `NO_COLOR`-aware console, overwrite warnings on existing `-o` targets
 - **Project Detection** - Auto-detect Foundry, Hardhat, Truffle
 - **Git Integration** - Auto-detect git repos and generate clickable file links to GitHub/GitLab
 - **Advanced Metrics** - nSLOC, Access Control Analysis, Grouped Entry Points
@@ -85,23 +108,28 @@ go install github.com/th13vn/w3goaudit/cmd/w3goaudit@latest
 |---------|-------------|
 | *(default)* | Scan contracts — stats, overview, findings |
 | `build` | Build contract database (JSON) |
-| `extract entry` | Entry point functions for a main contract |
-| `extract main` | Main (deployable) contracts (accepts a source path **or** `--db`) |
+| `extract main` | Main (deployable) contracts in a project |
+| `extract entry` | Entry point functions for a contract |
 | `extract inheritance` | C3 linearization (derived → base) — must be a main contract |
-| `extract involve` | Every entry-point workflow that reaches a function, one Mermaid chart per entry |
 | `extract statevar` | State variables (including inherited, storage order) |
 | `extract selector` | Function selectors (4-byte hashes) |
-| `extract diff` | Compare two databases |
-| `extract source` | Raw Solidity source for a function |
-| `extract context` | Combined context package for a function |
-| `extract bundle` | **LLM-ready** one-document context: source + callers + callees + state + inheritance + selectors |
+| `extract involve` | Every entry-point workflow that reaches a function, one Mermaid chart per entry |
 | `extract workflow` | Full transitive source for an entry function (report-ready) |
-
-All `extract` subcommands accept `--format=json` (default) or `--format=md`
-(markdown, optimized for LLM context windows). Format is inferred from the
-`-o` file extension when not specified.
+| `extract bundle` | **LLM-ready** one-document context: source + callers + callees + state + inheritance + selectors |
+| `extract context` | Combined context package for a function |
+| `extract source` | Raw Solidity source for a function |
+| `extract diff` | Compare two pre-built databases |
 | `completion` | Generate shell completions |
 | `version` | Show version information |
+
+`extract` subcommands are listed widest-scope first (project → contract →
+function → utility). Like the scan, each one (except `diff`) can **build from a
+source path** — `extract <name> ./contracts/` — or load a pre-built database
+with `--db`.
+
+Output defaults to **markdown** (human/LLM-friendly); pass `--format=json` (or
+`-o file.json`) for the machine-readable shape. Format is also inferred from the
+`-o` file extension.
 
 ### Examples
 
@@ -110,21 +138,30 @@ All `extract` subcommands accept `--format=json` (default) or `--format=md`
 w3goaudit ./contracts/
 
 # Scan with templates
-w3goaudit ./contracts/ --template ./templates/security/
+w3goaudit ./contracts/ --template ./templates/official/
 
 # Markdown report — produces report.overview.md + report.findings.md
-w3goaudit ./contracts/ --template ./templates/ --md -o report.md
+w3goaudit ./contracts/ --template ./templates/official/ --md -o report.md
 
 # JSON (versioned schema) — produces report.overview.json + report.findings.json
-w3goaudit ./contracts/ --template ./templates/ --json -o report.json
+w3goaudit ./contracts/ --template ./templates/official/ --json -o report.json
 
 # HTML — produces report.overview.html + report.findings.html
-w3goaudit ./contracts/ --template ./templates/ --html -o report.html
+w3goaudit ./contracts/ --template ./templates/official/ --html -o report.html
 
 # SARIF 2.1.0 for GitHub Code Scanning (additive: combine with any other format)
-w3goaudit ./contracts/ --template ./templates/ --md -o report.md --sarif
+w3goaudit ./contracts/ --template ./templates/official/ --md -o report.md --sarif
 
-# Build database, then extract info
+# CI gate (exit 2 on HIGH+, evaluated before display filters), filtering, inventory
+w3goaudit ./contracts/ --fail-on high
+w3goaudit ./contracts/ --min-severity medium --exclude 'SEC-PRNG-*'
+w3goaudit ./contracts/ --list-templates
+
+# Extract directly from source (builds the database on the fly)
+w3goaudit extract main ./contracts/
+w3goaudit extract statevar MyToken ./contracts/
+
+# …or build once and reuse the database across many extracts
 w3goaudit build ./contracts/ -o db.json
 w3goaudit extract entry MyToken --db db.json
 w3goaudit extract selector MyToken --db db.json
@@ -133,8 +170,8 @@ w3goaudit extract diff --db1 old.json --db2 new.json
 # LLM-ready bundle: one markdown document with source + callers/callees + state + inheritance
 w3goaudit extract bundle withdraw --db db.json --contract MyToken -o bundle.md
 
-# Any extract can render markdown for AI agents
-w3goaudit extract callgraph withdraw --db db.json --format=md
+# Every workflow that reaches a function, as markdown for AI agents
+w3goaudit extract involve withdraw --db db.json --format=md
 
 # Shell completion
 source <(w3goaudit completion bash)
@@ -184,18 +221,15 @@ meta:
 
 query:
   scope: entrypoint  # Public/external functions only
-  match:
-    # Exclude functions with reentrancy guards
+  filter:
     not:
-      mods: (?i)(nonReentrant|lock|guard)
-    
+      modifier: (?i)(nonReentrant|lock|guard)
+  match:
     # Find: external call → state modification
-    has:
-      seq:
-        - kind: external_call
-        - kind: assignment
-          attr:
-            is_state_var: true
+    contains:
+      sequence:
+        - kind: outgoing_call
+        - kind: state_write
 ```
 
 For complete WQL syntax, see [WQL Syntax Guide](./docs/wql-syntax.md).
@@ -212,10 +246,11 @@ w3goaudit/
 │   ├── builder/            # Database construction (6 phases)
 │   ├── engine/             # WQL template execution
 │   ├── types/              # Core data structures
-│   ├── report/             # Multi-format output
-│   └── testing/            # Test utilities
-├── templates/              # Security and test templates
-├── test-data/              # Test contracts
+│   └── report/             # Multi-format output (console/JSON/MD/HTML/SARIF)
+├── templates/              # WQL detection templates (official/ embedded via go:embed)
+│   ├── official/              # Curated official pack (embedded in the binary)
+│   └── test/                  # Engine feature-exercise templates
+├── test-data/              # Test contracts (core/, security/)
 └── docs/                   # Comprehensive documentation
 ```
 
@@ -241,7 +276,7 @@ Input → Reader → Builder → Database → Engine → Findings → Report
 
 Build phases:
 1. Parse files
-2. Build ASTs
+2. Build ASTs, data flow, and semantic type facts
 3. Calculate selectors
 4. Build inheritance (C3)
 5. Build call graph
@@ -275,18 +310,18 @@ The contract database contains:
 
 ```bash
 # Build database
-w3goaudit build test-data/build-database/ -o test-db.json --verbose
+w3goaudit build test-data/core/build-database/ -o test-db.json --verbose
 
 # Security scan
-w3goaudit test-data/security/ --template templates/ --md -o scan-report.md
+w3goaudit test-data/security/ --template templates/official/ --md -o scan-report.md
 
 # Project overview (now part of default scan)
-w3goaudit test-data/build-database/ --md -o summary.md
+w3goaudit test-data/core/build-database/ --md -o summary.md
 ```
 
 Test contracts are documented in:
-- [test-data/security/TEST_CONTRACTS.md](./test-data/security/TEST_CONTRACTS.md)
-- [test-data/build-database/README.md](./test-data/build-database/README.md)
+- [test-data/security/README.md](./test-data/security/README.md)
+- [test-data/core/build-database/README.md](./test-data/core/build-database/README.md)
 
 ---
 
@@ -317,21 +352,20 @@ For complete roadmap, see [Project Overview](./docs/project-overview.md#roadmap)
 
 ## Contributing
 
-Contributions are welcome! Please:
+Contributions are welcome — especially **new detectors**, which you can write in
+YAML without touching Go. See **[CONTRIBUTING.md](./CONTRIBUTING.md)** for a
+"write your first detector in 5 minutes" walkthrough, the dev setup, and the PR
+checklist.
 
-1. Fork the repository
-2. Create a feature branch
-3. Implement changes with tests
-4. Update documentation
-5. Submit a pull request
-
-See [Project Overview](./docs/project-overview.md#contributing) for guidelines.
+To report a vulnerability **in the tool itself**, see
+**[SECURITY.md](./SECURITY.md)** (please don't open a public issue).
 
 ---
 
 ## License
 
-MIT License
+[MIT](./LICENSE) © th13vn. Third-party dependency and trademark notices are in
+[NOTICE](./NOTICE).
 
 ---
 

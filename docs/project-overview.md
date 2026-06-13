@@ -73,7 +73,7 @@ w3goaudit/
 │       ├── main.go         # Entry: rootCmd.Execute()
 │       ├── root.go         # Default scan command (stats → overview → findings)
 │       ├── build.go        # Build subcommand
-│       ├── extract.go      # Extract subcommand (10 sub-subcommands)
+│       ├── extract.go      # Extract subcommand (11 sub-subcommands)
 │       ├── completion.go   # Shell completion generation
 │       └── helpers.go      # Shared utilities (verbose, DB loading)
 │
@@ -88,6 +88,7 @@ w3goaudit/
 │   │   ├── builder.go      # 6-phase build orchestration
 │   │   ├── contract.go     # Contract extraction from AST
 │   │   ├── ast_builder.go  # Function AST tree building
+│   │   ├── semantic.go     # Lightweight semantic type facts
 │   │   ├── inheritance.go  # C3 linearization
 │   │   └── callgraph.go    # Call graph construction
 │   │
@@ -102,6 +103,7 @@ w3goaudit/
 │   │   ├── contract.go     # Contract representation
 │   │   ├── function.go     # Function with selectors + access control helpers
 │   │   ├── ast.go          # AST node structures + semantic group helpers
+│   │   ├── semantic.go     # TypeInfo, SemanticFacts, SemanticSymbol
 │   │   ├── callgraph.go    # Call graph types
 │   │   └── dataflow.go     # Data flow graph types
 │   │
@@ -113,11 +115,12 @@ w3goaudit/
 │   │   ├── scan_formats.go # Findings formatting (Markdown + HTML)
 │   │   └── summary.go      # Project statistics and GitInfo
 │   │
-│   └── testing/            # Test utilities
-│       └── ...             # Test helper functions
+│   └── types/              # Core data structures (see above)
 │
-├── templates/              # Security and test templates
-├── test-data/              # Test contracts
+├── templates/              # WQL detection templates (embed.go embeds official/)
+│   ├── official/              # Curated pack, embedded as the default
+│   └── test/                  # Engine feature-exercise templates
+├── test-data/              # Test contracts (core/, security/)
 └── docs/                   # Documentation
     ├── workflows.md        # Internal workflow details
     ├── usage.md            # CLI and SDK usage
@@ -157,15 +160,27 @@ w3goaudit/
 **Build Phases:**
 
 1. **Parse Files** - Extract contracts, functions, state vars from AST
-2. **Build ASTs** - Create simplified AST trees for function bodies
+2. **Build ASTs & Semantic Facts** - Create simplified AST trees for function
+   bodies, intra-procedural data flow, and lightweight type facts for symbols,
+   casts, and call receivers
 3. **Calculate Selectors** - Generate function signatures and selectors
-4. **Build Inheritance** - Apply C3 linearization (cycle-safe — `A is B; B is A` errors out instead of panicking)
+4. **Build Inheritance** - Apply **canonical** C3 linearization (forward-order
+   "no-tail" merge over the reversed base list — the MRO solc computes, not a
+   divergence-prone heuristic; cycle-safe — `A is B; B is A` errors out instead
+   of panicking). Bases are resolved scope-aware via `ResolveContractName`, so a
+   duplicate contract name (real vs mock) picks the in-scope definition.
 5. **Build Call Graph** - Resolve all function calls (deterministic iteration order)
 6. **Calculate Entry Points** - Identify main contracts and public/external functions
 
 The Yul classifier in phase 2 now recognizes `create`, `create2`, `log0`–`log4`,
 `revert`, and `return` opcodes in addition to the original
 `call`/`delegatecall`/`staticcall`/`sstore`/`sload`/`selfdestruct` set.
+
+The phase 2 semantic layer stores `TypeInfo` in `Database.Semantics` and mirrors
+relevant facts onto AST node attributes (`type_kind`, `receiver_type_kind`,
+etc.). WQL templates can use those attributes without more syntax, and call
+classification can distinguish primitive-address ETH transfers from
+interface/contract methods with the same names.
 
 **Entry Point:** `builder.New().Build(sources)`
 
@@ -179,19 +194,32 @@ The Yul classifier in phase 2 now recognizes `create`, `create2`, `log0`–`log4
 
 **Capabilities:**
 - Load YAML templates with full load-time validation:
-  rule-placement (`filter:` vs `match:`), regex validity, known presets
+  required metadata, rule-placement (`filter:` vs `match:`), regex validity,
+  known presets, known kinds. Directory loading fails closed by default; use
+  `--ignore-invalid-templates` only for ad-hoc mixed rule folders.
 - Parse WQL syntax (all/any/not/seq/has/inside) with bounded recursion
   (`MaxRuleRecursionDepth = 64`)
 - Recursive `arg.N` constraint propagation through nested rules
 - Process-wide compiled-regex cache
 - Verify match rules against functions/contracts
 - Taint analysis for parameters, state variables, locals, indexed expressions,
-  and simple local aliases
+  and local aliases, computed as a **bounded dataflow fixpoint**
+  (`MaxTaintFixpointPasses = 8`) so chained and loop-carried aliases converge
+  while strong updates preserve sender-vs-parameter precision (flow-sensitive,
+  not path-sensitive)
 - Context-sensitive internal-call taint: `_helper(from)` keeps the callee
   parameter user-controlled, while `_helper(msg.sender)` is treated as sender
   identity rather than arbitrary user input
+- `sequence` is control-flow aware via branch-arm exclusivity: matches in the
+  `then`/`else` of an `if`, the two arms of a ternary, or the body vs a `catch`
+  clause of a `try/catch` cannot form a sequence (not a full CFG — loops stay
+  straight-line)
 - Recursive internal call tracing from entrypoints with a bounded depth guard
+  (`MaxInterproceduralTaintDepth = 12`)
 - Generate findings with locations
+- Transactional matched-node attribution: failed candidate branches roll back
+  provisional `PrimaryAST` capture, so reports point at the node that actually
+  satisfied the rule.
 
 **Thread-safety:** `Engine` is **not safe for concurrent use** — it carries
 per-scan context fields. SDK callers wanting parallelism must allocate one
@@ -218,6 +246,7 @@ type Database struct {
     MainContracts map[string]*MainContractEntry  // contractID → entry with funcs + linearization
     CallGraph     *CallGraph
     DataFlow      *DataFlowGraph  // intra-procedural assignments + param bindings
+    Semantics     *SemanticFacts   // lightweight type/symbol facts
     Framework     string
 }
 
@@ -413,11 +442,13 @@ function _processWithdraw() internal {
 - Semantic groups: outgoing_call, eth_transfer, delegatecall, check/guard, token_call, state_write/state_read, selfdestruct
 - Presets: unAuthenticated, unLocked
 
-**Extract Subcommands (10 total)**
-- `entry`, `main`, `callgraph` (+ `--reverse`), `inheritance`, `statevar`, `selector`, `diff`
+**Extract Subcommands (11 total)**
+- Canonical order widest→narrowest: `main`, `entry`, `inheritance`, `statevar`, `selector`, `involve`, `workflow`, `bundle`, `context`, `source`, `diff`
 - `source` — raw Solidity source lines for a named function
 - `context` — combined context bundle (source + call edges + state vars + inheritance)
 - `workflow` — full transitive source for an entry function (BFS call graph, report-ready)
+- Output defaults to **Markdown**; every subcommand except `diff` accepts an optional
+  trailing source `[path]` to build the database on the fly, so `--db` is not strictly required
 
 
 **Reporting**
@@ -425,6 +456,20 @@ function _processWithdraw() internal {
 - JSON export (stats + overview + findings)
 - Markdown reports (split: overview file + findings file)
 - HTML reports with interactive vis.js call graphs (split output)
+- **Reachability-aware findings** — every finding can carry the call chain
+  from an externally-callable entry down to the function that hosts the
+  dangerous statement. Formats:
+  - **Console**: `↳ via Contract.entry() ⇒ … ⇒ host()` + `↳ fix-here: …`
+  - **JSON**: structured `reachability.steps[]`, `entryPoint`, `primaryAst`
+  - **SARIF 2.1.0**: `result.relatedLocations[]` per hop +
+    `result.properties.entryPoint` / `result.properties.primaryAst`
+  - **Markdown / HTML**: per-occurrence trace block with dotted-level
+    indentation (`.`, `..`, `...`) and line numbers per hop
+- **Location-source switch** — `WGAUDIT_LOCATION_FROM_MATCHED_NODE=1` (or
+  `Engine.SetLocationSource(LocationSourceMatchedNode)`) flips
+  `Finding.Location` from the verifier-function entrypoint (today's
+  default, kept for backward compat) to the host of the matched AST node
+  (Slither / Semgrep / SARIF convention).
 
 **CLI**
 - default scan, build, extract, completion commands
@@ -509,13 +554,13 @@ go build -o w3goaudit ./cmd/w3goaudit
 go test ./pkg/...
 
 # Integration test: scan (root command, no 'scan' subcommand)
-./w3goaudit test-data/security/ --template templates/ --verbose
+./w3goaudit test-data/security/ --template templates/official/ --verbose
 
 # Integration test: build database
-./w3goaudit build test-data/build-database/ -o test-db.json --verbose
+./w3goaudit build test-data/core/build-database/ -o test-db.json --verbose
 
 # Full scan with markdown report
-./w3goaudit test-data/ --template templates/ --md -o test-report.md
+./w3goaudit test-data/security/ --template templates/official/ --md -o test-report.md
 ```
 
 ### Adding New Features
@@ -544,18 +589,13 @@ go test ./pkg/...
 
 ```
 test-data/
-├── security/               # Vulnerability detection tests
-│   ├── test-arbitrary-transferfrom.sol
-│   ├── test-reentrancy.sol
-│   └── TEST_CONTRACTS.md
+├── security/               # Security detection fixtures (paired with templates/official/)
+│   └── *.sol               # general + promoted-detector fixtures
 │
-└── build-database/         # Database building tests
-    ├── 01-basic-contracts.sol
-    ├── 02-inheritance.sol
-    ├── 03-function-calls.sol
-    ├── 04-complex-types.sol
-    ├── 05-state-modifiers.sol
-    └── README.md
+└── core/                   # Core pipeline / tool fixtures (not security detection)
+    ├── build-database/     # Parser + builder tests (01-..10-)
+    ├── engine-features/    # WQL engine operator tests (paired with templates/test/)
+    └── extract/            # CLI `extract` demo fixture (defi-vault.sol)
 ```
 
 ### Running Tests
@@ -565,11 +605,11 @@ test-data/
 go test ./pkg/...
 
 # Integration test: Build database
-./w3goaudit build test-data/build-database/ -o test-db.json --verbose
+./w3goaudit build test-data/core/build-database/ -o test-db.json --verbose
 
 # Integration test: Security scan (root command = scan, no 'scan' subcommand)
 ./w3goaudit test-data/security/ \
-  --template templates/ \
+  --template templates/official/ \
   --md \
   -o test-report.md
 ```

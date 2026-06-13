@@ -119,6 +119,7 @@ func SetVerboseWriter(w io.Writer)  // Set custom verbose output writer
 **Exposed Types:**
 - `Engine` - Query execution engine
 - `Template` - WQL template structure
+- `TemplateLoadOptions` - Directory loading policy
 - `Finding` - Vulnerability finding
 - `Location` - Finding location
 
@@ -129,8 +130,18 @@ func (e *Engine) Execute(tmpl *Template) []*Finding
 func (e *Engine) ExecuteAll(templates []*Template) []*Finding
 func LoadTemplate(path string) (*Template, error)
 func LoadTemplates(dir string) ([]*Template, error)
+func LoadTemplatesWithOptions(dir string, opts TemplateLoadOptions) ([]*Template, error)
+func LoadTemplatesLenient(dir string) ([]*Template, error)
+func LoadTemplatesFromFS(fsys fs.FS, dir string, opts TemplateLoadOptions) ([]*Template, error) // load from an embed.FS / any fs.FS
+func ParseTemplate(yamlContent string) (*Template, error)  // load from an in-memory YAML string
+func (e *Engine) SetLocationSource(src LocationSource)
 func SetVerboseWriter(w io.Writer)  // Set custom verbose output writer
 ```
+
+`LoadTemplatesFromFS` applies the same fail-closed validation as the
+directory loader and backs the binary's embedded default pack
+(`github.com/th13vn/w3goaudit/templates`.`Official`). `ParseTemplate` is the
+inline equivalent of `LoadTemplate` for SDK consumers that hold YAML in memory.
 
 **What It Does:**
 - Load YAML templates
@@ -161,6 +172,23 @@ type Database struct {
     Contracts     map[string]*Contract
     MainContracts map[string]*MainContractEntry
     CallGraph     *CallGraph
+    DataFlow      *DataFlowGraph
+    Semantics     *SemanticFacts
+}
+
+type TypeInfo struct {
+    Name       string // address, IERC20, mapping(address => uint256)
+    BaseName   string
+    Kind       string // primitive, contract, interface, library, abstract, struct, array, mapping, unknown
+    ContractID string
+    IsAddress  bool
+    IsPayable  bool
+    Confidence string // high, medium, low
+    Source     string // parameter, state_var, local_var, type_cast, builtin, ...
+}
+
+type SemanticFacts struct {
+    Symbols map[string]*SemanticSymbol
 }
 
 type MainContractEntry struct {
@@ -227,6 +255,13 @@ func NewGenerator(db *types.Database) *Generator
 func (g *Generator) GenerateSummary() *SummaryReport
 func FormatFindingsAsMarkdown(findings []*engine.Finding, db *types.Database) string
 func FormatFindingsAsHTML(findings []*engine.Finding, db *types.Database) string
+
+// Severity helpers — the single source of truth shared by the formatters and
+// the CLI's --fail-on gate.
+var SeverityOrder []string                       // CRITICAL > HIGH > MEDIUM > LOW > INFO
+func SeverityRank(severity string) int           // lower = more severe; unknown ranks last
+func SeverityAtLeast(severity, threshold string) bool
+func IsKnownSeverity(s string) bool
 ```
 
 **What It Does:**
@@ -352,7 +387,7 @@ e := engine.New(db)
 tmpl, err := engine.LoadTemplate("./reentrancy.yaml")
 
 // Multiple templates from directory
-templates, err := engine.LoadTemplates("./templates/")
+templates, err := engine.LoadTemplates("./templates/official/")
 ```
 
 **Step 6: Execute**
@@ -513,7 +548,7 @@ Builds a complete database from source files through 6 phases.
 
 **Build Phases:**
 1. Parse files
-2. Build ASTs
+2. Build ASTs, intra-procedural data flow, and semantic type facts
 3. Calculate selectors
 4. Build inheritance
 5. Build call graph
@@ -636,16 +671,135 @@ func LoadTemplates(dir string) ([]*Template, error)
 
 Loads all .yaml/.yml templates from a directory.
 
+`LoadTemplates` is fail-closed: malformed YAML, failed validation, missing
+`meta.id`, missing `meta.severity`, or zero valid templates returns an error.
+This is the recommended behavior for production/CI scans.
+
 **Parameters:**
 - `dir` (string) - Directory path
 
 **Returns:**
 - `[]*Template` - List of loaded templates
-- `error` - Error if any template fails
+- `error` - Error if any template fails or no valid templates are found
 
 **Example:**
 ```go
-templates, err := engine.LoadTemplates("./templates/")
+templates, err := engine.LoadTemplates("./templates/official/")
+```
+
+---
+
+#### LoadTemplatesWithOptions / LoadTemplatesLenient
+
+```go
+type TemplateLoadOptions struct {
+    IgnoreInvalid bool
+}
+
+func LoadTemplatesWithOptions(dir string, opts TemplateLoadOptions) ([]*Template, error)
+func LoadTemplatesLenient(dir string) ([]*Template, error)
+```
+
+Use these only for mixed or ad-hoc directories where invalid templates should
+be skipped intentionally. Even lenient loading returns an error when no valid
+templates are found.
+
+**Example:**
+```go
+templates, err := engine.LoadTemplatesWithOptions(
+    "./scratch-rules/",
+    engine.TemplateLoadOptions{IgnoreInvalid: true},
+)
+```
+
+---
+
+#### SetLocationSource
+
+```go
+func (e *Engine) SetLocationSource(src LocationSource)
+```
+
+Selects how `Finding.Location` is computed.
+
+| Value | Behavior |
+|---|---|
+| `LocationSourceVerifier` *(default)* | `Function`/`Contract` come from the verifier-function context (today's behavior). `Line` from the matched node when available. Backward-compatible. |
+| `LocationSourceMatchedNode` | Every field of `Location` is derived from the matched AST node's enclosing function/modifier — the dangerous statement. Aligns w3goaudit with SARIF / Slither / Semgrep conventions. |
+
+The env var `WGAUDIT_LOCATION_FROM_MATCHED_NODE` (`1`/`true`/`matched`)
+takes precedence over the API call so CI/scripts can flip the mode without
+touching code. The new structured fields on `Finding` (`Reachability`,
+`PrimaryAST`, `EntryPoint`) are populated **regardless** of this setting —
+only `Location` itself changes.
+
+**Example:**
+```go
+e := engine.New(db)
+e.SetLocationSource(engine.LocationSourceMatchedNode)
+findings := e.ExecuteAll(templates)
+// findings[i].Location.Function now names the host of the dangerous
+// statement; findings[i].EntryPoint names the auditor-actionable fix site.
+```
+
+---
+
+#### Finding (extended shape)
+
+`Finding` carries three optional structured fields populated whenever the
+engine can determine them. They sit alongside the existing
+`TemplateID`/`Severity`/`Title`/`Location`/etc.:
+
+```go
+type Finding struct {
+    // ...existing fields...
+
+    Reachability *ReachabilityPath // call chain entry -> ... -> host
+    PrimaryAST   *NodeRef          // kind / name / line of the matched AST node
+    EntryPoint   *EntryRef         // auditor-actionable fix-here function
+}
+
+type ReachabilityPath struct { Steps []ReachStep }
+
+type ReachStep struct {
+    Contract   string
+    Function   string
+    Visibility string // public/external/internal/private
+    Line       int
+    // AuthVerdict and AuthReasons are populated once the semantic
+    // access-control analyzer ships (see .vscode/2026-05-28-…).
+    AuthVerdict string
+    AuthReasons []string
+}
+
+type NodeRef struct {
+    Kind  string
+    Name  string
+    Start int
+    End   int
+}
+
+type EntryRef struct {
+    Contract    string
+    Function    string
+    AuthVerdict string
+    AuthReasons []string
+}
+```
+
+Reading these from SDK code:
+
+```go
+for _, f := range findings {
+    if f.Reachability == nil { continue }
+    for i, step := range f.Reachability.Steps {
+        fmt.Printf("  step[%d]: %s.%s() L%d (%s)\n",
+            i, step.Contract, step.Function, step.Line, step.Visibility)
+    }
+    if f.EntryPoint != nil {
+        fmt.Printf("  fix-here: %s.%s\n", f.EntryPoint.Contract, f.EntryPoint.Function)
+    }
+}
 ```
 
 ---
@@ -707,7 +861,11 @@ contract := db.GetContract("/path/to/file.sol#MyToken")
 func (db *Database) GetContractByName(name string) *Contract
 ```
 
-Gets first contract matching the name.
+Gets the contract matching the name. On a name collision (the same name in more
+than one file) it returns the candidate with the lexicographically-smallest ID,
+so the result is deterministic across runs. Prefer `GetContractByID` when you
+already hold a fully-qualified `absPath#Name` ID, or `ResolveContractName` when
+you have a referring file and want scope-aware disambiguation.
 
 **Parameters:**
 - `name` (string) - Contract name
@@ -717,6 +875,34 @@ Gets first contract matching the name.
 **Example:**
 ```go
 contract := db.GetContractByName("MyToken")
+```
+
+---
+
+#### ResolveContractName
+
+```go
+func (db *Database) ResolveContractName(name, fromFile string) *Contract
+```
+
+Resolves an unqualified contract name to a concrete contract, preferring the
+candidate "closest" to `fromFile` when the name is ambiguous: same file → same
+directory → a relative import in `fromFile` that resolves exactly → else the
+lexicographically-smallest ID. Used internally by C3 linearization and
+internal-call resolution so a project's real `Token` is not confused with a
+`test/mocks/Token`. It is a deterministic heuristic, not full import-scope
+resolution (remapped imports like `@openzeppelin/...` are not resolved).
+
+**Parameters:**
+- `name` (string) - Unqualified contract name
+- `fromFile` (string) - Absolute source path of the referring contract (pass
+  `""` to fall back to plain lex-min behaviour)
+
+**Returns:** `*Contract` (nil if no contract has that name)
+
+**Example:**
+```go
+base := db.ResolveContractName("IERC20", derived.SourceFile)
 ```
 
 ---
@@ -1038,12 +1224,11 @@ func main() {
         panic(err)
     }
     
-    // Run multiple template sets
-    critical := runTemplates(db, "./templates/critical/")
-    medium := runTemplates(db, "./templates/medium/")
+    // Run the official template pack
+    official := runTemplates(db, "./templates/official/")
     
     // Custom filtering
-    filtered := filterFindings(critical, func(f *engine.Finding) bool {
+    filtered := filterFindings(official, func(f *engine.Finding) bool {
         return f.Confidence == "HIGH"
     })
     
@@ -1074,8 +1259,13 @@ func getOrBuildDatabase(srcPath, cachePath string) (*types.Database, error) {
     }
     
     // Cache for next time
-    data, _ := json.MarshalIndent(db, "", "  ")
-    os.WriteFile(cachePath, data, 0644)
+    data, err := json.MarshalIndent(db, "", "  ")
+    if err != nil {
+        return nil, err
+    }
+    if err := os.WriteFile(cachePath, data, 0644); err != nil {
+        return nil, err
+    }
     fmt.Println("Cached database to:", cachePath)
     
     return db, nil
@@ -1274,7 +1464,7 @@ func runSecurityScan() int {
     
     // Load templates
     e := engine.New(db)
-    templates, err := engine.LoadTemplates("./security-templates/")
+    templates, err := engine.LoadTemplates("./templates/official/")
     if err != nil {
         fmt.Fprintf(os.Stderr, "Error loading templates: %v\n", err)
         return 1
@@ -1284,8 +1474,15 @@ func runSecurityScan() int {
     findings := e.ExecuteAll(templates)
     
     // Save report
-    data, _ := json.MarshalIndent(findings, "", "  ")
-    os.WriteFile("security-report.json", data, 0644)
+    data, err := json.MarshalIndent(findings, "", "  ")
+    if err != nil {
+        fmt.Fprintf(os.Stderr, "Error formatting report: %v\n", err)
+        return 1
+    }
+    if err := os.WriteFile("security-report.json", data, 0644); err != nil {
+        fmt.Fprintf(os.Stderr, "Error writing report: %v\n", err)
+        return 1
+    }
     
     // Count by severity
     critical := 0
@@ -1322,6 +1519,7 @@ package main
 
 import (
     "fmt"
+    "log"
     "os"
     "sort"
     "strings"
@@ -1340,12 +1538,17 @@ func main() {
     db, _ := b.Build(sources)
     
     e := engine.New(db)
-    templates, _ := engine.LoadTemplates("./templates/")
+    templates, err := engine.LoadTemplates("./templates/official/")
+    if err != nil {
+        log.Fatal(err)
+    }
     findings := e.ExecuteAll(templates)
     
     // Generate custom Markdown report
     report := generateMarkdownReport(findings)
-    os.WriteFile("custom-report.md", []byte(report), 0644)
+    if err := os.WriteFile("custom-report.md", []byte(report), 0644); err != nil {
+        log.Fatal(err)
+    }
 }
 
 func generateMarkdownReport(findings []*engine.Finding) string {
@@ -1465,20 +1668,18 @@ tmpl := &engine.Template{
 
 ---
 
-### 5. Handle Template Load Failures Gracefully
+### 5. Handle Template Load Failures Fail-Closed
 
 ```go
 // GOOD:
 templates, err := engine.LoadTemplates(dir)
 if err != nil {
-    log.Printf("Warning: Some templates failed to load: %v", err)
-    // Continue with successfully loaded templates
-}
-
-if len(templates) == 0 {
-    return errors.New("no valid templates loaded")
+    return fmt.Errorf("template load failed: %w", err)
 }
 ```
+
+Use `LoadTemplatesWithOptions(dir, engine.TemplateLoadOptions{IgnoreInvalid: true})`
+only for scratch rule folders where skipping invalid files is intentional.
 
 ---
 

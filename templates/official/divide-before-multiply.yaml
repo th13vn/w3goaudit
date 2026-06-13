@@ -1,0 +1,36 @@
+meta:
+  id: SEC-MATH-002
+  title: "Division Before Multiplication (Precision Loss)"
+  severity: MEDIUM
+  confidence: HIGH
+  description: >
+    A division (`/`) is the LEFT operand of a multiplication (`*`) in the same
+    expression — e.g. `(supply / n) * rate`. Solidity integer division truncates
+    toward zero, so dividing first loses precision the multiplication cannot
+    recover. The classical example is `(5 / 10) * 2 == 0`, whereas
+    `(5 * 2) / 10 == 1`. In DeFi this typically manifests as zero-yield bugs,
+    rounding-down rewards, or LP share-mint loss-of-precision exploits.
+    Equivalent to Slither's divide-before-multiply detector.
+  recommendation: >
+    Reorder so multiplication happens first: `(supply * rate) / n`. For
+    fractional fixed-point math use a scaling factor (e.g. 1e18) or a tested
+    fixed-point library (FullMath, FixedPoint96, PRBMath).
+  references:
+    - https://github.com/crytic/slither/wiki/Detector-Documentation#divide-before-multiply
+    - https://docs.soliditylang.org/en/latest/types.html#division
+
+query:
+  scope: function
+
+  match:
+    # Precise structural pattern: a multiply whose LEFT operand is a divide.
+    # The slither-inspired draft used `sequence: [/, *]`, which scans
+    # descendants in any order and FPs on `a = b/c; ...; d = e*f` (two
+    # unrelated expressions). `left:` directly walks children[0], which is
+    # the canonical AST shape for this bug.
+    contains:
+      kind: expr.binary_op
+      operator: "\\*"
+      left:
+        kind: expr.binary_op
+        operator: "/"

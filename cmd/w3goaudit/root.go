@@ -30,28 +30,40 @@ Output includes project stats, contract overview, and security findings.
 
 Examples:
   w3goaudit ./contracts/                               # Scan with console output
-  w3goaudit ./contracts/ --template ./templates/        # Scan with templates
-  w3goaudit ./contracts/ --template ./templates/ --md   # Markdown report
+  w3goaudit ./contracts/ --template ./templates/official/        # Scan with templates
+  w3goaudit ./contracts/ --template ./templates/official/ --md   # Markdown report
   w3goaudit ./contracts/ --db db.json --template ./t/   # Use pre-built database`,
 	Args: cobra.MaximumNArgs(1),
 	RunE: runScan,
+	// Usage errors print the usage block; runtime/scan errors and the --fail-on
+	// gate do not (main.go prints those to stderr). Without this, every error
+	// dumped the full 25-line help.
+	SilenceUsage:  true,
+	SilenceErrors: true,
 }
 
 // Flags for root scan command
 var (
-	templatePath string
-	outputPath   string
-	dbPath       string
-	verbose      string
-	jsonOutput   bool
-	htmlOutput   bool
-	mdOutput     bool
-	sarifOutput  bool
-	noColor      bool
+	templatePath           string
+	outputPath             string
+	dbPath                 string
+	verbose                string
+	jsonOutput             bool
+	htmlOutput             bool
+	mdOutput               bool
+	sarifOutput            bool
+	noColor                bool
+	ignoreInvalidTemplates bool
+	locationSource         string
+	failOnSeverity         string
+	minSeverity            string
+	includeTemplates       string
+	excludeTemplates       string
+	listTemplates          bool
 )
 
 func init() {
-	rootCmd.Flags().StringVar(&templatePath, "template", "", "Path to template file or directory")
+	rootCmd.Flags().StringVar(&templatePath, "template", "", "Path to template file or directory (default: built-in production pack)")
 	rootCmd.Flags().StringVarP(&outputPath, "output", "o", "", "Output file path (default: stdout). Splits into <stem>.overview.<ext> and <stem>.findings.<ext>.")
 	rootCmd.Flags().StringVar(&dbPath, "db", "", "Path to pre-built database JSON file")
 	rootCmd.Flags().StringVar(&verbose, "verbose", "", "Enable verbose logging (optional: path to log file)")
@@ -60,12 +72,32 @@ func init() {
 	rootCmd.Flags().BoolVar(&mdOutput, "md", false, "Output as Markdown (split: overview.md + findings.md)")
 	rootCmd.Flags().BoolVar(&sarifOutput, "sarif", false, "Also emit SARIF 2.1.0 to <stem>.sarif (or <output>.sarif when -o is set)")
 	rootCmd.Flags().BoolVar(&noColor, "no-color", false, "Disable ANSI color in console output (also honored: NO_COLOR env)")
+	rootCmd.Flags().BoolVar(&ignoreInvalidTemplates, "ignore-invalid-templates", false, "Skip invalid templates in a template directory instead of failing the scan")
+	rootCmd.Flags().StringVar(&locationSource, "location-source", "verifier", "Finding location provenance: verifier or matched")
+	rootCmd.Flags().StringVar(&failOnSeverity, "fail-on", "", "Exit with code 2 when any finding (across ALL templates, ignoring display filters) is at or above this severity (critical|high|medium|low|info) — for CI gating")
+	rootCmd.Flags().StringVar(&minSeverity, "min-severity", "", "Only report findings at or above this severity (critical|high|medium|low|info)")
+	rootCmd.Flags().StringVar(&includeTemplates, "include", "", "Comma-separated template-ID glob(s); only matching findings are reported")
+	rootCmd.Flags().StringVar(&excludeTemplates, "exclude", "", "Comma-separated template-ID glob(s); matching findings are suppressed")
+	rootCmd.Flags().BoolVar(&listTemplates, "list-templates", false, "List the templates that would run (id, severity, confidence, title) and exit")
+
+	// Allow a bare --verbose (no value) to mean "verbose to stdout"; otherwise
+	// cobra rejects it with "flag needs an argument".
+	rootCmd.Flags().Lookup("verbose").NoOptDefVal = "true"
 
 	// Add subcommands
 	rootCmd.AddCommand(buildCmd)
 	rootCmd.AddCommand(extractCmd)
 	rootCmd.AddCommand(completionCmd)
 	rootCmd.AddCommand(versionCmd)
+
+	// Better feedback on mistyped commands/flags. Cobra suggests near-miss
+	// subcommands ("Did you mean this?"); the flag-error hook points users at
+	// --help instead of dumping the whole usage block. Applied to the root and
+	// inherited by every subcommand.
+	rootCmd.SuggestionsMinimumDistance = 2
+	rootCmd.SetFlagErrorFunc(func(c *cobra.Command, err error) error {
+		return fmt.Errorf("%w\n\nRun `%s --help` to see available flags", err, c.CommandPath())
+	})
 }
 
 var versionCmd = &cobra.Command{
@@ -111,6 +143,24 @@ func runScan(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("only one of --json, --html, --md may be set (got %d)", formatCount)
 	}
 
+	switch strings.ToLower(locationSource) {
+	case "verifier", "":
+		locationSource = "verifier"
+	case "matched", "matched-node":
+		locationSource = "matched"
+	default:
+		return fmt.Errorf("--location-source must be one of: verifier, matched")
+	}
+
+	// Validate severity-threshold flags early so a typo fails fast instead of
+	// silently never tripping (--fail-on) or filtering nothing (--min-severity).
+	if failOnSeverity != "" && !report.IsKnownSeverity(failOnSeverity) {
+		return fmt.Errorf("--fail-on must be one of: critical, high, medium, low, info")
+	}
+	if minSeverity != "" && !report.IsKnownSeverity(minSeverity) {
+		return fmt.Errorf("--min-severity must be one of: critical, high, medium, low, info")
+	}
+
 	// If -o is set without an explicit format flag, infer format from the
 	// file extension. Previously this silently defaulted to markdown even
 	// when -o report.html was provided without --html.
@@ -150,6 +200,22 @@ func runScan(cmd *cobra.Command, args []string) error {
 		inputPath = args[0]
 	}
 
+	// Friendly typo handling: the root command takes a path, so a mistyped
+	// subcommand (e.g. `w3goaudit buil ./x` or `w3goaudit etract …`) is parsed
+	// as a path argument and would otherwise fail deep in the reader with an
+	// opaque "reading files" error. Catch the non-existent path here and, when
+	// it looks like a near-miss subcommand, point the user at the right one.
+	if inputPath != "" && dbPath == "" {
+		if _, statErr := os.Stat(inputPath); os.IsNotExist(statErr) {
+			msg := fmt.Sprintf("path %q does not exist", inputPath)
+			if sugs := cmd.Root().SuggestionsFor(inputPath); len(sugs) > 0 {
+				msg += fmt.Sprintf("\n\nDid you mean the subcommand %q?  (try: w3goaudit %s --help)", sugs[0], sugs[0])
+			}
+			msg += "\n\nUsage: w3goaudit <path> [flags]   —  run `w3goaudit --help` for all commands"
+			return fmt.Errorf("%s", msg)
+		}
+	}
+
 	// Time the scan so the console summary can show elapsed time.
 	scanStart := time.Now()
 
@@ -182,35 +248,35 @@ func runScan(cmd *cobra.Command, args []string) error {
 	gen := report.NewGenerator(db)
 	summary := gen.GenerateSummary()
 
-	// Run templates if provided
-	var findings []*engine.Finding
-	if templatePath != "" {
-		e := engine.New(db)
+	// Load templates: an explicit --template path, otherwise the built-in
+	// production pack embedded in the binary (so a bare scan works out of the box).
+	templates, templateSource, err := loadScanTemplates()
+	if err != nil {
+		return err
+	}
 
-		info, err := os.Stat(templatePath)
-		if err != nil {
-			return fmt.Errorf("error loading template: %w", err)
-		}
+	// --list-templates: print the rule inventory and exit (no scan needed).
+	if listTemplates {
+		printTemplateList(templates, templateSource)
+		return nil
+	}
 
-		var templates []*engine.Template
-		if info.IsDir() {
-			templates, err = engine.LoadTemplates(templatePath)
-		} else {
-			var tmpl *engine.Template
-			tmpl, err = engine.LoadTemplate(templatePath)
-			if err == nil {
-				templates = []*engine.Template{tmpl}
-			}
-		}
-		if err != nil {
-			return fmt.Errorf("error loading templates: %w", err)
-		}
+	e := engine.New(db)
+	if locationSource == "matched" {
+		e.SetLocationSource(engine.LocationSourceMatchedNode)
+	}
+	// allFindings is the complete scan result; --fail-on gates on THIS set so a
+	// display filter (--min-severity / --include / --exclude) can never silently
+	// disarm the CI gate. `findings` is the filtered set that gets reported.
+	allFindings := e.ExecuteAll(templates)
+	findings, err := filterFindings(allFindings)
+	if err != nil {
+		return err
+	}
 
-		findings = e.ExecuteAll(templates)
-
-		if isVerbose {
-			fmt.Printf("\nScan Results: %d templates checked, %d findings\n", len(templates), len(findings))
-		}
+	if isVerbose {
+		fmt.Fprintf(os.Stderr, "\nScan: %s, %d templates, %d findings (%d after filters)\n",
+			templateSource, len(templates), len(allFindings), len(findings))
 	}
 
 	// Tool metadata propagated to JSON/SARIF.
@@ -226,13 +292,17 @@ func runScan(cmd *cobra.Command, args []string) error {
 			ovPath, fdPath := splitOutputPaths(outputPath, ".json")
 			ov := report.BuildOverviewJSON(tool, summary, stats)
 			if data, err := json.MarshalIndent(ov, "", "  "); err == nil {
-				writeOutput(string(data), ovPath)
+				if err := writeOutput(string(data), ovPath); err != nil {
+					return err
+				}
 			} else {
 				return fmt.Errorf("error encoding overview JSON: %w", err)
 			}
 			fd := report.BuildFindingsJSON(tool, findings)
 			if data, err := json.MarshalIndent(fd, "", "  "); err == nil {
-				writeOutput(string(data), fdPath)
+				if err := writeOutput(string(data), fdPath); err != nil {
+					return err
+				}
 			} else {
 				return fmt.Errorf("error encoding findings JSON: %w", err)
 			}
@@ -248,28 +318,42 @@ func runScan(cmd *cobra.Command, args []string) error {
 			if err != nil {
 				return fmt.Errorf("error encoding JSON: %w", err)
 			}
-			writeOutput(string(data), "")
+			if err := writeOutput(string(data), ""); err != nil {
+				return err
+			}
 		}
 
 	case htmlOutput:
 		if outputPath != "" {
 			ovPath, fdPath := splitOutputPaths(outputPath, ".html")
-			writeOutput(summary.ToHTML(), ovPath)
-			writeOutput(report.FormatFindingsAsHTML(findings, db), fdPath)
+			if err := writeOutput(summary.ToHTML(), ovPath); err != nil {
+				return err
+			}
+			if err := writeOutput(report.FormatFindingsAsHTML(findings, db), fdPath); err != nil {
+				return err
+			}
 		} else {
 			// Stdout: append findings after overview.
 			out := summary.ToHTML() + "\n\n" + report.FormatFindingsAsHTML(findings, db)
-			writeOutput(out, "")
+			if err := writeOutput(out, ""); err != nil {
+				return err
+			}
 		}
 
 	case mdOutput || (outputPath != "" && !sarifOutput):
 		if outputPath != "" {
 			ovPath, fdPath := splitOutputPaths(outputPath, ".md")
-			writeOutput(summary.ToMarkdown(), ovPath)
-			writeOutput(report.FormatFindingsAsMarkdown(findings, db), fdPath)
+			if err := writeOutput(summary.ToMarkdown(), ovPath); err != nil {
+				return err
+			}
+			if err := writeOutput(report.FormatFindingsAsMarkdown(findings, db), fdPath); err != nil {
+				return err
+			}
 		} else {
 			out := summary.ToMarkdown() + "\n---\n\n" + report.FormatFindingsAsMarkdown(findings, db)
-			writeOutput(out, "")
+			if err := writeOutput(out, ""); err != nil {
+				return err
+			}
 		}
 
 	default:
@@ -291,13 +375,39 @@ func runScan(cmd *cobra.Command, args []string) error {
 			return fmt.Errorf("error encoding SARIF: %w", err)
 		}
 		if outputPath != "" {
-			writeOutput(sarifStr, sarifOutputPath(outputPath))
+			if err := writeOutput(sarifStr, sarifOutputPath(outputPath)); err != nil {
+				return err
+			}
 		} else {
-			writeOutput(sarifStr, "")
+			if err := writeOutput(sarifStr, ""); err != nil {
+				return err
+			}
+		}
+	}
+
+	// CI gate: exit non-zero (code 2) when any finding meets the --fail-on
+	// threshold. Evaluated over ALL scan findings (not the display-filtered set)
+	// so --min-severity/--include/--exclude can't silently weaken the gate. Done
+	// last so the report is always produced first.
+	if failOnSeverity != "" {
+		if n := countAtLeast(allFindings, failOnSeverity); n > 0 {
+			return &failOnError{msg: fmt.Sprintf("--fail-on %s: %d finding(s) at or above %s severity",
+				strings.ToLower(failOnSeverity), n, strings.ToUpper(failOnSeverity))}
 		}
 	}
 
 	return nil
+}
+
+// countAtLeast counts findings whose severity is at least `threshold`.
+func countAtLeast(findings []*engine.Finding, threshold string) int {
+	n := 0
+	for _, f := range findings {
+		if report.SeverityAtLeast(f.Severity, threshold) {
+			n++
+		}
+	}
+	return n
 }
 
 // splitOutputPaths derives the two output paths from a base -o path.
@@ -458,6 +568,29 @@ func printFindings(findings []*engine.Finding, plainMode bool) {
 				locInfo += fmt.Sprintf(" in %s()", f.Location.Function)
 			}
 			fmt.Printf("     Location: %s\n", locInfo)
+
+			// Reachability continuation: when the dangerous statement is
+			// reached via an internal call chain (more than one hop), show
+			// the path "entry ⇒ … ⇒ host" so a console reader sees both the
+			// fix-here function and where the bug actually lives.
+			if f.Reachability != nil && len(f.Reachability.Steps) > 1 {
+				names := make([]string, 0, len(f.Reachability.Steps))
+				for _, s := range f.Reachability.Steps {
+					fqn := s.Function
+					if s.Contract != "" && s.Function != "" {
+						fqn = s.Contract + "." + s.Function
+					}
+					names = append(names, fqn+"()")
+				}
+				fmt.Printf("     ↳ via %s\n", strings.Join(names, " ⇒ "))
+				if f.EntryPoint != nil && f.EntryPoint.Function != "" {
+					fix := f.EntryPoint.Function
+					if f.EntryPoint.Contract != "" {
+						fix = f.EntryPoint.Contract + "." + f.EntryPoint.Function
+					}
+					fmt.Printf("     ↳ fix-here: %s\n", fix)
+				}
+			}
 
 			if f.Confidence != "" {
 				fmt.Printf("     Confidence: %s\n", f.Confidence)

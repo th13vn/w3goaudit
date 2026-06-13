@@ -2,6 +2,7 @@ package builder
 
 import (
 	"fmt"
+	"sort"
 
 	"github.com/th13vn/solast-go/pkg/ast"
 	"github.com/th13vn/w3goaudit/pkg/types"
@@ -12,7 +13,8 @@ type ASTBuilder struct {
 	contract      *types.Contract
 	function      *types.Function
 	db            *types.Database
-	symbolTable   map[string]string   // variable name -> RefKind (parameter, state_var, local_var)
+	symbolTable   map[string]string // variable name -> RefKind (parameter, state_var, local_var)
+	symbolTypes   map[string]types.TypeInfo
 	taintTable    map[string][]string // variable name -> list of taints
 	paramNames    map[string]bool     // quick lookup for parameter names
 	stateVarNames map[string]bool     // quick lookup for state variable names
@@ -25,6 +27,7 @@ func BuildFunctionAST(fndef *ast.FunctionDefinition, fn *types.Function, contrac
 		function:      fn,
 		db:            db,
 		symbolTable:   make(map[string]string),
+		symbolTypes:   make(map[string]types.TypeInfo),
 		taintTable:    make(map[string][]string),
 		paramNames:    make(map[string]bool),
 		stateVarNames: make(map[string]bool),
@@ -51,6 +54,7 @@ func BuildFunctionAST(fndef *ast.FunctionDefinition, fn *types.Function, contrac
 func BuildModifierAST(moddef *ast.ModifierDefinition) *types.ASTNode {
 	builder := &ASTBuilder{
 		symbolTable:   make(map[string]string),
+		symbolTypes:   make(map[string]types.TypeInfo),
 		taintTable:    make(map[string][]string),
 		paramNames:    make(map[string]bool),
 		stateVarNames: make(map[string]bool),
@@ -61,11 +65,12 @@ func BuildModifierAST(moddef *ast.ModifierDefinition) *types.ASTNode {
 		if param.Name != "" {
 			builder.symbolTable[param.Name] = "parameter"
 			builder.paramNames[param.Name] = true
+			builder.symbolTypes[param.Name] = builder.typeInfoFromTypeName(getTypeName(param.TypeName), "modifier_parameter")
 		}
 	}
 
 	// Create modifier root node
-	root := types.NewASTNode("modifier")
+	root := types.NewASTNode(types.KindDeclModifier)
 	root.Name = moddef.Name
 
 	// Build AST from modifier body
@@ -88,6 +93,9 @@ func (b *ASTBuilder) buildSymbolTable() {
 	for _, param := range b.function.Parameters {
 		if param.Name != "" {
 			b.symbolTable[param.Name] = "parameter"
+			ti := b.typeInfoFromTypeName(param.TypeName, "parameter")
+			b.symbolTypes[param.Name] = ti
+			b.addSemanticSymbol(param.Name, "parameter", ti)
 			b.paramNames[param.Name] = true
 		}
 	}
@@ -95,6 +103,9 @@ func (b *ASTBuilder) buildSymbolTable() {
 	// Add state variables from contract
 	for _, sv := range b.contract.StateVariables {
 		b.symbolTable[sv.Name] = "state_var"
+		ti := b.typeInfoFromTypeName(sv.TypeName, "state_var")
+		b.symbolTypes[sv.Name] = ti
+		b.addSemanticSymbol(sv.Name, "state_var", ti)
 		b.stateVarNames[sv.Name] = true
 	}
 
@@ -138,6 +149,12 @@ func (b *ASTBuilder) buildStatement(stmt ast.Node) *types.ASTNode {
 
 	case *ast.EmitStatement:
 		return b.buildEmit(s)
+
+	case *ast.RevertStatement:
+		return b.buildRevertStatement(s)
+
+	case *ast.DoWhileStatement:
+		return b.buildDoWhileStatement(s)
 
 	case *ast.TryStatement:
 		return b.buildTryStatement(s)
@@ -213,11 +230,69 @@ func (b *ASTBuilder) buildAssemblyOperation(op ast.Node) *types.ASTNode {
 			}
 		}
 		return node
+	case *ast.AssemblyAssignment:
+		// `ok := delegatecall(...)` — the standard proxy pattern assigns to an
+		// existing variable WITHOUT `let`. Previously this hit the generic branch
+		// and its RHS call was never visited, so asm.delegatecall/asm.call inside
+		// it were invisible to templates and the call graph.
+		node := types.NewASTNode(types.KindStmtAssign)
+		node.SetAttribute("assembly", true)
+		if o.Expression != nil {
+			if exprNode := b.buildAssemblyOperation(o.Expression); exprNode != nil {
+				node.AddChild(exprNode)
+			}
+		}
+		return node
 	case *ast.AssemblyBlock:
 		blockNode := types.NewASTNode(types.KindStmtBlock)
 		blockNode.SetAttribute("assembly", true)
 		b.buildAssemblyBlock(blockNode, o)
 		return blockNode
+	case *ast.AssemblyIf:
+		node := types.NewASTNode(types.KindStmtIf)
+		node.SetAttribute("assembly", true)
+		if o.Condition != nil {
+			if condNode := b.buildAssemblyOperation(o.Condition); condNode != nil {
+				condNode.SetAttribute("cond_role", "if")
+				node.AddChild(condNode)
+			}
+		}
+		if o.Body != nil {
+			b.buildAssemblyBlock(node, o.Body)
+		}
+		return node
+	case *ast.AssemblySwitch:
+		node := types.NewASTNode(types.KindStmtIf)
+		node.SetAttribute("assembly", true)
+		node.SetAttribute("switch", true)
+		if o.Expression != nil {
+			if exprNode := b.buildAssemblyOperation(o.Expression); exprNode != nil {
+				node.AddChild(exprNode)
+			}
+		}
+		for _, c := range o.Cases {
+			if c == nil || c.Body == nil {
+				continue
+			}
+			b.buildAssemblyBlock(node, c.Body)
+		}
+		return node
+	case *ast.AssemblyFor:
+		node := types.NewASTNode(types.KindStmtLoop)
+		node.SetAttribute("assembly", true)
+		node.SetAttribute("loop_type", "asm_for")
+		for _, blk := range []*ast.AssemblyBlock{o.Pre, o.Post, o.Body} {
+			if blk != nil {
+				b.buildAssemblyBlock(node, blk)
+			}
+		}
+		if o.Condition != nil {
+			if condNode := b.buildAssemblyOperation(o.Condition); condNode != nil {
+				condNode.SetAttribute("cond_role", "loop")
+				node.AddChild(condNode)
+			}
+		}
+		return node
 	default:
 		// Generic assembly operation
 		return types.NewASTNode("assembly_operation")
@@ -294,6 +369,9 @@ func (b *ASTBuilder) buildVariableDeclaration(stmt *ast.VariableDeclarationState
 		}
 		if decl.Name != "" {
 			b.symbolTable[decl.Name] = "local_var"
+			ti := b.typeInfoFromTypeName(getTypeName(decl.TypeName), "local_var")
+			b.symbolTypes[decl.Name] = ti
+			b.addSemanticSymbol(decl.Name, "local_var", ti)
 		}
 	}
 
@@ -308,6 +386,10 @@ func (b *ASTBuilder) buildVariableDeclaration(stmt *ast.VariableDeclarationState
 			ident := types.NewASTNode(types.KindExprIdentifier)
 			ident.Name = decl.Name
 			ident.RefKind = "local_var"
+			if b.contract != nil && b.function != nil && ident.Name != "" {
+				ident.RefID = fmt.Sprintf("%s#%s.%s.-%s", b.contract.SourceFile, b.contract.Name, b.function.Name, ident.Name)
+			}
+			b.applyTypeAttributes(ident, b.symbolTypes[decl.Name])
 			assignNode.AddChild(ident)
 		}
 		// Add initial value
@@ -356,6 +438,16 @@ func (b *ASTBuilder) buildVariableDeclaration(stmt *ast.VariableDeclarationState
 					}
 				}
 			}
+			rhsType := b.typeFromNode(valueNode)
+			if rhsType.IsKnown() {
+				for _, child := range assignNode.Children {
+					if child != valueNode && child.Kind == types.KindExprIdentifier && child.Name != "" {
+						b.symbolTypes[child.Name] = rhsType
+						b.applyTypeAttributes(child, rhsType)
+						b.addSemanticSymbol(child.Name, child.RefKind, rhsType)
+					}
+				}
+			}
 		}
 		return assignNode
 	}
@@ -367,10 +459,13 @@ func (b *ASTBuilder) buildVariableDeclaration(stmt *ast.VariableDeclarationState
 func (b *ASTBuilder) buildIfStatement(stmt *ast.IfStatement) *types.ASTNode {
 	node := types.NewASTNode(types.KindStmtIf)
 
-	// Condition
+	// Condition. Tag it so templates can distinguish the test expression from
+	// the then/else bodies (e.g. flagging `if (true)` without matching a
+	// `return true` in the body). Mirrors the ternary's conditional_part tag.
 	if stmt.Condition != nil {
 		condNode := b.buildExpression(stmt.Condition)
 		if condNode != nil {
+			condNode.SetAttribute("cond_role", "if")
 			node.AddChild(condNode)
 		}
 	}
@@ -402,6 +497,7 @@ func (b *ASTBuilder) buildWhileStatement(stmt *ast.WhileStatement) *types.ASTNod
 	if stmt.Condition != nil {
 		condNode := b.buildExpression(stmt.Condition)
 		if condNode != nil {
+			condNode.SetAttribute("cond_role", "loop")
 			node.AddChild(condNode)
 		}
 	}
@@ -433,6 +529,7 @@ func (b *ASTBuilder) buildForStatement(stmt *ast.ForStatement) *types.ASTNode {
 	if stmt.ConditionExpression != nil {
 		condNode := b.buildExpression(stmt.ConditionExpression)
 		if condNode != nil {
+			condNode.SetAttribute("cond_role", "loop")
 			node.AddChild(condNode)
 		}
 	}
@@ -485,16 +582,102 @@ func (b *ASTBuilder) buildEmit(stmt *ast.EmitStatement) *types.ASTNode {
 	return node
 }
 
+// buildRevertStatement builds AST for a revert statement. The pinned parser
+// emits `revert("reason")` and `revert CustomError(args)` as *ast.RevertStatement
+// (NOT as a require/assert-style FunctionCall), so this is the only path that
+// produces check.revert nodes. The revert arguments are attached as children so
+// templates can match them via `args:` exactly like require/assert.
+func (b *ASTBuilder) buildRevertStatement(stmt *ast.RevertStatement) *types.ASTNode {
+	node := types.NewASTNode(types.KindCheckRevert)
+
+	if stmt.RevertCall == nil {
+		return node // bare `revert;` (rare)
+	}
+
+	switch rc := stmt.RevertCall.(type) {
+	case *ast.FunctionCall:
+		// `revert CustomError(args)` or `revert Lib.Error(args)` — record the
+		// error name and expose each argument as a child for `args:` matching.
+		switch e := rc.Expression.(type) {
+		case *ast.Identifier:
+			node.Name = e.Name
+		case *ast.MemberAccess:
+			node.Name = e.MemberName
+		}
+		for _, arg := range rc.Arguments {
+			if argNode := b.buildExpression(arg); argNode != nil {
+				node.AddChild(argNode)
+			}
+		}
+	default:
+		// `revert("reason")` — RevertCall is the literal/expression directly.
+		if argNode := b.buildExpression(stmt.RevertCall); argNode != nil {
+			node.AddChild(argNode)
+		}
+	}
+
+	return node
+}
+
+// buildDoWhileStatement builds AST for a do/while loop. Modeled as a generic
+// loop (loop_type=do_while) with the body first and the condition last, so the
+// shared `stmt.loop` matchers and `cond_role=loop` tagging apply uniformly.
+func (b *ASTBuilder) buildDoWhileStatement(stmt *ast.DoWhileStatement) *types.ASTNode {
+	node := types.NewASTNode(types.KindStmtLoop)
+	node.SetAttribute("loop_type", "do_while")
+
+	if stmt.Body != nil {
+		if bodyNode := b.buildStatement(stmt.Body); bodyNode != nil {
+			node.AddChild(bodyNode)
+		}
+	}
+
+	if stmt.Condition != nil {
+		if condNode := b.buildExpression(stmt.Condition); condNode != nil {
+			condNode.SetAttribute("cond_role", "loop")
+			node.AddChild(condNode)
+		}
+	}
+
+	return node
+}
+
 // buildTryStatement builds AST for try/catch
 func (b *ASTBuilder) buildTryStatement(stmt *ast.TryStatement) *types.ASTNode {
 	node := types.NewASTNode(types.KindStmtTryCatch)
 
-	// Try expression
+	// Try expression (the external call / contract creation). It executes on
+	// every path; on success the body runs, on failure a catch clause runs.
+	// Tagged "expr" so the engine knows it co-executes with whichever arm fires.
 	if stmt.Expression != nil {
 		exprNode := b.buildExpression(stmt.Expression)
 		if exprNode != nil {
+			exprNode.SetAttribute("try_part", "expr")
 			node.AddChild(exprNode)
 		}
+	}
+
+	// Success body. Previously the body and catch clauses were dropped entirely,
+	// so any dangerous code inside try/catch was invisible to templates. We now
+	// build them and tag each as an exclusive arm: a statement in the body and a
+	// statement in a catch clause can never both execute, so a `sequence` must
+	// not pair them (e.g. a CEI sequence that crosses the try/catch boundary).
+	if stmt.Body != nil {
+		bodyNode := types.NewASTNode(types.KindStmtBlock)
+		bodyNode.SetAttribute("try_part", "body")
+		b.buildBlock(bodyNode, stmt.Body)
+		node.AddChild(bodyNode)
+	}
+
+	// Catch clauses — each mutually exclusive with the body and the others.
+	for i, clause := range stmt.CatchClauses {
+		if clause == nil || clause.Body == nil {
+			continue
+		}
+		catchNode := types.NewASTNode(types.KindStmtBlock)
+		catchNode.SetAttribute("try_part", fmt.Sprintf("catch:%d", i))
+		b.buildBlock(catchNode, clause.Body)
+		node.AddChild(catchNode)
 	}
 
 	return node
@@ -519,17 +702,31 @@ func (b *ASTBuilder) buildExpression(expr ast.Node) *types.ASTNode {
 	case *ast.IndexAccess:
 		return b.buildIndexAccess(e)
 
+	case *ast.Conditional:
+		return b.buildConditional(e)
+
 	case *ast.Identifier:
 		return b.buildIdentifier(e)
 
 	case *ast.NumberLiteral, *ast.StringLiteral, *ast.BooleanLiteral, *ast.HexLiteral:
 		return b.buildLiteral(e)
 
+	case *ast.NewExpression:
+		// `new Contract(...)` deploys (and runs) code. The surrounding
+		// FunctionCall normally routes here via buildFunctionCall, but a bare
+		// `new C` expression reaches buildExpression directly.
+		return b.buildNewExpression(e)
+
+	case *ast.TupleExpression:
+		// `(a, b)` — used as the LHS/RHS of tuple assignments and as grouping
+		// parentheses. Preserve components so `(a, b) = (b, a)` keeps its
+		// assignment targets and taint flows instead of collapsing to an
+		// opaque node.
+		return b.buildTupleExpression(e)
+
 	// Handle assignment as part of expressions (like a = b)
 	case *ast.BinaryOperation:
-		// Check if it's an assignment-like operator
-		if e.Operator == "=" || e.Operator == "+=" || e.Operator == "-=" ||
-			e.Operator == "*=" || e.Operator == "/=" {
+		if isAssignmentOperator(e.Operator) {
 			return b.buildAssignmentFromBinary(e)
 		}
 		return b.buildBinaryOp(e)
@@ -540,6 +737,30 @@ func (b *ASTBuilder) buildExpression(expr ast.Node) *types.ASTNode {
 	}
 }
 
+// buildNewExpression builds a call.create node for `new Contract(...)`/`new T[]`.
+// The deployed type name is recorded so `kind: call.create` templates can match
+// and so the call graph can record a creation edge.
+func (b *ASTBuilder) buildNewExpression(expr *ast.NewExpression) *types.ASTNode {
+	node := types.NewASTNode(types.KindCallCreate)
+	node.Name = getTypeName(expr.TypeName)
+	return node
+}
+
+// buildTupleExpression builds an expression node holding each tuple component as
+// a child, preserving identifier targets for tuple assignments.
+func (b *ASTBuilder) buildTupleExpression(expr *ast.TupleExpression) *types.ASTNode {
+	node := types.NewASTNode(types.KindExprTuple)
+	for _, comp := range expr.Components {
+		if comp == nil {
+			continue // tuple hole, e.g. (, b) = f()
+		}
+		if compNode := b.buildExpression(comp); compNode != nil {
+			node.AddChild(compNode)
+		}
+	}
+	return node
+}
+
 // buildFunctionCall builds AST for function call
 func (b *ASTBuilder) buildFunctionCall(call *ast.FunctionCall) *types.ASTNode {
 	// Determine call type and name
@@ -547,6 +768,8 @@ func (b *ASTBuilder) buildFunctionCall(call *ast.FunctionCall) *types.ASTNode {
 	callName := ""
 	calledSignature := ""
 	var receiverExpr ast.Node
+	var receiverType types.TypeInfo
+	var resultType types.TypeInfo
 
 	switch expr := call.Expression.(type) {
 	case *ast.Identifier:
@@ -567,6 +790,7 @@ func (b *ASTBuilder) buildFunctionCall(call *ast.FunctionCall) *types.ASTNode {
 			callType = types.KindCallBuiltinSelfdestruct
 		default:
 			callType = types.KindCallInternal
+			resultType = b.expressionType(call)
 		}
 
 	case *ast.ElementaryTypeName:
@@ -574,18 +798,28 @@ func (b *ASTBuilder) buildFunctionCall(call *ast.FunctionCall) *types.ASTNode {
 		// This is not an external call and must not satisfy `outgoing_call`.
 		callName = expr.Name
 		callType = types.KindCallInternal
+		resultType = b.typeInfoFromTypeName(expr.Name, "type_cast")
 
 	case *ast.UserDefinedTypeName:
 		// Interface/contract casts such as IERC20(token). They may be receivers
 		// for later member calls, but the cast itself is not an external call.
 		callName = expr.NamePath
 		callType = types.KindCallInternal
+		resultType = b.typeInfoFromTypeName(expr.NamePath, "type_cast")
+
+	case *ast.NewExpression:
+		// `new Contract(args)` — deploys and runs code. Classified as call.create
+		// so `kind: call.create` and the outgoing_call/any_call groups match it.
+		callName = getTypeName(expr.TypeName)
+		callType = types.KindCallCreate
+		resultType = b.typeInfoFromTypeName(callName, "new")
 
 	case *ast.MemberAccess:
 		// Member access call: token.transfer(), addr.call(), etc.
 		callName = expr.MemberName
 		receiverExpr = expr.Expression
-		callType = b.classifyMemberAccessCall(callName, len(call.Arguments))
+		receiverType = b.expressionType(receiverExpr)
+		callType = b.classifyMemberAccessCall(callName, len(call.Arguments), receiverType)
 
 		// Try to extract called signature for low-level calls
 		if callType == types.KindCallLowlevelCall {
@@ -597,7 +831,8 @@ func (b *ASTBuilder) buildFunctionCall(call *ast.FunctionCall) *types.ASTNode {
 		if ma, ok := expr.Expression.(*ast.MemberAccess); ok {
 			callName = ma.MemberName
 			receiverExpr = ma.Expression
-			callType = b.classifyMemberAccessCall(callName, len(call.Arguments))
+			receiverType = b.expressionType(receiverExpr)
+			callType = b.classifyMemberAccessCall(callName, len(call.Arguments), receiverType)
 
 			// Try to extract called signature for low-level calls
 			if callType == types.KindCallLowlevelCall {
@@ -608,6 +843,15 @@ func (b *ASTBuilder) buildFunctionCall(call *ast.FunctionCall) *types.ASTNode {
 
 	node := types.NewASTNode(callType)
 	node.Name = callName
+	if resultType.IsKnown() {
+		b.applyTypeAttributes(node, resultType)
+	}
+	if receiverType.IsKnown() {
+		b.applyReceiverTypeAttributes(node, receiverType)
+		node.SetAttribute("call_classification", "semantic")
+	} else if receiverExpr != nil {
+		node.SetAttribute("call_classification", "heuristic")
+	}
 
 	// Preserve the receiver for member calls (`target.delegatecall(data)`,
 	// `to.transfer(amount)`, `token.transferFrom(...)`) as a tagged child. WQL
@@ -666,11 +910,10 @@ func (b *ASTBuilder) buildFunctionCall(call *ast.FunctionCall) *types.ASTNode {
 	return node
 }
 
-// classifyMemberAccessCall classifies a member access call based on the method
-// name and argument count. Arg count is required to disambiguate built-in ETH
-// operations (`.transfer(amt)`, `.send(amt)`) from ERC20 method calls of the
-// same name (`token.transfer(to, amt)`). Without type info this is the
-// strongest syntactic disambiguator available at parse time.
+// classifyMemberAccessCall classifies a member access call using receiver type
+// facts when available, then falls back to the historical method-name/arity
+// heuristic. Type facts let us distinguish one-arg interface methods such as
+// IOneArg(token).transfer(to) from address/payable ETH transfers.
 //
 // Classification rules:
 //   - `.transfer(amt)`        (1 arg)  → call.builtin.transfer  (ETH)
@@ -681,7 +924,7 @@ func (b *ASTBuilder) buildFunctionCall(call *ast.FunctionCall) *types.ASTNode {
 //   - `.delegatecall(...)`             → call.lowlevel.delegatecall
 //   - `.staticcall(...)`               → call.lowlevel.staticcall
 //   - everything else                  → call.external
-func (b *ASTBuilder) classifyMemberAccessCall(methodName string, argCount int) string {
+func (b *ASTBuilder) classifyMemberAccessCall(methodName string, argCount int, receiverType types.TypeInfo) string {
 	switch methodName {
 	case "call":
 		// Low-level .call() — could be ETH transfer or function call.
@@ -689,6 +932,14 @@ func (b *ASTBuilder) classifyMemberAccessCall(methodName string, argCount int) s
 		// the `has_value:` attribute when a {value: ...} modifier is present.
 		return types.KindCallLowlevelCall
 	case "transfer":
+		if receiverType.IsKnown() {
+			if receiverType.IsPrimitiveAddress() && argCount == 1 {
+				return types.KindCallBuiltinTransfer
+			}
+			if !receiverType.IsPrimitiveAddress() {
+				return types.KindCallExternal
+			}
+		}
 		// 1-arg .transfer(amount): ETH builtin (reverts on failure).
 		// 2-arg .transfer(to, amount): ERC20-shape — treat as a regular
 		// external call so templates can match it via `token_call` and
@@ -698,6 +949,14 @@ func (b *ASTBuilder) classifyMemberAccessCall(methodName string, argCount int) s
 		}
 		return types.KindCallExternal
 	case "send":
+		if receiverType.IsKnown() {
+			if receiverType.IsPrimitiveAddress() && argCount == 1 {
+				return types.KindCallBuiltinSend
+			}
+			if !receiverType.IsPrimitiveAddress() {
+				return types.KindCallExternal
+			}
+		}
 		// 1-arg .send(amount): ETH builtin (returns bool).
 		// Any other arity is not the Solidity builtin — fall through to external.
 		if argCount == 1 {
@@ -803,6 +1062,12 @@ func (b *ASTBuilder) buildAssignmentFromBinary(op *ast.BinaryOperation) *types.A
 				targetIdent.TaintSources = rhsTaint
 				b.taintTable[targetIdent.Name] = rhsTaint
 			}
+			rhsType := b.typeFromNode(rightNode)
+			if rhsType.IsKnown() {
+				b.symbolTypes[targetIdent.Name] = rhsType
+				b.applyTypeAttributes(targetIdent, rhsType)
+				b.addSemanticSymbol(targetIdent.Name, targetIdent.RefKind, rhsType)
+			}
 
 			// Extract source identifier for edge
 			var sourceIdent *types.ASTNode
@@ -886,6 +1151,40 @@ func (b *ASTBuilder) buildBinaryOp(op *ast.BinaryOperation) *types.ASTNode {
 	return node
 }
 
+// buildConditional preserves ternary expressions (`cond ? a : b`) so taint
+// analysis can see both possible values. Without this, `payer = ok ? msg.sender
+// : from` collapses to an opaque node and loses the `from` parameter taint.
+func (b *ASTBuilder) buildConditional(cond *ast.Conditional) *types.ASTNode {
+	node := types.NewASTNode(types.KindExprConditional)
+
+	if cond.Condition != nil {
+		conditionNode := b.buildExpression(cond.Condition)
+		if conditionNode != nil {
+			conditionNode.SetAttribute("conditional_part", "condition")
+			conditionNode.SetAttribute("cond_role", "ternary")
+			node.AddChild(conditionNode)
+		}
+	}
+
+	if cond.TrueExpression != nil {
+		trueNode := b.buildExpression(cond.TrueExpression)
+		if trueNode != nil {
+			trueNode.SetAttribute("conditional_part", "true")
+			node.AddChild(trueNode)
+		}
+	}
+
+	if cond.FalseExpression != nil {
+		falseNode := b.buildExpression(cond.FalseExpression)
+		if falseNode != nil {
+			falseNode.SetAttribute("conditional_part", "false")
+			node.AddChild(falseNode)
+		}
+	}
+
+	return node
+}
+
 // buildUnaryOp builds AST for unary operation
 func (b *ASTBuilder) buildUnaryOp(op *ast.UnaryOperation) *types.ASTNode {
 	node := types.NewASTNode(types.KindExprUnaryOp)
@@ -919,6 +1218,7 @@ func (b *ASTBuilder) buildMemberAccess(ma *ast.MemberAccess) *types.ASTNode {
 			node.AddChild(exprNode)
 		}
 	}
+	b.applyTypeAttributes(node, b.expressionType(ma))
 
 	return node
 }
@@ -958,6 +1258,7 @@ func (b *ASTBuilder) buildIndexAccess(ia *ast.IndexAccess) *types.ASTNode {
 			node.AddChild(indexNode)
 		}
 	}
+	b.applyTypeAttributes(node, b.expressionType(ia))
 
 	return node
 }
@@ -993,6 +1294,7 @@ func (b *ASTBuilder) buildIdentifier(ident *ast.Identifier) *types.ASTNode {
 		// Inherit taint from previous operations in this function
 		node.TaintSources = storedTaint
 	}
+	b.applyTypeAttributes(node, b.symbolTypes[ident.Name])
 
 	return node
 }
@@ -1048,5 +1350,8 @@ func (b *ASTBuilder) computeTaint(node *types.ASTNode) []string {
 	for t := range taintSet {
 		result = append(result, t)
 	}
+	// Sort for deterministic output: taint sets feed serialized findings and the
+	// cached database, both of which must be reproducible across runs.
+	sort.Strings(result)
 	return result
 }

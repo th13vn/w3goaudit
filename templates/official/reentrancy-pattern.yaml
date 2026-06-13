@@ -1,0 +1,42 @@
+meta:
+  id: SEC-GEN-REENTRANCY
+  title: Potential Reentrancy - State Variable Modification
+  severity: HIGH
+  confidence: MEDIUM
+  description: >
+    Detects functions where external calls occur before state variable updates.
+    Recursively traces through internal function calls to find external calls.
+  recommendation: >
+    Apply the Check-Effects-Interactions pattern (update state variables BEFORE external calls)
+    or use a ReentrancyGuard modifier.
+  references:
+    - https://swcregistry.io/docs/SWC-107
+    - https://consensys.github.io/smart-contract-best-practices/attacks/reentrancy/
+
+query:
+  scope: entrypoint
+
+  filter:
+    # preset: unLocked returns true when the function lacks a reentrancy
+    # guard — i.e. exactly the case we want to scan. No `not:` wrapper.
+    preset: unLocked
+
+  match:
+    # Reentrancy requires the external call to be able to re-enter. Match the
+    # genuinely reentrancy-prone call kinds — ETH-bearing transfers, raw
+    # low-level calls, and delegatecall — but NOT routine typed ERC20 method
+    # invocations (token.transfer/transferFrom/approve), which only re-enter
+    # via non-standard ERC777-style hooks. This eliminates the dominant FP
+    # class on vault-style `token.transferFrom(...); balances[...] += ...`
+    # while preserving all TP detections (verified against test-reentrancy.sol,
+    # whose vulnerable fixtures all use call{value:}/transfer/send/raw .call).
+    sequence:
+      - any:
+          # eth_transfer matches .transfer/.send/.call{value:} AND raw .call(...)
+          # (call.builtin.transfer, call.builtin.send, call.lowlevel.call, asm.call)
+          # — i.e. every ETH-bearing or raw-call shape used in classical reentrancy.
+          - kind: eth_transfer
+          # delegatecall variants (call.lowlevel.delegatecall, asm.delegatecall)
+          # can reenter via arbitrary code execution in the current context.
+          - kind: delegatecall
+      - kind: state_write

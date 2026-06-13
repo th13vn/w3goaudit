@@ -39,8 +39,9 @@ const (
 )
 
 // resolveExtractFormat picks the output format from the `--format` flag,
-// falling back to inferring from the `-o` extension, then JSON as the
-// machine-friendly default.
+// falling back to inferring from the `-o` extension, then markdown as the
+// human-readable default (the tool defaults to console-friendly output; pass
+// --format=json or -o file.json for the machine-readable shape).
 func resolveExtractFormat(cmd *cobra.Command) ExtractFormat {
 	if fmtFlag, _ := cmd.Flags().GetString("format"); fmtFlag != "" {
 		switch strings.ToLower(fmtFlag) {
@@ -55,15 +56,17 @@ func resolveExtractFormat(cmd *cobra.Command) ExtractFormat {
 		switch strings.ToLower(filepath.Ext(outPath)) {
 		case ".md", ".markdown":
 			return FormatMD
+		case ".json":
+			return FormatJSON
 		}
 	}
-	return FormatJSON
+	return FormatMD
 }
 
 // addExtractFormatFlag registers `--format` consistently across all extract
 // subcommands so the flag name and help text stay aligned.
 func addExtractFormatFlag(cmd *cobra.Command) {
-	cmd.Flags().String("format", "", "Output format: json (default) or md (LLM/human-friendly markdown). Inferred from -o extension if unset.")
+	cmd.Flags().String("format", "", "Output format: md (default, human/LLM-friendly markdown) or json (machine-readable). Inferred from -o extension if unset.")
 }
 
 // writeExtract is the single sink every extract subcommand uses. It picks

@@ -3,6 +3,7 @@ package types
 import (
 	"encoding/json"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 )
@@ -12,17 +13,24 @@ type SourceFile struct {
 	// Path is the file path
 	Path string `json:"path"`
 
-	// Content is the file content
-	Content string `json:"-"`
+	// Content is the file content.
+	//
+	// Serialized so a `build → JSON → scan --db` round-trip is self-contained:
+	// source-text predicates (`source_regex`, `scope: source`) reproduce the
+	// same findings without depending on the original files still being present
+	// at their absolute paths. The engine still falls back to reading the file
+	// from disk when Content is empty (e.g. a database produced before this
+	// field was serialized), and warns when neither is available.
+	Content string `json:"content,omitempty"`
 
 	// AST is the raw parsed AST tree (stored for deep analysis).
 	//
-	// TODO(stage-3): `json:"-"` means a `build → JSON → scan --db` round-trip
-	// loses the file-level AST. Function-level AST (Function.AST) still
-	// round-trips, but templates that walk the source-file tree (rare today,
-	// possible in future operators) produce zero findings after a reload.
-	// Either serialize this (size cost) or document loudly. Tracked in
-	// .vscode/2026-05-08-invariant-audit.md §5.9.
+	// Deliberately not serialized (`json:"-"`): it holds a solast-go node tree
+	// behind an interface{} that does not round-trip cleanly through JSON, and
+	// no current operator walks the file-level tree — source-scope matching uses
+	// Content (above), and function-level matching uses Function.AST (which does
+	// round-trip). If a future operator needs to walk this tree from a reloaded
+	// database, it must be rebuilt from source rather than relied upon here.
 	AST interface{} `json:"-"`
 
 	// Contracts defined in this file
@@ -58,6 +66,11 @@ type Database struct {
 
 	// DataFlow tracks intra-procedural operations and assignments
 	DataFlow *DataFlowGraph `json:"dataFlow"`
+
+	// Semantics stores lightweight inferred type/symbol facts used by WQL and
+	// later analysis phases. It is serialized with the database so build-cache
+	// scans retain the same facts.
+	Semantics *SemanticFacts `json:"semantics"`
 
 	// Framework detected for the project
 	Framework string `json:"framework"`
@@ -110,6 +123,7 @@ func NewDatabase() *Database {
 		Contracts:     make(map[string]*Contract),
 		CallGraph:     NewCallGraph(),
 		DataFlow:      NewDataFlowGraph(),
+		Semantics:     NewSemanticFacts(),
 		MainContracts: make(map[string]*MainContractEntry),
 	}
 }
@@ -143,6 +157,9 @@ func LoadFromJSON(path string) (*Database, error) {
 	}
 	if db.DataFlow == nil {
 		db.DataFlow = NewDataFlowGraph()
+	}
+	if db.Semantics == nil {
+		db.Semantics = NewSemanticFacts()
 	}
 	db.RestoreASTParents()
 
@@ -245,6 +262,74 @@ func (db *Database) FindContractsByName(name string) []*Contract {
 	return out
 }
 
+// ResolveContractName resolves an unqualified contract name to a concrete
+// contract, preferring the candidate "closest" to fromFile when the name is
+// ambiguous (the same name defined in more than one file — e.g. a real `Token`
+// and a `test/mocks/Token`). Resolution order:
+//
+//  1. exactly one contract has the name → return it (the overwhelmingly common
+//     case — zero behaviour change versus a plain lookup);
+//  2. a contract defined in fromFile itself (an intra-file reference is
+//     unambiguous);
+//  3. a contract in the same directory as fromFile;
+//  4. a contract whose file a relative import in fromFile resolves to exactly;
+//  5. otherwise the lexicographically-smallest ID (GetContractByName's default).
+//
+// This is a deterministic heuristic, not full import-scope resolution (which
+// would require the resolved absolute path of every import — imports are stored
+// as raw strings). It is never worse than the bare lex-min pick and strictly
+// more precise when a collision exists and fromFile gives a usable scope. Pass
+// fromFile = "" (or a path with no contracts) to get the plain lex-min result.
+func (db *Database) ResolveContractName(name, fromFile string) *Contract {
+	candidates := db.FindContractsByName(name) // sorted lex-min by ID
+	switch len(candidates) {
+	case 0:
+		return nil
+	case 1:
+		return candidates[0]
+	}
+
+	if fromFile != "" {
+		// 2. Defined in the same file.
+		for _, c := range candidates {
+			if c.SourceFile == fromFile {
+				return c
+			}
+		}
+		// 3. Defined in the same directory (candidates are lex-min sorted, so the
+		// first match is deterministic).
+		fromDir := filepath.Dir(fromFile)
+		for _, c := range candidates {
+			if filepath.Dir(c.SourceFile) == fromDir {
+				return c
+			}
+		}
+		// 4. A relative import in fromFile resolves exactly to a candidate's
+		// file. (Remapped imports like `@openzeppelin/...` cannot be resolved
+		// here without the project remappings, so they fall through.)
+		if sf := db.SourceFiles[fromFile]; sf != nil {
+			fromDir := filepath.Dir(fromFile)
+			for _, imp := range sf.Imports {
+				resolved := imp
+				if !filepath.IsAbs(resolved) {
+					resolved = filepath.Join(fromDir, imp)
+				}
+				resolved = filepath.Clean(resolved)
+				for _, c := range candidates {
+					if filepath.Clean(c.SourceFile) == resolved {
+						return c
+					}
+				}
+			}
+		}
+	}
+
+	// 5. Deterministic lex-min fallback (matches GetContractByName).
+	VerboseLog("ResolveContractName(%q, from=%q): %d candidates, lex-min fallback %s",
+		name, fromFile, len(candidates), candidates[0].ID)
+	return candidates[0]
+}
+
 // MakeContractID creates a unique contract ID: absPath#ContractName
 func MakeContractID(filePath, contractName string) string {
 	return filePath + "#" + contractName
@@ -328,11 +413,14 @@ func (db *Database) buildEntryFunctionsForContract(contract *Contract) []string 
 		}
 	}
 
-	// Convert map to slice of function IDs
-	var ids []string
+	// Convert map to slice of function IDs, sorted for deterministic output.
+	// MainContractEntry.EntryFunctions is serialized into the cached database;
+	// a random map order made the cache non-reproducible across runs.
+	ids := make([]string, 0, len(resolvedBySignature))
 	for _, funcID := range resolvedBySignature {
 		ids = append(ids, funcID)
 	}
+	sort.Strings(ids)
 
 	return ids
 }

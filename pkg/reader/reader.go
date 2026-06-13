@@ -31,7 +31,7 @@ type Reader struct {
 // New creates a new Reader
 func New() *Reader {
 	return &Reader{
-		SourceFiles:  make([]*types.SourceFile, 0),
+		SourceFiles: make([]*types.SourceFile, 0),
 		loadedPaths: make(map[string]bool),
 	}
 }
@@ -155,7 +155,6 @@ func (r *Reader) ReadDirectory(dirPath string) ([]*types.SourceFile, error) {
 				"deployments":     true,
 				"logs":            true,
 				"dependencies":    true,
-				
 			}
 			if skipDirs[name] {
 				VerboseLog("Skipping directory: %s", name)
@@ -224,21 +223,21 @@ func (r *Reader) GetAllSources() []*types.SourceFile {
 // ResolveImports recursively loads imported files using remapping resolution
 func (r *Reader) ResolveImports(projectRoot string) error {
 	VerboseLog("Starting import resolution with project root: %s", projectRoot)
-	
+
 	// Initialize resolver if not already done
 	if r.resolver == nil {
 		r.resolver = NewResolver(projectRoot)
 	}
-	
+
 	// Track initially loaded files
 	for _, sf := range r.SourceFiles {
 		r.loadedPaths[sf.Path] = true
 		VerboseLog("Marking initial file as loaded: %s", sf.Path)
 	}
-	
+
 	initialCount := len(r.SourceFiles)
 	VerboseLog("Processing imports from %d initial files", initialCount)
-	
+
 	// Process imports from all files (loop extends as new files are added)
 	for i := 0; i < len(r.SourceFiles); i++ {
 		sf := r.SourceFiles[i]
@@ -247,30 +246,30 @@ func (r *Reader) ResolveImports(projectRoot string) error {
 			// Continue processing other files even if one fails
 		}
 	}
-	
+
 	loadedCount := len(r.SourceFiles) - initialCount
 	VerboseLog("Import resolution complete: loaded %d additional files", loadedCount)
-	
+
 	return nil
 }
 
 // processFileImports extracts and loads all imports from a single file
 func (r *Reader) processFileImports(sf *types.SourceFile) error {
 	imports := extractImports(sf.Content)
-	
+
 	if len(imports) == 0 {
 		return nil
 	}
-	
+
 	VerboseLog("Found %d imports in %s", len(imports), filepath.Base(sf.Path))
-	
+
 	for _, importPath := range imports {
 		if err := r.loadImport(importPath, sf.Path); err != nil {
 			VerboseLog("  Could not load import '%s': %v", importPath, err)
 			// Continue with other imports
 		}
 	}
-	
+
 	return nil
 }
 
@@ -298,27 +297,27 @@ func (r *Reader) loadImport(importPath string, fromFile string) error {
 		VerboseLog("  ✓ %s (already loaded)", importPath)
 		return nil
 	}
-	
+
 	// Check if file exists
 	if _, err := os.Stat(absPath); os.IsNotExist(err) {
 		return fmt.Errorf("file does not exist: %s", absPath)
 	}
-	
+
 	// Load the file
 	VerboseLog("  → Loading %s", importPath)
 	VerboseLog("    Resolved to: %s", absPath)
-	
+
 	importedFile, err := r.readFileWithoutTracking(absPath)
 	if err != nil {
 		return fmt.Errorf("failed to read file: %w", err)
 	}
-	
+
 	// Mark as loaded and add to source files
 	r.loadedPaths[absPath] = true
 	r.SourceFiles = append(r.SourceFiles, importedFile)
-	
+
 	VerboseLog("  ✓ Loaded successfully (%d bytes)", len(importedFile.Content))
-	
+
 	return nil
 }
 
@@ -347,10 +346,10 @@ func extractImports(content string) []string {
 	// Match: import "path"; or import { ... } from "path"; or import * as Name from "path";
 	pattern := regexp.MustCompile(`import\s+(?:(?:\{[^}]*\}|\*)\s+(?:as\s+\w+\s+)?from\s+)?["']([^"']+)["']`)
 	matches := pattern.FindAllStringSubmatch(content, -1)
-	
+
 	var imports []string
 	seen := make(map[string]bool)
-	
+
 	for _, match := range matches {
 		if len(match) > 1 {
 			importPath := match[1]
@@ -361,10 +360,9 @@ func extractImports(content string) []string {
 			}
 		}
 	}
-	
+
 	return imports
 }
-
 
 // calculateChecksum returns the SHA256 hash of the content
 func calculateChecksum(content []byte) string {

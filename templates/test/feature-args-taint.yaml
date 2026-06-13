@@ -1,0 +1,24 @@
+meta:
+  id: TEST-FEATURE-ARGS-TAINT
+  title: "Feature test: args + tainted_from (positional taint)"
+  severity: HIGH
+  confidence: LOW
+  description: >
+    Engine feature fixture combining positional argument matching (`args`)
+    with `tainted_from: parameter`. Matches an ERC20 transferFrom whose first
+    argument is a caller-controlled parameter. Expected to match
+    VulnerableTransferFrom.pull and NOT SafeTransferFrom.pull in
+    test-data/core/engine-features/04-args-taint.sol.
+  recommendation: >
+    This is a feature-test template, not a production detector.
+
+query:
+  scope: function
+
+  match:
+    contains:
+      kind: token_call
+      name: "^transferFrom$"
+      args:
+        0:
+          tainted_from: parameter

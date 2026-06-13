@@ -45,7 +45,7 @@ func setupVerboseLogging(verbosePath string) error {
 	types.SetVerboseWriter(f)
 	report.SetVerboseWriter(f)
 
-	fmt.Printf("Verbose logging enabled (output: %s)\n", verbosePath)
+	fmt.Fprintf(os.Stderr, "Verbose logging enabled (output: %s)\n", verbosePath)
 	return nil
 }
 
@@ -77,9 +77,10 @@ func buildDatabase(inputPath string, verbose bool) (*types.Database, error) {
 		fmt.Printf("Framework: %s\n", framework)
 	}
 
-	// Resolve imports recursively
+	// Resolve imports recursively. Warnings go to stderr so they don't corrupt
+	// machine-readable output piped from stdout (e.g. --json).
 	if err := r.ResolveImports(projectRoot); err != nil {
-		fmt.Printf("Warning: import resolution failed: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Warning: import resolution failed: %v\n", err)
 	}
 	sources = r.GetAllSources()
 
@@ -119,21 +120,6 @@ func loadOrBuildDatabase(inputPath, dbPath string, verbose bool) (*types.Databas
 	return buildDatabase(inputPath, verbose)
 }
 
-// loadDatabaseRequired loads database from --db path (required).
-func loadDatabaseRequired(dbPath string, verbose bool) (*types.Database, error) {
-	if dbPath == "" {
-		return nil, fmt.Errorf("--db flag is required")
-	}
-	if verbose {
-		fmt.Printf("Loading database from %s\n", dbPath)
-	}
-	db, err := types.LoadFromJSON(dbPath)
-	if err != nil {
-		return nil, fmt.Errorf("loading database: %w", err)
-	}
-	return db, nil
-}
-
 // writeOutput writes content to file or stdout. Returns an error rather than
 // calling os.Exit. If outputPath points at an existing file, a brief notice
 // is printed so the user knows their previous report is being replaced.
@@ -146,11 +132,11 @@ func writeOutput(content, outputPath string) error {
 		if info.IsDir() {
 			return fmt.Errorf("output path %s is a directory", outputPath)
 		}
-		fmt.Printf("Replacing existing file: %s\n", outputPath)
+		fmt.Fprintf(os.Stderr, "Replacing existing file: %s\n", outputPath)
 	}
 	if err := os.WriteFile(outputPath, []byte(content), 0644); err != nil {
 		return fmt.Errorf("writing output to %s: %w", outputPath, err)
 	}
-	fmt.Printf("Output written to %s\n", outputPath)
+	fmt.Fprintf(os.Stderr, "Output written to %s\n", outputPath)
 	return nil
 }

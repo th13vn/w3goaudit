@@ -1,0 +1,20 @@
+meta:
+  id: TEST-FEATURE-ETH-TRANSFER
+  title: "Feature test: semantic group (eth_transfer)"
+  severity: LOW
+  confidence: LOW
+  description: >
+    Engine feature fixture for semantic-group matching. The `eth_transfer`
+    group matches .transfer()/.send()/.call{value:}. It matches UsesTransfer.pay
+    (.transfer) in 03-semantic-groups.sol and also the value-bearing
+    msg.sender.call{value:} calls in 01-sequence.sol (both are genuine ETH
+    transfers). It must NOT match NoTransfer, which performs no value transfer.
+  recommendation: >
+    This is a feature-test template, not a production detector.
+
+query:
+  scope: function
+
+  match:
+    contains:
+      kind: eth_transfer

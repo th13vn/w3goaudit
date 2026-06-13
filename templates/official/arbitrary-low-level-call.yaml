@@ -1,0 +1,31 @@
+meta:
+  id: SEC-CALL-001
+  title: "Arbitrary Low-Level Call (User-Controlled Target and Calldata)"
+  severity: HIGH
+  confidence: MEDIUM
+  description: >
+    An unauthenticated entry point forwards a user-controlled address AND
+    user-controlled calldata into a low-level `.call(...)`. The contract becomes
+    a confused deputy: an attacker can make it call any function on any contract
+    as `msg.sender == thisContract` — draining approvals granted to it, invoking
+    privileged functions that trust it, or sweeping tokens it holds.
+  recommendation: >
+    Do not let callers choose both the target and the calldata of a low-level
+    call. Restrict the target to a vetted allow-list, add access control, or
+    replace the generic dispatcher with explicit, typed functions.
+
+query:
+  scope: entrypoint
+  filter:
+    preset: unAuthenticated
+  match:
+    contains:
+      kind: call.lowlevel.call
+      all:
+        - contains:
+            attr:
+              call_receiver: true
+            tainted_from: parameter
+        - args:
+            0:
+              tainted_from: parameter

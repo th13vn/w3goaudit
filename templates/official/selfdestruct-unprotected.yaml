@@ -1,0 +1,31 @@
+meta:
+  id: SEC-DEST-001
+  title: Unprotected selfdestruct
+  severity: CRITICAL
+  confidence: HIGH
+  description: >
+    A selfdestruct (assembly) operation is reachable from a public/external entry
+    point without any access control modifier. An unauthorized caller could destroy
+    the contract and steal all remaining ETH balance.
+  recommendation: >
+    Add a restrictive modifier (e.g., onlyOwner, onlyAdmin) to any function that
+    calls selfdestruct. In modern Solidity deployments, consider removing selfdestruct
+    entirely as it is deprecated.
+  references:
+    - https://swcregistry.io/docs/SWC-106
+    - https://blog.openzeppelin.com/parity-wallet-hack-reloaded
+
+query:
+  scope: entrypoint
+
+  # `unAuthenticated` preset performs real access-control detection: auth-named
+  # modifiers (validated against decoys), inline msg.sender/role guards, and
+  # recursive internal auth helpers. This replaces the old modifier-name regex,
+  # which both missed inline `require(msg.sender == owner)` guards (false
+  # positive) and any auth modifier outside its hard-coded name list.
+  filter:
+    preset: unAuthenticated
+
+  match:
+    contains:
+      kind: selfdestruct

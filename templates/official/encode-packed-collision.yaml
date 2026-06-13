@@ -1,0 +1,52 @@
+meta:
+  id: SEC-HASH-001
+  title: "Hash Collision via abi.encodePacked with Multiple Dynamic Arguments"
+  severity: HIGH
+  confidence: MEDIUM
+  description: >
+    `keccak256(abi.encodePacked(...))` is computed over two or more
+    user-controlled dynamic arguments (`bytes` / `string` / dynamic arrays).
+    `abi.encodePacked` inserts no length delimiters, so distinct argument
+    tuples can produce the SAME packed bytes (`("a","bc")` vs `("ab","c")`).
+    When that hash backs a signature check or an access decision, an attacker
+    can craft a colliding input and bypass it.
+  recommendation: >
+    Use `abi.encode` (length-prefixed, collision-free) instead of
+    `abi.encodePacked` when hashing more than one dynamic argument, or insert a
+    fixed, unambiguous separator between fields.
+  references:
+    - https://swcregistry.io/docs/SWC-133
+    - https://docs.soliditylang.org/en/latest/abi-spec.html#non-standard-packed-mode
+
+query:
+  scope: function
+  filter:
+    all:
+      - visibility_filter: public,external
+      - source_regex: '(?s)function\s+\w+\([^)]*(?:bytes|string|address\[\]|uint256\[\])\s+\w+[^)]*(?:bytes|string|address\[\]|uint256\[\])\s+\w+'
+  match:
+    any:
+      - contains:
+          kind: call.internal
+          name: '^keccak256$'
+          contains:
+            kind: call.external
+            name: '^encodePacked$'
+            args:
+              0:
+                tainted_from: parameter
+              1:
+                tainted_from: parameter
+      - sequence:
+          - kind: call.external
+            name: '^encodePacked$'
+            args:
+              0:
+                tainted_from: parameter
+              1:
+                tainted_from: parameter
+          - kind: call.internal
+            name: '^keccak256$'
+            args:
+              0:
+                tainted_from: parameter

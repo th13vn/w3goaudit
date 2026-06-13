@@ -1,0 +1,49 @@
+meta:
+  id: SEC-UPGRADE-001
+  title: "Unprotected Initializer (Anyone Can Become Owner)"
+  severity: HIGH
+  confidence: HIGH
+  description: >
+    A function named initialize / initialise / init / __init / setup is callable
+    externally without an access modifier or `initializer` guard, and it writes
+    state. In upgradeable / proxy contracts the initialize function replaces the
+    constructor and must be callable exactly once by the deployer. Without
+    access control or an initializer guard, anyone can front-run the legitimate
+    initialization and take ownership of the proxy. Equivalent to Slither's
+    unprotected-upgrade detector.
+  recommendation: >
+    Apply OpenZeppelin's `initializer` / `reinitializer` modifier, or add an
+    access-control modifier (onlyOwner / onlyAdmin / onlyRole), or call
+    `_disableInitializers()` in the implementation constructor.
+  references:
+    - https://github.com/crytic/slither/wiki/Detector-Documentation#unprotected-upgradeable-contract
+    - https://docs.openzeppelin.com/contracts/4.x/api/proxy#Initializable
+
+query:
+  scope: entrypoint
+
+  filter:
+    # Match common initializer names. Anchored so we don't fire on functions
+    # like `initializeUser()` which often have legitimately weaker auth.
+    # Slither matches strictly on `initialize`; we also catch `init` / `setup`
+    # because those are the popular variants in non-OZ proxies.
+    func_name: (?i)^(initialize|initialise|init|__init|setup)$
+    # unAuthenticated covers: no auth modifier, no inline msg.sender guard,
+    # no recursive auth in callees. The explicit `not:` below skips OZ-style
+    # initializer/reinitializer modifiers.
+    preset: unAuthenticated
+    not:
+      modifier: (?i)(initializer|reinitializer)
+
+  match:
+    # Require at least one state write — otherwise it's a pure helper named
+    # `init()` and not an actual initializer (= no privilege to steal).
+    all:
+      - contains:
+          kind: state_write
+      - not:
+          contains:
+            kind: guard
+            contains:
+              kind: expr.identifier
+              name: ^_initializersDisabled$

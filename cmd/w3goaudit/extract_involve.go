@@ -27,10 +27,10 @@ import (
 // InvolveOutput is the JSON shape of `extract involve`. Each workflow
 // describes one entry point and the path that reaches the target function.
 type InvolveOutput struct {
-	SchemaVersion string              `json:"schemaVersion"`
-	Function      string              `json:"function"`
-	Targets       []string            `json:"targets,omitempty"` // all matched targets when name is ambiguous
-	Workflows     []InvolveWorkflow   `json:"workflows"`
+	SchemaVersion string            `json:"schemaVersion"`
+	Function      string            `json:"function"`
+	Targets       []string          `json:"targets,omitempty"` // all matched targets when name is ambiguous
+	Workflows     []InvolveWorkflow `json:"workflows"`
 }
 
 // InvolveWorkflow is one entry-point's path to the target.
@@ -42,7 +42,7 @@ type InvolveWorkflow struct {
 }
 
 var extractInvolveCmd = &cobra.Command{
-	Use:   "involve <function-name>",
+	Use:   "involve <function-name> [path]",
 	Short: "Show every entry-point workflow that involves a function (as Mermaid charts)",
 	Long: `For each entry-point function in the project, walk the call graph from
 that entry. If the target function is reachable, emit a Mermaid flowchart
@@ -50,15 +50,15 @@ of the path. Useful for "which user-facing functions are affected if I
 audit this helper?".
 
 Examples:
+  w3goaudit extract involve _transfer ./contracts/
   w3goaudit extract involve _transfer --db database.json
   w3goaudit extract involve _checkOwner --db database.json -o involve.md
   w3goaudit extract involve withdraw --db database.json --format=json`,
-	Args: cobra.ExactArgs(1),
+	Args: cobra.RangeArgs(1, 2),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		dbPath, _ := cmd.Flags().GetString("db")
 		outPath, _ := cmd.Flags().GetString("output")
 
-		db, err := loadDatabaseRequired(dbPath, false)
+		db, err := resolveExtractDB(cmd, args)
 		if err != nil {
 			return err
 		}
@@ -118,10 +118,9 @@ Examples:
 }
 
 func init() {
-	extractInvolveCmd.Flags().String("db", "", "Path to database JSON file (required)")
+	extractInvolveCmd.Flags().String("db", "", "Path to a pre-built database JSON (optional; or pass a source path)")
 	extractInvolveCmd.Flags().StringP("output", "o", "", "Output file path (default: stdout)")
 	addExtractFormatFlag(extractInvolveCmd)
-	extractInvolveCmd.MarkFlagRequired("db")
 }
 
 // findFunctionIDsByName returns every fully-qualified function ID matching

@@ -1,0 +1,44 @@
+meta:
+  id: SEC-REENTRANCY-002
+  title: "Reentrancy via balanceOf Delta (Stale Snapshot)"
+  severity: HIGH
+  confidence: MEDIUM
+  description: >
+    A pre-call `balanceOf(...)` (or `address(this).balance`) snapshot is taken,
+    followed by an external call, followed by a post-call delta check
+    (`balanceBefore - balanceAfter >= amount`). Without a reentrancy guard,
+    an attacker who controls the external-call target can reenter the same
+    function — the inner call sees a stale `balanceBefore`, so the outer
+    delta check passes with effectively zero payment. This is the canonical
+    pattern behind multiple "uniswap-like flash-mint" exploits.
+    Equivalent to Slither's reentrancy-benign / reentrancy-events variants
+    focused on balance accounting.
+  recommendation: >
+    Add a `nonReentrant` modifier. If a delta-based accounting is unavoidable,
+    snapshot AND mutate state before the external call (CEI), or transfer in
+    via `safeTransferFrom` instead of a callback.
+  references:
+    - https://github.com/crytic/slither/wiki/Detector-Documentation#reentrancy-vulnerabilities
+    - https://blog.openzeppelin.com/reentrancy-after-istanbul
+
+query:
+  scope: entrypoint
+
+  filter:
+    # Centralised guard detection — covers nonReentrant, lock, mutex, etc.
+    preset: unLocked
+
+  match:
+    # Pre-call balance read, then external call, then post-call balance read.
+    # `sequence:` enforces order on descendants (depth-first).
+    sequence:
+      - kind: call.external
+        name: ^(balanceOf)$
+      - kind: outgoing_call
+        not:
+          name: ^(balanceOf)$
+      - any:
+          - kind: call.external
+            name: ^(balanceOf)$
+          - kind: expr.member_access
+            name: ^balance$

@@ -1,5 +1,7 @@
 package types
 
+import "strings"
+
 // ASTNode represents a node in the Solidity Abstract Syntax Tree
 // Used for deep pattern matching in WQL templates.
 type ASTNode struct {
@@ -231,6 +233,7 @@ const (
 	KindExprMemberAccess = "expr.member_access"
 	KindExprIndexAccess  = "expr.index_access"
 	KindExprConditional  = "expr.conditional"
+	KindExprTuple        = "expr.tuple"
 )
 
 // Declaration kinds
@@ -325,19 +328,19 @@ func IsAnyCall(kind string) bool {
 // typo like `kind: outgoing_calls` (plural) errors at load instead of silently
 // matching nothing at scan time.
 var KnownSemanticGroups = map[string]bool{
-	"outgoing_call":  true,
-	"eth_transfer":   true,
-	"delegatecall":   true,
-	"check":          true,
-	"guard":          true, // alias for check
-	"guard.require":  true,
-	"guard.assert":   true,
-	"guard.revert":   true,
-	"token_call":     true,
-	"state_write":    true,
-	"state_read":     true,
-	"any_call":       true,
-	"selfdestruct":   true,
+	"outgoing_call": true,
+	"eth_transfer":  true,
+	"delegatecall":  true,
+	"check":         true,
+	"guard":         true, // alias for check
+	"guard.require": true,
+	"guard.assert":  true,
+	"guard.revert":  true,
+	"token_call":    true,
+	"state_write":   true,
+	"state_read":    true,
+	"any_call":      true,
+	"selfdestruct":  true,
 }
 
 // knownPrefixes is the closed set of dotted-prefix shortcuts. `kind: call`
@@ -388,6 +391,7 @@ func allRegisteredKinds() map[string]bool {
 		KindExprMemberAccess: true,
 		KindExprIndexAccess:  true,
 		KindExprConditional:  true,
+		KindExprTuple:        true,
 		// Declaration kinds
 		KindDeclFunction:  true,
 		KindDeclContract:  true,
@@ -416,9 +420,14 @@ func allRegisteredKinds() map[string]bool {
 }
 
 // IsKnownKind returns true if the given kind string is a registered exact
-// kind, a known semantic group, or a known dotted prefix. Used by the
-// template loader to reject `kind: <typo>` immediately rather than letting
-// the scan silently produce zero findings.
+// kind, a known semantic group, a single-segment prefix, or a multi-segment
+// dotted prefix of some registered kind (e.g. "call.lowlevel" prefixes
+// "call.lowlevel.call"). Used by the template loader to reject `kind: <typo>`
+// immediately rather than letting the scan silently produce zero findings.
+//
+// matchKind implements multi-segment prefix matching at scan time, so this must
+// accept the same multi-segment prefixes — otherwise a documented form like
+// `kind: call.lowlevel` would be rejected at load even though it works.
 func IsKnownKind(kind string) bool {
 	if kind == "" {
 		return true // empty kind = "any" — handled elsewhere
@@ -431,6 +440,20 @@ func IsKnownKind(kind string) bool {
 	}
 	if allRegisteredKinds()[kind] {
 		return true
+	}
+	// guard.* aliases check.* (matchKind rewrites the prefix).
+	if strings.HasPrefix(kind, "guard.") {
+		return allRegisteredKinds()[strings.Replace(kind, "guard.", "check.", 1)]
+	}
+	// Multi-segment prefix of a registered kind, e.g. "call.lowlevel",
+	// "call.builtin".
+	if strings.Contains(kind, ".") {
+		prefix := kind + "."
+		for registered := range allRegisteredKinds() {
+			if strings.HasPrefix(registered, prefix) {
+				return true
+			}
+		}
 	}
 	return false
 }

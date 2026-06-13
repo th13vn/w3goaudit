@@ -10,8 +10,8 @@ package main
 //
 // This subcommand subsumes the older `extract context` (which only included
 // callers + callees + state vars). Use `bundle` for AI workflows; the
-// narrower `context` / `source` / `callgraph` commands remain available for
-// targeted CLI queries.
+// narrower `context` / `source` commands remain available for targeted CLI
+// queries.
 
 import (
 	"fmt"
@@ -62,16 +62,16 @@ Includes:
   - Contract's selector table
 
 Examples:
+  w3goaudit extract bundle withdraw ./contracts/
   w3goaudit extract bundle withdraw --db database.json
   w3goaudit extract bundle withdraw --db database.json --contract DeFiVault -o bundle.md
   w3goaudit extract bundle transfer --db database.json --format=json -o bundle.json`,
-	Args: cobra.ExactArgs(1),
+	Args: cobra.RangeArgs(1, 2),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		dbPath, _ := cmd.Flags().GetString("db")
 		outPath, _ := cmd.Flags().GetString("output")
 		contractFilter, _ := cmd.Flags().GetString("contract")
 
-		db, err := loadDatabaseRequired(dbPath, false)
+		db, err := resolveExtractDB(cmd, args)
 		if err != nil {
 			return err
 		}
@@ -83,33 +83,19 @@ Examples:
 
 		bundle := buildBundle(db, contract, fn)
 
-		// Bundle defaults to markdown — that's the LLM-native form. JSON is
-		// available via --format=json for scripts. resolveExtractFormat
-		// picks based on --format, then -o extension, then defaults JSON;
-		// override the default here so the LLM-friendly format wins when
-		// neither -o nor --format hints at JSON.
-		format := resolveExtractFormat(cmd)
-		if format == FormatJSON {
-			// Was the user explicit? If neither --format nor a JSON -o was
-			// set, prefer markdown for bundle.
-			fmtFlag, _ := cmd.Flags().GetString("format")
-			if fmtFlag == "" && !strings.HasSuffix(strings.ToLower(outPath), ".json") {
-				format = FormatMD
-			}
-		}
-
+		// Bundle is markdown-native (the LLM-friendly form), which is also the
+		// tool-wide default; --format=json or -o file.json opts into JSON.
 		return writeExtract(bundle,
 			func() string { return renderBundleMarkdown(bundle, db) },
-			outPath, format)
+			outPath, resolveExtractFormat(cmd))
 	},
 }
 
 func init() {
-	extractBundleCmd.Flags().String("db", "", "Path to database JSON file (required)")
+	extractBundleCmd.Flags().String("db", "", "Path to a pre-built database JSON (optional; or pass a source path)")
 	extractBundleCmd.Flags().StringP("output", "o", "", "Output file path (default: stdout)")
 	extractBundleCmd.Flags().String("contract", "", "Restrict search to a specific contract name")
 	addExtractFormatFlag(extractBundleCmd)
-	extractBundleCmd.MarkFlagRequired("db")
 }
 
 // buildBundle assembles the BundleOutput for a function. Shared with any

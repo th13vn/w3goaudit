@@ -3,6 +3,7 @@ package builder
 
 import (
 	"fmt"
+	"sort"
 
 	"github.com/th13vn/solast-go/pkg/ast"
 	"github.com/th13vn/solast-go/pkg/parser"
@@ -29,17 +30,21 @@ func New() *Builder {
 func (b *Builder) Build(sources []*types.SourceFile) (*types.Database, error) {
 	VerboseLog("Starting database build process with %d source files", len(sources))
 
-	// Phase 1: Parse all files and extract contracts
+	// Phase 1: Parse all files and extract contracts.
+	// Tolerant: a single unparseable file is logged and skipped rather than
+	// aborting the whole build — an audit target with one broken file should
+	// still yield findings for the rest (matches the call-graph phase's policy).
 	VerboseLog("Phase 1: Parsing files and extracting contracts")
 	for _, sf := range sources {
 		if err := b.parseFile(sf); err != nil {
-			return nil, fmt.Errorf("parsing %s: %w", sf.Path, err)
+			VerboseLog("Phase 1: parsing %s failed: %v (skipping)", sf.Path, err)
+			continue
 		}
 	}
 	VerboseLog("Phase 1 complete: Extracted %d contracts", len(b.db.Contracts))
 
-	// Phase 2: Build AST trees for all functions
-	VerboseLog("Phase 2: Building AST trees")
+	// Phase 2: Build AST trees, data flow, and semantic type facts for all functions
+	VerboseLog("Phase 2: Building AST trees, data flow, and semantic type facts")
 	if err := b.buildASTs(); err != nil {
 		return nil, fmt.Errorf("building ASTs: %w", err)
 	}
@@ -84,6 +89,11 @@ func (b *Builder) parseFile(sf *types.SourceFile) error {
 	if err != nil {
 		return err
 	}
+
+	// Stash the parsed tree so the call-graph phase can reuse it instead of
+	// re-parsing every file (parsing is the most expensive phase; on large
+	// codebases this halves it). Not serialized — see SourceFile.AST.
+	sf.AST = result
 
 	// Add source file to database
 	b.db.AddSourceFile(sf)
@@ -171,14 +181,27 @@ func (b *Builder) buildCallGraph() error {
 // calculateFunctionSelectors calculates selectors and signatures for all functions
 // with proper struct resolution to tuple format
 func (b *Builder) calculateFunctionSelectors() {
-	// Build a global map of struct definitions from all contracts
-	// This allows resolving structs that might be defined in parent contracts
+	// Build a global map of struct definitions from all contracts.
+	// This allows resolving structs that might be defined in parent contracts.
+	// Iterate contracts in sorted ID order so that when two contracts define a
+	// struct with the same short name, the short-name winner is deterministic
+	// across runs (previously map-iteration order made selectors non-reproducible).
+	// The qualified `Contract.Struct` key is always unambiguous.
 	structDefs := make(map[string]*types.Struct)
-	for _, contract := range b.db.Contracts {
+	contractIDs := make([]string, 0, len(b.db.Contracts))
+	for id := range b.db.Contracts {
+		contractIDs = append(contractIDs, id)
+	}
+	sort.Strings(contractIDs)
+	for _, id := range contractIDs {
+		contract := b.db.Contracts[id]
 		for _, st := range contract.Structs {
-			// Use both short name and qualified name for lookup
-			structDefs[st.Name] = st
 			structDefs[contract.Name+"."+st.Name] = st
+			// Only set the short-name key if unclaimed, so the lexicographically
+			// first contract wins deterministically instead of the last iterated.
+			if _, exists := structDefs[st.Name]; !exists {
+				structDefs[st.Name] = st
+			}
 		}
 	}
 

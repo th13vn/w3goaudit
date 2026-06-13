@@ -1,0 +1,31 @@
+meta:
+  id: SEC-MATH-003
+  title: "Suspicious Use of ^ (Bitwise XOR, Likely Meant **)"
+  severity: HIGH
+  confidence: MEDIUM
+  description: >
+    The `^` operator is used in arithmetic-looking code. In Solidity `^` is
+    bitwise XOR, not power. `2 ^ 8` evaluates to `10` (0b0010 XOR 0b1000),
+    not `256`. Developers coming from Python / math notation routinely write
+    this bug. Real bitwise-XOR use cases in Solidity are very rare
+    (cryptographic primitives, low-level masking), so any unexplained `^`
+    deserves a manual review. Equivalent to Slither's incorrect-exp detector.
+  recommendation: >
+    Replace `^` with `**` for exponentiation. If bitwise XOR is intentional,
+    add a comment explaining what you're masking, and prefer a named bit-
+    mask constant so the intent is readable.
+  references:
+    - https://github.com/crytic/slither/wiki/Detector-Documentation#incorrect-exponentiation
+    - https://docs.soliditylang.org/en/latest/types.html#operators
+
+query:
+  scope: function
+
+  match:
+    # Engine note: there is no `type:` matcher (no Solidity type info reaches
+    # the AST). We therefore can't restrict to uint-typed operands — the
+    # cleanest filter we can offer is "the operand is an identifier or
+    # literal", which excludes nothing meaningful but documents the intent.
+    contains:
+      kind: expr.binary_op
+      operator: "\\^"

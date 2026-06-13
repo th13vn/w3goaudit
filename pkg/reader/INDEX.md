@@ -82,15 +82,43 @@ Import path resolution with remapping support.
 
 **Purpose:** Resolve Solidity imports to actual file paths
 - Handle relative imports (./file.sol, ../file.sol)
-- Handle npm/node_modules imports  
-- Support remappings from remappings.txt (Foundry)
-- Support dependencies directory (Soldeer)
+- Handle npm/node_modules and `lib/` imports
+- Support remappings from `remappings.txt` **and** the `remappings = [...]`
+  array inside `foundry.toml` (the latter is what modern Foundry repos use when
+  `auto_detect_remappings = false` and there is no `remappings.txt`)
+- Soldeer/other dependency managers work only via the remappings.txt they
+  generate — there is no dedicated `dependencies/` directory fallback.
+
+**Monorepo / multi-root resolution (sub-projects):**
+- The scan root (passed to `NewResolver`) is often a git root that contains
+  *several independent* Foundry/Hardhat projects (e.g. `packages/eip-*/`), each
+  with its **own** `foundry.toml`, its **own** remappings, and its **own**
+  `lib/` directory.
+- `Resolve(importPath, fromFile)` therefore resolves each import against the
+  **nearest enclosing sub-project** of `fromFile`, not the scan root.
+  `findSubRoot` walks up from the file to the closest ancestor carrying a
+  project config (`foundry.toml`/`remappings.txt`/`hardhat.config.*`/
+  `truffle-config.js`), bounded by the scan root; if none is found the scan
+  root itself is used. Remapping targets and the `lib/`/`node_modules`/root
+  fallbacks are all joined against that sub-project root.
+- Per-sub-project remappings are loaded once and memoized (`subCache`). The scan
+  root reuses the live `Remappings` slice so `AddRemapping` and the eager root
+  load keep working.
+
+> Known limitation: the remapping lookup returns on the first matching prefix
+> even if the mapped file is absent, instead of falling through to other
+> remappings or the node_modules/lib/root fallbacks (see `Resolve`).
 
 **Exports:**
 - `Resolver` struct - Handles import resolution with remappings
 - `NewResolver(projectRoot)` - Creates resolver with auto-loaded remappings
-- `Resolve(importPath, fromFile)` - Resolve import to absolute path
+- `Resolve(importPath, fromFile)` - Resolve import to absolute path (sub-project aware)
 - `AddRemapping(from, to)` - Add custom remapping
+
+**Key internals:**
+- `loadRemappingsFor(root, framework)` - Gather remappings.txt + foundry.toml + defaults for one root
+- `parseFoundryTomlRemappings(path)` - Parse the `remappings = [...]` array from foundry.toml
+- `findSubRoot(fromFile)` / `subProjectFor(fromFile)` - Locate and cache the owning sub-project
 
 **Used by:** Reader's `ResolveImports()` to load dependency files on-demand
 

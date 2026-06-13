@@ -265,7 +265,6 @@ func (ce *ContractExtractor) extractUsingDirective(node *ast.UsingForDeclaration
 	}
 }
 
-
 // getTypeName extracts the type name string from a TypeName node
 func getTypeName(node ast.Node) string {
 	if node == nil {

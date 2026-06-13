@@ -1,0 +1,34 @@
+meta:
+  id: SEC-SIG-001
+  title: "Signature Malleability: Raw Signature Bytes Used as a State Key"
+  severity: HIGH
+  confidence: MEDIUM
+  description: >
+    The result of `ECDSA.recover(hash, signature)` is consumed in a flow that
+    keys persistent state on the raw `signature` bytes (e.g.
+    `usedSignatures[signature] = true`). ECDSA signatures are malleable: for any
+    valid `(r, s, v)` an attacker can derive a second valid signature
+    `(r, n - s, v')` for the same message. Replay protection keyed on the raw
+    bytes is therefore bypassable.
+  recommendation: >
+    Key replay protection on the message digest or a per-signer nonce, not the
+    signature bytes. Use OpenZeppelin's `ECDSA.tryRecover`, which rejects
+    upper-range `s` values, and track consumed digests instead of signatures.
+  references:
+    - https://swcregistry.io/docs/SWC-117
+
+query:
+  scope: entrypoint
+  match:
+    sequence:
+      - kind: call.external
+        name: '^recover$'
+        contains:
+          attr:
+            call_receiver: true
+          name: '^ECDSA$'
+      - kind: state_write
+        left:
+          kind: expr.index_access
+          contains:
+            tainted_from: parameter

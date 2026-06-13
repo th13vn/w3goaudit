@@ -1,0 +1,22 @@
+.git
+.DS_Store
+.vscode/
+
+# Benchmark output is mounted at runtime, not baked into the image.
+benchmark-results/
+
+# Local build/cache noise.
+benchmarks/__pycache__/
+**/__pycache__/
+*.pyc
+w3goaudit
+dist/
+build/
+tmp/
+
+# Dependency folders from frontend or Solidity projects should not inflate the
+# benchmark image if they appear later.
+node_modules/
+artifacts/
+out/
+cache/

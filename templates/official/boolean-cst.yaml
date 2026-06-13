@@ -1,0 +1,56 @@
+meta:
+  id: SEC-BOOL-001
+  title: "Boolean Constant Misuse"
+  severity: MEDIUM
+  confidence: MEDIUM
+  description: >
+    A boolean literal (`true` / `false`) is misused: either compared with
+    `==` / `!=`, short-circuited through `&&` / `||`, or used directly as the
+    test of an `if` / ternary (e.g. `x == true`, `flag && false`, `if (true)`).
+    These signal dead code, an always-taken / never-taken branch, a redundant
+    comparison, or leftover debugging scaffolding that masks missing logic.
+    Equivalent to Slither's boolean-cst detector.
+
+    Boolean literals used as ordinary values — `return true`, `flag = false`,
+    `foo(true)`, mapping assignments, and `while (true)` loops — are NOT flagged,
+    since those are normal and idiomatic.
+  recommendation: >
+    Remove the boolean constant and restore the intended condition. If a branch
+    is genuinely unconditional, delete the dead arm entirely. Replace `x == true`
+    with `x` and `x == false` with `!x`.
+  references:
+    - https://github.com/crytic/slither/wiki/Detector-Documentation#misuse-of-a-boolean-constant
+
+query:
+  scope: function
+
+  match:
+    contains:
+      any:
+        # 1. Boolean constant as a DIRECT operand of a comparison or logical
+        #    operator: `x == true`, `y != false`, `a && true`, `b || false`.
+        #    left/right match the operand nodes themselves (not descendants), so
+        #    `sink(true) && sink(false)` — where the literals are call args, not
+        #    operands — is not flagged. Assignments use operator "=" on
+        #    stmt.assign, so `x = true` / `return true` never match here.
+        - kind: expr.binary_op
+          operator: '^(==|!=|&&|\|\|)$'
+          any:
+            - left:
+                kind: expr.literal
+                attr:
+                  subtype: bool
+            - right:
+                kind: expr.literal
+                attr:
+                  subtype: bool
+
+        # 2. Boolean constant used directly as an `if` or ternary condition:
+        #    `if (true)`, `if (false)`, `true ? a : b`. The cond_role tag marks
+        #    the test expression, so a `return true` in the body is not matched.
+        #    Loop conditions (`while (true)`) are intentionally excluded — they
+        #    are a common, legitimate idiom.
+        - kind: expr.literal
+          attr:
+            subtype: bool
+            cond_role: '^(if|ternary)$'

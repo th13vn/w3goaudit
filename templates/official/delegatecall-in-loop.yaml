@@ -1,0 +1,33 @@
+meta:
+  id: SEC-DELEG-002
+  title: "Delegatecall Inside a Loop"
+  severity: HIGH
+  confidence: MEDIUM
+  description: >
+    A `delegatecall` is invoked inside a `for` / `while` / `do-while` loop. If
+    the contract receives ETH and computes per-iteration accounting from
+    `msg.value` (e.g. payable multicall pattern), the same ETH can be consumed
+    multiple times in a single transaction. Even with a fixed target, repeated
+    delegatecalls expose the contract's storage to unintended mutations across
+    iterations. Equivalent to Slither's delegatecall-loop detector.
+  recommendation: >
+    Do not use `delegatecall` inside loops. If a batched-call API is needed,
+    either use regular external `call` (no storage merge), or guard the
+    delegatecall site so each iteration receives an isolated frame.
+  references:
+    - https://github.com/crytic/slither/wiki/Detector-Documentation#payable-functions-using-delegatecall-inside-a-loop
+    - https://forum.openzeppelin.com/t/poc-multicall-with-msg-value-reuses-eth/14467
+
+query:
+  scope: entrypoint
+
+  match:
+    # `kind: delegatecall` is the semantic group covering both
+    # call.lowlevel.delegatecall and asm.delegatecall. Wrapping it in
+    # `inside: stmt.loop` lets us assert "delegatecall whose ancestor is a
+    # loop" — surviving non-adjacent layout (helper var assignment between
+    # the loop header and the call).
+    contains:
+      kind: delegatecall
+      inside:
+        kind: stmt.loop

@@ -1,0 +1,35 @@
+meta:
+  id: SEC-PRNG-001
+  title: "Weak Randomness from Block Variables"
+  severity: HIGH
+  confidence: MEDIUM
+  description: >
+    A modulo (`%`) operation is applied to a value derived from `block.timestamp`,
+    `block.number`, `block.difficulty` (a.k.a. `block.prevrandao` post-Merge),
+    or `blockhash(...)`. These values are predictable or influenceable by
+    block proposers, so any randomness derived from them is exploitable by an
+    adversary willing to retry / re-propose. The `keccak256(abi.encodePacked(
+    block.timestamp, ...))` wrapping does not add real entropy. Equivalent to
+    Slither's weak-prng detector.
+  recommendation: >
+    Use a verifiable randomness source (e.g. Chainlink VRF) or a commit-reveal
+    scheme. Do not derive secret outcomes from block context alone.
+  references:
+    - https://github.com/crytic/slither/wiki/Detector-Documentation#weak-prng
+    - https://swcregistry.io/docs/SWC-120
+
+query:
+  scope: function
+
+  match:
+    # A modulo is the canonical signal — it converts a pseudo-random source
+    # into a bounded range. We walk the modulo's descendants to find ANY
+    # block-context member access, which also catches the popular
+    # `keccak256(abi.encodePacked(block.timestamp, ...)) % N` pattern because
+    # `block.timestamp` is still a descendant of the `%` node.
+    contains:
+      kind: expr.binary_op
+      operator: "%"
+      contains:
+        kind: expr.member_access
+        name: (?i)^block\.(timestamp|number|difficulty|prevrandao|coinbase)$|^blockhash$

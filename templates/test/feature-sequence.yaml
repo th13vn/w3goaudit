@@ -1,0 +1,20 @@
+meta:
+  id: TEST-FEATURE-SEQUENCE
+  title: "Feature test: sequence operator (outgoing_call -> state_write)"
+  severity: HIGH
+  confidence: LOW
+  description: >
+    Engine feature fixture for the `sequence` match operator. Matches a
+    function whose body contains an outgoing call followed (in source order)
+    by a state-variable write. Expected to match VulnerableSequence.withdraw
+    and NOT SafeSequence.withdraw in test-data/core/engine-features/01-sequence.sol.
+  recommendation: >
+    This is a feature-test template, not a production detector.
+
+query:
+  scope: entrypoint
+
+  match:
+    sequence:
+      - kind: outgoing_call
+      - kind: state_write

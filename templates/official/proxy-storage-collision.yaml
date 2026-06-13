@@ -1,0 +1,28 @@
+meta:
+  id: SEC-PROXY-001
+  title: "Proxy Storage Layout Collision"
+  severity: HIGH
+  confidence: MEDIUM
+  description: >
+    A contract inheriting a known upgradeable-proxy base declares its own
+    mutable storage alongside a constructor. The proxy delegates to an
+    implementation whose storage layout also starts at slot 0, so any mutable
+    variable the proxy declares collides with the implementation's slots —
+    silently corrupting state (admin/owner slots, balances) across delegatecalls.
+  recommendation: >
+    Keep proxy contracts storage-less. Store proxy-specific data in fixed,
+    namespaced slots (EIP-1967) and never declare plain mutable state on a
+    proxy. Use `immutable` / `constant` for values fixed at construction.
+  references:
+    - https://eips.ethereum.org/EIPS/eip-1967
+
+query:
+  scope: contract
+  filter:
+    extends: '(UpgradeabilityProxy|AdminUpgradeabilityProxy|OwnedUpgradeabilityProxy|TransparentUpgradeableProxy|ERC1967Proxy)'
+  match:
+    all:
+      - source_regex: '(?m)^\s*[A-Za-z_][A-Za-z0-9_<>,\[\] ]+\s+(?:public|private|internal)?\s*[A-Za-z_][A-Za-z0-9_]*\s*(?:=|;)'
+      - source_regex: '\bconstructor\s*\('
+      - not:
+          source_regex: '(?m)^\s*[A-Za-z_][A-Za-z0-9_<>,\[\] ]+\s+(?:immutable|constant)\b'

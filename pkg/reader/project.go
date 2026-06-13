@@ -59,11 +59,11 @@ func DetectProjectRoot(startPath string) (string, error) {
 type Framework string
 
 const (
-	FrameworkUnknown  Framework = "unknown"
-	FrameworkFoundry  Framework = "foundry"
-	FrameworkHardhat  Framework = "hardhat"
-	FrameworkTruffle  Framework = "truffle"
-	FrameworkBrownie  Framework = "brownie"
+	FrameworkUnknown Framework = "unknown"
+	FrameworkFoundry Framework = "foundry"
+	FrameworkHardhat Framework = "hardhat"
+	FrameworkTruffle Framework = "truffle"
+	FrameworkBrownie Framework = "brownie"
 )
 
 // DetectFramework identifies the development framework used

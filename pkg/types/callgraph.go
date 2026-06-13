@@ -60,7 +60,6 @@ type CallEdge struct {
 	TargetKind ContractKind `json:"targetKind,omitempty"`
 }
 
-
 // CallGraph represents the call graph for a project
 type CallGraph struct {
 	// Edges is the list of all call edges

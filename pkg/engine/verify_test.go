@@ -223,6 +223,49 @@ func TestVerifyTraversal(t *testing.T) {
 	}
 }
 
+func TestVerifyPrimaryTraceRollsBackFailedCandidates(t *testing.T) {
+	db := types.NewDatabase()
+	engine := New(db)
+
+	root := types.NewASTNode(types.KindDeclFunction)
+	root.Name = "deposit"
+
+	partial := types.NewASTNode(types.KindCallExternal)
+	partial.Name = "transferFrom"
+	partial.StartLine = 10
+	root.AddChild(partial)
+
+	good := types.NewASTNode(types.KindCallExternal)
+	good.Name = "transferFrom"
+	good.StartLine = 20
+	arg := types.NewASTNode(types.KindExprIdentifier)
+	arg.Name = "from"
+	arg.RefKind = "parameter"
+	good.AddChild(arg)
+	root.AddChild(good)
+
+	trace := &matchTrace{}
+	engine.match = trace
+	defer func() { engine.match = nil }()
+
+	rule := Rule{
+		Contains: &Rule{
+			Kind: types.KindCallExternal,
+			Name: "^transferFrom$",
+			Args: map[int]Rule{
+				0: {TaintedFrom: "parameter"},
+			},
+		},
+	}
+	if !engine.Verify(root, rule) {
+		t.Fatal("Verify returned false; want the second transferFrom candidate to match")
+	}
+	if trace.Primary != good {
+		t.Fatalf("Primary = line %d node %p; want successful candidate line %d node %p",
+			trace.Primary.StartLine, trace.Primary, good.StartLine, good)
+	}
+}
+
 func TestVerifyTaint(t *testing.T) {
 	db := types.NewDatabase()
 	engine := New(db)

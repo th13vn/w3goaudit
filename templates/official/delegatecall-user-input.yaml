@@ -1,0 +1,32 @@
+meta:
+  id: SEC-DELEG-001
+  title: Delegatecall to User-Controlled Address
+  severity: CRITICAL
+  confidence: HIGH
+  description: >
+    A delegatecall is executed with a target address that comes from a function
+    parameter (user-controlled). An attacker can pass a malicious contract address
+    as the target, which will execute arbitrary code in the context of this contract,
+    potentially draining funds, changing ownership, or corrupting storage.
+  recommendation: >
+    Never delegatecall to user-supplied addresses. Maintain a whitelist of trusted
+    implementation addresses, or use an upgradeable proxy pattern with a timelocked
+    admin role for changing the implementation.
+  references:
+    - https://swcregistry.io/docs/SWC-112
+    - https://consensys.github.io/smart-contract-best-practices/attacks/delegatecall/
+
+query:
+  scope: entrypoint
+
+  filter:
+    preset: unAuthenticated
+
+  match:
+    contains:
+      kind: delegatecall
+      contains:
+        kind: expr.identifier
+        attr:
+          call_receiver: true
+        tainted_from: parameter

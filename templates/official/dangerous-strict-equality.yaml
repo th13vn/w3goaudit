@@ -1,0 +1,46 @@
+meta:
+  id: SEC-EQ-001
+  title: "Dangerous Strict Equality on Externally-Influenced Balance"
+  severity: MEDIUM
+  confidence: HIGH
+  description: >
+    A strict equality (`==` or `!=`) is applied to a value that can be
+    externally manipulated — most commonly `address(this).balance` or an
+    ERC20 `balanceOf(...)` read. ETH balance can be force-incremented by
+    a `selfdestruct(payable(victim))` from any external contract, defeating
+    any `balance == X` guard. ERC20 balance can shift between blocks via
+    transfers or rebasing. Logic that depends on EXACT balances is therefore
+    brittle and exploitable. Equivalent to Slither's incorrect-equality
+    detector.
+  recommendation: >
+    Use `>=` or `<=` comparisons instead. Treat balances as a lower bound, not
+    an exact value. If exact value matters, snapshot it into a state variable
+    you control.
+  references:
+    - https://github.com/crytic/slither/wiki/Detector-Documentation#dangerous-strict-equalities
+    - https://swcregistry.io/docs/SWC-132
+
+query:
+  scope: function
+
+  match:
+    # An `==` or `!=` whose subtree contains a balance-like read. We use the
+    # binary_op operator AND a descendant member_access / balanceOf call so
+    # that side-of-comparison doesn't matter — `bal == 100e18` and
+    # `100e18 == bal` both fire.
+    contains:
+      kind: expr.binary_op
+      operator: "(==|!=)"
+      any:
+        - contains:
+            kind: expr.member_access
+            name: ^balance$
+        - contains:
+            kind: call.external
+            name: ^balanceOf$
+        # Also catch raw `block.number == X` (snapshot-locking abuse) and
+        # `block.timestamp == X` (rare but a real anti-pattern in vesting
+        # contracts).
+        - contains:
+            kind: expr.member_access
+            name: ^(timestamp|number)$

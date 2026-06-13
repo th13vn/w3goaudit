@@ -12,10 +12,16 @@ import (
 
 // CallGraphBuilder builds the call graph for the project
 type CallGraphBuilder struct {
-	db              *types.Database
-	currentContract string
-	currentFunction string
-	currentFile     string
+	db                 *types.Database
+	currentContract    string
+	currentFunction    string
+	currentFunctionObj *types.Function
+	// currentModifierObj is non-nil while analyzing a modifier body; in that
+	// state, discovered calls are attached to the modifier's Calls slice and the
+	// edge "From" is the modifier ID rather than a function ID.
+	currentModifierObj *types.Modifier
+	currentFile        string
+	symbolTypes        map[string]types.TypeInfo
 }
 
 // NewCallGraphBuilder creates a new call graph builder
@@ -40,7 +46,7 @@ func (cgb *CallGraphBuilder) Build() error {
 	for _, path := range paths {
 		sf := cgb.db.SourceFiles[path]
 		cgb.currentFile = path
-		if err := cgb.analyzeFile(path, sf.Content); err != nil {
+		if err := cgb.analyzeFile(sf); err != nil {
 			// Surface the failure via verbose so silent skips don't hide a real bug.
 			VerboseLog("call-graph analysis failed for %s: %v (skipping)", path, err)
 			continue
@@ -50,15 +56,21 @@ func (cgb *CallGraphBuilder) Build() error {
 	return nil
 }
 
-// analyzeFile analyzes function bodies for calls
-func (cgb *CallGraphBuilder) analyzeFile(path, content string) error {
-	result, err := parser.Parse(content, &parser.Options{
-		Tolerant: true,
-		Loc:      true,
-		Range:    true,
-	})
-	if err != nil {
-		return err
+// analyzeFile analyzes function bodies for calls. It reuses the AST parsed in
+// the build's Phase 1 (stashed on SourceFile.AST) and only re-parses if that
+// cache is absent (e.g. a database reloaded from JSON, where AST is not stored).
+func (cgb *CallGraphBuilder) analyzeFile(sf *types.SourceFile) error {
+	result, ok := sf.AST.(*ast.SourceUnit)
+	if !ok || result == nil {
+		parsed, err := parser.Parse(sf.Content, &parser.Options{
+			Tolerant: true,
+			Loc:      true,
+			Range:    true,
+		})
+		if err != nil {
+			return err
+		}
+		result = parsed
 	}
 
 	// Visit all contracts and functions
@@ -71,15 +83,60 @@ func (cgb *CallGraphBuilder) analyzeFile(path, content string) error {
 	return nil
 }
 
-// analyzeContract analyzes a contract's functions
+// analyzeContract analyzes a contract's functions and modifier bodies.
 func (cgb *CallGraphBuilder) analyzeContract(contract *ast.ContractDefinition) {
 	cgb.currentContract = contract.Name
 
 	for _, subNode := range contract.SubNodes {
-		if fn, ok := subNode.(*ast.FunctionDefinition); ok {
-			cgb.analyzeFunction(fn)
+		switch n := subNode.(type) {
+		case *ast.FunctionDefinition:
+			cgb.analyzeFunction(n)
+		case *ast.ModifierDefinition:
+			// Calls inside modifier bodies (e.g. `modifier g { _check(); _; }`)
+			// were never walked, so Modifier.Calls stayed empty and auth helpers
+			// invoked from modifiers were invisible to the call graph.
+			cgb.analyzeModifierDefinition(n)
 		}
 	}
+}
+
+// analyzeModifierDefinition walks a modifier body, attaching discovered calls to
+// the corresponding types.Modifier and emitting call-graph edges rooted at the
+// modifier ID.
+func (cgb *CallGraphBuilder) analyzeModifierDefinition(mod *ast.ModifierDefinition) {
+	if mod == nil || mod.Body == nil {
+		return
+	}
+	contractObj := cgb.db.GetContractByName(cgb.currentContract)
+	if contractObj == nil {
+		return
+	}
+	var modObj *types.Modifier
+	for _, m := range contractObj.Modifiers {
+		if m.Name == mod.Name {
+			modObj = m
+			break
+		}
+	}
+	if modObj == nil {
+		return
+	}
+
+	cgb.currentFunctionObj = nil
+	cgb.symbolTypes = make(map[string]types.TypeInfo)
+	for _, sv := range contractObj.StateVariables {
+		cgb.symbolTypes[sv.Name] = cgb.typeInfoFromTypeName(sv.TypeName, "state_var")
+	}
+	for _, param := range mod.Parameters {
+		if param.Name != "" {
+			cgb.symbolTypes[param.Name] = cgb.typeInfoFromTypeName(getTypeName(param.TypeName), "parameter")
+		}
+	}
+
+	cgb.currentFunction = fmt.Sprintf("%s.%s", cgb.currentContract, mod.Name)
+	cgb.currentModifierObj = modObj
+	cgb.analyzeBlock(mod.Body)
+	cgb.currentModifierObj = nil
 }
 
 // analyzeFunction analyzes a function's body for calls
@@ -96,13 +153,26 @@ func (cgb *CallGraphBuilder) analyzeFunction(fn *ast.FunctionDefinition) {
 	// Try to find the exact function implementation in the DB to use its selector
 	selector := name
 	contractObj := cgb.db.GetContractByName(cgb.currentContract)
+	cgb.currentFunctionObj = nil
+	cgb.symbolTypes = make(map[string]types.TypeInfo)
 	if contractObj != nil {
+		for _, sv := range contractObj.StateVariables {
+			cgb.symbolTypes[sv.Name] = cgb.typeInfoFromTypeName(sv.TypeName, "state_var")
+		}
 		for _, f := range contractObj.Functions {
 			if f.Name == name && f.StartLine == fn.Loc.Start.Line {
+				cgb.currentFunctionObj = f
 				if f.Selector != "" {
 					selector = f.Selector
 				}
 				break
+			}
+		}
+	}
+	if cgb.currentFunctionObj != nil {
+		for _, param := range cgb.currentFunctionObj.Parameters {
+			if param.Name != "" {
+				cgb.symbolTypes[param.Name] = cgb.typeInfoFromTypeName(param.TypeName, "parameter")
 			}
 		}
 	}
@@ -138,6 +208,11 @@ func (cgb *CallGraphBuilder) analyzeNode(node ast.Node) {
 	case *ast.Block:
 		cgb.analyzeBlock(n)
 
+	case *ast.UncheckedBlock:
+		// Calls inside `unchecked { ... }` (pervasive in Solidity >=0.8) were
+		// previously dropped from the call graph entirely.
+		cgb.analyzeBlock(n.Body)
+
 	case *ast.ExpressionStatement:
 		cgb.analyzeNode(n.Expression)
 
@@ -150,6 +225,10 @@ func (cgb *CallGraphBuilder) analyzeNode(node ast.Node) {
 		cgb.analyzeNode(n.Condition)
 		cgb.analyzeNode(n.Body)
 
+	case *ast.DoWhileStatement:
+		cgb.analyzeNode(n.Condition)
+		cgb.analyzeNode(n.Body)
+
 	case *ast.ForStatement:
 		cgb.analyzeNode(n.InitExpression)
 		cgb.analyzeNode(n.ConditionExpression)
@@ -159,11 +238,36 @@ func (cgb *CallGraphBuilder) analyzeNode(node ast.Node) {
 	case *ast.ReturnStatement:
 		cgb.analyzeNode(n.Expression)
 
+	case *ast.EmitStatement:
+		// Calls embedded in event arguments, e.g. emit E(f()).
+		cgb.analyzeNode(n.EventCall)
+
+	case *ast.RevertStatement:
+		// Calls embedded in custom-error arguments, e.g. revert E(f()).
+		cgb.analyzeNode(n.RevertCall)
+
 	case *ast.VariableDeclarationStatement:
+		for _, decl := range n.Variables {
+			if decl == nil || decl.Name == "" {
+				continue
+			}
+			ti := cgb.typeInfoFromTypeName(getTypeName(decl.TypeName), "local_var")
+			if !ti.IsKnown() && n.InitialValue != nil {
+				ti = cgb.expressionType(n.InitialValue)
+			}
+			if ti.IsKnown() {
+				cgb.symbolTypes[decl.Name] = ti
+			}
+		}
 		cgb.analyzeNode(n.InitialValue)
 
 	case *ast.TryStatement:
 		cgb.analyzeNode(n.Expression)
+		// Success body — previously dropped, so calls in the try body (the common
+		// case, e.g. processing the call result) were invisible to the call graph.
+		if n.Body != nil {
+			cgb.analyzeBlock(n.Body)
+		}
 		for _, clause := range n.CatchClauses {
 			if clause.Body != nil {
 				cgb.analyzeBlock(clause.Body)
@@ -181,6 +285,13 @@ func (cgb *CallGraphBuilder) analyzeNode(node ast.Node) {
 		cgb.analyzeNode(n.Expression)
 
 	case *ast.BinaryOperation:
+		if isAssignmentOperator(n.Operator) {
+			if id, ok := n.Left.(*ast.Identifier); ok {
+				if ti := cgb.expressionType(n.Right); ti.IsKnown() {
+					cgb.symbolTypes[id.Name] = ti
+				}
+			}
+		}
 		cgb.analyzeNode(n.Left)
 		cgb.analyzeNode(n.Right)
 
@@ -216,28 +327,28 @@ func (cgb *CallGraphBuilder) analyzeFunctionCall(call *ast.FunctionCall) {
 	calledName := ""
 	targetContract := ""
 
-
 	switch expr := call.Expression.(type) {
 	case *ast.Identifier:
 		// Simple internal call: _internalFunc()
 		calledName = expr.Name
-		
+
 		// Skip built-in Solidity functions (require, assert, etc.)
 		if isBuiltinFunction(calledName) {
 			return
 		}
-		
+
 		targetContract = cgb.currentContract
 		callType = types.CallTypeInternal
 
 	case *ast.MemberAccess:
 		calledName = expr.MemberName
 		isResolved := false
+		receiverType := cgb.expressionType(expr.Expression)
 
 		// Check for specific bases (Identifier)
 		if inner, ok := expr.Expression.(*ast.Identifier); ok {
 			name := inner.Name
-			
+
 			// Skip built-in objects
 			if name == "abi" || name == "msg" {
 				return
@@ -263,6 +374,18 @@ func (cgb *CallGraphBuilder) analyzeFunctionCall(call *ast.FunctionCall) {
 				callType = types.CallTypeLibrary
 				targetContract = name
 				isResolved = true
+			} else if receiverType.IsPrimitiveAddress() && (calledName == "transfer" || calledName == "send") {
+				callType = types.CallTypeTransferETH
+				targetContract = name
+				isResolved = false
+			} else if receiverType.IsKnown() && !receiverType.IsPrimitiveAddress() && receiverType.BaseName != "" {
+				targetContract = receiverType.BaseName
+				if receiverType.Kind == types.TypeKindLibrary {
+					callType = types.CallTypeLibrary
+				} else {
+					callType = types.CallTypeExternal
+				}
+				isResolved = true
 			} else {
 				// Variable.func() - default to external, allow library check later
 				// e.g. token.transfer()
@@ -271,8 +394,18 @@ func (cgb *CallGraphBuilder) analyzeFunctionCall(call *ast.FunctionCall) {
 			}
 		} else if callExpr, ok := expr.Expression.(*ast.FunctionCall); ok {
 			// Cast: IERC20(addr).transfer()
-			// We want the name of the function being called in that expression: "IERC20"
-			if id, ok := callExpr.Expression.(*ast.Identifier); ok {
+			if castType := cgb.expressionType(callExpr); castType.IsKnown() && castType.BaseName != "" {
+				if castType.IsPrimitiveAddress() && (calledName == "transfer" || calledName == "send") {
+					callType = types.CallTypeTransferETH
+					targetContract = ""
+					isResolved = false
+				} else {
+					callType = types.CallTypeExternal
+					targetContract = castType.BaseName
+					isResolved = true
+				}
+			} else if id, ok := callExpr.Expression.(*ast.Identifier); ok {
+				// We want the name of the function being called in that expression: "IERC20"
 				callType = types.CallTypeExternal
 				targetContract = id.Name
 				isResolved = true // Treat cast as resolved target type
@@ -306,6 +439,15 @@ func (cgb *CallGraphBuilder) analyzeFunctionCall(call *ast.FunctionCall) {
 				}
 			}
 		}
+
+	case *ast.NewExpression:
+		// `new Contract(args)` — deploying runs the created contract's constructor
+		// (untrusted code execution). Record an external creation edge so call-graph
+		// consumers and reachability see it. resolveTarget will bind it to the
+		// created contract's constructor when that contract is in scope.
+		calledName = getTypeName(expr.TypeName)
+		callType = types.CallTypeExternal
+		targetContract = calledName
 	}
 
 	// Skip if we couldn't determine the target
@@ -335,7 +477,7 @@ func (cgb *CallGraphBuilder) analyzeFunctionCall(call *ast.FunctionCall) {
 			resolvedFuncName = resolvedFunc.Name
 		}
 	}
-	
+
 	if resolvedContract != "" {
 		// Try to find the contract to get its source file
 		if targetContractObj := cgb.db.GetContractByName(resolvedContract); targetContractObj != nil {
@@ -353,12 +495,18 @@ func (cgb *CallGraphBuilder) analyzeFunctionCall(call *ast.FunctionCall) {
 		}
 	}
 
-	// Create the full "From" identifier with file path
-	// cgb.currentFunction is already formatted as Contract.Selector from analyzeFunction
-	parts := strings.Split(cgb.currentFunction, ".")
+	// Create the full "From" identifier with file path.
+	// cgb.currentFunction is formatted as Contract.Selector (or Contract.modifier).
+	parts := strings.SplitN(cgb.currentFunction, ".", 2)
 	fromContract := parts[0]
-	fromSelector := strings.Join(parts[1:], ".") // In case of dots in selector
+	fromSelector := ""
+	if len(parts) == 2 {
+		fromSelector = parts[1] // Join via SplitN keeps dotted selectors intact
+	}
 	from := types.MakeFunctionID(cgb.currentFile, fromContract, fromSelector)
+	if cgb.currentModifierObj != nil {
+		from = types.MakeModifierID(cgb.currentFile, fromContract, cgb.currentModifierObj.Name)
+	}
 
 	// Add edge to call graph
 	edge := &types.CallEdge{
@@ -406,9 +554,11 @@ func (cgb *CallGraphBuilder) getLowLevelCallType(memberName string) types.CallTy
 	}
 }
 
-// resolveLibraryCall checks if a call on a variable is actually a library call via 'using' directive
-// Note: Without full type inference, we check if the function exists in any library that has a using directive.
-// This is a heuristic approach - if fromBalance.sub() is called and SafeMath has sub(), it's likely a library call.
+// resolveLibraryCall checks if a call on a variable is actually a library call
+// via a `using` directive. Receiver type facts handle direct typed receivers;
+// this fallback still checks whether a matching function exists in any active
+// using-library because `using X for *` and extension-style calls can be broader
+// than a single receiver type.
 func (cgb *CallGraphBuilder) resolveLibraryCall(funcName string) *types.Contract {
 	// Get the current contract to check its using directives
 	currentContract := cgb.db.GetContractByName(cgb.currentContract)
@@ -460,6 +610,9 @@ func (cgb *CallGraphBuilder) resolveLibraryCall(funcName string) *types.Contract
 // Pass -1 to skip overload disambiguation.
 func (cgb *CallGraphBuilder) resolveTarget(funcName, contractName string, callType types.CallType, argCount int) (resolvedContract string, resolvedFunc *types.Function, targetKind types.ContractKind, resolved bool) {
 	// For low-level calls, we can't resolve
+	if callType == types.CallTypeTransferETH {
+		return "", nil, "", false
+	}
 	if callType == types.CallTypeLowLevel || callType == types.CallTypeLowLevelCall ||
 		callType == types.CallTypeLowLevelDelegate || callType == types.CallTypeLowLevelStatic {
 		return contractName, nil, "", false
@@ -582,8 +735,24 @@ func (cgb *CallGraphBuilder) resolveTarget(funcName, contractName string, callTy
 	return contractName, nil, targetKind, false
 }
 
-// addCallToFunction adds a call reference to the function object
+// addCallToFunction adds a call reference to the function object, or to the
+// modifier object when analyzing a modifier body.
 func (cgb *CallGraphBuilder) addCallToFunction(target, targetContract, resolvedContract, resolvedFunc string, callType types.CallType, targetKind types.ContractKind, line int, resolved bool, argCount int) {
+	if cgb.currentModifierObj != nil {
+		cgb.currentModifierObj.Calls = append(cgb.currentModifierObj.Calls, &types.FunctionCall{
+			Target:           target,
+			ContractName:     targetContract,
+			ResolvedContract: resolvedContract,
+			ResolvedFunction: resolvedFunc,
+			CallType:         callType,
+			TargetKind:       targetKind,
+			Line:             line,
+			Resolved:         resolved,
+			ArgCount:         argCount,
+		})
+		return
+	}
+
 	// Find the current function in the database using the selector
 	parts := strings.Split(cgb.currentFunction, ".")
 	if len(parts) < 2 {
@@ -647,16 +816,16 @@ var builtinFunctions = map[string]bool{
 	"revert":  true,
 
 	// Cryptographic functions
-	"keccak256":  true,
-	"sha256":     true,
-	"sha3":       true,
-	"ripemd160":  true,
-	"ecrecover":  true,
-	"addmod":     true,
-	"mulmod":     true,
+	"keccak256": true,
+	"sha256":    true,
+	"sha3":      true,
+	"ripemd160": true,
+	"ecrecover": true,
+	"addmod":    true,
+	"mulmod":    true,
 
 	// ABI encoding/decoding
-	"abi":    true, // abi.encode, abi.decode, etc. are member accesses
+	"abi": true, // abi.encode, abi.decode, etc. are member accesses
 
 	// Type conversion
 	"bytes":   true,
@@ -722,8 +891,14 @@ func (cgb *CallGraphBuilder) analyzeModifiers(modifiers []*ast.ModifierInvocatio
 			}
 		}
 
-		// Create full "From" identifier with file path
-		from := types.MakeFunctionID(cgb.currentFile, cgb.currentContract, strings.Split(cgb.currentFunction, ".")[1])
+		// Create full "From" identifier with file path. Use SplitN/Join so a
+		// selector containing dots (e.g. setConfig(MyLib.Config)) is not truncated.
+		fromParts := strings.SplitN(cgb.currentFunction, ".", 2)
+		fromSelector := ""
+		if len(fromParts) == 2 {
+			fromSelector = fromParts[1]
+		}
+		from := types.MakeFunctionID(cgb.currentFile, cgb.currentContract, fromSelector)
 
 		// Add edge to call graph
 		edge := &types.CallEdge{

@@ -64,11 +64,11 @@ type Contract struct {
 
 // StateVariable represents a contract state variable
 type StateVariable struct {
-	Name       string `json:"name"`
-	TypeName   string `json:"typeName"`
-	Visibility string `json:"visibility"`
-	IsConstant bool   `json:"isConstant,omitempty"`
-	IsImmutable bool  `json:"isImmutable,omitempty"`
+	Name        string `json:"name"`
+	TypeName    string `json:"typeName"`
+	Visibility  string `json:"visibility"`
+	IsConstant  bool   `json:"isConstant,omitempty"`
+	IsImmutable bool   `json:"isImmutable,omitempty"`
 }
 
 // Event represents a Solidity event

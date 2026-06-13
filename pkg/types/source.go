@@ -10,24 +10,37 @@ import (
 // Falls back to the in-memory Content field if available; reads from disk otherwise.
 // Returns empty string if source is not available.
 func (db *Database) GetFunctionSource(fn *Function) string {
-	if fn == nil || fn.StartLine <= 0 || fn.EndLine <= 0 {
+	if fn == nil {
 		return ""
 	}
-
-	// Resolve the contract to find the source file path
-	var content string
-
 	contract := db.GetContractByName(fn.ContractName)
 	if contract == nil {
 		return ""
 	}
-	sourceFilePath := contract.SourceFile
+	return db.GetSourceLines(contract.SourceFile, fn.StartLine, fn.EndLine)
+}
 
-	// Try in-memory content first (set during build, tagged json:"-" so not in JSON DB)
+// GetModifierSource returns the raw Solidity source for a modifier defined in
+// the given contract. Mirrors GetFunctionSource.
+func (db *Database) GetModifierSource(contract *Contract, mod *Modifier) string {
+	if contract == nil || mod == nil {
+		return ""
+	}
+	return db.GetSourceLines(contract.SourceFile, mod.StartLine, mod.EndLine)
+}
+
+// GetSourceLines returns lines [startLine, endLine] (1-based, inclusive) of the
+// given source file. Prefers the in-memory Content (serialized in the cached
+// database) and falls back to reading from disk. Returns "" when unavailable.
+func (db *Database) GetSourceLines(sourceFilePath string, startLine, endLine int) string {
+	if sourceFilePath == "" || startLine <= 0 || endLine <= 0 {
+		return ""
+	}
+
+	var content string
 	if sf, ok := db.SourceFiles[sourceFilePath]; ok && sf != nil && sf.Content != "" {
 		content = sf.Content
 	} else {
-		// Fall back to reading from disk (e.g. after loading from cached JSON DB)
 		data, err := os.ReadFile(sourceFilePath)
 		if err != nil {
 			return ""
@@ -36,8 +49,8 @@ func (db *Database) GetFunctionSource(fn *Function) string {
 	}
 
 	lines := strings.Split(content, "\n")
-	start := fn.StartLine - 1 // convert to 0-based
-	end := fn.EndLine          // exclusive upper bound (EndLine is inclusive line number)
+	start := startLine - 1 // convert to 0-based
+	end := endLine         // EndLine is an inclusive line number → exclusive slice bound
 
 	if start < 0 {
 		start = 0

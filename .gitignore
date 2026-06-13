@@ -1,12 +1,15 @@
 /w3goaudit
+/web/
 .env
 .vscode/
 .agent/
 .cursor/
 .idea/
 .claude/
-scripts/
-report/
-templates/4naly3er-inspired/
-templates/realworld-inspired/
-templates/slither-inspired/
+/scripts/
+/report/
+__pycache__/
+
+# Ephemeral default benchmark output (overwritten each run). Named runs
+# created with --out benchmarks/results/<name> are intentionally kept.
+benchmarks/results/latest/

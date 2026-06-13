@@ -14,40 +14,67 @@ import (
 var extractCmd = &cobra.Command{
 	Use:   "extract",
 	Short: "Extract information from a contract database",
-	Long: `Extract specific information from a pre-built contract database.
+	Long: `Extract specific information from a contract database.
 
-Every subcommand supports --format=json (default, machine-readable) and
---format=md (markdown, optimized for feeding to an AI agent / LLM as
-conversation context). The format is also inferred from the -o file
-extension (.md → markdown, .json → json).
+Like the root scan, every subcommand can build the database on the fly from a
+source path, or load a pre-built one with --db. Output defaults to markdown
+(human/LLM-friendly); pass --format=json (or -o file.json) for the
+machine-readable shape. The format is also inferred from the -o extension
+(.md → markdown, .json → json).
 
-Use the subcommands below to query different aspects of the database:
+Subcommands, ordered from widest to narrowest scope:
+  main        — Main (deployable) contracts in a project
   entry       — Entry point functions for a contract
-  main        — Main (deployable) contracts in a project (path or --db)
   inheritance — C3 linearization for a main contract (derived → base)
-  involve     — All entry-point workflows that involve a given function (Mermaid charts)
-  statevar    — State variables (including inherited)
+  statevar    — State variables in storage order (including inherited)
   selector    — Function selectors for a contract
-  diff        — Compare two databases
-  source      — Raw Solidity source for a function
-  context     — Combined context package for a function
+  involve     — All entry-point workflows that involve a given function (Mermaid charts)
+  workflow    — Full transitive source for an entry function (report-ready)
   bundle      — One LLM-ready document: source + callers + callees + state + inheritance + selectors
-  workflow    — Full transitive source for an entry function (report-ready)`,
+  context     — Combined context package for a function
+  source      — Raw Solidity source for a function
+  diff        — Compare two pre-built databases`,
+	// Without an explicit RunE, cobra silently prints help (exit 0) for an
+	// unknown subcommand like `extract entryy`. Take over so a typo gets a
+	// clear error plus a near-miss suggestion, while a bare `extract` still
+	// shows help.
+	RunE: func(cmd *cobra.Command, args []string) error {
+		if len(args) == 0 {
+			return cmd.Help()
+		}
+		msg := fmt.Sprintf("unknown extract subcommand %q", args[0])
+		if sugs := cmd.SuggestionsFor(args[0]); len(sugs) > 0 {
+			msg += fmt.Sprintf("\n\nDid you mean %q?", sugs[0])
+		}
+		msg += "\n\nRun `w3goaudit extract --help` to list all subcommands"
+		return fmt.Errorf("%s", msg)
+	},
+	SilenceUsage:  true,
+	SilenceErrors: true,
 }
 
 func init() {
-	// Subcommands
-	extractCmd.AddCommand(extractEntryCmd)
+	// Preserve AddCommand order in help listings instead of cobra's default
+	// alphabetical sort, so `--help` shows subcommands widest-scope first.
+	cobra.EnableCommandSorting = false
+
+	// Enable near-miss suggestions for mistyped subcommands (e.g. `entryy` →
+	// `entry`); the default distance of 0 only matches prefixes.
+	extractCmd.SuggestionsMinimumDistance = 2
+
+	// Subcommands — registered widest-scope first (project → contract → function
+	// → utility) so `--help` lists them large-to-small.
 	extractCmd.AddCommand(extractMainCmd)
+	extractCmd.AddCommand(extractEntryCmd)
 	extractCmd.AddCommand(extractInheritanceCmd)
-	extractCmd.AddCommand(extractInvolveCmd)
 	extractCmd.AddCommand(extractStatevarCmd)
 	extractCmd.AddCommand(extractSelectorCmd)
-	extractCmd.AddCommand(extractDiffCmd)
-	extractCmd.AddCommand(extractSourceCmd)
-	extractCmd.AddCommand(extractContextCmd)
-	extractCmd.AddCommand(extractBundleCmd)
+	extractCmd.AddCommand(extractInvolveCmd)
 	extractCmd.AddCommand(extractWorkflowCmd)
+	extractCmd.AddCommand(extractBundleCmd)
+	extractCmd.AddCommand(extractContextCmd)
+	extractCmd.AddCommand(extractSourceCmd)
+	extractCmd.AddCommand(extractDiffCmd)
 }
 
 // ── Helper ──────────────────────────────────────────────────────────────────
@@ -55,6 +82,26 @@ func init() {
 // All extract subcommands route through writeExtract() in extract_render.go,
 // which handles JSON vs markdown format selection. JSON encoding for the
 // json branch happens inside that helper.
+
+// resolveExtractDB loads the database for a name-taking extract subcommand.
+// args[0] is the contract/function name; an optional source path may follow as
+// args[1], in which case the database is built from it on the fly — the same
+// way the root scan and `extract main` accept a path. When no path is given,
+// --db must point at a pre-built database.
+func resolveExtractDB(cmd *cobra.Command, args []string) (*types.Database, error) {
+	dbPath, _ := cmd.Flags().GetString("db")
+	srcPath := ""
+	if len(args) > 1 {
+		srcPath = args[1]
+	}
+	if srcPath != "" {
+		return loadOrBuildDatabase(srcPath, "", false)
+	}
+	if dbPath != "" {
+		return loadOrBuildDatabase("", dbPath, false)
+	}
+	return nil, fmt.Errorf("no database: pass a source path (e.g. `%s <name> ./contracts/`) to build one, or --db <database.json> to load a pre-built one", cmd.CommandPath())
+}
 
 func findContract(db *types.Database, name string) *types.Contract {
 	// Try exact name match first
@@ -82,32 +129,34 @@ type EntryOutput struct {
 }
 
 type EntryFuncInfo struct {
-	Name           string   `json:"name"`
-	Selector       string   `json:"selector"`
-	Signature      string   `json:"signature"`
-	Visibility     string   `json:"visibility"`
-	Mutability     string   `json:"mutability"`
-	Modifiers      []string `json:"modifiers,omitempty"`
-	StartLine      int      `json:"startLine"`
-	EndLine        int      `json:"endLine"`
+	Name       string   `json:"name"`
+	Selector   string   `json:"selector"`
+	Signature  string   `json:"signature"`
+	Visibility string   `json:"visibility"`
+	Mutability string   `json:"mutability"`
+	Modifiers  []string `json:"modifiers,omitempty"`
+	StartLine  int      `json:"startLine"`
+	EndLine    int      `json:"endLine"`
 }
 
 var extractEntryCmd = &cobra.Command{
-	Use:   "entry <contract-name>",
+	Use:   "entry <contract-name> [path]",
 	Short: "Extract entry point functions for a contract",
 	Long: `Extract all public/external entry point functions for a named contract.
-Requires a pre-built database (--db flag).
+Build from a source path, or load a pre-built database with --db.
 
 Example:
+  w3goaudit extract entry MyToken ./contracts/
   w3goaudit extract entry MyToken --db database.json
   w3goaudit extract entry MyToken --db database.json -o entry.json`,
-	Args: cobra.ExactArgs(1),
+	Args: cobra.RangeArgs(1, 2),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		dbPath, _ := cmd.Flags().GetString("db")
 		outPath, _ := cmd.Flags().GetString("output")
 
-		db, err := loadDatabaseRequired(dbPath, false)
-		if err != nil { return err }
+		db, err := resolveExtractDB(cmd, args)
+		if err != nil {
+			return err
+		}
 		contract := findContract(db, args[0])
 		if contract == nil {
 			return fmt.Errorf("contract %q not found in database", args[0])
@@ -144,10 +193,9 @@ Example:
 }
 
 func init() {
-	extractEntryCmd.Flags().String("db", "", "Path to database JSON file (required)")
+	extractEntryCmd.Flags().String("db", "", "Path to a pre-built database JSON (optional; or pass a source path)")
 	extractEntryCmd.Flags().StringP("output", "o", "", "Output file path (default: stdout)")
 	addExtractFormatFlag(extractEntryCmd)
-	extractEntryCmd.MarkFlagRequired("db")
 }
 
 // ── extract main ────────────────────────────────────────────────────────────
@@ -191,7 +239,9 @@ Examples:
 		}
 
 		db, err := loadOrBuildDatabase(inputPath, dbPath, false)
-		if err != nil { return err }
+		if err != nil {
+			return err
+		}
 
 		var mains []MainContractInfo
 		for contractID, entry := range db.MainContracts {
@@ -208,6 +258,15 @@ Examples:
 				StateVarCount:    len(contract.StateVariables),
 			})
 		}
+
+		// Sort for deterministic output (map iteration above is randomized);
+		// matches the diff-friendly ordering the other extract subcommands use.
+		sort.Slice(mains, func(i, j int) bool {
+			if mains[i].Name != mains[j].Name {
+				return mains[i].Name < mains[j].Name
+			}
+			return mains[i].SourceFile < mains[j].SourceFile
+		})
 
 		output := MainOutput{
 			SchemaVersion: ExtractSchemaVersion,
@@ -263,7 +322,7 @@ type InheritanceEntry struct {
 }
 
 var extractInheritanceCmd = &cobra.Command{
-	Use:   "inheritance <main-contract-name>",
+	Use:   "inheritance <main-contract-name> [path]",
 	Short: "Extract C3 linearization for a main (deployable) contract",
 	Long: `Show the full C3 linearization (most-derived → most-base) for a main
 contract. The argument MUST resolve to a contract marked as deployable —
@@ -275,13 +334,13 @@ matters for the contracts you can call from the outside, not for utility
 mixins that compose into them.
 
 Example:
+  w3goaudit extract inheritance MyToken ./contracts/
   w3goaudit extract inheritance MyToken --db database.json`,
-	Args: cobra.ExactArgs(1),
+	Args: cobra.RangeArgs(1, 2),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		dbPath, _ := cmd.Flags().GetString("db")
 		outPath, _ := cmd.Flags().GetString("output")
 
-		db, err := loadDatabaseRequired(dbPath, false)
+		db, err := resolveExtractDB(cmd, args)
 		if err != nil {
 			return err
 		}
@@ -342,10 +401,9 @@ Example:
 }
 
 func init() {
-	extractInheritanceCmd.Flags().String("db", "", "Path to database JSON file (required)")
+	extractInheritanceCmd.Flags().String("db", "", "Path to a pre-built database JSON (optional; or pass a source path)")
 	extractInheritanceCmd.Flags().StringP("output", "o", "", "Output file path (default: stdout)")
 	addExtractFormatFlag(extractInheritanceCmd)
-	extractInheritanceCmd.MarkFlagRequired("db")
 }
 
 // ── extract statevar ────────────────────────────────────────────────────────
@@ -367,20 +425,22 @@ type StateVarInfo struct {
 }
 
 var extractStatevarCmd = &cobra.Command{
-	Use:   "statevar <contract-name>",
+	Use:   "statevar <contract-name> [path]",
 	Short: "List all state variables (including inherited)",
 	Long: `List all state variables for a contract, including those inherited from base contracts.
-Variables are listed in inheritance order (base first).
+Variables are listed in storage-layout order (most-base first).
 
 Example:
+  w3goaudit extract statevar MyToken ./contracts/
   w3goaudit extract statevar MyToken --db database.json`,
-	Args: cobra.ExactArgs(1),
+	Args: cobra.RangeArgs(1, 2),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		dbPath, _ := cmd.Flags().GetString("db")
 		outPath, _ := cmd.Flags().GetString("output")
 
-		db, err := loadDatabaseRequired(dbPath, false)
-		if err != nil { return err }
+		db, err := resolveExtractDB(cmd, args)
+		if err != nil {
+			return err
+		}
 		contract := findContract(db, args[0])
 		if contract == nil {
 			return fmt.Errorf("contract %q not found in database", args[0])
@@ -422,10 +482,9 @@ Example:
 }
 
 func init() {
-	extractStatevarCmd.Flags().String("db", "", "Path to database JSON file (required)")
+	extractStatevarCmd.Flags().String("db", "", "Path to a pre-built database JSON (optional; or pass a source path)")
 	extractStatevarCmd.Flags().StringP("output", "o", "", "Output file path (default: stdout)")
 	addExtractFormatFlag(extractStatevarCmd)
-	extractStatevarCmd.MarkFlagRequired("db")
 }
 
 // ── extract selector ────────────────────────────────────────────────────────
@@ -446,19 +505,21 @@ type SelectorInfo struct {
 }
 
 var extractSelectorCmd = &cobra.Command{
-	Use:   "selector <contract-name>",
+	Use:   "selector <contract-name> [path]",
 	Short: "List function selectors for a contract",
 	Long: `List all function selectors (4-byte keccak256 hashes) for a contract.
 
 Example:
+  w3goaudit extract selector MyToken ./contracts/
   w3goaudit extract selector MyToken --db database.json`,
-	Args: cobra.ExactArgs(1),
+	Args: cobra.RangeArgs(1, 2),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		dbPath, _ := cmd.Flags().GetString("db")
 		outPath, _ := cmd.Flags().GetString("output")
 
-		db, err := loadDatabaseRequired(dbPath, false)
-		if err != nil { return err }
+		db, err := resolveExtractDB(cmd, args)
+		if err != nil {
+			return err
+		}
 		contract := findContract(db, args[0])
 		if contract == nil {
 			return fmt.Errorf("contract %q not found in database", args[0])
@@ -492,10 +553,9 @@ Example:
 }
 
 func init() {
-	extractSelectorCmd.Flags().String("db", "", "Path to database JSON file (required)")
+	extractSelectorCmd.Flags().String("db", "", "Path to a pre-built database JSON (optional; or pass a source path)")
 	extractSelectorCmd.Flags().StringP("output", "o", "", "Output file path (default: stdout)")
 	addExtractFormatFlag(extractSelectorCmd)
-	extractSelectorCmd.MarkFlagRequired("db")
 }
 
 // ── extract diff ────────────────────────────────────────────────────────────
@@ -515,10 +575,10 @@ type DiffContractList struct {
 }
 
 type ContractDiff struct {
-	Contract       string   `json:"contract"`
-	AddedFuncs     []string `json:"addedFunctions,omitempty"`
-	RemovedFuncs   []string `json:"removedFunctions,omitempty"`
-	AddedStateVars []string `json:"addedStateVars,omitempty"`
+	Contract         string   `json:"contract"`
+	AddedFuncs       []string `json:"addedFunctions,omitempty"`
+	RemovedFuncs     []string `json:"removedFunctions,omitempty"`
+	AddedStateVars   []string `json:"addedStateVars,omitempty"`
 	RemovedStateVars []string `json:"removedStateVars,omitempty"`
 }
 
@@ -683,22 +743,24 @@ type SourceOutput struct {
 }
 
 var extractSourceCmd = &cobra.Command{
-	Use:   "source <function-name>",
+	Use:   "source <function-name> [path]",
 	Short: "Extract raw Solidity source code for a function",
 	Long: `Extract the raw Solidity source lines for a named function.
 Searches all contracts; use --contract to disambiguate when multiple match.
 
 Examples:
+  w3goaudit extract source withdraw ./contracts/
   w3goaudit extract source withdraw --db database.json
-  w3goaudit extract source withdraw --db database.json --contract DeFiVault -o src.json`,
-	Args: cobra.ExactArgs(1),
+  w3goaudit extract source withdraw --db database.json --contract DeFiVault -o src.md`,
+	Args: cobra.RangeArgs(1, 2),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		dbPath, _ := cmd.Flags().GetString("db")
 		outPath, _ := cmd.Flags().GetString("output")
 		contractFilter, _ := cmd.Flags().GetString("contract")
 
-		db, err := loadDatabaseRequired(dbPath, false)
-		if err != nil { return err }
+		db, err := resolveExtractDB(cmd, args)
+		if err != nil {
+			return err
+		}
 		funcName := args[0]
 
 		fn, contract := findFunction(db, funcName, contractFilter)
@@ -722,11 +784,10 @@ Examples:
 }
 
 func init() {
-	extractSourceCmd.Flags().String("db", "", "Path to database JSON file (required)")
+	extractSourceCmd.Flags().String("db", "", "Path to a pre-built database JSON (optional; or pass a source path)")
 	extractSourceCmd.Flags().StringP("output", "o", "", "Output file path (default: stdout)")
 	extractSourceCmd.Flags().String("contract", "", "Restrict search to a specific contract name")
 	addExtractFormatFlag(extractSourceCmd)
-	extractSourceCmd.MarkFlagRequired("db")
 }
 
 // ── extract context ─────────────────────────────────────────────────────────
@@ -763,22 +824,24 @@ type ContextContract struct {
 }
 
 var extractContextCmd = &cobra.Command{
-	Use:   "context <function-name>",
+	Use:   "context <function-name> [path]",
 	Short: "Extract combined context package for a function",
 	Long: `Extract a comprehensive context package for a function: source + call edges + state vars + inheritance.
 Suitable as input for analysis or report writing.
 
 Examples:
+  w3goaudit extract context withdraw ./contracts/
   w3goaudit extract context withdraw --db database.json
-  w3goaudit extract context withdraw --db database.json --contract DeFiVault -o ctx.json`,
-	Args: cobra.ExactArgs(1),
+  w3goaudit extract context withdraw --db database.json --contract DeFiVault -o ctx.md`,
+	Args: cobra.RangeArgs(1, 2),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		dbPath, _ := cmd.Flags().GetString("db")
 		outPath, _ := cmd.Flags().GetString("output")
 		contractFilter, _ := cmd.Flags().GetString("contract")
 
-		db, err := loadDatabaseRequired(dbPath, false)
-		if err != nil { return err }
+		db, err := resolveExtractDB(cmd, args)
+		if err != nil {
+			return err
+		}
 		funcName := args[0]
 
 		fn, contract := findFunction(db, funcName, contractFilter)
@@ -839,11 +902,10 @@ Examples:
 }
 
 func init() {
-	extractContextCmd.Flags().String("db", "", "Path to database JSON file (required)")
+	extractContextCmd.Flags().String("db", "", "Path to a pre-built database JSON (optional; or pass a source path)")
 	extractContextCmd.Flags().StringP("output", "o", "", "Output file path (default: stdout)")
 	extractContextCmd.Flags().String("contract", "", "Restrict search to a specific contract name")
 	addExtractFormatFlag(extractContextCmd)
-	extractContextCmd.MarkFlagRequired("db")
 }
 
 // ── extract workflow ─────────────────────────────────────────────────────────
@@ -872,7 +934,7 @@ type WorkflowOutput struct {
 }
 
 var extractWorkflowCmd = &cobra.Command{
-	Use:   "workflow <entry-function-name>",
+	Use:   "workflow <entry-function-name> [path]",
 	Short: "Extract full transitive source for an entry function (report-ready)",
 	Long: `Extract the complete source code workflow for an entry function:
   - The entry function itself
@@ -887,18 +949,20 @@ Options:
   --depth     Maximum call depth to recurse (default: 10)
 
 Examples:
+  w3goaudit extract workflow withdraw ./contracts/
   w3goaudit extract workflow withdraw --db database.json
-  w3goaudit extract workflow withdraw --db database.json --contract DeFiVault -o workflow.json
+  w3goaudit extract workflow withdraw --db database.json --contract DeFiVault -o workflow.md
   w3goaudit extract workflow transfer --db database.json --depth 5`,
-	Args: cobra.ExactArgs(1),
+	Args: cobra.RangeArgs(1, 2),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		dbPath, _ := cmd.Flags().GetString("db")
 		outPath, _ := cmd.Flags().GetString("output")
 		contractFilter, _ := cmd.Flags().GetString("contract")
 		maxDepth, _ := cmd.Flags().GetInt("depth")
 
-		db, err := loadDatabaseRequired(dbPath, false)
-		if err != nil { return err }
+		db, err := resolveExtractDB(cmd, args)
+		if err != nil {
+			return err
+		}
 		entryFuncName := args[0]
 
 		fn, contract := findFunction(db, entryFuncName, contractFilter)
@@ -928,33 +992,49 @@ Examples:
 			}
 			visited[item.funcID] = true
 
-			// Resolve function from ID
+			// Resolve the node from its ID — it may be a function OR a modifier
+			// (modifier edges are enqueued below; resolving only functions
+			// previously dropped them, contradicting the documented behavior).
 			_, cName, fSelector := parseWorkflowFuncID(item.funcID)
 			c := db.GetContractByName(cName)
 			if c == nil {
 				continue
 			}
-			resolvedFn := findFunctionBySelector(c, fSelector)
-			if resolvedFn == nil {
-				continue
-			}
 
-			src := db.GetFunctionSource(resolvedFn)
-			wf := WorkflowFunction{
-				Contract:   c.Name,
-				Function:   resolvedFn.Name,
-				File:       c.SourceFile,
-				Visibility: string(resolvedFn.Visibility),
-				StartLine:  resolvedFn.StartLine,
-				EndLine:    resolvedFn.EndLine,
-				SourceCode: src,
-				CallDepth:  item.depth,
+			var wf WorkflowFunction
+			var src string
+			if resolvedFn := findFunctionBySelector(c, fSelector); resolvedFn != nil {
+				src = db.GetFunctionSource(resolvedFn)
+				wf = WorkflowFunction{
+					Contract:   c.Name,
+					Function:   resolvedFn.Name,
+					File:       c.SourceFile,
+					Visibility: string(resolvedFn.Visibility),
+					StartLine:  resolvedFn.StartLine,
+					EndLine:    resolvedFn.EndLine,
+					SourceCode: src,
+					CallDepth:  item.depth,
+				}
+			} else if mod := findModifierByName(c, fSelector); mod != nil {
+				src = db.GetModifierSource(c, mod)
+				wf = WorkflowFunction{
+					Contract:   c.Name,
+					Function:   mod.Name,
+					File:       c.SourceFile,
+					Visibility: "modifier",
+					StartLine:  mod.StartLine,
+					EndLine:    mod.EndLine,
+					SourceCode: src,
+					CallDepth:  item.depth,
+				}
+			} else {
+				continue
 			}
 			collected = append(collected, wf)
 
 			// Append to combined source with a section header
 			combined.WriteString(fmt.Sprintf("\n// ─── %s.%s (depth %d, %s:%d-%d) ───\n",
-				c.Name, resolvedFn.Name, item.depth, shortPath(c.SourceFile), resolvedFn.StartLine, resolvedFn.EndLine))
+				c.Name, wf.Function, item.depth, shortPath(c.SourceFile), wf.StartLine, wf.EndLine))
 			combined.WriteString(src)
 			combined.WriteString("\n")
 
@@ -989,12 +1069,11 @@ Examples:
 }
 
 func init() {
-	extractWorkflowCmd.Flags().String("db", "", "Path to database JSON file (required)")
+	extractWorkflowCmd.Flags().String("db", "", "Path to a pre-built database JSON (optional; or pass a source path)")
 	extractWorkflowCmd.Flags().StringP("output", "o", "", "Output file path (default: stdout)")
 	extractWorkflowCmd.Flags().String("contract", "", "Restrict entry function search to a named contract")
 	extractWorkflowCmd.Flags().Int("depth", 10, "Maximum call depth to recurse")
 	addExtractFormatFlag(extractWorkflowCmd)
-	extractWorkflowCmd.MarkFlagRequired("db")
 }
 
 // ── shared helpers ────────────────────────────────────────────────────────────
@@ -1020,6 +1099,18 @@ func findFunctionBySelector(c *types.Contract, nameOrSelector string) *types.Fun
 	for _, f := range c.Functions {
 		if f.Name == nameOrSelector || f.Selector == nameOrSelector || f.Signature == nameOrSelector {
 			return f
+		}
+	}
+	return nil
+}
+
+// findModifierByName finds a modifier in a contract by name. Used so the
+// workflow call-graph walk can resolve modifier edges (modifiers live in
+// c.Modifiers, not c.Functions).
+func findModifierByName(c *types.Contract, name string) *types.Modifier {
+	for _, m := range c.Modifiers {
+		if m.Name == name {
+			return m
 		}
 	}
 	return nil

@@ -1,7 +1,6 @@
 package engine
 
 import (
-	"fmt"
 	"regexp"
 	"sort"
 	"strconv"
@@ -16,13 +15,24 @@ import (
 // Guards against unbounded recursion (e.g. `not: { not: { not: ... } }` chains)
 // by tracking depth on the Engine. When depth exceeds MaxRuleRecursionDepth,
 // returns false and logs once at verbose; the scan continues with other rules.
-func (e *Engine) Verify(node *types.ASTNode, r Rule) bool {
+func (e *Engine) Verify(node *types.ASTNode, r Rule) (matched bool) {
 	if node == nil {
 		return false
 	}
 
+	var oldPrimary *types.ASTNode
+	traceActive := e.match != nil
+	if traceActive {
+		oldPrimary = e.match.Primary
+	}
+
 	e.recursionDepth++
-	defer func() { e.recursionDepth-- }()
+	defer func() {
+		if traceActive && !matched {
+			e.match.Primary = oldPrimary
+		}
+		e.recursionDepth--
+	}()
 	if e.recursionDepth > MaxRuleRecursionDepth {
 		VerboseLog("Verify: recursion depth %d exceeded (max %d) — aborting branch", e.recursionDepth, MaxRuleRecursionDepth)
 		return false
@@ -33,6 +43,13 @@ func (e *Engine) Verify(node *types.ASTNode, r Rule) bool {
 	// Check atomic attributes on current node (kind, regex/name, attr, source/tainted_from)
 	if !e.matchAtomic(node, r) {
 		return false
+	}
+
+	// Capture the first provisionally matched atomic node as the finding's
+	// primary AST node. The defer above rolls this back if later constraints
+	// in the same branch fail.
+	if e.match != nil && e.match.Primary == nil && hasAtomicPredicate(r) {
+		e.match.Primary = node
 	}
 
 	// ========== LEFT/RIGHT MATCHING ==========
@@ -122,16 +139,19 @@ func (e *Engine) verifyAny(node *types.ASTNode, rules []Rule) bool {
 	return false
 }
 
-// verifySeq checks if children match rules in sequence
-// Enhanced to support deep traversal - searches descendants recursively
+// verifySeq checks if descendants match the rules in order on a single
+// execution path.
 //
-// TODO(stage-3): the current implementation matches rules in DFS source-text
-// order across all descendants. This produces false positives in branched
-// code: `if (cond) { externalCall(); } else { state = x; }` matches
-// `sequence: [outgoing_call, state_write]` even though those two operations
-// cannot both execute. Proper semantics would require same-execution-path
-// constraint (CFG-based). Tracked in .vscode/2026-05-08-invariant-audit.md
-// §2.5 — the reentrancy templates' biggest source of FP.
+// Rules are matched in DFS source order across descendants, with one
+// control-flow constraint applied between consecutive matches: two matches may
+// not land in mutually-exclusive arms of the same conditional (the then/else of
+// an `stmt.if`, or the two arms of an `expr.conditional`). This removes the
+// dominant false positive where
+// `if (cond) { externalCall(); } else { state = x; }` spuriously matched
+// `sequence: [outgoing_call, state_write]` even though the two operations can
+// never both execute. It is a branch-arm check rather than a full CFG: loops
+// and other constructs are still treated as straight-line, which is the
+// conservative (match-more) direction.
 func (e *Engine) verifySeq(node *types.ASTNode, rules []Rule) bool {
 	if len(rules) == 0 {
 		return true
@@ -145,31 +165,138 @@ func (e *Engine) verifySeq(node *types.ASTNode, rules []Rule) bool {
 	})
 
 	// Try to find sequence pattern in descendants
-	return e.findSequenceInNodes(descendants, rules, 0)
+	return e.findSequenceInNodes(descendants, rules, 0, nil)
 }
 
-// findSequenceInNodes searches for rule sequence in a list of nodes
-func (e *Engine) findSequenceInNodes(nodes []*types.ASTNode, rules []Rule, startIdx int) bool {
+// findSequenceInNodes searches for the rule sequence in node order. prevMatch is
+// the node that satisfied the previous rule (nil for the first rule); a
+// candidate for the current rule is skipped when it cannot execute on the same
+// path as prevMatch (mutually-exclusive branch arms).
+func (e *Engine) findSequenceInNodes(nodes []*types.ASTNode, rules []Rule, startIdx int, prevMatch *types.ASTNode) bool {
 	if len(rules) == 0 {
 		return true
 	}
 
 	// Try to match first rule starting from each position
 	for i := startIdx; i < len(nodes); i++ {
-		if e.Verify(nodes[i], rules[0]) {
-			// Found match for first rule, try to find remaining rules after this position
-			if len(rules) == 1 {
-				return true // Last rule matched
-			}
-
-			// Recursively find remaining rules
-			if e.findSequenceInNodes(nodes, rules[1:], i+1) {
-				return true
-			}
+		if !e.Verify(nodes[i], rules[0]) {
+			continue
+		}
+		// A later step must not match inside the previous step's own subtree.
+		// In DFS order a node's descendants follow it, so without this guard
+		// `sequence: [state_write, outgoing_call]` would match the single
+		// statement `total = token.balanceOf(x)` (the call is a child of the
+		// assign) — a false "write-then-call" ordering.
+		if prevMatch != nil && isWithinSubtree(nodes[i], prevMatch) {
+			continue
+		}
+		// Consecutive matches must be able to co-execute.
+		if prevMatch != nil && !sameExecutionPath(prevMatch, nodes[i]) {
+			continue
+		}
+		if len(rules) == 1 {
+			return true // Last rule matched
+		}
+		// Recursively find remaining rules after this position.
+		if e.findSequenceInNodes(nodes, rules[1:], i+1, nodes[i]) {
+			return true
 		}
 	}
 
 	return false
+}
+
+// isWithinSubtree reports whether node is ancestor itself or a descendant of
+// ancestor, walking Parent links.
+func isWithinSubtree(node, ancestor *types.ASTNode) bool {
+	for n := node; n != nil; n = n.Parent {
+		if n == ancestor {
+			return true
+		}
+	}
+	return false
+}
+
+// sameExecutionPath reports whether nodes a and b can both execute on a single
+// run. They cannot when they first diverge into two different *arm* children of
+// a common conditional ancestor (then vs else of an `if`, or the two arms of a
+// ternary). Divergence at a sequential parent (block, function, loop) or at a
+// conditional's condition is fine. Relies on ASTNode.Parent links (restored
+// during build and after a JSON load); when no common ancestor exists — e.g.
+// nodes inlined from different functions in interprocedural matching — it does
+// not constrain.
+func sameExecutionPath(a, b *types.ASTNode) bool {
+	if a == nil || b == nil || a == b {
+		return true
+	}
+	// Map every ancestor of a (including a) to the child one step down toward a.
+	childTowardA := make(map[*types.ASTNode]*types.ASTNode)
+	var prev *types.ASTNode
+	for n := a; n != nil; n = n.Parent {
+		childTowardA[n] = prev
+		prev = n
+	}
+	// Walk up from b to the lowest common ancestor.
+	prev = nil
+	for n := b; n != nil; n = n.Parent {
+		if childA, ok := childTowardA[n]; ok {
+			childB := prev
+			if childA == nil || childB == nil || childA == childB {
+				// One node is an ancestor of the other, or they share the
+				// subtree at this level — same path.
+				return true
+			}
+			return !areExclusiveArms(n, childA, childB)
+		}
+		prev = n
+	}
+	return true // no common ancestor -> don't constrain
+}
+
+// areExclusiveArms reports whether c1 and c2 (direct children of parent) are
+// mutually-exclusive branch arms. For stmt.if the condition is the expression
+// child and the arms are the statement children; for expr.conditional the arms
+// carry conditional_part = "true"/"false"; for stmt.try_catch the body and each
+// catch clause carry try_part = "body" / "catch:N" and the try expression carries
+// "expr".
+func areExclusiveArms(parent, c1, c2 *types.ASTNode) bool {
+	switch parent.Kind {
+	case types.KindStmtIf:
+		// Two children are exclusive arms only when neither is the condition.
+		// The condition is an expression (expr.*); the then/else bodies are
+		// statements. This keeps condition-vs-arm pairs sequential (no FN for
+		// a call in an if-condition followed by a state write in the body).
+		return !isConditionExpr(c1) && !isConditionExpr(c2)
+	case types.KindExprConditional:
+		p1 := c1.GetAttributeString("conditional_part")
+		p2 := c2.GetAttributeString("conditional_part")
+		return (p1 == "true" && p2 == "false") || (p1 == "false" && p2 == "true")
+	case types.KindStmtTryCatch:
+		// The try expression ("expr") executes on every path and co-executes
+		// with whichever arm fires, so it is never exclusive. The body and each
+		// catch clause are distinct arms that can never both run: a sequence
+		// must not pair a node in the body with one in a catch (or across two
+		// catch clauses).
+		p1 := c1.GetAttributeString("try_part")
+		p2 := c2.GetAttributeString("try_part")
+		if !isTryArm(p1) || !isTryArm(p2) {
+			return false
+		}
+		return p1 != p2
+	default:
+		return false
+	}
+}
+
+func isConditionExpr(n *types.ASTNode) bool {
+	return strings.HasPrefix(n.Kind, "expr.")
+}
+
+// isTryArm reports whether a try_part value names a mutually-exclusive arm of a
+// try/catch (the success body or a catch clause), as opposed to the try
+// expression itself.
+func isTryArm(part string) bool {
+	return part == "body" || strings.HasPrefix(part, "catch")
 }
 
 // verifyHas searches descendants for a matching node
@@ -243,6 +370,25 @@ func (e *Engine) matchAtomic(node *types.ASTNode, r Rule) bool {
 		}
 	}
 
+	// Check raw source text for the active AST scope. Prefer the node's own
+	// line range when available, then fall back to the current function,
+	// contract, or file context.
+	if r.SourceRegex != "" {
+		source := e.astNodeSource(node)
+		if source == "" && e.currentFunction != nil {
+			source = e.functionSource(e.currentFunction, e.currentContract)
+		}
+		if source == "" && e.currentContract != nil {
+			source = e.contractSource(e.currentContract)
+		}
+		if source == "" && e.currentSourceFile != nil {
+			source = e.sourceContent(e.currentSourceFile.Path)
+		}
+		if !sourceRegexMatches(r.SourceRegex, source) {
+			return false
+		}
+	}
+
 	// Check taint source
 	if r.TaintedFrom != "" {
 		res := e.checkTaint(node, r.TaintedFrom)
@@ -302,20 +448,32 @@ func (e *Engine) matchMemberAccessLeftRight(node *types.ASTNode, r Rule) bool {
 		}
 	}
 
-	// Check right (member name)
+	// Check right (member name). For a member access the "right" is just the
+	// member identifier — there is no child node — so only `right.name` is
+	// meaningful. Any other predicate (kind/contains/attr/etc.) cannot be
+	// evaluated here and must fail closed rather than silently pass.
 	if r.Right != nil {
-		memberName := node.Name
-
 		if r.Right.Name != "" {
-			if !MatchesRegex(r.Right.Name, memberName) {
+			if !MatchesRegex(r.Right.Name, node.Name) {
 				return false
 			}
 		}
-		// Right could also specify Kind/other checks for complex scenarios
-		// but for member_access the member is just a name, not a node
+		if rightHasUnsupportedMemberPredicate(r.Right) {
+			return false
+		}
 	}
 
 	return true
+}
+
+// rightHasUnsupportedMemberPredicate reports whether a `right:` rule for a
+// member access uses a predicate other than `name`, which member access cannot
+// satisfy (the member has no child node).
+func rightHasUnsupportedMemberPredicate(r *Rule) bool {
+	return r.Kind != "" || r.Contains != nil || r.Inside != nil ||
+		len(r.All) > 0 || len(r.Any) > 0 || r.Not != nil ||
+		len(r.Sequence) > 0 || len(r.Attr) > 0 || len(r.Args) > 0 ||
+		r.TaintedFrom != "" || r.Left != nil || r.Right != nil
 }
 
 // matchBinaryLeftRight checks left/right for assignment and binary_op nodes
@@ -441,16 +599,27 @@ func (e *Engine) matchAttributeValue(node *types.ASTNode, key string, expectedVa
 	// Handle different value types
 	switch expected := expectedValue.(type) {
 	case bool:
-		actual, ok := actualValue.(bool)
-		return ok && actual == expected
+		// Tolerate the common case where the attribute is stored as the string
+		// "true"/"false" (most node attrs are strings) but the template wrote a
+		// YAML bool (`conditional_part: true`). Both that and the quoted form
+		// (`conditional_part: 'true'`) now match.
+		switch actual := actualValue.(type) {
+		case bool:
+			return actual == expected
+		case string:
+			return actual == strconv.FormatBool(expected)
+		}
+		return false
 
 	case string:
 		actual, ok := actualValue.(string)
 		if !ok {
 			return false
 		}
-		// Support regex matching on string attributes
-		return MatchesRegex(expected, actual)
+		// Attribute values are matched as ANCHORED regexes: `operator: "="` must
+		// match exactly "=", not "==" / "!=" / ">=". (The `name:` field is
+		// deliberately substring-matched; attributes are discrete tokens.)
+		return matchAnchoredRegex(expected, actual)
 
 	case []interface{}:
 		// Handle array of values (match any)
@@ -473,12 +642,17 @@ func (e *Engine) matchAttributeValue(node *types.ASTNode, key string, expectedVa
 
 // matchArgs checks call arguments against rules
 func (e *Engine) matchArgs(node *types.ASTNode, args map[int]Rule) bool {
-	// Node must be a call type
+	// Node must be a call-like node whose children are positional arguments.
+	// This includes require/assert/revert (their condition/args are children)
+	// and selfdestruct, so `args:` can constrain e.g. a revert's error args or
+	// selfdestruct's recipient.
 	switch node.Kind {
 	case types.KindCallExternal, types.KindCallInternal,
 		types.KindCallLowlevelCall, types.KindCallLowlevelDelegate, types.KindCallLowlevelStatic,
-		types.KindCallBuiltinTransfer, types.KindCallBuiltinSend, types.KindCallCreate:
-		// Valid call types
+		types.KindCallBuiltinTransfer, types.KindCallBuiltinSend, types.KindCallCreate,
+		types.KindCallBuiltinSelfdestruct,
+		types.KindCheckRequire, types.KindCheckAssert, types.KindCheckRevert:
+		// Valid argument-bearing nodes
 	default:
 		return false
 	}
@@ -607,16 +781,28 @@ func (e *Engine) VerifyAtFunction(fn *types.Function, r Rule, contract *types.Co
 // argument sources.
 func (e *Engine) VerifyAtFunctionWithCallees(fn *types.Function, r Rule, contract *types.Contract) bool {
 	visiting := make(map[string]bool)
-	return e.verifyAtFunctionWithCallees(fn, r, contract, nil, visiting, 0)
+	return e.verifyAtFunctionWithCallees(fn, r, contract, nil, visiting, 0, nil, nil)
 }
 
-func (e *Engine) verifyAtFunctionWithCallees(fn *types.Function, r Rule, contract *types.Contract, seed map[string][]string, visiting map[string]bool, depth int) bool {
+func (e *Engine) verifyAtFunctionWithCallees(fn *types.Function, r Rule, contract *types.Contract, seed map[string][]string, visiting map[string]bool, depth int, chain []*types.Function, chainContracts []*types.Contract) bool {
 	if fn == nil {
 		return false
 	}
 
+	// Build the chain that reached `fn`. Fresh slice per recursion so sibling
+	// branches don't pollute each other's record.
+	curChain := append(append([]*types.Function{}, chain...), fn)
+	curContracts := append(append([]*types.Contract{}, chainContracts...), contract)
+
 	env := e.buildFunctionTaintEnv(fn, seed)
 	if e.verifyAtFunctionWithEnv(fn, r, contract, env) {
+		// Match succeeded at this function. Stash the chain that reached
+		// here so the caller can build Reachability/EntryPoint. Only set
+		// once — the first successful match is the one we report.
+		if e.match != nil && e.match.Chain == nil {
+			e.match.Chain = curChain
+			e.match.ChainContracts = curContracts
+		}
 		return true
 	}
 	if fn.AST == nil || depth >= MaxInterproceduralTaintDepth {
@@ -640,7 +826,7 @@ func (e *Engine) verifyAtFunctionWithCallees(fn *types.Function, r Rule, contrac
 			return true
 		}
 		calleeSeed := e.bindCalleeTaint(callee, node.Children, env)
-		if e.verifyAtFunctionWithCallees(callee, r, calleeContract, calleeSeed, visiting, depth+1) {
+		if e.verifyAtFunctionWithCallees(callee, r, calleeContract, calleeSeed, visiting, depth+1, curChain, curContracts) {
 			matched = true
 			return false
 		}
@@ -677,19 +863,12 @@ func (e *Engine) verifyAtFunctionWithEnv(fn *types.Function, r Rule, contract *t
 		}
 	}
 
-	// Split rule into context and AST parts
-	// Context: modifier, extends, func_name, visibility_filter, mutability_filter, has_guard, preset, version
-	//          (and not: if it only contains context fields)
-	// AST: all, any, sequence, contains, inside, kind, name, attr, args, tainted_from
-	//      (and not: if it contains AST fields)
-
-	hasContext := r.Modifier != "" || r.Extends != "" ||
-		r.FuncName != "" || r.VisibilityFilter != "" || r.MutabilityFilter != "" ||
-		r.HasGuard != nil || (r.Not != nil && r.Not.IsContextOnly())
-	hasAST := len(r.All) > 0 || len(r.Any) > 0 || len(r.Sequence) > 0 ||
-		r.Contains != nil || r.Inside != nil || r.Kind != "" || r.Name != "" ||
-		len(r.Attr) > 0 || len(r.Args) > 0 || r.TaintedFrom != "" ||
-		(r.Not != nil && !r.Not.IsContextOnly())
+	// Split rule into context and AST parts. Logical operators can carry either
+	// kind of predicate, so detect the actual leaves instead of treating all/any
+	// as AST-only. source_regex is intentionally scope-aware and counts as a
+	// context predicate at function scope.
+	hasContext := ruleHasContextFields(r)
+	hasAST := ruleHasASTFields(r)
 
 	// Check context first
 	if hasContext {
@@ -720,6 +899,8 @@ func (e *Engine) verifyAtFunctionWithEnv(fn *types.Function, r Rule, contract *t
 	astRule.VisibilityFilter = ""
 	astRule.MutabilityFilter = ""
 	astRule.HasGuard = nil
+	astRule.HasParam = ""
+	astRule.SourceRegex = ""
 	if r.Not != nil && r.Not.IsContextOnly() {
 		astRule.Not = nil
 	}
@@ -738,11 +919,34 @@ func (e *Engine) verifyAtFunctionWithEnv(fn *types.Function, r Rule, contract *t
 }
 
 func (e *Engine) verifyInterproceduralSequence(fn *types.Function, contract *types.Contract, env map[string][]string, rules []Rule) bool {
-	nodes := e.interproceduralDescendants(fn, contract, env, make(map[string]bool), 0)
-	return e.findSequenceInNodes(nodes, rules, 0)
+	// Allocate a chain map for this match attempt; the walker populates it
+	// alongside the node slice so we can reconstruct the entry -> host call
+	// chain for whichever node ends up matching the rule's primary atom.
+	prevChains := e.ipChains
+	e.ipChains = make(map[*types.ASTNode]ipPath)
+	defer func() { e.ipChains = prevChains }()
+
+	nodes := e.interproceduralDescendants(fn, contract, env, make(map[string]bool), 0, ipPath{
+		Functions: []*types.Function{fn},
+		Contracts: []*types.Contract{contract},
+	})
+	// Nodes here are inlined from multiple functions, so they share no common
+	// ancestor and sameExecutionPath does not constrain across the boundary.
+	if !e.findSequenceInNodes(nodes, rules, 0, nil) {
+		return false
+	}
+	// On success, surface the chain that led to the matched primary so the
+	// caller can build Reachability/EntryPoint.
+	if e.match != nil && e.match.Primary != nil {
+		if path, ok := e.ipChains[e.match.Primary]; ok {
+			e.match.Chain = path.Functions
+			e.match.ChainContracts = path.Contracts
+		}
+	}
+	return true
 }
 
-func (e *Engine) interproceduralDescendants(fn *types.Function, contract *types.Contract, env map[string][]string, visiting map[string]bool, depth int) []*types.ASTNode {
+func (e *Engine) interproceduralDescendants(fn *types.Function, contract *types.Contract, env map[string][]string, visiting map[string]bool, depth int, chain ipPath) []*types.ASTNode {
 	if fn == nil || fn.AST == nil {
 		return nil
 	}
@@ -756,6 +960,11 @@ func (e *Engine) interproceduralDescendants(fn *types.Function, contract *types.
 	var out []*types.ASTNode
 	fn.AST.WalkDescendants(func(node *types.ASTNode) bool {
 		out = append(out, node)
+		// Record the call chain that reached this node so a successful
+		// later match can recover the entry -> host path.
+		if e.ipChains != nil {
+			e.ipChains[node] = chain
+		}
 		if node.Kind != types.KindCallInternal || depth >= MaxInterproceduralTaintDepth {
 			return true
 		}
@@ -765,7 +974,14 @@ func (e *Engine) interproceduralDescendants(fn *types.Function, contract *types.
 		}
 		seed := e.bindCalleeTaint(callee, node.Children, env)
 		calleeEnv := e.buildFunctionTaintEnv(callee, seed)
-		out = append(out, e.interproceduralDescendants(callee, calleeContract, calleeEnv, visiting, depth+1)...)
+
+		// Extend the chain for the callee subtree: a fresh slice per recursion
+		// so sibling branches don't pollute each other's path records.
+		nextChain := ipPath{
+			Functions: append(append([]*types.Function{}, chain.Functions...), callee),
+			Contracts: append(append([]*types.Contract{}, chain.Contracts...), calleeContract),
+		}
+		out = append(out, e.interproceduralDescendants(callee, calleeContract, calleeEnv, visiting, depth+1, nextChain)...)
 		return true
 	})
 	return out
@@ -814,7 +1030,29 @@ func (e *Engine) buildFunctionTaintEnv(fn *types.Function, seed map[string][]str
 	if fn.AST == nil {
 		return env
 	}
-	fn.AST.WalkDescendants(func(node *types.ASTNode) bool {
+	// Iterate the forward propagation to a bounded fixpoint. Variable
+	// declarations with initializers are already lowered to `stmt.assign` by the
+	// builder, so they participate too. Carrying env across passes lets a later
+	// definition feed an earlier use — loop-carried taint and out-of-source-order
+	// aliases that a single pass misses converge here. Strong updates (each
+	// assignment overwrites its target) preserve the sender-vs-parameter
+	// precision the context-sensitive matcher depends on: `from = msg.sender`
+	// still leaves `from` as sender identity, not arbitrary input.
+	for pass := 0; pass < MaxTaintFixpointPasses; pass++ {
+		if !e.applyTaintAssignments(fn.AST, env) {
+			break // env stable — fixpoint reached
+		}
+	}
+	return env
+}
+
+// applyTaintAssignments runs one forward pass over the assignments in root,
+// updating env in place with strong-update (last-write-wins) semantics. It
+// returns true if any binding changed, signalling that another pass may
+// propagate further.
+func (e *Engine) applyTaintAssignments(root *types.ASTNode, env map[string][]string) bool {
+	changed := false
+	root.WalkDescendants(func(node *types.ASTNode) bool {
 		if node.Kind != types.KindStmtAssign || len(node.Children) < 2 {
 			return true
 		}
@@ -822,12 +1060,30 @@ func (e *Engine) buildFunctionTaintEnv(fn *types.Function, seed map[string][]str
 		rhsTaints := e.expressionTaints(rhs, env)
 		for i := 0; i < len(node.Children)-1; i++ {
 			for _, name := range assignmentTargetNames(node.Children[i]) {
-				env[name] = cloneTaintSources(rhsTaints)
+				if !taintSlicesEqual(env[name], rhsTaints) {
+					env[name] = cloneTaintSources(rhsTaints)
+					changed = true
+				}
 			}
 		}
 		return true
 	})
-	return env
+	return changed
+}
+
+// taintSlicesEqual compares two taint-source slices for equality. Both sides are
+// kept sorted (cloneTaintSources / sortedTaintSet), so an element-wise compare is
+// sufficient.
+func taintSlicesEqual(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func assignmentTargetNames(node *types.ASTNode) []string {
@@ -875,7 +1131,9 @@ func (e *Engine) resolveInternalCallee(contract *types.Contract, callNode *types
 	}
 	argCount := len(callNode.Children)
 	for _, baseName := range baseNames {
-		candidateContract := e.db.GetContractByName(baseName)
+		// Resolve each base relative to the calling contract's file so a
+		// duplicate contract name picks the in-scope definition, not a global one.
+		candidateContract := e.db.ResolveContractName(baseName, contract.SourceFile)
 		if candidateContract == nil {
 			continue
 		}
@@ -957,6 +1215,10 @@ func functionVisitKey(fn *types.Function, env map[string][]string) string {
 // Context checks are evaluated before AST matching.
 // Returns true if the function matches all context conditions (= should be scanned).
 func (e *Engine) checkFunctionContext(fn *types.Function, contract *types.Contract, r Rule) bool {
+	if fn == nil {
+		return false
+	}
+
 	// Check modifier presence
 	if r.Modifier != "" {
 		found := false
@@ -1015,6 +1277,9 @@ func (e *Engine) checkFunctionContext(fn *types.Function, contract *types.Contra
 		allowed := strings.Split(r.MutabilityFilter, ",")
 		matched := false
 		fnMut := strings.ToLower(strings.TrimSpace(string(fn.StateMutability)))
+		if fnMut == "" {
+			fnMut = "nonpayable" // empty state mutability is the (default) nonpayable
+		}
 		for _, v := range allowed {
 			if strings.TrimSpace(strings.ToLower(v)) == fnMut {
 				matched = true
@@ -1022,6 +1287,37 @@ func (e *Engine) checkFunctionContext(fn *types.Function, contract *types.Contra
 			}
 		}
 		if !matched {
+			return false
+		}
+	}
+
+	if r.SourceRegex != "" {
+		if !sourceRegexMatches(r.SourceRegex, e.functionSource(fn, contract)) {
+			return false
+		}
+	}
+
+	if r.Version != "" {
+		if !e.checkVersion(r.Version) {
+			return false
+		}
+	}
+
+	if r.Preset != "" {
+		if !e.checkPreset(fn, contract, r.Preset) {
+			return false
+		}
+	}
+
+	if r.HasParam != "" {
+		found := false
+		for _, param := range fn.Parameters {
+			if param != nil && param.Name == r.HasParam {
+				found = true
+				break
+			}
+		}
+		if !found {
 			return false
 		}
 	}
@@ -1044,8 +1340,32 @@ func (e *Engine) checkFunctionContext(fn *types.Function, contract *types.Contra
 		}
 	}
 
-	// Handle NOT — negate all context conditions inside
-	if r.Not != nil {
+	for _, subRule := range r.All {
+		if ruleHasContextFields(subRule) && !e.checkFunctionContext(fn, contract, subRule) {
+			return false
+		}
+	}
+
+	if len(r.Any) > 0 {
+		seenContextRule := false
+		matched := false
+		for _, subRule := range r.Any {
+			if !ruleHasContextFields(subRule) {
+				continue
+			}
+			seenContextRule = true
+			if e.checkFunctionContext(fn, contract, subRule) {
+				matched = true
+				break
+			}
+		}
+		if seenContextRule && !matched {
+			return false
+		}
+	}
+
+	// Handle NOT — negate context conditions inside.
+	if r.Not != nil && ruleHasContextFields(*r.Not) {
 		return !e.checkFunctionContext(fn, contract, *r.Not)
 	}
 
@@ -1053,16 +1373,10 @@ func (e *Engine) checkFunctionContext(fn *types.Function, contract *types.Contra
 }
 
 // IsContextOnly returns true if rule only contains context-level checks
-// (modifier, extends, version, preset, func_name, visibility_filter, mutability_filter, has_guard)
+// (modifier, extends, version, preset, func_name, visibility_filter,
+// mutability_filter, has_guard, has_param, source_regex)
 func (r *Rule) IsContextOnly() bool {
-	hasContextChecks := r.Modifier != "" || r.Extends != "" || r.Version != "" ||
-		r.Preset != "" || r.FuncName != "" || r.VisibilityFilter != "" ||
-		r.MutabilityFilter != "" || r.HasGuard != nil
-	hasOtherChecks := len(r.All) > 0 || len(r.Any) > 0 || len(r.Sequence) > 0 ||
-		r.Contains != nil || r.Inside != nil || r.Kind != "" || r.Name != "" ||
-		len(r.Attr) > 0 || len(r.Args) > 0 || r.TaintedFrom != ""
-
-	return hasContextChecks && !hasOtherChecks
+	return ruleHasContextFields(*r) && !ruleHasASTFields(*r)
 }
 
 // checkVersion checks if the source file's pragma version matches the constraint
@@ -1168,9 +1482,29 @@ func (e *Engine) checkPreset(fn *types.Function, contract *types.Contract, prese
 	return checkBuiltinPreset(fn, contract, e, preset)
 }
 
-// VerifyAtContract is the top-level entry point for contract-scope verification
+// VerifyAtContract is the top-level entry point for contract-scope verification.
 func (e *Engine) VerifyAtContract(contract *types.Contract, r Rule) bool {
-	// Check contract-level context
+	if contract == nil {
+		return false
+	}
+
+	prevContract := e.currentContract
+	prevSourceFile := e.currentSourceFile
+	e.currentContract = contract
+	e.currentSourceFile = e.db.SourceFiles[contract.SourceFile]
+	defer func() {
+		e.currentContract = prevContract
+		e.currentSourceFile = prevSourceFile
+	}()
+
+	return e.verifyAtContract(contract, r)
+}
+
+func (e *Engine) verifyAtContract(contract *types.Contract, r Rule) bool {
+	if r.IsEmpty() {
+		return true
+	}
+
 	if r.Extends != "" {
 		found := false
 		for _, baseName := range contract.LinearizedBases {
@@ -1184,66 +1518,165 @@ func (e *Engine) VerifyAtContract(contract *types.Contract, r Rule) bool {
 		}
 	}
 
-	// Handle NOT
-	if r.Not != nil {
-		return !e.VerifyAtContract(contract, *r.Not)
+	if r.Name != "" && !MatchesRegex(r.Name, contract.Name) {
+		return false
 	}
 
-	// For contract scope, we might check contract-level patterns
-	// This is less common, but could involve checking state variables, functions, etc.
+	if r.Kind != "" && r.Kind != types.KindDeclContract {
+		return false
+	}
+
+	if r.SourceRegex != "" {
+		if !sourceRegexMatches(r.SourceRegex, e.contractSource(contract)) {
+			return false
+		}
+	}
+
+	for _, subRule := range r.All {
+		if !e.verifyAtContract(contract, subRule) {
+			return false
+		}
+	}
+
+	if len(r.Any) > 0 {
+		matched := false
+		for _, subRule := range r.Any {
+			if e.verifyAtContract(contract, subRule) {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			return false
+		}
+	}
+
+	// Handle NOT
+	if r.Not != nil {
+		return !e.verifyAtContract(contract, *r.Not)
+	}
 
 	return true
 }
 
-// Debug helper: print rule structure
-func (r *Rule) String() string {
-	var parts []string
+func sourceRegexMatches(pattern, source string) bool {
+	if pattern == "" {
+		return true
+	}
+	if source == "" {
+		return false
+	}
+	return MatchesRegex(pattern, source)
+}
 
-	if len(r.All) > 0 {
-		parts = append(parts, fmt.Sprintf("all(%d)", len(r.All)))
+func ruleHasContextFields(r Rule) bool {
+	if r.Modifier != "" || r.Extends != "" || r.Version != "" ||
+		r.Preset != "" || r.FuncName != "" || r.VisibilityFilter != "" ||
+		r.MutabilityFilter != "" || r.HasGuard != nil || r.HasParam != "" ||
+		r.SourceRegex != "" {
+		return true
 	}
-	if len(r.Any) > 0 {
-		parts = append(parts, fmt.Sprintf("any(%d)", len(r.Any)))
+	for _, subRule := range r.All {
+		if ruleHasContextFields(subRule) {
+			return true
+		}
 	}
-	if r.Not != nil {
-		parts = append(parts, "not")
+	for _, subRule := range r.Any {
+		if ruleHasContextFields(subRule) {
+			return true
+		}
 	}
-	if len(r.Sequence) > 0 {
-		parts = append(parts, fmt.Sprintf("seq(%d)", len(r.Sequence)))
+	if r.Not != nil && ruleHasContextFields(*r.Not) {
+		return true
 	}
-	if r.Contains != nil {
-		parts = append(parts, "has")
-	}
-	if r.Inside != nil {
-		parts = append(parts, "inside")
-	}
-	if r.Kind != "" {
-		parts = append(parts, fmt.Sprintf("kind:%s", r.Kind))
-	}
-	if r.Name != "" {
-		parts = append(parts, fmt.Sprintf("regex:%s", r.Name))
-	}
-	if len(r.Attr) > 0 {
-		parts = append(parts, fmt.Sprintf("attr(%d)", len(r.Attr)))
-	}
-	if r.Modifier != "" {
-		parts = append(parts, fmt.Sprintf("mods:%s", r.Modifier))
-	}
-	if r.Extends != "" {
-		parts = append(parts, fmt.Sprintf("inherits:%s", r.Extends))
-	}
-	if len(r.Args) > 0 {
-		parts = append(parts, fmt.Sprintf("args(%d)", len(r.Args)))
-	}
-	if r.TaintedFrom != "" {
-		parts = append(parts, fmt.Sprintf("source:%s", r.TaintedFrom))
-	}
-	if r.Version != "" {
-		parts = append(parts, fmt.Sprintf("version:%s", r.Version))
-	}
-	if r.Preset != "" {
-		parts = append(parts, fmt.Sprintf("preset:%s", r.Preset))
-	}
+	return false
+}
 
-	return "Rule{" + strings.Join(parts, ", ") + "}"
+func ruleHasASTFields(r Rule) bool {
+	if len(r.Sequence) > 0 || r.Contains != nil || r.Inside != nil ||
+		r.Kind != "" || r.Name != "" || len(r.Attr) > 0 || len(r.Args) > 0 ||
+		r.TaintedFrom != "" || r.Left != nil || r.Right != nil ||
+		r.Operator != "" || r.IsStateVar != nil || r.Visibility != "" ||
+		r.Mutability != "" {
+		return true
+	}
+	for _, subRule := range r.All {
+		if ruleHasASTFields(subRule) {
+			return true
+		}
+	}
+	for _, subRule := range r.Any {
+		if ruleHasASTFields(subRule) {
+			return true
+		}
+	}
+	if r.Not != nil && ruleHasASTFields(*r.Not) {
+		return true
+	}
+	return false
+}
+
+// hasAtomicPredicate reports whether the rule carries at least one
+// surface-level predicate (kind/name/attr/source/taint/operator) — i.e. a
+// reason for the current node to count as the matched dangerous statement
+// rather than a structural container (`{any: [...]}`, `{contains: ...}`,
+// `{sequence: [...]}`) which is just routing the match deeper.
+func hasAtomicPredicate(r Rule) bool {
+	return r.Kind != "" ||
+		r.Name != "" ||
+		r.SourceRegex != "" ||
+		len(r.Attr) > 0 ||
+		r.IsStateVar != nil ||
+		r.Operator != "" ||
+		r.Visibility != "" ||
+		r.Mutability != "" ||
+		r.TaintedFrom != ""
+}
+
+// hostFunctionFor walks a matched AST node's parent chain to find the
+// enclosing decl.function (or decl.modifier) and resolves its name + contract.
+// Returns nil values when the node has no captured ancestor chain (synthetic
+// fixtures or source-scope matches with no parent link).
+func (e *Engine) hostFunctionFor(node *types.ASTNode) (hostName, hostContract, hostFile string, hostLine int) {
+	if node == nil {
+		return "", "", "", 0
+	}
+	hostLine = node.StartLine
+	for n := node; n != nil; n = n.Parent {
+		switch n.Kind {
+		case types.KindDeclFunction, types.KindDeclModifier:
+			hostName = n.Name
+			// Resolve contract via the matched node's chain map (populated
+			// by the interprocedural walker) or from the verifier context.
+			if path, ok := e.ipChains[node]; ok && len(path.Functions) > 0 {
+				last := path.Functions[len(path.Functions)-1]
+				if last != nil {
+					hostContract = last.ContractName
+					if c := e.db.GetContractByName(last.ContractName); c != nil {
+						hostFile = c.SourceFile
+					}
+				}
+				return
+			}
+			if e.currentContract != nil {
+				hostContract = e.currentContract.Name
+				hostFile = e.currentContract.SourceFile
+			} else if e.currentFunction != nil {
+				hostContract = e.currentFunction.ContractName
+				if c := e.db.GetContractByName(e.currentFunction.ContractName); c != nil {
+					hostFile = c.SourceFile
+				}
+			}
+			return
+		}
+	}
+	// No ancestor — fall back to whatever context we have.
+	if e.currentFunction != nil {
+		hostName = e.currentFunction.Name
+		hostContract = e.currentFunction.ContractName
+		if c := e.db.GetContractByName(hostContract); c != nil {
+			hostFile = c.SourceFile
+		}
+	}
+	return
 }

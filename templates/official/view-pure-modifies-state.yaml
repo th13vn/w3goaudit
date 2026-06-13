@@ -1,0 +1,37 @@
+meta:
+  id: SEC-MUTABILITY-001
+  title: "view/pure Function Modifies State"
+  severity: MEDIUM
+  confidence: HIGH
+  description: >
+    A function declared `view` or `pure` writes to state — either directly
+    (`stmt.assign` to a state variable) or via inline assembly (`sstore`).
+    From Solidity 0.5.0 the compiler enforces the mutability promise at
+    compile time, BUT inline assembly bypasses that check. Callers and
+    integrators that trust the declared mutability (e.g. simulating with
+    `staticcall` for gas estimation, or assuming the function is safe for
+    on-chain reads from immutable contracts) will hit unexpected reverts
+    or worse — a STATICCALL succeeds in EVM only if no SSTORE is executed,
+    so an `sstore` inside a `view` will revert the entire trace.
+    Equivalent to Slither's constant-function-state detector.
+  recommendation: >
+    Either remove the `view`/`pure` modifier (the function is genuinely
+    state-changing), or refactor to push the mutation out of the read path.
+    Never use inline assembly to bypass the mutability promise.
+  references:
+    - https://github.com/crytic/slither/wiki/Detector-Documentation#constant-functions-changing-the-state
+    - https://docs.soliditylang.org/en/latest/contracts.html#view-functions
+
+query:
+  scope: function
+
+  filter:
+    mutability_filter: view,pure
+
+  match:
+    # `state_write` is the semantic group for both `stmt.assign` (with
+    # is_state_var=true) and `asm.sstore` — covers both the high-level
+    # "x = ...;" pattern AND the assembly bypass pattern, which is the
+    # interesting (and silently dangerous) one.
+    contains:
+      kind: state_write

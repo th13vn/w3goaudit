@@ -1,0 +1,43 @@
+meta:
+  id: SEC-ERC20-002
+  title: "Unchecked ERC20 transfer / transferFrom Return Value"
+  severity: HIGH
+  confidence: MEDIUM
+  description: >
+    A call to ERC20 `transfer(...)` or `transferFrom(...)` is made but the
+    boolean return value is discarded. Non-reverting ERC20s (USDT, BNB, ZRX,
+    early OZ) signal failure by returning `false`, so a discarded return value
+    silently passes failure upstream and corrupts internal accounting.
+    Equivalent to Slither's unchecked-transfer detector.
+  recommendation: >
+    Use OpenZeppelin's `SafeERC20.safeTransfer` / `safeTransferFrom`, which
+    revert on failure, or wrap the call: `require(token.transfer(to, amt),
+    "transfer failed")`.
+  references:
+    - https://github.com/crytic/slither/wiki/Detector-Documentation#unchecked-transfer
+    - https://docs.soliditylang.org/en/latest/security-considerations.html#use-the-checks-effects-interactions-pattern
+
+query:
+  scope: entrypoint
+
+  match:
+    # As of P0-1 (ast_builder.go:603) the parser disambiguates ETH .transfer(amt)
+    # (1 arg → call.builtin.transfer, always reverts on failure — no check
+    # needed) from ERC20 .transfer(to, amt) (2 args → call.external). So we
+    # match only call.external here.
+    contains:
+      kind: call.external
+      name: ^(transfer|transferFrom)$
+      # The return is consumed if the call sits inside any of these:
+      #   - check.require / check.assert : `require(token.transfer(...), ...)`
+      #   - stmt.if                       : `if (!token.transferFrom(...)) revert();`
+      #   - stmt.assign                   : `bool ok = token.transfer(...);`
+      #   - stmt.return                   : `return token.transfer(...);`
+      not:
+        inside:
+          any:
+            - kind: check.require
+            - kind: check.assert
+            - kind: stmt.if
+            - kind: stmt.assign
+            - kind: stmt.return

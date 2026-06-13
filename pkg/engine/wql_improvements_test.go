@@ -1,6 +1,9 @@
 package engine
 
 import (
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/th13vn/w3goaudit/pkg/types"
@@ -13,10 +16,10 @@ func TestMatchKindGuardAlias(t *testing.T) {
 	e := New(db)
 
 	tests := []struct {
-		name     string
-		nodeKind string
+		name      string
+		nodeKind  string
 		queryKind string
-		expected bool
+		expected  bool
 	}{
 		// guard = alias for check (semantic group)
 		{"guard matches check.require", types.KindCheckRequire, "guard", true},
@@ -105,6 +108,33 @@ query:
 	}
 	if len(tmpl.Query.Match.Sequence) != 2 {
 		t.Errorf("Expected 2 sequence items, got %d", len(tmpl.Query.Match.Sequence))
+	}
+}
+
+func TestSourceRegexAcceptedInFilterAndMatch(t *testing.T) {
+	yamlWithScopedSourceRegex := `
+meta:
+  id: TEST-SOURCE-REGEX-SCOPE
+  title: "source regex scope"
+  severity: LOW
+  confidence: HIGH
+
+query:
+  scope: function
+  filter:
+    source_regex: "onlyFunctionBody"
+  match:
+    source_regex: "rawSnippetPredicate"
+`
+	tmpl, err := ParseTemplate(yamlWithScopedSourceRegex)
+	if err != nil {
+		t.Fatalf("ParseTemplate should accept source_regex in filter and match: %v", err)
+	}
+	if tmpl.Query.Filter == nil || tmpl.Query.Filter.SourceRegex == "" {
+		t.Fatal("expected filter.source_regex to be preserved")
+	}
+	if tmpl.Query.Match.SourceRegex == "" {
+		t.Fatal("expected match.source_regex to be preserved")
 	}
 }
 
@@ -215,6 +245,92 @@ func TestContextMutabilityFilter(t *testing.T) {
 	}
 }
 
+func TestSourceRegexScopedFunctionAndFilter(t *testing.T) {
+	db := types.NewDatabase()
+	e := New(db)
+
+	path := "/virtual/Scoped.sol"
+	content := `contract Scoped {
+    function foo() external {
+        emit Flagged();
+    }
+}
+`
+	db.AddSourceFile(&types.SourceFile{Path: path, Content: content})
+
+	fnAST := types.NewASTNode(types.KindDeclFunction)
+	fnAST.Name = "foo"
+	fnAST.StartLine = 2
+	fnAST.EndLine = 4
+	fn := &types.Function{
+		Name:         "foo",
+		ContractName: "Scoped",
+		Visibility:   types.VisibilityExternal,
+		StartLine:    2,
+		EndLine:      4,
+		AST:          fnAST,
+	}
+	contract := &types.Contract{
+		Name:       "Scoped",
+		SourceFile: path,
+		Kind:       types.ContractKindContract,
+		Functions:  []*types.Function{fn},
+	}
+	db.AddContract(contract)
+
+	t.Run("source_regex matches current function source", func(t *testing.T) {
+		result := e.VerifyAtFunction(fn, Rule{SourceRegex: `emit\s+Flagged`}, contract)
+		if !result {
+			t.Fatal("expected source_regex to match function source")
+		}
+	})
+
+	t.Run("source_regex can compose with function filters", func(t *testing.T) {
+		rule := Rule{All: []Rule{
+			{SourceRegex: `emit\s+Flagged`},
+			{VisibilityFilter: "external"},
+		}}
+		result := e.VerifyAtFunction(fn, rule, contract)
+		if !result {
+			t.Fatal("expected source_regex and visibility_filter to match together")
+		}
+	})
+
+	t.Run("source_regex rejects non-matching scoped source", func(t *testing.T) {
+		result := e.VerifyAtFunction(fn, Rule{SourceRegex: `NotHere`}, contract)
+		if result {
+			t.Fatal("expected source_regex to reject non-matching function source")
+		}
+	})
+}
+
+func TestContractContextAllExtends(t *testing.T) {
+	db := types.NewDatabase()
+	e := New(db)
+
+	contract := &types.Contract{
+		Name:            "VulnerableThirdwebCombination",
+		Kind:            types.ContractKindContract,
+		LinearizedBases: []string{"VulnerableThirdwebCombination", "ERC2771Context", "Multicall"},
+	}
+
+	rule := Rule{All: []Rule{
+		{Extends: `^ERC2771Context$`},
+		{Extends: `^Multicall$`},
+	}}
+	if !e.VerifyAtContract(contract, rule) {
+		t.Fatal("expected contract to match both inherited bases")
+	}
+
+	missingBase := Rule{All: []Rule{
+		{Extends: `^ERC2771Context$`},
+		{Extends: `^Ownable$`},
+	}}
+	if e.VerifyAtContract(contract, missingBase) {
+		t.Fatal("expected contract to reject missing inherited base")
+	}
+}
+
 func TestContextHasGuard(t *testing.T) {
 	db := types.NewDatabase()
 	e := New(db)
@@ -279,7 +395,7 @@ func TestContextHasGuard(t *testing.T) {
 		// need AST content to trigger AST matching
 		fnNoGuard.AST.AddChild(types.NewASTNode(types.KindCallExternal))
 		result := e.VerifyAtFunction(fnNoGuard, Rule{
-			Not: notHasGuardRule.Not,
+			Not:      notHasGuardRule.Not,
 			Contains: &Rule{Kind: types.KindCallExternal},
 		}, contract)
 		if !result {
@@ -314,16 +430,21 @@ query:
 		t.Fatalf("ParseTemplate failed: %v", err)
 	}
 
-	// The match contains rule should have Args[0] populated
+	// The match contains rule should have Args[0] populated by normalizeArgNKeys
+	// (the whole point of arg.N flat-key parsing).
 	if tmpl.Query.Match.Contains == nil {
 		t.Fatal("Expected match.contains to be set")
 	}
-
-	// Note: arg.N parsing works at the raw YAML level and populates the
-	// Contains.Args map. Since YAML unmarshalling already sets Contains,
-	// we check the Args were populated by normalizeArgNKeys.
-	// This is a best-effort check.
-	_ = tmpl // template parsed without error = success for now
+	argRule, ok := tmpl.Query.Match.Contains.Args[0]
+	if !ok {
+		t.Fatalf("Expected Contains.Args[0] to be populated from `arg.0:`; got Args=%v", tmpl.Query.Match.Contains.Args)
+	}
+	if argRule.Kind != "expr.identifier" {
+		t.Errorf("Contains.Args[0].Kind = %q, want expr.identifier", argRule.Kind)
+	}
+	if argRule.TaintedFrom != "parameter" {
+		t.Errorf("Contains.Args[0].TaintedFrom = %q, want parameter", argRule.TaintedFrom)
+	}
 }
 
 // ─── Template Loading (silent failure fix) ────────────────────────────────────
@@ -362,6 +483,54 @@ meta:
 			t.Error("Expected invalid YAML to return an error")
 		}
 	})
+}
+
+func TestLoadTemplatesFailsClosedByDefault(t *testing.T) {
+	dir := t.TempDir()
+	valid := `
+meta:
+  id: VALID-001
+  severity: HIGH
+  confidence: MEDIUM
+query:
+  scope: entrypoint
+  match:
+    kind: outgoing_call
+`
+	invalid := `
+meta:
+  id: INVALID-001
+query:
+  scope: entrypoint
+  match:
+    kind: outgoing_call
+`
+	if err := os.WriteFile(filepath.Join(dir, "valid.yaml"), []byte(valid), 0644); err != nil {
+		t.Fatalf("write valid template: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "invalid.yaml"), []byte(invalid), 0644); err != nil {
+		t.Fatalf("write invalid template: %v", err)
+	}
+
+	if _, err := LoadTemplates(dir); err == nil {
+		t.Fatal("LoadTemplates returned nil error; want fail-closed error for invalid template")
+	} else if !strings.Contains(err.Error(), "missing meta.severity") {
+		t.Fatalf("LoadTemplates error = %q; want missing severity context", err)
+	}
+
+	templates, err := LoadTemplatesWithOptions(dir, TemplateLoadOptions{IgnoreInvalid: true})
+	if err != nil {
+		t.Fatalf("LoadTemplatesWithOptions(ignore invalid) returned error: %v", err)
+	}
+	if len(templates) != 1 || templates[0].Meta.ID != "VALID-001" {
+		t.Fatalf("lenient load = %+v; want only VALID-001", templates)
+	}
+}
+
+func TestLoadTemplatesErrorsWhenNoTemplatesLoaded(t *testing.T) {
+	if _, err := LoadTemplates(t.TempDir()); err == nil {
+		t.Fatal("LoadTemplates(empty dir) returned nil error; want no valid templates error")
+	}
 }
 
 // ─── IsContextOnly covers new fields ─────────────────────────────────────────

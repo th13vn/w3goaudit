@@ -16,9 +16,11 @@ All workflows share a common foundation: **Reader → Builder → Database**.
 
 ## 1. Scan Workflow
 
-**Command:** `w3goaudit <path> --template <template-path>`
+**Command:** `w3goaudit <path> [--template <template-path>]`
 
 **Purpose:** Scan Solidity contracts for vulnerabilities using WQL templates.
+Omitting `--template` uses the embedded official pack (see §3 for the full
+flag set, CI gating, and filtering).
 
 ### High-Level Flow
 
@@ -59,10 +61,14 @@ The builder constructs a comprehensive database through **6 phases**:
 - Extract functions, state variables, structs, events
 - Store pragma and import information
 
-**Phase 2: Build ASTs**
+**Phase 2: Build ASTs & Semantic Facts**
 - Convert raw AST into simplified tree structure
 - Build AST for each function body
 - Support for all Solidity statement types
+- Infer lightweight `TypeInfo` for parameters, state variables, locals, casts,
+  builtin address expressions, and member-call receivers
+- Store facts in `Database.Semantics` and mirror key facts onto AST attributes
+  such as `type_kind` and `receiver_type_kind`
 
 **Phase 3: Calculate Function Selectors**
 - Generate function signatures (e.g., `transfer(address,uint256)`)
@@ -89,7 +95,7 @@ The builder constructs a comprehensive database through **6 phases**:
 ```mermaid
 graph TD
     A[Source Files] --> B[Phase 1: Parse Files]
-    B --> C[Phase 2: Build ASTs]
+    B --> C[Phase 2: Build ASTs + Semantic Facts]
     C --> D[Phase 3: Calculate Selectors]
     D --> E[Phase 4: Build Inheritance]
     E --> F[Phase 5: Build Call Graph]
@@ -103,7 +109,10 @@ graph TD
 1. **Load template file(s)** from YAML
 2. **Parse template structure**: meta + query
 3. **Validate template syntax**
-4. **Store in engine**
+4. **Fail closed on invalid template directories** — by default, one invalid
+   template or zero valid templates aborts the scan; `--ignore-invalid-templates`
+   is the explicit ad-hoc escape hatch
+5. **Store in engine**
 
 **Code:** [template.go](../pkg/engine/template.go)
 
@@ -134,16 +143,20 @@ graph TD
 **Verification process** ([verify.go](../pkg/engine/verify.go)):
 
 1. **Parse match rules** (all/any/not/seq/has/inside)
-2. **Check atomic matchers**: kind, regex, attr
+2. **Check atomic matchers**: kind, regex, attr — when the rule has a
+   surface predicate AND the full branch succeeds, the engine records the
+   matched AST node as the finding's `PrimaryAST` (the dangerous statement
+   to report). Failed branches roll back their provisional capture.
 3. **Evaluate context helpers**: mods, inherits, source
 4. **Traverse AST** for has/inside operators
 5. **Check sequences** for ordered patterns
-6. **Perform taint analysis** for source tracking, including caller argument bindings when entrypoints invoke internal helpers
+6. **Perform taint analysis** for source tracking, including caller argument bindings when entrypoints invoke internal helpers — the call chain traversed becomes the finding's `Reachability` (entry → … → host of `PrimaryAST`)
 
 **Advanced features:**
-- **Recursive internal call tracing**: Engine follows entrypoint → helper call chains and maps caller argument taint onto callee parameters
+- **Recursive internal call tracing**: Engine follows entrypoint → helper call chains and maps caller argument taint onto callee parameters; the chain itself is preserved on the finding
 - **Inheritance-aware matching**: Checks base contracts and modifiers
 - **Argument position matching**: Validates specific function arguments
+- **Location-source switch**: `--location-source matched`, `WGAUDIT_LOCATION_FROM_MATCHED_NODE=1`, or `Engine.SetLocationSource` flips `Finding.Location` from the verifier-function entrypoint to the host of `PrimaryAST` (SARIF / Slither / Semgrep convention); the new `Reachability` / `EntryPoint` fields are populated regardless
 
 #### Phase 5: Report Generation
 **Component:** [`pkg/report`](../pkg/report)
@@ -156,6 +169,7 @@ graph LR
     B -->|--json| C[JSON Output]
     B -->|--md| D[Markdown Report]
     B -->|--html| E[HTML Report]
+    B -->|--sarif| G[SARIF 2.1.0]
     B -->|default| F[Console Pretty Print]
 ```
 
@@ -165,6 +179,13 @@ graph LR
 - Vulnerability description and recommendation
 - Code snippets with context
 - Confidence levels
+- **Reachability trace** (when populated): full call chain from entry to
+  host. Rendered per-format:
+  - JSON — `reachability.steps[]`, `entryPoint`, `primaryAst`
+  - SARIF — `result.relatedLocations[]` + `result.properties.entryPoint` / `…primaryAst`
+  - Markdown — per-occurrence "Reachability path" block with dotted-level indentation (`.`, `..`, `...`) and line numbers per hop
+  - HTML — `<div class="w3a-trace">` with depth-scaled `margin-left`
+  - Console — `↳ via Entry.func() ⇒ … ⇒ host()` and `↳ fix-here: …` continuation lines
 
 **Code:** [report/](../pkg/report)
 
@@ -232,9 +253,27 @@ The output JSON contains:
 
 ## 3. Default Scan Workflow
 
-**Command:** `w3goaudit <path> --template <templates> --md -o <output.md>`
+**Command:** `w3goaudit <path>` (optionally `--template <dir>`, `--md -o <output.md>`, etc.)
 
 **Purpose:** Combined scan that outputs stats, project overview (with call graphs), and security findings.
+
+**Template source:** when `--template` is omitted, the scan uses the **official
+pack embedded in the binary** (`templates/embed.go`), so a bare
+`w3goaudit <path>` produces findings with no repository checkout. `--template`
+overrides with a file or directory.
+
+**CI gating & filtering:**
+
+- `--fail-on <severity>` — exit code **2** when any finding (across *all*
+  templates, evaluated *before* the display filters) is at or above the
+  threshold, so a display filter cannot silently disarm the gate.
+- `--min-severity` / `--include` / `--exclude <id-globs>` — narrow the **reported**
+  findings (these do not affect `--fail-on`).
+- `--list-templates` — print the rule inventory that would run, then exit.
+- `--sarif` — additive SARIF 2.1.0 for GitHub Code Scanning.
+
+Progress/notice/verbose diagnostics go to **stderr**, so a stdout pipe
+(`--json`) stays machine-clean.
 
 ### Flow Diagram
 
@@ -430,7 +469,7 @@ args:
 
 ```bash
 w3goaudit ./contracts/ \
-  --template ./templates/reentrancy.yaml \
+  --template ./templates/official/reentrancy-pattern.yaml \
   --md \
   -o report.md \
   --verbose
@@ -440,7 +479,7 @@ w3goaudit ./contracts/ \
 
 1. **Reader** discovers all `.sol` files in `./contracts/`
 2. **Builder** parses files and builds database (6 phases)
-3. **Engine** loads `reentrancy.yaml` template
+3. **Engine** loads `reentrancy-pattern.yaml` template
 4. **Engine** iterates entry functions (scope: entrypoint)
 5. **Engine** verifies each function against template rules
 6. **Engine** creates findings for matches

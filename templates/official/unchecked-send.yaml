@@ -1,0 +1,38 @@
+meta:
+  id: SEC-SEND-001
+  title: "Unchecked send() Return Value"
+  severity: MEDIUM
+  confidence: HIGH
+  description: >
+    A call to `addr.send(amount)` is made but the boolean return value is
+    discarded. Unlike `.transfer()`, `.send()` does NOT revert on failure —
+    it returns `false`. Ignoring that return value means a failed transfer is
+    silently absorbed: caller state (balances, nonces, claim flags) may have
+    already been updated, leaving funds stranded. Equivalent to Slither's
+    unchecked-send detector.
+  recommendation: >
+    Prefer `.call{value: amt}("")` with `require(success, ...)`, or wrap:
+    `require(addr.send(amount), "send failed")`. Better: use a pull-payment
+    pattern so users withdraw their own funds.
+  references:
+    - https://github.com/crytic/slither/wiki/Detector-Documentation#unchecked-send
+    - https://swcregistry.io/docs/SWC-104
+
+query:
+  scope: function
+
+  match:
+    contains:
+      kind: call.builtin.send
+      # If the call is inside a guard, branch, assign, or return, the return
+      # value is presumed handled. `stmt.assign` covers
+      # `bool ok = to.send(amt);` — checking of `ok` is left to a downstream
+      # rule and is not in scope here.
+      not:
+        inside:
+          any:
+            - kind: check.require
+            - kind: check.assert
+            - kind: stmt.if
+            - kind: stmt.assign
+            - kind: stmt.return

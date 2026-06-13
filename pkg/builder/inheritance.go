@@ -13,11 +13,20 @@ type InheritanceBuilder struct {
 	// inheritance (A is B; B is A) returns an error instead of recursing
 	// until the Go stack overflows.
 	inProgress map[string]bool
+	// memo caches each contract's completed C3 linearization, keyed by contract
+	// ID. A contract's MRO is context-independent, so this is shared across all
+	// top-level contracts and avoids the previous superlinear re-computation of
+	// shared ancestors on deep (OpenZeppelin-style) hierarchies.
+	memo map[string][]string
 }
 
 // NewInheritanceBuilder creates a new inheritance builder
 func NewInheritanceBuilder(db *types.Database) *InheritanceBuilder {
-	return &InheritanceBuilder{db: db, inProgress: make(map[string]bool)}
+	return &InheritanceBuilder{
+		db:         db,
+		inProgress: make(map[string]bool),
+		memo:       make(map[string][]string),
+	}
 }
 
 // Build constructs the inheritance tree for all contracts
@@ -27,7 +36,7 @@ func (ib *InheritanceBuilder) Build() error {
 		// don't poison each other.
 		ib.inProgress = make(map[string]bool)
 		// Perform C3 linearization
-		linearized, err := ib.c3Linearize(contract.Name)
+		linearized, err := ib.c3Linearize(contract)
 		if err != nil {
 			// Fall back to "just this contract" so downstream phases don't crash.
 			// Surface the reason via verbose so the user can see what failed.
@@ -43,235 +52,164 @@ func (ib *InheritanceBuilder) Build() error {
 	return nil
 }
 
-// c3Linearize performs C3 linearization (Method Resolution Order)
-// This is the same algorithm used by Solidity for inheritance
-// In Solidity's "is" clause, left-to-right is most base-like to most derived-like
-// The result is stored in derived-to-base order (most derived first, most base last)
-// This matches Python's MRO and is useful for method resolution (search from derived to base)
-func (ib *InheritanceBuilder) c3Linearize(contractName string) ([]string, error) {
-	if ib.inProgress[contractName] {
-		return nil, fmt.Errorf("cyclic inheritance detected at %s", contractName)
-	}
-	ib.inProgress[contractName] = true
-	defer delete(ib.inProgress, contractName)
-
-	contract := ib.db.GetContractByName(contractName)
-	if contract == nil {
-		return nil, fmt.Errorf("contract not found: %s", contractName)
-	}
-
-	// Base case: no parents
-	if len(contract.BaseContracts) == 0 {
-		return []string{contractName}, nil
-	}
-
-	// Collect parent linearizations in REVERSE order (right-to-left)
-	// Rightmost parent (most derived-like) first - this ensures each parent's
-	// chain is fully drained before moving to the next parent
-	parentLinearizations := make([][]string, 0)
-	for i := len(contract.BaseContracts) - 1; i >= 0; i-- {
-		baseName := contract.BaseContracts[i]
-		parentLin, err := ib.c3LinearizeInternal(baseName)
-		if err != nil {
-			// Parent not found OR cyclic — skip and continue with the rest.
-			VerboseLog("C3 parent linearization skipped (%s -> %s): %v", contractName, baseName, err)
-			continue
-		}
-		parentLinearizations = append(parentLinearizations, parentLin)
-	}
-
-	// Add the list of direct parents in REVERSE order (right-to-left)
-	// This is used for blocking: rightmost parent blocks leftmost
-	reversedBases := make([]string, len(contract.BaseContracts))
-	for i, base := range contract.BaseContracts {
-		reversedBases[len(contract.BaseContracts)-1-i] = base
-	}
-	parentLinearizations = append(parentLinearizations, reversedBases)
-
-	// Merge using C3 algorithm
-	merged, err := ib.c3Merge(parentLinearizations)
-	if err != nil {
-		return nil, err
-	}
-
-	// Prepend current contract (most derived) at the start
-	result := append([]string{contractName}, merged...)
-
-	return result, nil
-}
-
-// c3LinearizeInternal computes C3 linearization in base-first order (for internal recursion)
-func (ib *InheritanceBuilder) c3LinearizeInternal(contractName string) ([]string, error) {
-	if ib.inProgress[contractName] {
-		return nil, fmt.Errorf("cyclic inheritance detected at %s", contractName)
-	}
-	ib.inProgress[contractName] = true
-	defer delete(ib.inProgress, contractName)
-
-	contract := ib.db.GetContractByName(contractName)
-	if contract == nil {
-		return nil, fmt.Errorf("contract not found: %s", contractName)
-	}
-
-	// Base case: no parents
-	if len(contract.BaseContracts) == 0 {
-		return []string{contractName}, nil
-	}
-
-	// Collect parent linearizations in REVERSE order (right-to-left)
-	parentLinearizations := make([][]string, 0)
-	for i := len(contract.BaseContracts) - 1; i >= 0; i-- {
-		baseName := contract.BaseContracts[i]
-		parentLin, err := ib.c3LinearizeInternal(baseName)
-		if err != nil {
-			// Parent not found, skip
-			continue
-		}
-		parentLinearizations = append(parentLinearizations, parentLin)
-	}
-
-	// Add the list of direct parents in REVERSE order (right-to-left)
-	reversedBases := make([]string, len(contract.BaseContracts))
-	for i, base := range contract.BaseContracts {
-		reversedBases[len(contract.BaseContracts)-1-i] = base
-	}
-	parentLinearizations = append(parentLinearizations, reversedBases)
-
-	// Merge using C3 algorithm
-	merged, err := ib.c3Merge(parentLinearizations)
-	if err != nil {
-		return nil, err
-	}
-
-	// Prepend current contract (most derived) at the start
-	// With right-to-left processing, merge already produces derived-first order
-	result := append([]string{contractName}, merged...)
-	return result, nil
-}
-
-// c3Merge merges multiple linearizations using C3 algorithm
-// Lists are ordered: rightmost parent first (most derived-like), last list is direct parents
-// Algorithm: Chain draining - pick from same list until blocked, then move to next
+// c3Linearize performs canonical C3 linearization (Solidity's Method Resolution
+// Order), the same algorithm used by Solidity and CPython.
 //
-// TODO(stage-3): the chain-draining variant here picks heads in reverse list
-// order; canonical C3 (Solidity, CPython) picks in forward order with strict
-// "no candidate in any other list's tail" semantics. Output is correct on
-// non-diamond inheritance but can diverge from solc on complex diamonds.
-// Port the canonical algorithm once we have diamond-inheritance fixtures.
-// Tracked in .vscode/2026-05-08-invariant-audit.md §1.4.
-func (ib *InheritanceBuilder) c3Merge(lists [][]string) ([]string, error) {
-	var result []string
-	lastPickedListHead := "" // Track the head we picked from
+// Solidity reads the `is` base list left-to-right but treats the LAST-listed
+// base as the most derived. Equivalently, C3 is computed over the direct base
+// list in reverse:
+//
+//	L[C] = C + merge( L[B_n], …, L[B_1], [B_n, …, B_1] )
+//
+// where B_1..B_n are the bases in written order. The `merge` step uses the
+// canonical forward-order rule (select the first head that appears in no other
+// list's tail), so the result is provably the same MRO solc computes — not a
+// heuristic that can diverge on deep diamonds.
+//
+// The output is derived-first (most derived contract at index 0, most-base
+// last), which is both the method-resolution scan order and an easy-to-read
+// display order.
+//
+// It operates on the resolved *Contract (not just a name) and resolves each base
+// name relative to that contract's source file via db.ResolveContractName, so a
+// duplicate contract name (e.g. a real `Token` and a mock `Token`) resolves to
+// the right base instead of an arbitrary global pick. Cycle tracking is keyed by
+// contract ID so two same-named contracts are linearized independently.
+func (ib *InheritanceBuilder) c3Linearize(contract *types.Contract) ([]string, error) {
+	if contract == nil {
+		return nil, fmt.Errorf("nil contract")
+	}
+	if cached, ok := ib.memo[contract.ID]; ok {
+		return append([]string(nil), cached...), nil // copy so callers can't mutate the cache
+	}
+	if ib.inProgress[contract.ID] {
+		return nil, fmt.Errorf("cyclic inheritance detected at %s", contract.Name)
+	}
+	ib.inProgress[contract.ID] = true
+	defer delete(ib.inProgress, contract.ID)
 
+	// Base case: no parents.
+	if len(contract.BaseContracts) == 0 {
+		result := []string{contract.Name}
+		ib.memo[contract.ID] = append([]string(nil), result...)
+		return result, nil
+	}
+
+	// Reverse the direct base list: Solidity's most-derived base is the one
+	// written last, so C3 is computed right-to-left.
+	revBases := make([]string, len(contract.BaseContracts))
+	for i, base := range contract.BaseContracts {
+		revBases[len(contract.BaseContracts)-1-i] = base
+	}
+
+	// Build the merge input: each reversed parent's full linearization, followed
+	// by the reversed direct-base list itself (which enforces local precedence).
+	lists := make([][]string, 0, len(revBases)+1)
+	degraded := false
+	for _, baseName := range revBases {
+		base := ib.db.ResolveContractName(baseName, contract.SourceFile)
+		if base == nil {
+			// Unknown base (e.g. an interface from an unresolved import): keep its
+			// name in the direct-base list below, but we cannot recurse into it.
+			VerboseLog("C3 parent not found (%s -> %s); using name only", contract.Name, baseName)
+			continue
+		}
+		parentLin, err := ib.c3Linearize(base)
+		if err != nil {
+			// Cyclic parent: skip recursion but keep linearizing the rest so
+			// downstream phases still receive a usable (if partial) MRO. The
+			// partial result is context-sensitive, so don't memoize it.
+			VerboseLog("C3 parent linearization skipped (%s -> %s): %v", contract.Name, baseName, err)
+			degraded = true
+			continue
+		}
+		lists = append(lists, parentLin)
+	}
+	lists = append(lists, append([]string{}, revBases...))
+
+	merged := ib.c3Merge(lists)
+	result := append([]string{contract.Name}, merged...)
+	if !degraded {
+		ib.memo[contract.ID] = append([]string(nil), result...)
+	}
+	return result, nil
+}
+
+// c3Merge implements the canonical forward-order C3 merge. At each step it scans
+// the lists left-to-right for a "good head" — a head that appears in no other
+// list's tail — and selects it. Selecting heads in forward order with the
+// no-tail rule is what makes C3 deterministic and consistent with solc.
+//
+// If the hierarchy is genuinely inconsistent (no good head exists, which
+// Solidity would reject at compile time), c3Merge degrades gracefully: it takes
+// the first remaining head and logs, so a single malformed contract cannot abort
+// the whole build. Operates on private copies so the caller's slices are intact.
+func (ib *InheritanceBuilder) c3Merge(lists [][]string) []string {
+	work := make([][]string, len(lists))
+	for i, l := range lists {
+		work[i] = append([]string{}, l...)
+	}
+
+	var result []string
 	for {
-		// Count non-empty lists
-		nonEmptyCount := 0
-		for _, list := range lists {
-			if len(list) > 0 {
-				nonEmptyCount++
+		anyNonEmpty := false
+		for _, l := range work {
+			if len(l) > 0 {
+				anyNonEmpty = true
+				break
 			}
 		}
-		if nonEmptyCount == 0 {
+		if !anyNonEmpty {
 			break
 		}
 
-		var head string
+		head := ""
 		found := false
-		pickedFromListIdx := -1
-
-		// CHAIN DRAINING: If we picked something before, try to continue from same list
-		if lastPickedListHead != "" {
-			for listIdx := 0; listIdx < len(lists); listIdx++ {
-				if len(lists[listIdx]) == 0 {
-					continue
-				}
-				// Check if this list's head was the one we picked before
-				// (meaning this is the list we were draining)
-				if len(lists[listIdx]) > 0 {
-					candidate := lists[listIdx][0]
-					if ib.isGoodHeadFromSpecificList(candidate, lists, listIdx) {
-						// Continue picking from any unblocked list
-						head = candidate
-						found = true
-						pickedFromListIdx = listIdx
-						break
-					}
-				}
+		for _, l := range work {
+			if len(l) == 0 {
+				continue
+			}
+			candidate := l[0]
+			if !inAnyTail(candidate, work) {
+				head = candidate
+				found = true
+				break
 			}
 		}
 
-		// If chain draining didn't work or first iteration, do normal selection
 		if !found {
-			// Try parent linearizations in REVERSE (n-2 to 0), then direct parent list
-			for listIdx := len(lists) - 2; listIdx >= 0; listIdx-- {
-				if len(lists[listIdx]) == 0 {
-					continue
-				}
-				candidate := lists[listIdx][0]
-				if ib.isGoodHeadFromSpecificList(candidate, lists, listIdx) {
-					head = candidate
-					found = true
-					pickedFromListIdx = listIdx
+			// Inconsistent linearization — pick the first available head to make
+			// progress rather than loop forever or drop the contract entirely.
+			for _, l := range work {
+				if len(l) > 0 {
+					head = l[0]
 					break
 				}
 			}
-
-			// Try direct parent list as fallback
-			if !found {
-				directParentIdx := len(lists) - 1
-				if len(lists[directParentIdx]) > 0 {
-					candidate := lists[directParentIdx][0]
-					if ib.isGoodHeadFromSpecificList(candidate, lists, directParentIdx) {
-						head = candidate
-						found = true
-						pickedFromListIdx = directParentIdx
-					}
-				}
-			}
-		}
-
-		if !found {
-			return result, nil
+			VerboseLog("C3 merge: inconsistent linearization, forcing head %q", head)
 		}
 
 		result = append(result, head)
-
-		// Track what we picked for chain draining
-		if pickedFromListIdx >= 0 && len(lists[pickedFromListIdx]) > 1 {
-			// Next head after removing current
-			lastPickedListHead = lists[pickedFromListIdx][1]
-		} else {
-			lastPickedListHead = ""
-		}
-
-		// Remove head from all lists
-		for i := range lists {
-			lists[i] = removeElement(lists[i], head)
+		for i := range work {
+			work[i] = removeElement(work[i], head)
 		}
 	}
 
-	return result, nil
+	return result
 }
 
-// isGoodHeadFromSpecificList checks if a candidate from a specific list can be picked
-func (ib *InheritanceBuilder) isGoodHeadFromSpecificList(candidate string, lists [][]string, sourceIdx int) bool {
-	for listIdx, list := range lists {
-		if listIdx == sourceIdx {
-			continue
-		}
-		// Check if candidate is in the TAIL of this list
-		if len(list) > 1 {
-			for _, item := range list[1:] {
-				if item == candidate {
-					return false
-				}
+// inAnyTail reports whether candidate appears in the tail (every element after
+// the head) of any list — the canonical C3 "blocking" check.
+func inAnyTail(candidate string, lists [][]string) bool {
+	for _, l := range lists {
+		for i := 1; i < len(l); i++ {
+			if l[i] == candidate {
+				return true
 			}
 		}
 	}
-	return true
+	return false
 }
-
-
 
 // removeElement removes an element from a slice
 func removeElement(list []string, element string) []string {

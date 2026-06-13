@@ -1,0 +1,35 @@
+meta:
+  id: SEC-MSGVAL-001
+  title: "msg.value Used Inside a Loop"
+  severity: HIGH
+  confidence: MEDIUM
+  description: >
+    `msg.value` is referenced inside a loop body. `msg.value` is a transaction-
+    level constant — it does NOT decrement as the loop iterates. Per-iteration
+    accounting (`balances[users[i]] += msg.value`) therefore double-counts the
+    same ETH N times. In payable multicalls this allows a caller to mint N×
+    the actual ETH sent. Equivalent to Slither's msg-value-loop detector.
+  recommendation: >
+    Pass an explicit `amounts[]` array alongside `users[]` and require
+    `sum(amounts) == msg.value`. Never re-use `msg.value` inside a loop.
+  references:
+    - https://github.com/crytic/slither/wiki/Detector-Documentation#msg-value-inside-a-loop
+    - https://forum.openzeppelin.com/t/poc-multicall-with-msg-value-reuses-eth/14467
+
+query:
+  scope: entrypoint
+
+  filter:
+    # Only payable entries can receive ETH — non-payable functions cannot
+    # exhibit this bug because msg.value is always 0. Restricting here cuts
+    # the FP surface dramatically.
+    mutability_filter: payable
+
+  match:
+    contains:
+      kind: stmt.loop
+      contains:
+        kind: expr.member_access
+        name: ^value$
+        left:
+          name: ^msg$

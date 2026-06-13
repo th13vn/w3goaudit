@@ -5,9 +5,19 @@ import (
 	"encoding/hex"
 	"fmt"
 	"regexp"
+	"sort"
+	"strconv"
 	"strings"
 
 	"golang.org/x/crypto/sha3"
+)
+
+// Access-control heuristic patterns, compiled once at package init. These were
+// previously recompiled on every (recursive) call of isAccessControlledRecursive,
+// which is invoked per function per report — a measurable cost on large scans.
+var (
+	authModifierRegex = regexp.MustCompile(`(?i)(onlyOwner|onlyAdmin|onlyOperator|onlyRole|onlyGuardian|onlyGovernor|onlyGovernance|onlyGov|onlyManager|onlyController|auth|authorized|requiresAuth|onlyMinter|onlyPauser)`)
+	authFuncRegex     = regexp.MustCompile(`(?i)(check|require|verify|validate|enforce)_*(owner|auth|admin|role|sender|access|permission)`)
 )
 
 // Visibility represents function visibility
@@ -314,17 +324,16 @@ func isPrimitiveType(typeName string) bool {
 	return false
 }
 
-// isValidIntSize checks if the string is a valid integer size (8, 16, 24, ..., 256)
+// isValidIntSize checks if the string is a valid Solidity integer bit width:
+// a multiple of 8 in [8, 256]. Validating this prevents a user type whose name
+// merely starts with "int"/"uint" (e.g. a struct `intData`) from being treated
+// as a primitive and skipping tuple/selector resolution.
 func isValidIntSize(s string) bool {
-	// validSizes := map[string]bool{
-	// 	"8": true, "16": true, "24": true, "32": true, "40": true, "48": true,
-	// 	"56": true, "64": true, "72": true, "80": true, "88": true, "96": true,
-	// 	"104": true, "112": true, "120": true, "128": true, "136": true, "144": true,
-	// 	"152": true, "160": true, "168": true, "176": true, "184": true, "192": true,
-	// 	"200": true, "208": true, "216": true, "224": true, "232": true, "240": true,
-	// 	"248": true, "256": true,
-	// }
-	return true
+	n, err := strconv.Atoi(s)
+	if err != nil {
+		return false
+	}
+	return n >= 8 && n <= 256 && n%8 == 0
 }
 
 // UniqueID generates a unique ID for the function based on contract and selector
@@ -334,11 +343,120 @@ func (f *Function) UniqueID(structDefs map[string]*Struct) string {
 	return hex.EncodeToString(hash[:8])
 }
 
+// modifierLooksProtective walks the function's contract and its linearized
+// bases looking for a modifier definition with the given name, and returns
+// true when the modifier body carries at least one auth-shaped signal —
+// a require/assert/revert, an if/ternary, or a msg.sender / tx.origin
+// reference. When the definition cannot be resolved (synthetic test data,
+// inherited from a base that isn't in the database, or modifier AST not
+// captured during build), the function returns true so callers fall back to
+// trusting the modifier's name. It returns false only when the modifier is
+// definitely a no-op decoy.
+func modifierLooksProtective(db *Database, contractName, modName string) bool {
+	if db == nil {
+		return true
+	}
+	chain := []string{contractName}
+	if c := db.GetContractByName(contractName); c != nil {
+		chain = append(chain, c.LinearizedBases...)
+	}
+	seen := make(map[string]bool)
+	for _, cname := range chain {
+		if cname == "" || seen[cname] {
+			continue
+		}
+		seen[cname] = true
+		c := db.GetContractByName(cname)
+		if c == nil {
+			continue
+		}
+		for _, mod := range c.Modifiers {
+			if mod == nil || mod.Name != modName {
+				continue
+			}
+			if mod.AST == nil {
+				return true // can't inspect — trust the name
+			}
+			return modifierBodyHasAuthSignal(mod.AST)
+		}
+	}
+	return true // not found — trust the name
+}
+
+// modifierCallsAuthHelper resolves modName through contractName's linearization
+// and reports whether the modifier's body calls an auth-shaped helper
+// (e.g. _checkOwner, requireAuth). Relies on Modifier.Calls being populated by
+// the call-graph builder's modifier-body analysis.
+func modifierCallsAuthHelper(db *Database, contractName, modName string) bool {
+	if db == nil {
+		return false
+	}
+	chain := []string{contractName}
+	if c := db.GetContractByName(contractName); c != nil {
+		chain = append(chain, c.LinearizedBases...)
+	}
+	seen := make(map[string]bool)
+	for _, cname := range chain {
+		if cname == "" || seen[cname] {
+			continue
+		}
+		seen[cname] = true
+		c := db.GetContractByName(cname)
+		if c == nil {
+			continue
+		}
+		for _, mod := range c.Modifiers {
+			if mod == nil || mod.Name != modName {
+				continue
+			}
+			for _, call := range mod.Calls {
+				if authFuncRegex.MatchString(call.Target) {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+// modifierBodyHasAuthSignal reports whether the modifier's AST contains any
+// auth-shaped marker. The check is intentionally lenient — its purpose is to
+// distinguish a true no-op decoy (`modifier auth() { _; }`) from any modifier
+// with a real body, not to validate that the check is correct.
+func modifierBodyHasAuthSignal(root *ASTNode) bool {
+	if root == nil {
+		return false
+	}
+	found := false
+	root.WalkDescendants(func(n *ASTNode) bool {
+		if n == nil {
+			return true
+		}
+		if IsGuard(n.Kind) || IsCheck(n.Kind) {
+			found = true
+			return false
+		}
+		if n.Kind == KindStmtIf || n.Kind == KindExprConditional {
+			found = true
+			return false
+		}
+		if n.Kind == KindExprMemberAccess {
+			if strings.Contains(n.Name, "msg.sender") || strings.Contains(n.Name, "tx.origin") {
+				found = true
+				return false
+			}
+		}
+		return true
+	})
+	return found
+}
+
 // IsAccessControlled checks if the function has access control logic
 // Checks for:
-// 1. Access control modifiers (onlyOwner, auth, etc.)
-// 2. msg.sender/tx.origin checks in require/assert/if statements
-// 3. Recursive checks on internal calls
+//  1. Access control modifiers (onlyOwner, auth, etc.) — with best-effort
+//     modifier-body validation to detect decoy modifiers
+//  2. msg.sender/tx.origin checks in require/assert/if statements
+//  3. Recursive checks on internal calls
 func (f *Function) IsAccessControlled(db *Database) bool {
 	visited := make(map[string]bool)
 	return f.isAccessControlledRecursive(db, visited)
@@ -353,21 +471,44 @@ func (f *Function) isAccessControlledRecursive(db *Database, visited map[string]
 	}
 	visited[key] = true
 
-	// 1. Check modifiers
-	// Use same regex as checkUnAuthenticated preset
-	authModifierPattern := `(?i)(onlyOwner|onlyAdmin|onlyOperator|onlyRole|onlyGuardian|onlyGovernor|onlyGovernance|onlyGov|onlyManager|onlyController|auth|authorized|requiresAuth|onlyMinter|onlyPauser)`
-	regex := regexp.MustCompile(authModifierPattern)
+	// 1. Check modifiers (auth-named, validated against decoys below).
+	for _, modName := range f.Modifiers {
+		if !authModifierRegex.MatchString(modName) {
+			continue
+		}
+		// Best-effort body validation: an auth-named modifier whose body is
+		// a no-op (`modifier auth() { _; }`) is a decoy — common in adversarial
+		// or deliberately misleading code. Resolve the modifier definition
+		// through the function's contract + its linearized bases and require
+		// at least one auth-shaped signal (require/assert/revert/if or a
+		// msg.sender / tx.origin reference) before trusting the name. When
+		// the definition cannot be resolved (synthetic tests, inherited from
+		// an out-of-scope base), fall back to trusting the name.
+		if db != nil && !modifierLooksProtective(db, f.ContractName, modName) {
+			continue
+		}
+		return true
+	}
 
-	for _, mod := range f.Modifiers {
-		if regex.MatchString(mod) {
-			return true
+	// 1b. A modifier whose NAME isn't auth-shaped can still enforce access
+	// control by calling an auth helper in its body (e.g.
+	// `modifier gate { _enforceOwner(); _; }`). Now that modifier bodies are
+	// walked into Modifier.Calls, detect that case.
+	if db != nil {
+		for _, modName := range f.Modifiers {
+			if modifierCallsAuthHelper(db, f.ContractName, modName) {
+				return true
+			}
 		}
 	}
 
 	// 2. Check for calls to internal auth functions (heuristic fallback)
-	// Matches: _checkOwner, _requireAuth, _validateAdmin, _enforceRole, etc.
-	authFuncPattern := `(?i)(_?check|_?require|_?verify|_?validate|_?enforce).(Owner|Auth|Admin|Role|Sender|Access|Permission)`
-	authFuncRegex := regexp.MustCompile(authFuncPattern)
+	// Matches verb+noun auth helpers in both camelCase and snake_case:
+	// _checkOwner, checkOwner, requireAuth, _validate_admin, enforceRole, etc.
+	// The verb and noun may be joined directly or separated only by
+	// underscores. (A literal `.` here was a bug: it required exactly one
+	// character between verb and noun, so the common no-separator camelCase
+	// forms like `_checkOwner` silently failed to match.)
 	for _, call := range f.Calls {
 		// Only check internal or self calls (or inherited)
 		if call.CallType == "internal" || call.CallType == "inherited" || call.CallType == "self" {
@@ -395,6 +536,19 @@ func (f *Function) isAccessControlledRecursive(db *Database, visited map[string]
 
 	// 4. Recursive check on internal calls (Deep Inspection)
 	if db != nil {
+		// Iterate main contracts in deterministic (sorted) order, and only
+		// consider deployment contexts whose linearized hierarchy actually
+		// contains THIS function's contract. Previously this scanned every main
+		// contract by bare function name, so a protected helper of the same name
+		// in an unrelated contract would mark this function as access-controlled
+		// (a false negative) — and because it walked a map, the result was
+		// non-deterministic when two hierarchies defined same-named helpers.
+		mainIDs := make([]string, 0, len(db.MainContracts))
+		for id := range db.MainContracts {
+			mainIDs = append(mainIDs, id)
+		}
+		sort.Strings(mainIDs)
+
 		for _, call := range f.Calls {
 			// Only follow internal/inherited/self/super calls
 			if call.CallType == "internal" || call.CallType == "inherited" ||
@@ -410,9 +564,14 @@ func (f *Function) isAccessControlledRecursive(db *Database, visited map[string]
 				// Get the main contract that contains this function (or its most derived version)
 				// We use db.MainContracts to find the actual runtime implementation
 				foundInMain := false
-				for mainContractID := range db.MainContracts {
+				for _, mainContractID := range mainIDs {
 					mainContract := db.GetContract(mainContractID)
 					if mainContract == nil {
+						continue
+					}
+					// Skip deployment contexts that don't contain this function's
+					// contract — resolving the callee elsewhere is meaningless.
+					if !contractHierarchyContains(mainContract, f.ContractName) {
 						continue
 					}
 					// LinearizedBases is derived-first: [MostDerived, ..., MostBase]
@@ -459,6 +618,25 @@ func (f *Function) isAccessControlledRecursive(db *Database, visited map[string]
 		}
 	}
 
+	return false
+}
+
+// contractHierarchyContains reports whether contractName appears in the
+// deployment context of mainContract — either as the contract itself or
+// anywhere in its C3 linearization. Used to scope internal-call resolution to
+// the hierarchy that actually contains the caller.
+func contractHierarchyContains(mainContract *Contract, contractName string) bool {
+	if mainContract == nil || contractName == "" {
+		return false
+	}
+	if mainContract.Name == contractName {
+		return true
+	}
+	for _, base := range mainContract.LinearizedBases {
+		if base == contractName {
+			return true
+		}
+	}
 	return false
 }
 

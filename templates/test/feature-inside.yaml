@@ -1,0 +1,26 @@
+meta:
+  id: TEST-FEATURE-INSIDE
+  title: "Feature test: contains + inside (ancestor traversal)"
+  severity: MEDIUM
+  confidence: LOW
+  description: >
+    Engine feature fixture for the `inside` ancestor-traversal operator.
+    Matches a tx.origin member access nested inside a require/assert/if guard.
+    Expected to match VulnerableInside.adminAction and NOT SafeInside in
+    test-data/core/engine-features/02-inside.sol.
+  recommendation: >
+    This is a feature-test template, not a production detector.
+
+query:
+  scope: function
+
+  match:
+    contains:
+      kind: expr.member_access
+      name: "tx\\.origin"
+      inside:
+        any:
+          - kind: check.require
+          - kind: check.assert
+          - kind: stmt.if
+          - kind: expr.conditional

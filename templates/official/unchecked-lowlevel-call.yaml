@@ -1,0 +1,38 @@
+meta:
+  id: SEC-LOWLEVEL-CALL-001
+  title: "Unchecked Low-Level Call Return Value"
+  severity: MEDIUM
+  confidence: MEDIUM
+  description: >
+    A low-level `addr.call{value: ...}(data)` (or `addr.call(data)`) is invoked
+    but the `(bool success, bytes memory)` return tuple is discarded. Low-level
+    calls do NOT revert on failure — they return `success = false`. Discarding
+    that means a failed call is silently absorbed; if state was updated before
+    the call (claim flags, balances), the contract can leak funds or grant
+    privileges that were never paid for. Equivalent to Slither's unchecked-
+    lowlevel detector.
+  recommendation: >
+    Capture the success flag: `(bool ok, ) = addr.call{value: x}("");
+    require(ok, "call failed");`. For pure ETH sends prefer
+    `Address.sendValue` (OpenZeppelin) which encodes the require for you.
+  references:
+    - https://github.com/crytic/slither/wiki/Detector-Documentation#unchecked-low-level-calls
+    - https://swcregistry.io/docs/SWC-104
+
+query:
+  scope: function
+
+  match:
+    contains:
+      kind: call.lowlevel.call
+      # If the call is the RHS of an assign (`(bool ok, ) = to.call(...)`) the
+      # return is captured; downstream guard analysis is out of scope. If it
+      # is inside require/assert/if/return, it's also considered handled.
+      not:
+        inside:
+          any:
+            - kind: check.require
+            - kind: check.assert
+            - kind: stmt.if
+            - kind: stmt.assign
+            - kind: stmt.return

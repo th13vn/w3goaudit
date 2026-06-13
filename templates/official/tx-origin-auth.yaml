@@ -1,0 +1,42 @@
+meta:
+  id: SEC-TXORIGIN-001
+  title: tx.origin Used for Authentication
+  severity: MEDIUM
+  confidence: HIGH
+  description: >
+    tx.origin is used for authentication inside a conditional or require statement.
+    This is a phishing attack vector — an attacker can trick the legitimate
+    tx.origin into calling a malicious contract that then calls this function,
+    bypassing the intended access control.
+  recommendation: >
+    Replace tx.origin with msg.sender. Use msg.sender for access control checks.
+    If cross-contract calls with origin tracking are needed, pass msg.sender
+    explicitly as a parameter.
+  references:
+    - https://swcregistry.io/docs/SWC-115
+    - https://docs.soliditylang.org/en/latest/security-considerations.html#tx-origin
+
+query:
+  scope: function
+
+  # Whitelist the legitimate anti-contract idiom `require(msg.sender ==
+  # tx.origin)` / `tx.origin == msg.sender`, which asserts the caller is an EOA
+  # rather than authenticating. Slither excludes the same form.
+  filter:
+    not:
+      source_regex: "(msg\\.sender\\s*==\\s*tx\\.origin|tx\\.origin\\s*==\\s*msg\\.sender)"
+
+  match:
+    # `tx.origin` inside ANY guard or branch (require / assert / revert /
+    # if / conditional) — all are auth-shaped uses. The previous version
+    # only matched `stmt.if`, missing the very common `require(tx.origin ==
+    # owner, ...)` form (the single most-popular tx.origin auth pattern).
+    contains:
+      kind: expr.member_access
+      name: "tx\\.origin"
+      inside:
+        any:
+          - kind: check.require
+          - kind: check.assert
+          - kind: stmt.if
+          - kind: expr.conditional

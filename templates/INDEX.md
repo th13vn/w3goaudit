@@ -3,7 +3,9 @@
 ## Purpose
 
 WQL templates for smart-contract security scanning. Each `.yaml` file is a
-self-contained detector loaded by `--template` at scan time.
+self-contained detector. The `official/` pack is embedded in the binary
+(`//go:embed`) and runs by default; point `--template` at any file or directory
+to override it.
 
 ## Curation Policy
 
@@ -17,79 +19,72 @@ legitimate pattern) are also out.
 
 ```
 templates/
-├── security/             # Hand-written security detectors (19)
-├── slither-inspired/     # Slither-equivalent detectors (20, HIGH/MEDIUM only)
-├── 4naly3er-insppired/   # 4naly3er-equivalent detectors (14, HIGH/MEDIUM only)
-└── realworld-inspired/   # Replays of real-world incidents (6, incident-specific)
+├── official/   # Curated official detector pack (25) — embedded; run THIS to audit
+└── test/       # WQL feature-test templates (NOT production detectors)
 ```
 
-> All four directories are production detectors. To scan with everything,
-> point `--template` at `templates/` and use `--dedupe` to collapse the
-> known overlaps between directories (see [Known Overlaps](#known-overlaps)).
-> To narrow a scan, target a single subdirectory.
+> **`official/` is the pack you scan with.** It is the curated, best-of-breed
+> set of hand-written W3GoAudit-native detectors. It is embedded in the binary,
+> so a bare `w3goaudit ./contracts/` uses it automatically — no `--template`
+> flag required. Point `--template templates/official/` explicitly when running
+> from a source checkout.
+>
+> `test/` is **not** a production detector set — it holds low-confidence
+> feature-exercise templates paired with fixtures in
+> [`../test-data/core/engine-features/`](../test-data/core/engine-features/) to
+> smoke-test WQL engine operators (`sequence`, `inside`, semantic groups,
+> `args` + `tainted_from`). Run it with
+> `w3goaudit test-data/core/engine-features/ --template templates/test/`.
+> Do not point production scans at it.
 
-## security/ — Hand-Written Detectors
+## official/ — Curated Detectors
 
-Each template is verified against focused fixtures under [`../test-data/security/`](../test-data/security/). Some contracts named `Safe_*` for one vulnerability class intentionally still contain other bug classes, so whole-directory scans are assessed by template/category rather than by name prefix alone. TP/FP/recall notes are in [`../docs/template-quality-analysis.md`](../docs/template-quality-analysis.md) and the latest full-pack benchmark report under `.vscode/`.
+Templates are exercised against fixtures under
+[`../test-data/security/`](../test-data/security/). Detectors whose
+**FP exclusions** matter (e.g. `selfdestruct-unprotected`'s inline-guard
+carve-out, `tx-origin-auth`'s `msg.sender == tx.origin` whitelist) have
+dedicated `Vulnerable*`/`Safe*` fixtures named after the template. Some
+contracts named `Safe_*` for one vulnerability class intentionally still
+contain other bug classes, so whole-directory scans are assessed by
+template/category rather than by name prefix alone.
+
+> **Classification metadata (cwe/owasp):** templates currently carry `references`
+> (SWC/EIP/Slither links) for classification. Dedicated `cwe`/`owasp` fields are
+> not yet emitted — adding them requires `engine.TemplateMeta` fields plus SARIF
+> `taxa` propagation, tracked as a follow-up. Until then, use `references`.
 
 | ID | Severity | File | Detects |
 |---|---|---|---|
-| `SEC-DEST-001` | CRITICAL | `selfdestruct_unprotected.yaml` | `selfdestruct(...)` (Solidity-level OR assembly `selfdestruct` opcode) reachable from an entrypoint with no auth modifier |
-| `SEC-DELEG-001` | CRITICAL | `delegatecall_user_input.yaml` | `delegatecall` whose target flows from a function parameter |
-| `SEC-ETH-001` | HIGH | `arbitrary_send_eth.yaml` | Unprotected ETH withdrawal via `.transfer(amt)` / `.send(amt)` / `.call{value:}` — uses `has_value` attr (P0-2) to distinguish ETH-bearing `.call` |
-| `SEC-ERC20-001` | HIGH | `arbitrary_transferfrom.yaml` | `transferFrom(from, ...)` where `from` is user-controlled across entrypoint/helper flows and lacks sender/auth validation |
-| `SEC-ERC20-002` | HIGH | `unchecked_erc20_transfer.yaml` | ERC20 `transfer` / `transferFrom` whose bool return is discarded (ETH `.transfer(amt)` excluded — parser disambiguates by arg count via P0-1) |
-| `SEC-GEN-REENTRANCY` | HIGH | `reentrancy_pattern.yaml` | Generic CEI violation — outbound call before state write (no reentrancy guard) |
-| `SEC-REENTRANCY-002` | HIGH | `reentrancy_balance.yaml` | `balanceOf` → external-call → balance-read pattern without reentrancy guard (delta-snapshot exploit) |
-| `SEC-DELEG-002` | HIGH | `delegatecall_in_loop.yaml` | `delegatecall` inside `for`/`while` body (payable-multicall ETH reuse) |
-| `SEC-UPGRADE-001` | HIGH | `unprotected_initializer.yaml` | `initialize/init/setup` entrypoint that writes state with no access control or `initializer` guard |
-| `SEC-PRNG-001` | HIGH | `weak_prng.yaml` | Modulo over `block.timestamp`/`block.number`/`block.difficulty`/`block.prevrandao`/`blockhash` (Chainlink-VRF replacement) |
-| `SEC-MSGVAL-001` | HIGH | `msg_value_in_loop.yaml` | `msg.value` referenced inside a loop body in a `payable` entrypoint (multicall ETH reuse) |
-| `SEC-MATH-003` | HIGH | `incorrect_exp.yaml` | `^` (bitwise XOR) used in arithmetic context — classic "developer meant `**`" foot-gun |
-| `SEC-SEND-001` | MEDIUM | `unchecked_send.yaml` | `addr.send(amt)` whose bool return is discarded |
-| `SEC-LOWLEVEL-CALL-001` | MEDIUM | `unchecked_lowlevel_call.yaml` | Low-level `.call(data)` / `.call{value:}(data)` whose `(bool, bytes)` return is discarded |
-| `SEC-EQ-001` | MEDIUM | `dangerous_strict_equality.yaml` | `==` / `!=` against `address(this).balance`, `balanceOf(...)`, `block.timestamp`, `block.number` — externally manipulable values |
-| `SEC-MATH-002` | MEDIUM | `divide_before_multiply.yaml` | `(a / b) * c` shape — divide is the left operand of a multiply (precision-loss bug) |
-| `SEC-MUTABILITY-001` | MEDIUM | `view_pure_modifies_state.yaml` | `view` / `pure` function that writes state (including inline-assembly `sstore` bypass) |
-| `SEC-TXORIGIN-001` | MEDIUM | `tx_origin_auth.yaml` | `tx.origin` used inside any guard (`require` / `assert` / `if` / ternary) — phishing-vector auth check |
-| `SEC-MATH-001` | MEDIUM | `unchecked_arithmetic.yaml` | Arithmetic inside `unchecked { ... }` on Solidity `>=0.8.0` |
+| `SEC-DEST-001` | CRITICAL | `selfdestruct-unprotected.yaml` | `selfdestruct(...)` (Solidity-level OR assembly opcode) reachable from an unauthenticated entrypoint (`preset: unAuthenticated` — modifiers, inline sender guards, and recursive auth helpers) |
+| `SEC-DELEG-001` | CRITICAL | `delegatecall-user-input.yaml` | `delegatecall` whose target flows from a function parameter |
+| `SEC-ETH-001` | HIGH | `arbitrary-send-eth.yaml` | Unprotected ETH withdrawal via `.transfer` / `.send` / `.call{value:}` |
+| `SEC-ERC20-001` | HIGH | `arbitrary-transferfrom.yaml` | `transferFrom(from, ...)` where `from` is user-controlled across entrypoint/helper flows and lacks sender/auth validation |
+| `SEC-ERC20-002` | HIGH | `unchecked-erc20-transfer.yaml` | ERC20 `transfer` / `transferFrom` whose bool return is discarded |
+| `SEC-GEN-REENTRANCY` | HIGH | `reentrancy-pattern.yaml` | CEI violation — ETH-bearing call / raw low-level `.call` / `delegatecall` followed by a state write, on a function lacking a reentrancy guard |
+| `SEC-REENTRANCY-002` | HIGH | `reentrancy-balance.yaml` | `balanceOf` → external-call → balance-read pattern without a reentrancy guard (delta-snapshot exploit) |
+| `SEC-DELEG-002` | HIGH | `delegatecall-in-loop.yaml` | `delegatecall` inside a `for`/`while` body (payable-multicall ETH reuse) |
+| `SEC-UPGRADE-001` | HIGH | `unprotected-initializer.yaml` | `initialize/init/setup` entrypoint that writes state with no access control or `initializer` guard |
+| `SEC-PRNG-001` | HIGH | `weak-prng.yaml` | Modulo over `block.timestamp` / `block.number` / `block.prevrandao` / `blockhash` |
+| `SEC-MSGVAL-001` | HIGH | `msg-value-in-loop.yaml` | `msg.value` referenced inside a loop body in a `payable` entrypoint (multicall ETH reuse) |
+| `SEC-MATH-003` | HIGH | `incorrect-exp.yaml` | `^` (bitwise XOR) used in arithmetic context — "developer meant `**`" foot-gun |
+| `SEC-HASH-001` | HIGH | `encode-packed-collision.yaml` | `keccak256(abi.encodePacked(...))` over ≥2 user-controlled dynamic args (ambiguous packing → collision) |
+| `SEC-PROXY-001` | HIGH | `proxy-storage-collision.yaml` | Proxy subclass declares plain mutable storage alongside a constructor (implementation slot collision) |
+| `SEC-SIG-001` | HIGH | `ecdsa-recover-malleable.yaml` | `ECDSA.recover` result keyed by the raw `signature` bytes (malleability replay) |
+| `SEC-CALL-001` | HIGH | `arbitrary-low-level-call.yaml` | Unauthenticated entrypoint forwards a user-controlled target AND calldata into a low-level `.call` |
+| `SEC-OWNER-001` | HIGH | `unrestricted-transferownership.yaml` | `transferOwnership` entrypoint writes owner-like state from a parameter with no access control |
+| `SEC-SEND-001` | MEDIUM | `unchecked-send.yaml` | `addr.send(amt)` whose bool return is discarded |
+| `SEC-LOWLEVEL-CALL-001` | MEDIUM | `unchecked-lowlevel-call.yaml` | Low-level `.call(data)` / `.call{value:}(data)` whose `(bool, bytes)` return is discarded |
+| `SEC-EQ-001` | MEDIUM | `dangerous-strict-equality.yaml` | `==` / `!=` against `address(this).balance`, `balanceOf(...)`, `block.timestamp`, `block.number` |
+| `SEC-MATH-002` | MEDIUM | `divide-before-multiply.yaml` | `(a / b) * c` shape — divide is the left operand of a multiply (precision-loss bug) |
+| `SEC-MUTABILITY-001` | MEDIUM | `view-pure-modifies-state.yaml` | `view` / `pure` function that writes state (including inline-assembly `sstore` bypass) |
+| `SEC-TXORIGIN-001` | MEDIUM | `tx-origin-auth.yaml` | `tx.origin` used inside any guard (`require` / `assert` / `if` / ternary) |
+| `SEC-MATH-001` | MEDIUM | `unchecked-arithmetic.yaml` | Arithmetic inside `unchecked { ... }` on Solidity `>=0.8.0` |
+| `SEC-BOOL-001` | MEDIUM | `boolean-cst.yaml` | Boolean literal misused as a comparison/logical operand (`x == true`, `a && false`) or directly as an `if`/ternary condition (`if (true)`). Plain `return true` / `flag = false` / `while (true)` are not flagged |
 
-All `security/*` templates carry curated metadata:
-`cwe`, `owasp` (OWASP SC Top 10 2025 IDs), and `references` (SWC links,
-Slither wiki entries, Solidity docs). The engine propagates these to
-findings; Markdown / HTML / JSON / SARIF formatters all surface them, and
-SARIF emits CWE tags + GitHub `security-severity` scores.
-
-## slither-inspired/ — Slither-Equivalent Detectors
-
-HIGH and MEDIUM severity only. Detectors that are inherently noisy (e.g. assembly use, low-level calls, solc version) have been dropped. Template IDs are `SLITHER-*`.
-
-**HIGH (12):** `arbitrary-send-erc20`, `arbitrary-send-eth`, `controlled-delegatecall`, `delegatecall-loop`, `incorrect-exp`, `msg-value-loop`, `reentrancy-balance`, `reentrancy-eth`, `suicidal`, `unchecked-transfer`, `unprotected-upgrade`, `weak-prng`
-
-**MEDIUM (8):** `boolean-cst`, `constant-function-state`, `divide-before-multiply`, `incorrect-equality`, `reentrancy-no-eth`, `tx-origin`, `unchecked-lowlevel`, `unchecked-send`
-
-## 4naly3er-inspired/ — 4naly3er-Equivalent Detectors
-
-> Folder is named `4naly3er-insppired/` on disk (double "p"). Paths below use the actual name.
-
-HIGH and MEDIUM severity only. All `GAS-*` and `L-*` (low) detectors removed. Template IDs are `4NALY3ER-H-*` / `4NALY3ER-M-*`.
-
-**HIGH (4) — `H-*`:** `comparison-outside-condition`, `delegatecall-in-loop`, `msg-value-in-loop`, `wsteth-price-steth`
-
-**MEDIUM (10) — `M-*`:** `approve-zero-first`, `avoid-tx-origin`, `block-number-l2`, `centralization-risk`, `deprecated-chainlink-latest-answer`, `erc721-safe-mint`, `erc721-safe-transfer-from`, `fee-over-100`, `stale-oracle-data`, `unchecked-erc20-transfer`
-
-## realworld-inspired/ — Incident Replays
-
-Narrow, incident-specific patterns. Zero findings on generic codebases is expected — they trigger only on contracts with the matching shape. All six are HIGH severity.
-
-| ID | File | Replays |
-|---|---|---|
-| `RW-ALKEMI-001` | `alkemi_self_liquidation.yaml` | Alkemi self-liquidation guard missing |
-| `RW-AMTOKEN-001` | `deferred_burn_manipulation.yaml` | Deferred-burn price manipulation (AM/MT Token) |
-| `RW-DBXEN-001` | `dbxen_msgsender_inconsistency.yaml` | Mixed `msg.sender` / `_msgSender()` in one function (DBXen) |
-| `RW-ETHERFREAKERS-001` | `etherfreakers_transfer_hook_cei.yaml` | ETH payout → NFT transfer → state-write CEI violation |
-| `RW-GOOSE-001` | `goose_finance_deposit_before_harvest.yaml` | Shares minted before harvest/sync (Goose Finance) |
-| `RW-MTTOKEN-001` | `mt_buy_restriction_bypass.yaml` | Whitelist early-return short-circuits restriction (MT Token) |
+`references` is **optional** — present only where a canonical smart-contract
+reference exists (SWC registry, Slither wiki, Solidity docs, EIPs). The engine
+propagates references to findings; Markdown / HTML / JSON / SARIF formatters
+surface them, and SARIF emits GitHub `security-severity` scores.
 
 ---
 
@@ -256,15 +251,12 @@ to substring matching.
 ## Adding New Templates
 
 1. Pick the right directory:
-   - `security/` — hand-curated patterns with full `cwe` / `owasp` / `references` metadata.
-   - `slither-inspired/` — direct port of a Slither detector.
-   - `4naly3er-insppired/` — direct port of a 4naly3er detector.
-   - `realworld-inspired/` — replay of a specific incident with the on-chain trail in the description.
+   - `official/` — curated, audit-grade patterns with optional `references`.
+   - `test/` — low-confidence feature-exercise templates for WQL operators
+     (paired with `../test-data/core/engine-features/`), NOT production detectors.
 2. Follow WQL syntax (see [../docs/wql-syntax.md](../docs/wql-syntax.md)).
-3. Test against vulnerable contracts in `../test-data/security/`:
-   - `test-slither-detectors.sol` — `Vulnerable_*` / `Safe_*` pairs for Slither detectors
-   - `test-4naly3er-detectors.sol` — `Vulnerable_*` / `Safe_*` pairs for 4naly3er detectors
-   - `test-arbitrary-transferfrom.sol` / `test-interprocedural-taint.sol` / `test-reentrancy.sol` / `reentrancy-simple.sol` — focused fixtures
+3. Test against fixtures in [`../test-data/security/`](../test-data/security/):
+   add a `Vulnerable_*` / `Safe_*` pair named after the detector.
 4. Verify the `Vulnerable_*` cases trigger and the `Safe_*` cases do not.
 5. Add the template to the table in this INDEX.md.
 
@@ -273,54 +265,28 @@ to substring matching.
 ## Usage
 
 `--template` is single-valued and accepts either a file or a directory. When
-given a directory it walks every `.yaml` underneath. Run one directory at a
-time, or point at `templates/` to run them all.
+given a directory it walks every `.yaml` underneath. When omitted, the embedded
+`official/` pack is used.
 
 ```bash
-# Scan with hand-written security detectors
-w3goaudit ./contracts/ --template templates/security/
+# Audit with the built-in official pack (the normal case — no flag needed)
+w3goaudit ./contracts/
 
-# Scan with all Slither-equivalent detectors
-w3goaudit ./contracts/ --template templates/slither-inspired/
+# Equivalent, pointing at the pack explicitly from a source checkout
+w3goaudit ./contracts/ --template templates/official/
 
-# Scan with all 4naly3er-equivalent detectors
-w3goaudit ./contracts/ --template templates/4naly3er-insppired/
-
-# Replay known real-world incidents
-w3goaudit ./contracts/ --template templates/realworld-inspired/
-
-# Run every production detector at once and collapse duplicates
-w3goaudit ./contracts/ --template templates/ --dedupe
-
-# Scan with a single specific template
-w3goaudit ./contracts/ --template templates/security/reentrancy_pattern.yaml
+# Run a single specific detector
+w3goaudit ./contracts/ --template templates/official/reentrancy-pattern.yaml
 
 # Full integration scan with verbose log
-w3goaudit test-data/ --template templates/ --verbose=/tmp/scan.log
+w3goaudit test-data/security/ --template templates/official/ --verbose=/tmp/scan.log
 ```
 
-Template errors are reported with `--verbose`:
+Template directories fail closed by default. Use `--ignore-invalid-templates`
+only for ad-hoc mixed directories; skipped files are then reported with
+`--verbose`:
 ```
-Loaded template: SEC-ERC20-001 (templates/security/arbitrary_transferfrom.yaml)
+Loaded template: SEC-ERC20-001 (templates/official/arbitrary-transferfrom.yaml)
 Skipping invalid template broken.yaml: parse YAML: yaml: line 3: ...
 Skipping template missing-id.yaml: missing meta.id
 ```
-
----
-
-## Known Overlaps
-
-Several detectors exist in more than one directory because `slither-inspired/`, `4naly3er-insppired/`, and `security/` each implement them from their own perspective. They produce overlapping findings:
-
-| Pattern | Templates that overlap |
-|---|---|
-| tx.origin auth | `slither-inspired/tx-origin`, `4naly3er-insppired/M-avoid-tx-origin`, `security/tx_origin_auth` |
-| delegatecall in loop | `slither-inspired/delegatecall-loop`, `4naly3er-insppired/H-delegatecall-in-loop` |
-| msg.value in loop | `slither-inspired/msg-value-loop`, `4naly3er-insppired/H-msg-value-in-loop` |
-| Unchecked ERC20 transfer | `slither-inspired/unchecked-transfer`, `4naly3er-insppired/M-unchecked-erc20-transfer` |
-| Generic reentrancy | `slither-inspired/reentrancy-eth`, `slither-inspired/reentrancy-no-eth`, `security/reentrancy_pattern` |
-| Selfdestruct without auth | `slither-inspired/suicidal`, `security/selfdestruct_unprotected` |
-| Arbitrary transferFrom | `slither-inspired/arbitrary-send-erc20`, `security/arbitrary_transferfrom` |
-| Controlled delegatecall | `slither-inspired/controlled-delegatecall`, `security/delegatecall_user_input` |
-
-Use `--dedupe` at scan time to collapse findings sharing `(file, line, function, severity)`.

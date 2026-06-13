@@ -3,9 +3,11 @@ package engine
 
 import (
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 
@@ -31,6 +33,9 @@ const (
 	ScopeLibrary Scope = "library"
 	// ScopeAbstract loops over abstract contract definitions only
 	ScopeAbstract Scope = "abstract"
+	// ScopeSource loops over raw source files. Most templates should use an
+	// AST scope; source_regex is also available as a scoped predicate there.
+	ScopeSource Scope = "source"
 )
 
 // Template represents a WQL vulnerability detection template
@@ -47,10 +52,16 @@ type TemplateMeta struct {
 	Confidence     string   `yaml:"confidence" json:"confidence"`
 	Description    string   `yaml:"description,omitempty" json:"description,omitempty"`
 	Recommendation string   `yaml:"recommendation,omitempty" json:"recommendation,omitempty"`
-	CWE            []int    `yaml:"cwe,omitempty" json:"cwe,omitempty"`
-	OWASP          []string `yaml:"owasp,omitempty" json:"owasp,omitempty"`
 	References     []string `yaml:"references,omitempty" json:"references,omitempty"`
 	Fix            string   `yaml:"fix,omitempty" json:"fix,omitempty"`
+}
+
+// TemplateLoadOptions controls directory template loading.
+type TemplateLoadOptions struct {
+	// IgnoreInvalid keeps scanning a template directory when one file is
+	// malformed or incomplete. The default is fail-closed: any invalid template
+	// aborts loading so security scans do not silently run with missing rules.
+	IgnoreInvalid bool
 }
 
 // QueryBlock defines the query scope, optional filter, and matching rules.
@@ -79,6 +90,11 @@ type Rule struct {
 	// ========== ATOMIC MATCHERS ==========
 	Kind string `yaml:"kind,omitempty" json:"kind,omitempty"`
 	Name string `yaml:"name,omitempty" json:"name,omitempty"`
+
+	// SourceRegex matches raw source text for the active scope. With
+	// query.scope=source it scans the whole file; in contract/function/AST
+	// contexts it checks the scoped source snippet.
+	SourceRegex string `yaml:"source_regex,omitempty" json:"source_regex,omitempty"`
 
 	// ========== ATTRIBUTES ==========
 	Attr map[string]interface{} `yaml:"attr,omitempty" json:"attr,omitempty"`
@@ -154,47 +170,87 @@ func LoadTemplate(path string) (*Template, error) {
 		return nil, fmt.Errorf("parse YAML: %w", err)
 	}
 
+	if err := finalizeTemplate(&tmpl, data, path); err != nil {
+		return nil, err
+	}
+	return &tmpl, nil
+}
+
+// validSeverities is the closed set of finding severities. A typo here used to
+// produce findings that appeared on the console but silently vanished from the
+// Markdown/HTML reports (which only render the known severity buckets).
+var validSeverities = map[string]bool{
+	"CRITICAL": true, "HIGH": true, "MEDIUM": true, "LOW": true, "INFO": true,
+}
+
+// finalizeTemplate runs the full validate+normalize pipeline shared by the file
+// loader (LoadTemplate) and the inline loader (ParseTemplate), so both behave
+// identically. `data` is the raw YAML (for arg.N key recovery) and `source`
+// names the origin for error messages.
+func finalizeTemplate(tmpl *Template, data []byte, source string) error {
+	if err := validateTemplateMeta(tmpl, source); err != nil {
+		return err
+	}
+	if !validSeverities[strings.ToUpper(tmpl.Meta.Severity)] {
+		return fmt.Errorf("template %s: invalid severity %q — must be one of CRITICAL, HIGH, MEDIUM, LOW, INFO", source, tmpl.Meta.Severity)
+	}
+	if err := validateScope(tmpl.Query.Scope); err != nil {
+		return fmt.Errorf("template %s: %w", source, err)
+	}
+
 	// Validate that filter/match rules sit at the right layer.
 	if err := validateRulePlacement(&tmpl.Query); err != nil {
-		return nil, err
+		return err
+	}
+
+	// Contract scopes only evaluate a small set of fields; reject the rest so
+	// AST/function predicates don't silently match every contract.
+	if isContractScope(tmpl.Query.Scope) {
+		if err := validateContractScopeRule(&tmpl.Query.Match, "match"); err != nil {
+			return err
+		}
+		if err := validateContractScopeRule(tmpl.Query.Filter, "filter"); err != nil {
+			return err
+		}
+	}
+
+	// Source scope is regex-only and reads only a top-level match.source_regex;
+	// a filter or nested source_regex would silently do nothing.
+	if tmpl.Query.Scope == ScopeSource {
+		if tmpl.Query.Filter != nil {
+			return fmt.Errorf("template %s: scope: source does not support filter: — use a top-level match.source_regex", source)
+		}
+		if tmpl.Query.Match.SourceRegex == "" {
+			return fmt.Errorf("template %s: scope: source requires a top-level match.source_regex", source)
+		}
 	}
 
 	// Promote inline attrs into Attr maps so the matcher can read them uniformly.
 	normalizeQueryBlock(&tmpl.Query)
 
-	// Post-process: scan raw YAML for arg.N flat keys.
-	if err := normalizeArgNKeys(data, &tmpl); err != nil {
-		// Non-fatal: log but don't fail
-		VerboseLog("Warning: arg.N normalization failed for %s: %v", path, err)
+	// Post-process: scan raw YAML for arg.N flat keys (non-fatal).
+	if err := normalizeArgNKeys(data, tmpl); err != nil {
+		VerboseLog("Warning: arg.N normalization failed for %s: %v", source, err)
 	}
 
-	// Compile every regex pattern once now so we surface typos as load errors
-	// instead of silently rewriting rule semantics at scan time.
-	if err := validateRegexes(&tmpl.Query.Match); err != nil {
-		return nil, fmt.Errorf("match: %w", err)
-	}
-	if err := validateRegexes(tmpl.Query.Filter); err != nil {
-		return nil, fmt.Errorf("filter: %w", err)
-	}
-
-	// Reject unknown preset names so authors see typos immediately.
-	if err := validatePresets(&tmpl.Query.Match); err != nil {
-		return nil, fmt.Errorf("match: %w", err)
-	}
-	if err := validatePresets(tmpl.Query.Filter); err != nil {
-		return nil, fmt.Errorf("filter: %w", err)
-	}
-
-	// Reject unknown `kind:` values (typos, dropped suffixes) so they surface
-	// at load instead of silently producing zero findings at scan time.
-	if err := validateKinds(&tmpl.Query.Match); err != nil {
-		return nil, fmt.Errorf("match: %w", err)
-	}
-	if err := validateKinds(tmpl.Query.Filter); err != nil {
-		return nil, fmt.Errorf("filter: %w", err)
+	// Surface bad regexes, presets, kinds, and out-of-vocabulary values as load
+	// errors instead of silently rewriting/skipping rule semantics at scan time.
+	for label, rule := range map[string]*Rule{"match": &tmpl.Query.Match, "filter": tmpl.Query.Filter} {
+		if err := validateRegexes(rule); err != nil {
+			return fmt.Errorf("%s: %w", label, err)
+		}
+		if err := validatePresets(rule); err != nil {
+			return fmt.Errorf("%s: %w", label, err)
+		}
+		if err := validateKinds(rule); err != nil {
+			return fmt.Errorf("%s: %w", label, err)
+		}
+		if err := validateRuleValues(rule); err != nil {
+			return fmt.Errorf("%s: %w", label, err)
+		}
 	}
 
-	return &tmpl, nil
+	return nil
 }
 
 // normalizeQueryBlock promotes inline attributes (is_state_var, operator,
@@ -228,6 +284,23 @@ func normalizeRule(r *Rule) {
 		}
 		r.Attr["operator"] = r.Operator
 		// Don't clear Operator — it's also used for display/debug
+	}
+	// Promote inline visibility/mutability into Attr so they match against the
+	// decl.function node's visibility/mutability attributes. Previously these
+	// fields were declared but never read, so `match: { visibility: external }`
+	// was a silent no-op. (Function-level filtering still uses visibility_filter
+	// / mutability_filter in filter:.)
+	if r.Visibility != "" {
+		if r.Attr == nil {
+			r.Attr = make(map[string]interface{})
+		}
+		r.Attr["visibility"] = r.Visibility
+	}
+	if r.Mutability != "" {
+		if r.Attr == nil {
+			r.Attr = make(map[string]interface{})
+		}
+		r.Attr["mutability"] = r.Mutability
 	}
 
 	// Recurse into sub-rules
@@ -409,11 +482,11 @@ func mergeArgsFromYAML(rule *Rule, node *yaml.Node) {
 // blocks operate at different layers:
 //
 //   - filter:  function/contract-level predicates only (modifier, extends,
-//              func_name, visibility_filter, mutability_filter, has_guard,
-//              has_param, version, preset).
+//     func_name, visibility_filter, mutability_filter, has_guard,
+//     has_param, version, preset).
 //   - match:   AST node predicates only (kind, name, contains, sequence,
-//              inside, args, tainted_from, left/right, attr, operator,
-//              is_state_var, visibility, mutability).
+//     inside, args, tainted_from, left/right, attr, operator,
+//     is_state_var, visibility, mutability).
 //
 // Logical operators (all/any/not) are allowed in both, and recurse.
 //
@@ -456,6 +529,8 @@ func checkRule(r *Rule, where string, inMatch bool) error {
 		"attr":         len(r.Attr) > 0,
 		"operator":     r.Operator != "",
 		"is_state_var": r.IsStateVar != nil,
+		"visibility":   r.Visibility != "",
+		"mutability":   r.Mutability != "",
 	}
 
 	// Context-only fields — forbidden inside match:.
@@ -535,9 +610,37 @@ func checkRule(r *Rule, where string, inMatch bool) error {
 	return nil
 }
 
-// LoadTemplates loads all templates from a directory (recursively).
-// Invalid templates are skipped with a verbose warning (not silently).
+func validateTemplateMeta(tmpl *Template, path string) error {
+	if tmpl == nil {
+		return fmt.Errorf("template %s: empty template", path)
+	}
+	if tmpl.Meta.ID == "" {
+		return fmt.Errorf("template %s: missing meta.id", path)
+	}
+	if tmpl.Meta.Severity == "" {
+		return fmt.Errorf("template %s: missing meta.severity", path)
+	}
+	return nil
+}
+
+// LoadTemplates loads all templates from a directory recursively.
+//
+// The default is fail-closed: malformed templates, missing required metadata,
+// or a directory with zero valid templates return an error. Use
+// LoadTemplatesWithOptions(..., TemplateLoadOptions{IgnoreInvalid: true}) when
+// intentionally running a mixed directory and wanting invalid files skipped.
 func LoadTemplates(dir string) ([]*Template, error) {
+	return LoadTemplatesWithOptions(dir, TemplateLoadOptions{})
+}
+
+// LoadTemplatesLenient preserves the older "skip invalid files" behavior for
+// ad-hoc tooling. Production and CI scans should prefer LoadTemplates.
+func LoadTemplatesLenient(dir string) ([]*Template, error) {
+	return LoadTemplatesWithOptions(dir, TemplateLoadOptions{IgnoreInvalid: true})
+}
+
+// LoadTemplatesWithOptions loads all templates from a directory recursively.
+func LoadTemplatesWithOptions(dir string, opts TemplateLoadOptions) ([]*Template, error) {
 	var templates []*Template
 
 	err := filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
@@ -559,18 +662,29 @@ func LoadTemplates(dir string) ([]*Template, error) {
 		// Load template — log errors instead of silently swallowing them
 		tmpl, err := LoadTemplate(path)
 		if err != nil {
-			VerboseLog("⚠️  Skipping invalid template %s: %v", path, err)
-			return nil
+			if opts.IgnoreInvalid {
+				VerboseLog("⚠️  Skipping invalid template %s: %v", path, err)
+				return nil
+			}
+			return fmt.Errorf("invalid template %s: %w", path, err)
 		}
 
-		// Validate required meta fields
-		if tmpl.Meta.ID == "" {
-			VerboseLog("⚠️  Skipping template %s: missing meta.id", path)
-			return nil
+		if err := validateTemplateMeta(tmpl, path); err != nil {
+			if opts.IgnoreInvalid {
+				VerboseLog("⚠️  Skipping template %s: %v", path, err)
+				return nil
+			}
+			return err
 		}
-		if tmpl.Meta.Severity == "" {
-			VerboseLog("⚠️  Skipping template %s: missing meta.severity", path)
-			return nil
+
+		// LoadTemplate validates required metadata too; keep this second check
+		// as a defensive guard for future loader changes.
+		if tmpl.Meta.ID == "" || tmpl.Meta.Severity == "" {
+			if opts.IgnoreInvalid {
+				VerboseLog("⚠️  Skipping incomplete template %s", path)
+				return nil
+			}
+			return fmt.Errorf("template %s: missing required metadata", path)
 		}
 
 		VerboseLog("✓ Loaded template: %s (%s)", tmpl.Meta.ID, path)
@@ -580,6 +694,9 @@ func LoadTemplates(dir string) ([]*Template, error) {
 
 	if err != nil {
 		return nil, err
+	}
+	if len(templates) == 0 {
+		return nil, fmt.Errorf("no valid templates found in %s", dir)
 	}
 
 	return templates, nil
@@ -594,37 +711,64 @@ func ParseTemplate(yamlContent string) (*Template, error) {
 	if err := yaml.Unmarshal(data, &tmpl); err != nil {
 		return nil, err
 	}
-
-	if err := validateRulePlacement(&tmpl.Query); err != nil {
+	if err := finalizeTemplate(&tmpl, data, "<inline>"); err != nil {
 		return nil, err
 	}
-
-	normalizeQueryBlock(&tmpl.Query)
-
-	if err := normalizeArgNKeys(data, &tmpl); err != nil {
-		VerboseLog("Warning: arg.N normalization failed: %v", err)
-	}
-
-	if err := validateRegexes(&tmpl.Query.Match); err != nil {
-		return nil, fmt.Errorf("match: %w", err)
-	}
-	if err := validateRegexes(tmpl.Query.Filter); err != nil {
-		return nil, fmt.Errorf("filter: %w", err)
-	}
-	if err := validatePresets(&tmpl.Query.Match); err != nil {
-		return nil, fmt.Errorf("match: %w", err)
-	}
-	if err := validatePresets(tmpl.Query.Filter); err != nil {
-		return nil, fmt.Errorf("filter: %w", err)
-	}
-	if err := validateKinds(&tmpl.Query.Match); err != nil {
-		return nil, fmt.Errorf("match: %w", err)
-	}
-	if err := validateKinds(tmpl.Query.Filter); err != nil {
-		return nil, fmt.Errorf("filter: %w", err)
-	}
-
 	return &tmpl, nil
+}
+
+// LoadTemplatesFromFS loads all .yaml/.yml templates from an fs.FS subtree,
+// applying the same fail-closed validation as the path-based loader. This backs
+// the embedded default template pack (go:embed) so the binary can scan with a
+// sensible default rule set even when no --template directory is given.
+func LoadTemplatesFromFS(fsys fs.FS, dir string, opts TemplateLoadOptions) ([]*Template, error) {
+	var templates []*Template
+
+	err := fs.WalkDir(fsys, dir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			return nil
+		}
+		name := d.Name()
+		if !strings.HasSuffix(name, ".yaml") && !strings.HasSuffix(name, ".yml") {
+			return nil
+		}
+		data, readErr := fs.ReadFile(fsys, path)
+		if readErr != nil {
+			if opts.IgnoreInvalid {
+				VerboseLog("⚠️  Skipping unreadable template %s: %v", path, readErr)
+				return nil
+			}
+			return fmt.Errorf("read template %s: %w", path, readErr)
+		}
+		var tmpl Template
+		if uErr := yaml.Unmarshal(data, &tmpl); uErr != nil {
+			if opts.IgnoreInvalid {
+				VerboseLog("⚠️  Skipping invalid template %s: %v", path, uErr)
+				return nil
+			}
+			return fmt.Errorf("invalid template %s: %w", path, uErr)
+		}
+		if fErr := finalizeTemplate(&tmpl, data, path); fErr != nil {
+			if opts.IgnoreInvalid {
+				VerboseLog("⚠️  Skipping invalid template %s: %v", path, fErr)
+				return nil
+			}
+			return fmt.Errorf("invalid template %s: %w", path, fErr)
+		}
+		VerboseLog("✓ Loaded embedded template: %s (%s)", tmpl.Meta.ID, path)
+		templates = append(templates, &tmpl)
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	if len(templates) == 0 {
+		return nil, fmt.Errorf("no valid templates found in %s", dir)
+	}
+	return templates, nil
 }
 
 // IsEmpty returns true if the rule has no conditions
@@ -632,11 +776,13 @@ func (r *Rule) IsEmpty() bool {
 	return len(r.All) == 0 && len(r.Any) == 0 && len(r.Sequence) == 0 &&
 		r.Not == nil && r.Contains == nil && r.Inside == nil &&
 		r.Kind == "" && r.Name == "" && len(r.Attr) == 0 &&
+		r.SourceRegex == "" &&
 		r.Extends == "" && r.Modifier == "" && len(r.Args) == 0 &&
 		r.TaintedFrom == "" && r.Version == "" && r.Preset == "" &&
 		r.Left == nil && r.Right == nil && r.HasParam == "" &&
 		r.FuncName == "" && r.VisibilityFilter == "" && r.MutabilityFilter == "" &&
-		r.HasGuard == nil && r.IsStateVar == nil
+		r.HasGuard == nil && r.IsStateVar == nil &&
+		r.Operator == "" && r.Visibility == "" && r.Mutability == ""
 }
 
 // regexCache memoizes compiled regexes so a pattern referenced from N AST
@@ -677,191 +823,303 @@ func MatchesRegex(pattern, value string) bool {
 	return re.MatchString(value)
 }
 
-// validateKinds walks a rule tree and rejects any `kind:` value that isn't a
-// registered exact kind, semantic group, or dotted prefix. Without this, a
-// typo like `kind: outgoing_calls` (plural) or `kind: call.lowlevel` (missing
-// .call/.delegatecall/.staticcall suffix) silently matched nothing at scan
-// time. The error message lists the closest valid examples so the author can
-// fix the template without grepping ast.go.
+// matchAnchoredRegex matches value against pattern anchored at both ends, so the
+// pattern must describe the WHOLE value. Used for attribute matching, where a
+// substring match (`operator: "="` matching `==`) is a footgun. An empty pattern
+// matches anything.
+func matchAnchoredRegex(pattern, value string) bool {
+	if pattern == "" {
+		return true
+	}
+	re, err := compileRegexCached("^(?:" + pattern + ")$")
+	if err != nil || re == nil {
+		return false
+	}
+	return re.MatchString(value)
+}
+
+// walkRules invokes visit on r and every nested sub-rule (logic operators,
+// traversal, left/right, has_guard, args). It is the single source of truth for
+// "visit every Rule slot" — validators built on it cannot drift out of sync the
+// way the previous hand-rolled recursive walkers did.
+func walkRules(r *Rule, visit func(*Rule) error) error {
+	if r == nil {
+		return nil
+	}
+	if err := visit(r); err != nil {
+		return err
+	}
+	for i := range r.All {
+		if err := walkRules(&r.All[i], visit); err != nil {
+			return err
+		}
+	}
+	for i := range r.Any {
+		if err := walkRules(&r.Any[i], visit); err != nil {
+			return err
+		}
+	}
+	if err := walkRules(r.Not, visit); err != nil {
+		return err
+	}
+	for i := range r.Sequence {
+		if err := walkRules(&r.Sequence[i], visit); err != nil {
+			return err
+		}
+	}
+	if err := walkRules(r.Contains, visit); err != nil {
+		return err
+	}
+	if err := walkRules(r.Inside, visit); err != nil {
+		return err
+	}
+	if err := walkRules(r.Left, visit); err != nil {
+		return err
+	}
+	if err := walkRules(r.Right, visit); err != nil {
+		return err
+	}
+	if err := walkRules(r.HasGuard, visit); err != nil {
+		return err
+	}
+	// Visit args in sorted key order so error reporting is deterministic.
+	if len(r.Args) > 0 {
+		keys := make([]int, 0, len(r.Args))
+		for k := range r.Args {
+			keys = append(keys, k)
+		}
+		sort.Ints(keys)
+		for _, k := range keys {
+			v := r.Args[k]
+			if err := walkRules(&v, visit); err != nil {
+				return err
+			}
+			r.Args[k] = v
+		}
+	}
+	return nil
+}
+
+// validKindsMessage lists the acceptable kind forms; generated from the
+// semantic-group registry so it can't drift from matchKind.
+func validKindsMessage() string {
+	groups := make([]string, 0, len(types.KnownSemanticGroups))
+	for g := range types.KnownSemanticGroups {
+		groups = append(groups, g)
+	}
+	sort.Strings(groups)
+	return "a registered AST kind (see pkg/types/ast.go), a semantic group (" +
+		strings.Join(groups, ", ") + "), or a known prefix (call, check, stmt, expr, decl, asm, call.lowlevel, call.builtin)"
+}
+
+// validateKinds rejects any `kind:` value that isn't a registered exact kind,
+// semantic group, or known dotted prefix. Without this, a typo like
+// `kind: outgoing_calls` (plural) silently matched nothing at scan time.
 func validateKinds(r *Rule) error {
-	if r == nil {
+	return walkRules(r, func(n *Rule) error {
+		if n.Kind != "" && !types.IsKnownKind(n.Kind) {
+			return fmt.Errorf("unknown kind %q — must be %s", n.Kind, validKindsMessage())
+		}
 		return nil
-	}
-	if r.Kind != "" && !types.IsKnownKind(r.Kind) {
-		return fmt.Errorf(
-			"unknown kind %q — must be one of: a registered AST kind "+
-				"(see pkg/types/ast.go), a semantic group "+
-				"(outgoing_call, eth_transfer, delegatecall, check, guard, "+
-				"token_call, state_write, state_read, any_call, "+
-				"selfdestruct), or a known prefix (call, check, stmt, expr, "+
-				"decl, asm)",
-			r.Kind,
-		)
-	}
-	for i := range r.All {
-		if err := validateKinds(&r.All[i]); err != nil {
-			return err
-		}
-	}
-	for i := range r.Any {
-		if err := validateKinds(&r.Any[i]); err != nil {
-			return err
-		}
-	}
-	if err := validateKinds(r.Not); err != nil {
-		return err
-	}
-	for i := range r.Sequence {
-		if err := validateKinds(&r.Sequence[i]); err != nil {
-			return err
-		}
-	}
-	if err := validateKinds(r.Contains); err != nil {
-		return err
-	}
-	if err := validateKinds(r.Inside); err != nil {
-		return err
-	}
-	if err := validateKinds(r.Left); err != nil {
-		return err
-	}
-	if err := validateKinds(r.Right); err != nil {
-		return err
-	}
-	if err := validateKinds(r.HasGuard); err != nil {
-		return err
-	}
-	for k := range r.Args {
-		v := r.Args[k]
-		if err := validateKinds(&v); err != nil {
-			return err
-		}
-	}
-	return nil
+	})
 }
 
-// validatePresets walks a rule tree and rejects any preset name that isn't
-// registered. Without this, a typo like `preset: unAuthenticatd` previously
-// caused checkBuiltinPreset to return true, silently matching every function.
+// validatePresets rejects any preset name that isn't registered. Without this,
+// a typo like `preset: unAuthenticatd` previously caused checkBuiltinPreset to
+// return true, silently matching every function.
 func validatePresets(r *Rule) error {
-	if r == nil {
+	return walkRules(r, func(n *Rule) error {
+		if n.Preset != "" && !IsKnownPreset(n.Preset) {
+			return fmt.Errorf("unknown preset %q — known presets: unAuthenticated, unLocked", n.Preset)
+		}
 		return nil
-	}
-	if r.Preset != "" && !IsKnownPreset(r.Preset) {
-		return fmt.Errorf("unknown preset %q — known presets: unAuthenticated, unLocked", r.Preset)
-	}
-	for i := range r.All {
-		if err := validatePresets(&r.All[i]); err != nil {
-			return err
-		}
-	}
-	for i := range r.Any {
-		if err := validatePresets(&r.Any[i]); err != nil {
-			return err
-		}
-	}
-	if err := validatePresets(r.Not); err != nil {
-		return err
-	}
-	for i := range r.Sequence {
-		if err := validatePresets(&r.Sequence[i]); err != nil {
-			return err
-		}
-	}
-	if err := validatePresets(r.Contains); err != nil {
-		return err
-	}
-	if err := validatePresets(r.Inside); err != nil {
-		return err
-	}
-	if err := validatePresets(r.Left); err != nil {
-		return err
-	}
-	if err := validatePresets(r.Right); err != nil {
-		return err
-	}
-	if err := validatePresets(r.HasGuard); err != nil {
-		return err
-	}
-	for k := range r.Args {
-		v := r.Args[k]
-		if err := validatePresets(&v); err != nil {
-			return err
-		}
-	}
-	return nil
+	})
 }
 
-// validateRegexes walks a rule tree and surfaces any invalid regex pattern as
-// an error. Called at template-load time so authors see typos immediately
-// instead of getting silently-empty findings.
+// validateRegexes surfaces any invalid regex pattern as a load error so authors
+// see typos immediately instead of getting silently-empty findings.
 func validateRegexes(r *Rule) error {
-	if r == nil {
-		return nil
-	}
-	checks := []struct {
-		field, pattern string
-	}{
-		{"name", r.Name},
-		{"modifier", r.Modifier},
-		{"extends", r.Extends},
-		{"func_name", r.FuncName},
-	}
-	for _, c := range checks {
-		if c.pattern == "" {
-			continue
+	return walkRules(r, func(n *Rule) error {
+		checks := []struct{ field, pattern string }{
+			{"name", n.Name},
+			{"source_regex", n.SourceRegex},
+			{"modifier", n.Modifier},
+			{"extends", n.Extends},
+			{"func_name", n.FuncName},
 		}
-		if _, err := compileRegexCached(c.pattern); err != nil {
-			return fmt.Errorf("invalid regex in %q: %s — %w", c.field, c.pattern, err)
-		}
-	}
-	// Attribute values are matched as regex when they're strings (see verify.go matchAttributeValue).
-	for k, v := range r.Attr {
-		if s, ok := v.(string); ok && s != "" {
-			if _, err := compileRegexCached(s); err != nil {
-				return fmt.Errorf("invalid regex in attr.%s: %s — %w", k, s, err)
+		for _, c := range checks {
+			if c.pattern == "" {
+				continue
+			}
+			if _, err := compileRegexCached(c.pattern); err != nil {
+				return fmt.Errorf("invalid regex in %q: %s — %w", c.field, c.pattern, err)
 			}
 		}
+		// Attribute string values are matched as regex (see matchAttributeValue).
+		for k, v := range n.Attr {
+			if s, ok := v.(string); ok && s != "" {
+				if _, err := compileRegexCached(s); err != nil {
+					return fmt.Errorf("invalid regex in attr.%s: %s — %w", k, s, err)
+				}
+			}
+		}
+		return nil
+	})
+}
+
+// Closed sets for value-level validation. A typo in any of these previously
+// loaded cleanly and then silently matched nothing (tainted_from) or excluded
+// everything (visibility_filter/mutability_filter) at scan time.
+var (
+	validTaintSources = map[string]bool{
+		"parameter": true, "state_var": true, "local_var": true, "sender": true,
 	}
-	// Recurse through sub-rules.
-	for i := range r.All {
-		if err := validateRegexes(&r.All[i]); err != nil {
+	validVisibilities = map[string]bool{
+		"public": true, "external": true, "internal": true, "private": true,
+	}
+	validMutabilities = map[string]bool{
+		"payable": true, "view": true, "pure": true, "nonpayable": true,
+	}
+)
+
+// validateRuleValues rejects out-of-vocabulary values for the closed-set fields
+// and malformed version constraints, recursively.
+func validateRuleValues(r *Rule) error {
+	return walkRules(r, func(n *Rule) error {
+		if n.TaintedFrom != "" && !validTaintSources[n.TaintedFrom] {
+			return fmt.Errorf("unknown tainted_from %q — must be one of: parameter, state_var, local_var, sender", n.TaintedFrom)
+		}
+		if err := validateCSVVocabulary("visibility_filter", n.VisibilityFilter, validVisibilities); err != nil {
 			return err
 		}
-	}
-	for i := range r.Any {
-		if err := validateRegexes(&r.Any[i]); err != nil {
+		if err := validateCSVVocabulary("mutability_filter", n.MutabilityFilter, validMutabilities); err != nil {
 			return err
 		}
-	}
-	if err := validateRegexes(r.Not); err != nil {
-		return err
-	}
-	for i := range r.Sequence {
-		if err := validateRegexes(&r.Sequence[i]); err != nil {
-			return err
+		if n.Version != "" {
+			if err := validateVersionConstraint(n.Version); err != nil {
+				return err
+			}
 		}
+		return nil
+	})
+}
+
+// validateCSVVocabulary checks each comma-separated token of value against the
+// allowed set. Empty value is a no-op.
+func validateCSVVocabulary(field, value string, allowed map[string]bool) error {
+	if value == "" {
+		return nil
 	}
-	if err := validateRegexes(r.Contains); err != nil {
-		return err
-	}
-	if err := validateRegexes(r.Inside); err != nil {
-		return err
-	}
-	if err := validateRegexes(r.Left); err != nil {
-		return err
-	}
-	if err := validateRegexes(r.Right); err != nil {
-		return err
-	}
-	if err := validateRegexes(r.HasGuard); err != nil {
-		return err
-	}
-	for k := range r.Args {
-		v := r.Args[k]
-		if err := validateRegexes(&v); err != nil {
-			return err
+	for _, part := range strings.Split(value, ",") {
+		token := strings.TrimSpace(strings.ToLower(part))
+		if token == "" {
+			continue
+		}
+		if !allowed[token] {
+			keys := make([]string, 0, len(allowed))
+			for k := range allowed {
+				keys = append(keys, k)
+			}
+			sort.Strings(keys)
+			return fmt.Errorf("unknown %s value %q — must be one of: %s", field, token, strings.Join(keys, ", "))
 		}
 	}
 	return nil
+}
+
+// versionConstraintPattern accepts an optional comparison operator followed by a
+// dotted version (e.g. ">=0.8.0", "0.8", "^0.8.0"). The caret/tilde forms are
+// accepted syntactically and treated as equality at scan time.
+var versionConstraintPattern = regexp.MustCompile(`^\s*(>=|<=|==|>|<|=|\^|~)?\s*\d+(\.\d+){0,2}\s*$`)
+
+// validateVersionConstraint rejects a version: constraint that the version
+// comparator cannot parse, instead of silently degrading to a garbled equality.
+func validateVersionConstraint(constraint string) error {
+	if !versionConstraintPattern.MatchString(constraint) {
+		return fmt.Errorf("invalid version constraint %q — expected e.g. \">=0.8.0\", \"<0.7.0\", or \"0.8.0\"", constraint)
+	}
+	return nil
+}
+
+// isContractScope reports whether a scope iterates contract definitions (and so
+// is evaluated by verifyAtContract, which only understands name/kind/extends/
+// source_regex/all/any/not).
+func isContractScope(s Scope) bool {
+	switch s {
+	case ScopeContract, ScopeLibrary, ScopeAbstract, ScopeAllContract, ScopeMainContract:
+		return true
+	}
+	return false
+}
+
+// validateScope rejects an unknown scope at load. An empty scope is allowed and
+// defaults to entrypoint (see Engine.Execute); a non-empty unknown scope used to
+// silently fall through to entrypoint, changing what code got scanned.
+func validateScope(s Scope) error {
+	switch s {
+	case "", ScopeAllContract, ScopeMainContract, ScopeFunction, ScopeEntrypoint,
+		ScopeContract, ScopeLibrary, ScopeAbstract, ScopeSource:
+		return nil
+	}
+	return fmt.Errorf("unknown scope %q — must be one of: source, function, entrypoint, contract, library, abstract, all_contract, main_contract", s)
+}
+
+// contractScopeIgnoredFields reports a field name present in r that
+// verifyAtContract silently ignores at a contract scope (which would make the
+// rule match every contract). Returns "" if none.
+func contractScopeIgnoredField(r *Rule) string {
+	switch {
+	case r.Contains != nil:
+		return "contains"
+	case r.Inside != nil:
+		return "inside"
+	case len(r.Sequence) > 0:
+		return "sequence"
+	case len(r.Args) > 0:
+		return "args"
+	case r.TaintedFrom != "":
+		return "tainted_from"
+	case r.Left != nil:
+		return "left"
+	case r.Right != nil:
+		return "right"
+	case len(r.Attr) > 0:
+		return "attr"
+	case r.Operator != "":
+		return "operator"
+	case r.IsStateVar != nil:
+		return "is_state_var"
+	case r.Visibility != "":
+		return "visibility"
+	case r.Mutability != "":
+		return "mutability"
+	case r.Modifier != "":
+		return "modifier"
+	case r.FuncName != "":
+		return "func_name"
+	case r.VisibilityFilter != "":
+		return "visibility_filter"
+	case r.MutabilityFilter != "":
+		return "mutability_filter"
+	case r.HasGuard != nil:
+		return "has_guard"
+	case r.HasParam != "":
+		return "has_param"
+	case r.Preset != "":
+		return "preset"
+	}
+	return ""
+}
+
+// validateContractScopeRule rejects fields a contract scope cannot evaluate, so
+// e.g. `scope: contract` + `match: { contains: ... }` errors at load instead of
+// matching every contract. Only name/kind/extends/source_regex/version and the
+// all/any/not combinators are supported there.
+func validateContractScopeRule(r *Rule, where string) error {
+	return walkRules(r, func(n *Rule) error {
+		if field := contractScopeIgnoredField(n); field != "" {
+			return fmt.Errorf("invalid template: `%s` is not supported at a contract scope (in %s) — contract scopes only evaluate name, kind, extends, source_regex and all/any/not. Use scope: entrypoint or scope: function for AST or function-level predicates", field, where)
+		}
+		return nil
+	})
 }
