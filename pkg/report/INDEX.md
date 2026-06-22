@@ -19,13 +19,13 @@ Reachability"):
 
 Per-format treatment:
 
-| Format | File | Where it renders the trace |
-|---|---|---|
-| Console | `cmd/w3goaudit/root.go` *(driver)* | `↳ via …` + `↳ fix-here: …` continuation lines under `Location:` |
-| JSON | `json_split.go` *(passthrough)* | `findings[].reachability.steps[]`, `findings[].entryPoint`, `findings[].primaryAst` — emitted with `omitempty` |
-| SARIF 2.1.0 | `sarif.go` | One `result.relatedLocations[]` per hop (`entry:` / `hop:` / `host:`); `result.properties.entryPoint` + `result.properties.primaryAst` |
-| Markdown findings | `scan_formats.go::FormatFindingsAsMarkdown` (via `renderFindingTraceMarkdown`) | Dotted-level list block (`.`, `..`, `...`) inside each occurrence `<details>` |
-| HTML findings | `scan_formats.go::FormatFindingsAsHTML` (via `renderFindingTraceHTML`) | `<div class="w3a-trace">` with depth-scaled `margin-left` per `<li class="w3a-trace-step">` |
+| Format            | File                                                                           | Where it renders the trace                                                                                                             |
+| ----------------- | ------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------- |
+| Console           | `cmd/w3goaudit/root.go` *(driver)*                                             | `↳ via …` + `↳ fix-here: …` continuation lines under `Location:`                                                                       |
+| JSON              | `json_split.go` *(passthrough)*                                                | `findings[].reachability.steps[]`, `findings[].entryPoint`, `findings[].primaryAst` — emitted with `omitempty`                         |
+| SARIF 2.1.0       | `sarif.go`                                                                     | One `result.relatedLocations[]` per hop (`entry:` / `hop:` / `host:`); `result.properties.entryPoint` + `result.properties.primaryAst` |
+| Markdown findings | `scan_formats.go::FormatFindingsAsMarkdown` (via `renderFindingTraceMarkdown`) | Dotted-level list block (`.`, `..`, `...`) inside each occurrence `<details>`                                                          |
+| HTML findings     | `scan_formats.go::FormatFindingsAsHTML` (via `renderFindingTraceHTML`)         | `<div class="w3a-trace">` with depth-scaled `margin-left` per `<li class="w3a-trace-step">`                                            |
 
 The fields are populated regardless of the `LocationSource` setting on the
 engine; `WGAUDIT_LOCATION_FROM_MATCHED_NODE=1` only changes which step of
@@ -350,7 +350,7 @@ findingsHTML := report.FormatFindingsAsHTML(findings, db)
 
 // 2b. Or build versioned JSON documents. The findings JSON passes the new
 //     reachability / entryPoint / primaryAst fields through unchanged.
-tool := report.ToolMeta{Name: "w3goaudit", Version: "0.3.0"}
+tool := report.ToolMeta{Name: "w3goaudit", Version: "0.3.1"}
 ovJSON := report.BuildOverviewJSON(tool, summary, db.GetStats())
 fdJSON := report.BuildFindingsJSON(tool, findings)
 
