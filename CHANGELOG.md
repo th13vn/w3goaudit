@@ -1,5 +1,10 @@
 # Changelog
 
+## v0.3.1 - 2026-06-22
+
+- Removed old benchmark results and scripts from the repository.
+- Bumped CLI version to `0.3.1`.
+
 ## v0.3.0 - 2026-06-22
 
 Compared with the previous `0.2.0` CLI version. This release changes the scan
