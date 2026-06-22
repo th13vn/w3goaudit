@@ -110,7 +110,7 @@ filter:
 | `visibility_filter` | Comma-separated: `public`, `external`, `internal`, `private`                                                                                                                         |
 | `mutability_filter` | Comma-separated: `payable`, `view`, `pure`, `nonpayable`                                                                                                                             |
 | `has_guard`         | Rule — function body must contain a matching `check.*` node                                                                                                                          |
-| `preset`            | Built-in preset (returns true for the *vulnerable* case — use WITHOUT `not:` to scan vulnerable functions). Known names: `unAuthenticated`, `unLocked`. Unknown names error at load. |
+| `preset`            | Built-in preset (returns true for the *vulnerable* case — use WITHOUT `not:` to scan vulnerable functions). Known names: `unAuthenticated` (no privileged access control), `unCheckedSender` (no privileged access control AND no caller self-scoping like `require(from == msg.sender)`), `unLocked` (no reentrancy guard). Unknown names error at load. |
 | `not`               | Negate all conditions inside                                                                                                                                                         |
 
 ---
@@ -570,7 +570,7 @@ continues to mean the first source-level argument even for
 
 ```yaml
 meta:
-  id: SEC-GEN-REENTRANCY
+  id: HIGH-REENTRANCY-PATTERN
   title: Potential Reentrancy
   severity: HIGH
   confidence: MEDIUM
@@ -592,7 +592,7 @@ query:
 
 ```yaml
 meta:
-  id: SEC-ERC20-001
+  id: HIGH-ARBITRARY-TRANSFERFROM
   title: Arbitrary transferFrom Call
   severity: HIGH
   confidence: MEDIUM
@@ -616,7 +616,7 @@ query:
 
 ```yaml
 meta:
-  id: SEC-TXORIGIN-001
+  id: MEDIUM-TX-ORIGIN-AUTH
   title: tx.origin Used for Authentication
   severity: MEDIUM
   confidence: HIGH
@@ -636,7 +636,7 @@ query:
 
 ```yaml
 meta:
-  id: SEC-DEST-001
+  id: CRITICAL-SELFDESTRUCT-UNPROTECTED
   title: Unprotected selfdestruct
   severity: CRITICAL
   confidence: HIGH

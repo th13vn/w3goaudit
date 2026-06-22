@@ -1,0 +1,46 @@
+meta:
+  id: DECURITY-ENCODE-PACKED-COLLISION
+  title: "Decurity Semgrep: abi.encodePacked hashes multiple dynamic arguments"
+  severity: HIGH
+  confidence: MEDIUM
+  description: >
+    Detects keccak256(abi.encodePacked(...)) over multiple user-controlled
+    dynamic inputs.
+  recommendation: >
+    Review the Decurity rule semantics and add access control, validation,
+    reentrancy protection, or safer arithmetic/oracle handling as appropriate.
+  references:
+    - https://github.com/Decurity/semgrep-smart-contracts/tree/master/solidity/security
+
+query:
+  scope: function
+  filter:
+    all:
+      - visibility_filter: public,external
+      - source_regex: '(?s)function\s+\w+\([^)]*(?:bytes|string|address\[\]|uint256\[\])\s+\w+[^)]*(?:bytes|string|address\[\]|uint256\[\])\s+\w+'
+  match:
+    any:
+      - contains:
+          kind: call.internal
+          name: '^keccak256$'
+          contains:
+            kind: call.external
+            name: '^encodePacked$'
+            args:
+              0:
+                tainted_from: parameter
+              1:
+                tainted_from: parameter
+      - sequence:
+          - kind: call.external
+            name: '^encodePacked$'
+            args:
+              0:
+                tainted_from: parameter
+              1:
+                tainted_from: parameter
+          - kind: call.internal
+            name: '^keccak256$'
+            args:
+              0:
+                tainted_from: parameter

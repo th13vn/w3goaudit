@@ -1,0 +1,24 @@
+meta:
+  id: DECURITY-ERC677-REENTRANCY
+  title: "Decurity Semgrep: ERC677 transfer invokes callAfterTransfer callback"
+  severity: HIGH
+  confidence: MEDIUM
+  description: >
+    Detects ERC677-style transfer implementations that invoke the post-transfer
+    callback without a reentrancy guard.
+  recommendation: >
+    Review the Decurity rule semantics and add access control, validation,
+    reentrancy protection, or safer arithmetic/oracle handling as appropriate.
+  references:
+    - https://github.com/Decurity/semgrep-smart-contracts/tree/master/solidity/security
+
+query:
+  scope: entrypoint
+  filter:
+    all:
+      - func_name: '^transfer$'
+      - preset: unLocked
+  match:
+    contains:
+      kind: call.internal
+      name: '^callAfterTransfer$'

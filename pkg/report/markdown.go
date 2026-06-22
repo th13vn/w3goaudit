@@ -68,6 +68,9 @@ func (c *ContractSummary) toMarkdownWithGit(gitInfo *GitInfo, projectRoot string
 		}
 	}
 	sb.WriteString(fmt.Sprintf("**File:** %s  \n", fileDisplay))
+	if c.Version != "" {
+		sb.WriteString(fmt.Sprintf("**Version:** `%s`  \n", c.Version))
+	}
 	sb.WriteString(fmt.Sprintf("**Entry Points:** %d  \n", c.EntryFunctionCount))
 	sb.WriteString(fmt.Sprintf("**State Variables:** %d  \n", c.StateVariableCount))
 	sb.WriteString("\n")

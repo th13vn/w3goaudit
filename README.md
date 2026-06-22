@@ -1,6 +1,5 @@
 # W3GoAudit
 
-[![CI](https://github.com/th13vn/w3goaudit/actions/workflows/ci.yml/badge.svg)](https://github.com/th13vn/w3goaudit/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](./LICENSE)
 [![Go Reference](https://pkg.go.dev/badge/github.com/th13vn/w3goaudit.svg)](https://pkg.go.dev/github.com/th13vn/w3goaudit)
 
@@ -11,17 +10,23 @@ A Go-based CLI & SDK for auditing Solidity smart contracts using rule-based temp
 ## Quick Start
 
 ```bash
-# Install (the official detector pack is embedded in the binary)
+# Install (templates download on first run; embedded pack is the offline fallback)
 go install github.com/th13vn/w3goaudit/cmd/w3goaudit@latest
 
-# Scan contracts — uses the built-in official pack by default
+# Scan contracts → writes a ./contracts result folder
 w3goaudit ./contracts/
 
-# Or point at a custom template directory
-w3goaudit ./contracts/ --template ./my-templates/
+# Scan one file into a named folder
+w3goaudit Token.sol -o audit/
 
-# CI gating: exit non-zero (code 2) on any HIGH+ finding, emit SARIF
-w3goaudit ./contracts/ --fail-on high --sarif -o report.sarif
+# Use a custom template directory
+w3goaudit ./contracts/ -t ./my-templates/
+
+# Only high + critical findings
+w3goaudit ./contracts/ -s high,critical
+
+# Print the summary only, write nothing
+w3goaudit ./contracts/ -q
 
 # Build database
 w3goaudit build ./contracts/ -o database.json
@@ -36,11 +41,25 @@ w3goaudit extract entry MyToken --db database.json
 Example console output:
 
 ```
+▶ Reading sources: ./contracts/
+▶ Building database: 74 files, 164 contracts, 1203 functions
+▶ Scanning: 25 templates (~/.w3goaudit/templates)
+▶ Writing report: ./contracts-audit
+
 81 findings: 65 HIGH, 16 MEDIUM · scanned 74 contracts in 51ms
 ── Findings ──────────────────────────────────────────────
   🟠 HIGH (65 findings)
-  🟡 MEDIUM (16 findings)
+  1. Arbitrary transferFrom Call
+  2. Unchecked ERC20 transfer / transferFrom Return Value
+  ... (titles only on console; full detail in findings.md, or use --verbose)
+
+📂 Results written to: ./contracts-audit
 ```
+
+Results land in a folder — `overview.md`, `findings.md`, `results.sarif`,
+`run.log`, a machine-readable `corpus/` (JSON + DB), and one sub-folder per main
+contract with per-entry workflow files and a state-change report. See
+[Result folder layout](#result-folder-layout).
 
 ---
 
@@ -53,10 +72,12 @@ Example console output:
 - **Function Selectors** - Calculate 4-byte keccak256 selectors
 - **Call Graph** - Recursive tracing with filtered built-ins and optimized styling
 - **WQL Templates** - Powerful query language for security pattern matching, with load-time validation (regex, preset names, filter/match placement) so typos fail fast instead of producing silent zero-finding scans. Includes scope-aware `source_regex` for rare raw-source predicates.
-- **Multiple Outputs** - JSON (versioned schema), Markdown, HTML (interactive, PDF export), Console, **SARIF 2.1.0** (GitHub Code Scanning, with portable relative URIs + `srcRoot`)
-- **Two-File Reports** - File output always splits into `<name>.overview.<ext>` (project structure) and `<name>.findings.<ext>` (issues), so reviewers can diff them independently
-- **Reachability-Aware Findings** - Every finding can carry the full call chain from an externally-callable entry down to the function that hosts the dangerous statement: structured `reachability.steps[]` + `entryPoint` (auditor's fix-here pointer) + `primaryAst` in JSON, `relatedLocations` in SARIF, dotted-level trace block in Markdown / HTML, `↳ via …` continuation line in console. Opt in to matched-node `Location` attribution (Slither/Semgrep-style) with `--location-source matched` or `WGAUDIT_LOCATION_FROM_MATCHED_NODE=1`.
-- **CI-Ready** - SARIF 2.1.0 for GitHub Code Scanning, fail-closed template loading, checked file writes, `NO_COLOR`-aware console, overwrite warnings on existing `-o` targets
+- **Result Folder** - One opinionated folder per scan: `overview.md`, `findings.md`, always-on `results.sarif` + `run.log`, a machine-readable `corpus/` (database.json reusable via `--db`, findings.json, overview.json), and one sub-folder per main contract. Opt-in HTML mirror with `--html`.
+- **Per-Entry Workflow Files** - For every entry function, a self-contained context block (signature, auth / access control, guards & checks, branch conditions, transitive state effects, Mermaid call workflow) — built to be fed to a human or an AI auditor.
+- **State-Change Matrix** - Per contract, each state variable mapped to the functions that write it and the entry points that reach a writer (reverse call-graph walk).
+- **Self-Provisioning Templates** - Downloads the latest [`w3goaudit-templates`](https://github.com/th13vn/w3goaudit-templates) release on first run (nuclei-style, no git clone), refreshable with `--update-templates`; embedded official pack is the always-available offline fallback.
+- **Reachability-Aware Findings** - Every finding can carry the full call chain from an externally-callable entry down to the function that hosts the dangerous statement: structured `reachability.steps[]` + `entryPoint` (auditor's fix-here pointer) + `primaryAst` in JSON, `relatedLocations` in SARIF, dotted-level trace block in Markdown / HTML, `↳ via …` continuation line on the `--verbose` console.
+- **SARIF 2.1.0** - Always emitted (`results.sarif`) for GitHub Code Scanning, with portable relative URIs + `srcRoot`; fail-closed template loading, `NO_COLOR`-aware console.
 - **Project Detection** - Auto-detect Foundry, Hardhat, Truffle
 - **Git Integration** - Auto-detect git repos and generate clickable file links to GitHub/GitLab
 - **Advanced Metrics** - nSLOC, Access Control Analysis, Grouped Entry Points
@@ -98,64 +119,109 @@ sudo mv w3goaudit /usr/local/bin/
 go install github.com/th13vn/w3goaudit/cmd/w3goaudit@latest
 ```
 
+### Self-Update
+
+```bash
+w3goaudit --update   # re-runs `go install …@latest` (requires the Go toolchain)
+```
+
+---
+
+## Result Folder Layout
+
+Every scan (unless `--stdout/-q`) writes a result folder, optimized to feed a
+human or AI auditor:
+
+```
+<output>/
+├── overview.md            # all main contracts; pragma version per contract
+├── findings.md            # human-readable findings
+├── results.sarif          # SARIF 2.1.0 (always)
+├── run.log                # full verbose detail (always; replaces --log)
+├── corpus/                # machine-readable JSON
+│   ├── database.json      # canonical DB — reuse via --db corpus/database.json
+│   ├── findings.json
+│   └── overview.json
+└── <MainContract>/        # one folder per main contract (Name__<filestem> on collision)
+    ├── state-changes.md   # state var → Written By (fns) → Reachable From (entries)
+    └── workflows/
+        ├── <entryFn>.md             # one file per entry function
+        └── <entryFn>__<selector>.md # overloads disambiguated by 4-byte selector
+```
+
+The default folder name is the scanned project dir name (or `.sol` file stem);
+`-o/--output` overrides it, and `-audit` is appended if the default would collide
+with the scanned directory. Each `workflows/<entryFn>.md` records the signature
+(selector, 4-byte, payable, version), auth / access control (modifiers,
+`msg.sender` checks, ⚠ Unprotected, ⚠ tx.origin), guards/checks, branch
+conditions, transitive state effects, and a Mermaid call-workflow diagram.
+
 ---
 
 ## CLI Quick Reference
 
 ### Commands
 
-| Command | Description |
-|---------|-------------|
-| *(default)* | Scan contracts — stats, overview, findings |
-| `build` | Build contract database (JSON) |
-| `extract main` | Main (deployable) contracts in a project |
-| `extract entry` | Entry point functions for a contract |
-| `extract inheritance` | C3 linearization (derived → base) — must be a main contract |
-| `extract statevar` | State variables (including inherited, storage order) |
-| `extract selector` | Function selectors (4-byte hashes) |
-| `extract involve` | Every entry-point workflow that reaches a function, one Mermaid chart per entry |
-| `extract workflow` | Full transitive source for an entry function (report-ready) |
-| `extract bundle` | **LLM-ready** one-document context: source + callers + callees + state + inheritance + selectors |
-| `extract context` | Combined context package for a function |
-| `extract source` | Raw Solidity source for a function |
-| `extract diff` | Compare two pre-built databases |
-| `completion` | Generate shell completions |
-| `version` | Show version information |
+| Command               | Description                                                                                      |
+| --------------------- | ------------------------------------------------------------------------------------------------ |
+| *(default)*           | Scan contracts — stats, overview, findings                                                       |
+| `build`               | Build contract database (JSON)                                                                   |
+| `extract main`        | Main (deployable) contracts in a project                                                         |
+| `extract entry`       | Entry point functions for a contract                                                             |
+| `extract inheritance` | C3 linearization (derived → base) — must be a main contract                                      |
+| `extract statevar`    | State variables (including inherited, storage order)                                             |
+| `extract selector`    | Function selectors (4-byte hashes)                                                               |
+| `extract involve`     | Every entry-point workflow that reaches a function, one Mermaid chart per entry                  |
+| `extract workflow`    | Full transitive source for an entry function (report-ready)                                      |
+| `extract bundle`      | **LLM-ready** one-document context: source + callers + callees + state + inheritance + selectors |
+| `extract context`     | Combined context package for a function                                                          |
+| `extract source`      | Raw Solidity source for a function                                                               |
+| `extract diff`        | Compare two pre-built databases                                                                  |
+| `completion`          | Generate shell completions                                                                       |
+| `version`             | Show version information                                                                         |
+
+The root command **is** the scan (there is no `scan` subcommand). Every scan
+flag has a long and short form: `-o/--output`, `-t/--template`, `-d/--db`,
+`-v/--verbose`, `-s/--severity` (exact set), `-m/--min-severity` (threshold),
+`-i/--include`, `-e/--exclude`, `-l/--list-templates`, `-H/--html`,
+`-q/--stdout`, `-T/--update-templates`, `-u/--update`. `--severity` and
+`--min-severity` are mutually exclusive.
 
 `extract` subcommands are listed widest-scope first (project → contract →
 function → utility). Like the scan, each one (except `diff`) can **build from a
 source path** — `extract <name> ./contracts/` — or load a pre-built database
-with `--db`.
-
-Output defaults to **markdown** (human/LLM-friendly); pass `--format=json` (or
-`-o file.json`) for the machine-readable shape. Format is also inferred from the
-`-o` file extension.
+with `--db`. Extract output defaults to **markdown**; pass `--format=json` (or
+`-o file.json`) for the machine-readable shape.
 
 ### Examples
 
 ```bash
-# Default scan (console)
+# Default scan → writes a ./contracts result folder
 w3goaudit ./contracts/
 
-# Scan with templates
-w3goaudit ./contracts/ --template ./templates/official/
+# Scan one file into a named folder
+w3goaudit Token.sol -o audit/
 
-# Markdown report — produces report.overview.md + report.findings.md
-w3goaudit ./contracts/ --template ./templates/official/ --md -o report.md
+# Use a custom template directory
+w3goaudit ./contracts/ -t ./templates/official/
 
-# JSON (versioned schema) — produces report.overview.json + report.findings.json
-w3goaudit ./contracts/ --template ./templates/official/ --json -o report.json
+# Only high + critical (exact set), or a threshold + exclude glob
+w3goaudit ./contracts/ -s high,critical
+w3goaudit ./contracts/ -m medium -e 'HIGH-WEAK-PRNG'
 
-# HTML — produces report.overview.html + report.findings.html
-w3goaudit ./contracts/ --template ./templates/official/ --html -o report.html
+# Also emit the HTML mirror, or print the summary only (write nothing)
+w3goaudit ./contracts/ -H
+w3goaudit ./contracts/ -q
 
-# SARIF 2.1.0 for GitHub Code Scanning (additive: combine with any other format)
-w3goaudit ./contracts/ --template ./templates/official/ --md -o report.md --sarif
+# List the active template set (no path needed)
+w3goaudit -l
 
-# CI gate (exit 2 on HIGH+, evaluated before display filters), filtering, inventory
-w3goaudit ./contracts/ --fail-on high
-w3goaudit ./contracts/ --min-severity medium --exclude 'SEC-PRNG-*'
-w3goaudit ./contracts/ --list-templates
+# Re-scan a pre-built database (e.g. the corpus DB from a previous run)
+w3goaudit -d ./contracts/corpus/database.json
+
+# Refresh templates from the latest release; update the tool itself
+w3goaudit --update-templates
+w3goaudit --update
 
 # Extract directly from source (builds the database on the fly)
 w3goaudit extract main ./contracts/
@@ -240,15 +306,16 @@ For complete WQL syntax, see [WQL Syntax Guide](./docs/wql-syntax.md).
 
 ```
 w3goaudit/
-├── cmd/w3goaudit/          # CLI entry point (root, build, extract, completion)
+├── cmd/w3goaudit/          # CLI entry point (root scan, build, extract, completion)
 ├── pkg/
 │   ├── reader/             # File discovery and loading
-│   ├── builder/            # Database construction (6 phases)
+│   ├── builder/            # Database construction (7 phases incl. per-fn effects)
 │   ├── engine/             # WQL template execution
+│   ├── home/               # ~/.w3goaudit config + template home (release download)
 │   ├── types/              # Core data structures
-│   └── report/             # Multi-format output (console/JSON/MD/HTML/SARIF)
+│   └── report/             # Result-folder bundle, state matrix, console/MD/HTML/SARIF
 ├── templates/              # WQL detection templates (official/ embedded via go:embed)
-│   ├── official/              # Curated official pack (embedded in the binary)
+│   ├── official/              # Curated official pack (embedded fallback; split by severity: critical/ high/ medium/)
 │   └── test/                  # Engine feature-exercise templates
 ├── test-data/              # Test contracts (core/, security/)
 └── docs/                   # Comprehensive documentation
@@ -261,16 +328,16 @@ w3goaudit/
 ### 1. Scan Workflow
 
 ```
-Input → Reader → Builder → Database → Engine → Findings → Report
+Input → Reader → Builder → Database → Engine → Findings → Result-folder bundle
 ```
 
 1. Discover `.sol` files
 2. Parse with solast-go
-3. Build database (inheritance, call graph, selectors)
-4. Load WQL templates
+3. Build database (inheritance, call graph, selectors, per-function effects)
+4. Load WQL templates (home → embedded fallback)
 5. Execute queries
 6. Generate findings
-7. Format output
+7. Write the result folder (overview, findings, SARIF, run.log, corpus, per-contract workflows + state-changes)
 
 ### 2. Build Workflow
 
@@ -281,6 +348,7 @@ Build phases:
 4. Build inheritance (C3)
 5. Build call graph
 6. Calculate entry points
+7. Analyze per-function effects (state writes, guards, access control)
 
 ### 3. Default Scan (Combined) Workflow
 
@@ -312,11 +380,11 @@ The contract database contains:
 # Build database
 w3goaudit build test-data/core/build-database/ -o test-db.json --verbose
 
-# Security scan
-w3goaudit test-data/security/ --template templates/official/ --md -o scan-report.md
+# Security scan → writes a test-data/security result folder
+w3goaudit test-data/security/ --template templates/official/ -o scan-report/
 
-# Project overview (now part of default scan)
-w3goaudit test-data/core/build-database/ --md -o summary.md
+# Project overview (always part of the scan — see overview.md in the folder)
+w3goaudit test-data/core/build-database/ -o overview-out/
 ```
 
 Test contracts are documented in:
@@ -332,8 +400,10 @@ Test contracts are documented in:
 - AST parsing and contract database
 - C3 inheritance linearization
 - Recursive call graph building
+- Per-function effects analysis (state writes, guards, access control)
 - WQL query language
-- Multiple output formats (console, JSON, Markdown, HTML)
+- Result-folder output: Markdown + SARIF + JSON corpus + per-entry workflows + state-change matrix
+- Self-provisioning template home (`~/.w3goaudit`) with release download + embedded fallback
 - CLI and SDK
 - Source/context/workflow extraction for report writing
 

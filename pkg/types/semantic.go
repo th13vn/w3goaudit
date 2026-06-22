@@ -55,13 +55,73 @@ type SemanticSymbol struct {
 // SemanticFacts is the database-level semantic layer consumed by WQL.
 type SemanticFacts struct {
 	Symbols map[string]*SemanticSymbol `json:"symbols,omitempty"`
+
+	// FunctionEffects holds per-function analysis facts (state writes, guards,
+	// access control) keyed by function ID. Populated by the builder's effects
+	// pass and consumed by the report layer (per-entry workflow files and the
+	// state-change matrix).
+	FunctionEffects map[string]*FunctionEffects `json:"functionEffects,omitempty"`
+}
+
+// FunctionEffects captures what a single function does that an auditor needs to
+// reason about: which state it writes, what it checks, and how it is guarded.
+type FunctionEffects struct {
+	// StateWrites are the state variables this function writes directly.
+	StateWrites []StateWrite `json:"stateWrites,omitempty"`
+	// Guards are require/assert/revert and branch conditions, in source order.
+	Guards []Guard `json:"guards,omitempty"`
+	// Auth summarizes access control on this function.
+	Auth AuthInfo `json:"auth"`
+}
+
+// StateWrite records a write to a state variable.
+type StateWrite struct {
+	Var  string `json:"var"`            // state variable name
+	Kind string `json:"kind,omitempty"` // assign | compound | delete | sstore
+	Line int    `json:"line,omitempty"`
+}
+
+// Guard records a precondition or branch condition.
+type Guard struct {
+	Kind string `json:"kind"`           // require | assert | revert | if
+	Expr string `json:"expr,omitempty"` // condition source text (best effort)
+	Line int    `json:"line,omitempty"`
+}
+
+// AuthInfo summarizes a function's access control.
+type AuthInfo struct {
+	Modifiers    []string `json:"modifiers,omitempty"`
+	SenderChecks []string `json:"senderChecks,omitempty"` // conditions referencing msg.sender
+	UsesTxOrigin bool     `json:"usesTxOrigin,omitempty"`
+	// Controlled is true when any modifier or msg.sender check is present.
+	Controlled bool `json:"controlled,omitempty"`
 }
 
 // NewSemanticFacts creates an empty semantic index.
 func NewSemanticFacts() *SemanticFacts {
 	return &SemanticFacts{
-		Symbols: make(map[string]*SemanticSymbol),
+		Symbols:         make(map[string]*SemanticSymbol),
+		FunctionEffects: make(map[string]*FunctionEffects),
 	}
+}
+
+// SetFunctionEffects stores effects for a function ID.
+func (sf *SemanticFacts) SetFunctionEffects(funcID string, fe *FunctionEffects) {
+	if sf == nil || funcID == "" || fe == nil {
+		return
+	}
+	if sf.FunctionEffects == nil {
+		sf.FunctionEffects = make(map[string]*FunctionEffects)
+	}
+	sf.FunctionEffects[funcID] = fe
+}
+
+// GetFunctionEffects returns effects for a function ID (nil when absent).
+func (sf *SemanticFacts) GetFunctionEffects(funcID string) *FunctionEffects {
+	if sf == nil || sf.FunctionEffects == nil {
+		return nil
+	}
+	return sf.FunctionEffects[funcID]
 }
 
 // AddSymbol inserts or replaces a semantic symbol by RefID.

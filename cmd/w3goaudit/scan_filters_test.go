@@ -52,41 +52,36 @@ func TestFilterFindings(t *testing.T) {
 		{TemplateID: "NOISE-C", Severity: "MEDIUM"},
 	}
 
-	save := func() (string, string, string) { return minSeverity, includeTemplates, excludeTemplates }
-	restore := func(a, b, c string) { minSeverity, includeTemplates, excludeTemplates = a, b, c }
+	save := func() (string, string, string, string) {
+		return severityList, minSeverity, includeTemplates, excludeTemplates
+	}
+	restore := func(a, b, c, d string) {
+		severityList, minSeverity, includeTemplates, excludeTemplates = a, b, c, d
+	}
 	defer restore(save())
 
 	// min-severity HIGH keeps only SEC-A.
-	minSeverity, includeTemplates, excludeTemplates = "high", "", ""
+	severityList, minSeverity, includeTemplates, excludeTemplates = "", "high", "", ""
 	if got, _ := filterFindings(findings); len(got) != 1 || got[0].TemplateID != "SEC-A" {
 		t.Errorf("min-severity high: got %d findings, want [SEC-A]", len(got))
 	}
 
+	// --severity is an exact set: "low,medium" keeps SEC-B + NOISE-C only.
+	severityList, minSeverity, includeTemplates, excludeTemplates = "low,medium", "", "", ""
+	if got, _ := filterFindings(findings); len(got) != 2 {
+		t.Errorf("severity low,medium: got %d findings, want 2", len(got))
+	}
+
 	// exclude NOISE-* drops NOISE-C.
-	minSeverity, includeTemplates, excludeTemplates = "", "", "NOISE-*"
+	severityList, minSeverity, includeTemplates, excludeTemplates = "", "", "", "NOISE-*"
 	if got, _ := filterFindings(findings); len(got) != 2 {
 		t.Errorf("exclude NOISE-*: got %d findings, want 2", len(got))
 	}
 
 	// include SEC-* keeps only the SEC ones.
-	minSeverity, includeTemplates, excludeTemplates = "", "SEC-*", ""
+	severityList, minSeverity, includeTemplates, excludeTemplates = "", "", "SEC-*", ""
 	got, _ := filterFindings(findings)
 	if len(got) != 2 {
 		t.Errorf("include SEC-*: got %d findings, want 2", len(got))
-	}
-}
-
-func TestCountAtLeast(t *testing.T) {
-	findings := []*engine.Finding{
-		{Severity: "CRITICAL"}, {Severity: "HIGH"}, {Severity: "LOW"},
-	}
-	if n := countAtLeast(findings, "high"); n != 2 {
-		t.Errorf("countAtLeast(high) = %d, want 2", n)
-	}
-	if n := countAtLeast(findings, "critical"); n != 1 {
-		t.Errorf("countAtLeast(critical) = %d, want 1", n)
-	}
-	if n := countAtLeast(findings, "info"); n != 3 {
-		t.Errorf("countAtLeast(info) = %d, want 3", n)
 	}
 }

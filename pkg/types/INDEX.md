@@ -38,6 +38,7 @@ type MainContractEntry struct {
   `fromFile` resolves to, before falling back to lex-min. Used by inheritance and
   internal-call resolution so duplicate names pick the in-scope definition.
 - `FindContractsByName(name)` - Returns every contract sharing a name (explicit collision handling)
+- `UnresolvedBases()` - Sorted base-contract names referenced in inheritance but absent from the DB (unresolved imports); surfaced by the CLI as "⚠ Unresolved references"
 - `CalculateMainContracts()` - Identify deployable contracts
 - `GetStats()` - Database statistics
 - `LoadFromJSON(path)` - Load pre-built database from JSON file (for caching) and restore serialized AST parent pointers
@@ -177,7 +178,9 @@ type Function struct {
 - `IsEntrypoint()` - true for public/external functions that are not view/pure and not the constructor
 - `GetSelector(structDefs)` - Calculate canonical signature text (with struct→tuple resolution)
 - `GetSignature(structDefs)` - Generate the 4-byte hash
-- `IsAccessControlled(db)` - Detect access-control modifiers, sender/role guards, and recursive internal auth checks. Recognized role-style modifiers include owner/admin/operator/role/guardian/governance/manager/controller/minter/pauser variants. When a modifier name matches the auth pattern, the helper additionally validates the modifier's **body** — resolving the definition through the contract's linearized bases and requiring at least one auth-shaped signal (a guard, an `if`/ternary, or a `msg.sender`/`tx.origin` reference) before trusting the name. This catches the empty-decoy bypass (`modifier auth() { _; }`) while preserving compatibility with synthetic tests where no body is available (falls back to trusting the name when the definition can't be resolved). The internal-auth-call fallback recognizes verb+noun helper names — a guard verb (`check`/`require`/`verify`/`validate`/`enforce`) followed by an auth noun (`owner`/`auth`/`admin`/`role`/`sender`/`access`/`permission`), joined directly or by underscores — so both camelCase (`_checkOwner`) and snake_case (`_check_owner`) helpers match.
+- `IsAccessControlled(db)` - Detect **privileged** access control: auth modifiers, recursive internal auth checks, and caller-identity guards. Recognized role-style modifiers include owner/admin/operator/role/guardian/governance/manager/controller/minter/pauser variants. When a modifier name matches the auth pattern, the helper additionally validates the modifier's **body** — resolving the definition through the contract's linearized bases and requiring at least one auth-shaped signal (a guard, an `if`/ternary, or a `msg.sender`/`tx.origin` reference) before trusting the name. This catches the empty-decoy bypass (`modifier auth() { _; }`) while preserving compatibility with synthetic tests where no body is available (falls back to trusting the name when the definition can't be resolved). The internal-auth-call fallback recognizes verb+noun helper names — a guard verb (`check`/`require`/`verify`/`validate`/`enforce`) followed by an auth noun (`owner`/`auth`/`admin`/`role`/`sender`/`access`/`permission`), joined directly or by underscores — so both camelCase (`_checkOwner`) and snake_case (`_check_owner`) helpers match.
+  - **Caller-identity guard rule (storage-anchored):** a comparison of a caller identity (`msg.sender`/`tx.origin`/`_msgSender()`) counts as access control **only** when the other operand is something the caller cannot control — a state variable, a state-reading getter (`owner()`, `ownerOf(id)`, `hasRole(...)`), a state mapping/struct, an immutable, a constant, `address(this)`, or a **hardcoded literal address** (`require(msg.sender == 0xAbC…)`). Comparing against a **function argument** (or an argument-derived local) is *self-authorization*, not a privileged gate, and does NOT count — e.g. `require(from == msg.sender)` where `from` is a parameter is permissionless. Provenance is read from the AST node's `RefKind` (`parameter`/`state_var`/`local_var`) and `TaintSources` (a local is caller-controlled only when tainted solely from `parameter`), with the function's parameter set as a backstop. `_msgSender()` (all forms, including custom calldata-decoding overrides) is accepted as a caller-identity source; an insecure custom `_msgSender()` is a separate concern for a WQL template, not this heuristic.
+- `ComparesCallerIdentity()` - Detect caller **self-scoping**: a caller identity compared (inside a guard/condition) against any operand, *including a function argument* (`require(from == msg.sender)`, `if (from != msg.sender) revert`, `assert(request.from == msg.sender)`). This is NOT privileged access control — it binds a sensitive value to the caller ("you can only act on your own behalf"). Used by detectors (e.g. arbitrary `transferFrom`, the `unCheckedSender` preset) that treat self-scoping as a valid mitigation. Keep distinct from `IsAccessControlled` so entry-point classification still treats self-scoped functions as permissionless.
 
 ### ast.go
 AST node structure for queries.
@@ -258,20 +261,39 @@ Lightweight semantic facts serialized with the database.
 **Main Types:**
 ```go
 type TypeInfo struct {
-    Name       string // e.g. address, IERC20, mapping(address => uint256)
-    BaseName   string // storage/payable/array-normalized base
-    Kind       string // primitive, contract, interface, library, abstract, struct, array, mapping, unknown
-    ContractID string
-    IsAddress  bool
-    IsPayable  bool
-    Confidence string // high, medium, low
-    Source     string // parameter, state_var, local_var, type_cast, builtin, ...
+    Name        string // e.g. address, IERC20, mapping(address => uint256)
+    BaseName    string // storage/payable/array-normalized base
+    Kind        string // primitive, contract, interface, library, abstract, struct, array, mapping, unknown
+    ContractID  string
+    IsAddress   bool
+    IsPayable   bool
+    Confidence  string // high, medium, low
+    Source      string // parameter, state_var, local_var, type_cast, builtin, ...
+    ElementType string // array element type (when Kind == array)
+    KeyType     string // mapping key type   (when Kind == mapping)
+    ValueType   string // mapping value type (when Kind == mapping)
 }
 
 type SemanticFacts struct {
-    Symbols map[string]*SemanticSymbol // RefID -> symbol fact
+    Symbols         map[string]*SemanticSymbol   // RefID -> symbol fact
+    FunctionEffects map[string]*FunctionEffects  // function ID -> effects
 }
+
+// Per-function analysis facts (builder Phase 7), consumed by the report layer.
+type FunctionEffects struct {
+    StateWrites []StateWrite // state vars written directly
+    Guards      []Guard      // require/assert/revert + if conditions, in order
+    Auth        AuthInfo     // modifiers, msg.sender checks, tx.origin, controlled?
+}
+type StateWrite struct { Var, Kind string; Line int }   // kind: assign|compound|delete|sstore
+type Guard      struct { Kind, Expr string; Line int }   // kind: require|assert|revert|if
+type AuthInfo   struct { Modifiers, SenderChecks []string; UsesTxOrigin, Controlled bool }
 ```
+
+`SetFunctionEffects` / `GetFunctionEffects` access the map by function ID
+(`MakeFunctionID(sourceFile, contract, selector)`). These facts serialize into
+`corpus/database.json` and power `state-changes.md` and the per-entry workflow
+files. (WQL exposure of these facts is intentionally out of scope for now.)
 
 **What is inferred today:**
 - Function parameters, state variables, and local declarations
@@ -279,6 +301,7 @@ type SemanticFacts struct {
 - User-defined type/interface/contract casts such as `IERC20(token)`
 - Builtin address facts such as `msg.sender`, `tx.origin`, and `msg.value`
 - Member-call receiver facts, e.g. `receiver_type_kind: interface`
+- Per-function effects: state writes, guards, and access control (`FunctionEffects`)
 
 These facts are intentionally an MVP semantic layer, not a full solc-compatible
 type checker. Unknown or complex types remain low-confidence and classification
@@ -292,15 +315,16 @@ Call graph structures.
 // FunctionCall is defined in function.go (records one call site, used by
 // Function.Calls and Modifier.Calls).
 type FunctionCall struct {
-    CallType         CallType
     Target           string
     ContractName     string
-    Resolved         bool
     ResolvedContract string
     ResolvedFunction string
+    Signature        string       // 4-byte selector, when applicable
+    CallType         CallType
     TargetKind       ContractKind
-    ArgCount         int
     Line             int
+    Resolved         bool
+    ArgCount         int          // -1 means unknown (old JSON)
 }
 
 type CallGraph struct {

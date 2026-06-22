@@ -9,8 +9,9 @@ with a YAML-based detection language (WQL). The most valuable contributions are
 - Discuss non-trivial changes in an issue first.
 - Every code change must keep `go build ./...`, `go test ./...`, `go vet ./...`,
   and `gofmt -l ./cmd ./pkg ./templates` (empty output) green. CI enforces this.
-- Update the relevant `INDEX.md` and `docs/` when you change behavior — see the
-  doc-update table in `docs/project-overview.md`.
+- Update the relevant `INDEX.md` and `docs/` when you change behavior — each
+  `pkg/*` and top-level folder with an `INDEX.md` documents its own change
+  checklist; see `docs/project-overview.md` for the overall architecture.
 - New detectors **and** engine changes need tests (vulnerable + safe fixtures).
 
 ## Dev setup

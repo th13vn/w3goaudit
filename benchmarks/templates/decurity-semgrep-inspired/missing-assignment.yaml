@@ -1,0 +1,24 @@
+meta:
+  id: DECURITY-MISSING-ASSIGNMENT
+  title: "Decurity Semgrep: Expression statement looks like a missing assignment or check"
+  severity: HIGH
+  confidence: MEDIUM
+  description: >
+    Detects suspicious standalone expressions that look like a forgotten
+    assignment or comparison result.
+  recommendation: >
+    Review the Decurity rule semantics and add access control, validation,
+    reentrancy protection, or safer arithmetic/oracle handling as appropriate.
+  references:
+    - https://github.com/Decurity/semgrep-smart-contracts/tree/master/solidity/security
+
+query:
+  scope: function
+  filter:
+    source_regex: '(?m)^\s*(?:[A-Za-z_][A-Za-z0-9_]*(?:\[[^\]]+\])?|\w+\s*==\s*\w+)\s*;'
+  match:
+    contains:
+      any:
+        - kind: expr.identifier
+        - kind: expr.binary_op
+          operator: '=='

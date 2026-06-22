@@ -62,6 +62,47 @@ are byte-stable across runs and diff cleanly.
   a collision silently merged two nodes in the graph output. 64-bit makes
   the risk astronomically small.
 
+### bundle.go
+
+Writes the **result folder** — the default output of a scan (v0.3). One call,
+`WriteBundle(dir, db, summary, findings, tool, BundleOptions{HTML})`, produces:
+
+```
+<dir>/overview.md, findings.md, results.sarif
+<dir>/corpus/{database.json, findings.json, overview.json}   # canonical DB lives here only
+<dir>/<MainContract>/state-changes.md
+<dir>/<MainContract>/workflows/<entryFn>.md
+```
+
+- Folder name dedup: `contractDirNames` disambiguates duplicate contract names
+  (across files) as `Name__<filestem>`; `workflowFileNames` disambiguates
+  overloaded entries as `<fn>__<selector>.md`. All names go through `sanitizeName`.
+- `pruneStaleContractDirs` removes per-contract folders from a previous run that
+  aren't in the current scan (re-scan is idempotent); it only touches dirs that
+  contain `state-changes.md`/`workflows/` and never `corpus/`.
+- `renderStateChanges(mc, rows)` renders the reachability matrix (see
+  `state_matrix.go`); falls back to a plain variable list when rows are absent.
+- `renderWorkflow(mc, fn, *types.FunctionEffects, stateWrites)` renders one
+  entry-function context block: Signature, Auth/Access Control (modifiers,
+  msg.sender checks, ⚠ Unprotected, ⚠ tx.origin), Guards/Checks, Branch
+  Conditions, State Effects (transitive), Call Workflow mermaid. Effects come
+  from `Database.Semantics.FunctionEffects` (builder Phase 7).
+- `run.log` is NOT written here — the CLI owns it (open for the whole scan).
+  HTML mirrors are added only when `BundleOptions.HTML` is set.
+
+### state_matrix.go
+
+Computes the per-contract state-change matrix consumed by `state-changes.md` and
+the workflow files' State-Effects section.
+
+- `BuildStateMatrix(db, main, states) []StateRow` — for each state variable:
+  the functions that write it (`Written By`) and the entry points that reach a
+  writer transitively (`Reachable From`).
+- `stateMatrixBuilder` resolves functions across `main.LinearizedBases`
+  (most-derived wins), follows intra-contract calls (`isIntraContractCall`:
+  internal/self/inherited/super/library/modifier) for the reachability closure,
+  and reads writes from `Database.Semantics.GetFunctionEffects`.
+
 ### html.go
 Interactive HTML report renderer.
 
@@ -106,6 +147,9 @@ Output structures for reports.
 
 **Features:**
 - Defines `SummaryReport` and `ContractSummary` structs.
+- `ContractSummary.Version` — the Solidity pragma of the file defining the
+  contract (e.g. `^0.8.20`), surfaced per main contract in the overview and the
+  per-contract folder.
 - `GitInfo` struct includes:
     - `RemoteURL` - Web URL of repository (e.g., `https://github.com/user/repo`)
     - `Branch` - Current branch name (e.g., `main`)
@@ -208,9 +252,18 @@ The CLI also passes a `plainMode` flag (derived from `--no-color` / `NO_COLOR`
 / non-TTY) into `printCombinedConsole` and `printFindings` so emoji
 decorations are suppressed consistently with the header.
 
-**Reachability continuation line:** when a finding's `Reachability` has
-more than one hop, `cmd/w3goaudit/root.go` prints two additional indented
-lines under the standard `Location:` block:
+**Title-only console by default:** `printFindings` in `cmd/w3goaudit/root.go`
+prints only the numbered finding title per severity group on the terminal,
+because the full per-finding block overflowed narrow terminals on large scans.
+The full detail (`Location:`, `Confidence:`, `Details:`, and the reachability
+continuation below) is always written to the result folder (`findings.md`,
+`corpus/findings.json`) and is teed to the terminal only when `--verbose` is
+set. The footer prints a one-line hint pointing at the result folder /
+`--verbose` when not verbose.
+
+**Reachability continuation line (verbose console only):** when a finding's
+`Reachability` has more than one hop, the `--verbose` console path prints two
+additional indented lines under the standard `Location:` block:
 
 ```
 ↳ via Contract.entry() ⇒ Contract._helper() ⇒ Contract._host()
@@ -297,7 +350,7 @@ findingsHTML := report.FormatFindingsAsHTML(findings, db)
 
 // 2b. Or build versioned JSON documents. The findings JSON passes the new
 //     reachability / entryPoint / primaryAst fields through unchanged.
-tool := report.ToolMeta{Name: "w3goaudit", Version: "0.2.0"}
+tool := report.ToolMeta{Name: "w3goaudit", Version: "0.3.0"}
 ovJSON := report.BuildOverviewJSON(tool, summary, db.GetStats())
 fdJSON := report.BuildFindingsJSON(tool, findings)
 
@@ -330,16 +383,28 @@ for _, f := range findings {
 
 ## File Layout
 
-When the CLI is invoked with `-o report.<ext>`, it produces:
+A scan writes a **result folder** (v0.3) via `WriteBundle` (`bundle.go`):
 
-| Format | Files written |
-|---|---|
-| `--md`   | `report.overview.md` + `report.findings.md` |
-| `--html` | `report.overview.html` + `report.findings.html` |
-| `--json` | `report.overview.json` + `report.findings.json` |
-| `--sarif` *(additive)* | `report.sarif` (single file — SARIF schema mandates this) |
+```
+<output>/
+├── overview.md            # SummaryReport.ToMarkdown(); pragma Version per contract
+├── findings.md            # FormatFindingsAsMarkdown
+├── results.sarif          # FormatFindingsAsSARIF (always)
+├── run.log                # written by the CLI (always)
+├── corpus/                # machine-readable mirror
+│   ├── database.json      # canonical DB (reuse via --db corpus/database.json)
+│   ├── findings.json      # BuildFindingsJSON
+│   └── overview.json      # BuildOverviewJSON
+└── <MainContract>/
+    ├── state-changes.md   # reachability matrix (state_matrix.go)
+    └── workflows/<entryFn>.md
+```
 
-The split is implemented in `cmd/w3goaudit/root.go` via `splitOutputPaths()`. The `report` package itself only provides the renderers; the CLI owns the path layout.
+`--html` additionally emits `overview.html` + `findings.html`. The default
+folder name and the `--stdout` (no-files) path are owned by
+`cmd/w3goaudit/root.go`; the `report` package owns the folder's internal layout
+via `WriteBundle`. The previous `-o report.<ext>` split (`splitOutputPaths`) and
+the `--json`/`--md`/`--format` selectors were removed.
 
 ## Styling
 

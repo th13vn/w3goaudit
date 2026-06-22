@@ -103,7 +103,7 @@ func SetVerboseWriter(w io.Writer)  // Set custom verbose output writer
 ```
 
 **What It Does:**
-- Parse Solidity files (6-phase process)
+- Parse Solidity files (7-phase process)
 - Build AST trees
 - Calculate function selectors
 - Resolve inheritance (C3 linearization)
@@ -174,6 +174,7 @@ type Database struct {
     CallGraph     *CallGraph
     DataFlow      *DataFlowGraph
     Semantics     *SemanticFacts
+    Framework     string
 }
 
 type TypeInfo struct {
@@ -199,27 +200,30 @@ type MainContractEntry struct {
 type Contract struct {
     ID                string
     Name              string
-    Kind              string
+    Kind              ContractKind  // contract, interface, library, abstract
     SourceFile        string
-    Functions         []*Function
-    StateVars         []*StateVariable
-    Structs           []*Struct
-    Events            []*Event
     BaseContracts     []string
     LinearizedBases   []string  // C3 linearization (most derived first)
     InheritanceWeight int
+    Functions         []*Function
+    StateVariables    []*StateVariable
+    Events            []*Event
+    Modifiers         []*Modifier
+    Structs           []*Struct
+    Enums             []*Enum
+    IsAbstract        bool
 }
 
 type Function struct {
     Name            string
     ContractName    string
-    Visibility      string
-    StateMutability string
-    Modifiers       []string
+    Visibility      Visibility       // public, external, internal, private
+    StateMutability StateMutability  // pure, view, payable, nonpayable
     Parameters      []*Parameter
     Returns         []*Parameter
-    Selector        string
-    Signature       string
+    Modifiers       []string
+    Selector        string  // canonical: name(type1,type2,...)
+    Signature       string  // 4-byte hex keccak256 of selector
     AST             *ASTNode
     Calls           []*FunctionCall
     StartLine       int
@@ -233,7 +237,9 @@ func NewDatabase() *Database
 func (db *Database) GetContract(id string) *Contract
 func (db *Database) GetContractByName(name string) *Contract
 func (db *Database) GetAllFunctions() []*Function
-func (db *Database) GetStats() DatabaseStats
+func (db *Database) GetContractByID(id string) *Contract
+func (db *Database) ResolveContractName(name, fromFile string) *Contract
+func (db *Database) GetStats() *DatabaseStats
 func LoadFromJSON(path string) (*Database, error)  // Load pre-built database from JSON
 func MakeContractID(filePath, contractName string) string
 func MakeFunctionID(filePath, contractName, funcName string) string
@@ -248,6 +254,8 @@ func MakeFunctionID(filePath, contractName, funcName string) string
 **Exposed Types:**
 - `Generator` - Report generator
 - `SummaryReport` - Project summary
+- `BundleOptions` - Result-folder options (`HTML bool`)
+- `ToolMeta` - Tool name/version metadata stamped into reports
 
 **Exported Functions:**
 ```go
@@ -255,9 +263,17 @@ func NewGenerator(db *types.Database) *Generator
 func (g *Generator) GenerateSummary() *SummaryReport
 func FormatFindingsAsMarkdown(findings []*engine.Finding, db *types.Database) string
 func FormatFindingsAsHTML(findings []*engine.Finding, db *types.Database) string
+func FormatFindingsAsSARIF(findings []*engine.Finding, tool ToolMeta, projectRoot string) (string, error)
+
+// WriteBundle renders the complete scan result folder (overview.md, findings.md,
+// results.sarif, corpus/{database,findings,overview}.json, and one folder per
+// main contract with state-changes.md + workflows/<entryFn>.md). run.log is
+// written separately by the CLI; HTML mirrors are added when opts.HTML is set.
+func WriteBundle(dir string, db *types.Database, summary *SummaryReport,
+    findings []*engine.Finding, tool ToolMeta, opts BundleOptions) error
 
 // Severity helpers — the single source of truth shared by the formatters and
-// the CLI's --fail-on gate.
+// the CLI's --severity / --min-severity filters.
 var SeverityOrder []string                       // CRITICAL > HIGH > MEDIUM > LOW > INFO
 func SeverityRank(severity string) int           // lower = more severe; unknown ranks last
 func SeverityAtLeast(severity, threshold string) bool
@@ -265,8 +281,9 @@ func IsKnownSeverity(s string) bool
 ```
 
 **What It Does:**
-- Format findings as Markdown/HTML/JSON
+- Format findings as Markdown/HTML/SARIF/JSON
 - Generate project summaries
+- Write the complete scan result folder (`WriteBundle`)
 - Create call graph visualizations
 - Extract code snippets
 
@@ -537,7 +554,7 @@ b := builder.New()
 func (b *Builder) Build(sources []*types.SourceFile) (*types.Database, error)
 ```
 
-Builds a complete database from source files through 6 phases.
+Builds a complete database from source files through 7 phases.
 
 **Parameters:**
 - `sources` ([]*types.SourceFile) - Source files from reader
@@ -553,6 +570,7 @@ Builds a complete database from source files through 6 phases.
 4. Build inheritance
 5. Build call graph
 6. Calculate entry points
+7. Analyze per-function effects (state writes, guards, access control)
 
 **Errors:**
 - Parse errors (syntax errors in Solidity)
@@ -809,7 +827,7 @@ for _, f := range findings {
 #### GetStats
 
 ```go
-func (db *Database) GetStats() DatabaseStats
+func (db *Database) GetStats() *DatabaseStats
 ```
 
 Returns database statistics.

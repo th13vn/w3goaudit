@@ -1,0 +1,23 @@
+{
+  "_comment": "Detector manifest for 4naly3er (Picodes/4naly3er). 4naly3er's detectors are built-in TypeScript issue templates (no external rule files), and it reports each issue under a severity-prefixed code (H-/M-/L-/NC-/GAS-) plus a title. This manifest is the canonical list the benchmark uses to map those codes/titles onto shared benchmark categories and to scope the corpus to what 4naly3er can find. Each detector lists `id` (the shared slug), the matching shared `category`, and `aliases` (native code + title fragments) — run_benchmark.py registers id + every alias as a match string for this tool, so any reported form is credited and never silently dropped. Only High/Medium security issues are listed; 4naly3er's gas (GAS-) and non-critical (NC-) issues are out of scope for a security benchmark.",
+  "tool": "4naly3er",
+  "source": "https://github.com/Picodes/4naly3er",
+  "issue_templates": "https://github.com/Picodes/4naly3er/tree/main/src/issues",
+  "ref": "main",
+  "detectors": [
+    { "id": "comparison-outside-condition", "title": "Comparison operator implemented outside of a condition", "severity": "High",   "category": "comparison-outside-condition", "aliases": ["comparison outside", "comparison-outside-condition", "result of a comparison"] },
+    { "id": "delegatecall-in-loop",         "title": "Using delegatecall inside a loop",                        "severity": "High",   "category": "delegatecall-loop",            "aliases": ["delegatecall in a loop", "delegatecall inside a loop", "delegatecall-loop"] },
+    { "id": "msg-value-in-loop",            "title": "Using msg.value inside a loop",                           "severity": "High",   "category": "msg-value-loop",               "aliases": ["msg.value in a loop", "msg.value inside a loop", "msg-value-loop"] },
+    { "id": "wsteth-steth-price",           "title": "wstETH price assumed 1:1 with stETH (stEthPerToken)",     "severity": "High",   "category": "wsteth-steth-price",           "aliases": ["wsteth", "stethpertoken", "wsteth price"] },
+    { "id": "tx-origin-auth",               "title": "Use of tx.origin for authorization",                      "severity": "Medium", "category": "tx-origin",                    "aliases": ["tx.origin", "tx-origin"] },
+    { "id": "centralization-risk",          "title": "Centralization risk for privileged functions",            "severity": "Medium", "category": "centralization-risk",          "aliases": ["centralization risk", "privileged", "onlyowner"] },
+    { "id": "deprecated-chainlink-latestanswer", "title": "Deprecated Chainlink latestAnswer()",               "severity": "Medium", "category": "deprecated-chainlink-latestanswer", "aliases": ["latestanswer", "deprecated chainlink", "deprecated-oracle"] },
+    { "id": "stale-oracle-data",            "title": "Chainlink latestRoundData stale/incomplete not checked",  "severity": "Medium", "category": "stale-oracle-data",            "aliases": ["latestrounddata", "stale price", "stale oracle", "updatedat"] },
+    { "id": "approve-non-zero-first",       "title": "ERC20 approve() without first resetting allowance to 0",  "severity": "Medium", "category": "approve-non-zero-first",       "aliases": ["approve race", "approve without", "approve to non-zero", "reset to 0"] },
+    { "id": "unchecked-erc20-transfer",     "title": "Return value of ERC20 transfer/transferFrom not checked",  "severity": "Medium", "category": "unchecked-erc20-transfer",     "aliases": ["return value of", "unchecked transfer", "transfer return value"] },
+    { "id": "block-number-l2",              "title": "block.number used on L2 (unreliable)",                    "severity": "Medium", "category": "block-number-l2",              "aliases": ["block.number", "l2 block", "block number"] },
+    { "id": "erc721-safemint",              "title": "Use _safeMint instead of _mint for ERC721",               "severity": "Medium", "category": "erc721-safemint",              "aliases": ["_safemint", "safemint", "_mint instead"] },
+    { "id": "erc721-safetransferfrom",      "title": "Use safeTransferFrom instead of transferFrom for ERC721",  "severity": "Medium", "category": "erc721-safetransferfrom",      "aliases": ["safetransferfrom", "transferfrom for erc721"] },
+    { "id": "fee-over-100",                 "title": "Fee parameter can be set higher than 100%",               "severity": "Medium", "category": "fee-over-100",                 "aliases": ["fee over", "fee can be", "100%"] }
+  ]
+}

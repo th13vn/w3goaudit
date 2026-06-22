@@ -2,7 +2,10 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"os"
+	"path/filepath"
+	"strings"
 
 	"github.com/th13vn/w3goaudit/pkg/builder"
 	"github.com/th13vn/w3goaudit/pkg/engine"
@@ -10,6 +13,105 @@ import (
 	"github.com/th13vn/w3goaudit/pkg/report"
 	"github.com/th13vn/w3goaudit/pkg/types"
 )
+
+// runLogFile holds the run.log handle for the current scan (if any).
+var runLogFile *os.File
+
+// resolveOutputDir picks the result-folder path. An explicit -o wins; otherwise
+// the folder is named after the scanned project directory (or the .sol file
+// stem, or the database stem). When the derived name would collide with the
+// scanned input directory itself, "-audit" is appended so we never write report
+// files into the source tree.
+func resolveOutputDir(inputPath, dbPath, outputFlag string) string {
+	if outputFlag != "" {
+		return outputFlag
+	}
+
+	base := ""
+	switch {
+	case inputPath != "":
+		if info, err := os.Stat(inputPath); err == nil && info.IsDir() {
+			base = filepath.Base(filepath.Clean(inputPath))
+		} else {
+			b := filepath.Base(inputPath)
+			base = strings.TrimSuffix(b, filepath.Ext(b))
+		}
+	case dbPath != "":
+		b := filepath.Base(dbPath)
+		base = strings.TrimSuffix(b, filepath.Ext(b))
+	}
+
+	switch base {
+	case "", ".", "/", "..":
+		base = "w3goaudit-report"
+	}
+
+	// Honor config output.base_dir: default-named folders are created under it.
+	out := base
+	if outputBaseDir != "" {
+		out = filepath.Join(outputBaseDir, base)
+	}
+
+	// Guard against writing into the scanned directory.
+	if inputPath != "" {
+		if inAbs, err := filepath.Abs(inputPath); err == nil {
+			if outAbs, err := filepath.Abs(out); err == nil {
+				if inAbs == outAbs {
+					out += "-audit"
+				}
+			}
+		}
+	}
+	return out
+}
+
+// setupRunLog opens <dir>/run.log and routes verbose detail to it. run.log
+// always captures full detail; when terminalVerbose is set, detail is also teed
+// to stdout. Returns a close function.
+func setupRunLog(dir string, terminalVerbose bool) (func(), error) {
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return nil, fmt.Errorf("creating output folder %s: %w", dir, err)
+	}
+	f, err := os.Create(filepath.Join(dir, "run.log"))
+	if err != nil {
+		return nil, fmt.Errorf("creating run.log: %w", err)
+	}
+	runLogFile = f
+
+	var w io.Writer = f
+	if terminalVerbose {
+		w = io.MultiWriter(f, os.Stdout)
+	}
+	enableVerbose(w)
+
+	return func() {
+		if runLogFile != nil {
+			runLogFile.Close()
+			runLogFile = nil
+		}
+	}, nil
+}
+
+// enableVerbose turns on verbose logging for every package and routes it to w.
+func enableVerbose(w io.Writer) {
+	reader.VerboseEnabled = true
+	builder.VerboseEnabled = true
+	engine.VerboseEnabled = true
+	types.VerboseEnabled = true
+	report.VerboseEnabled = true
+
+	reader.SetVerboseWriter(w)
+	builder.SetVerboseWriter(w)
+	engine.SetVerboseWriter(w)
+	types.SetVerboseWriter(w)
+	report.SetVerboseWriter(w)
+}
+
+// enableVerboseStdout enables verbose logging straight to the terminal, used by
+// --stdout mode where there is no run.log.
+func enableVerboseStdout() {
+	enableVerbose(os.Stdout)
+}
 
 // verboseFile holds the current verbose file handle (if any)
 var verboseFile *os.File
@@ -28,6 +130,13 @@ func setupVerboseLogging(verbosePath string) error {
 	// If no path or "true", use stdout (default)
 	if verbosePath == "" || verbosePath == "true" {
 		return nil
+	}
+
+	// Create parent directories if they don't exist
+	if dir := filepath.Dir(verbosePath); dir != "" && dir != "." {
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			return fmt.Errorf("failed to create verbose directory %s: %w", dir, err)
+		}
 	}
 
 	// Create verbose file
@@ -128,6 +237,14 @@ func writeOutput(content, outputPath string) error {
 		fmt.Println(content)
 		return nil
 	}
+
+	// Create parent directories if they don't exist
+	if dir := filepath.Dir(outputPath); dir != "" && dir != "." {
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			return fmt.Errorf("failed to create output directory %s: %w", dir, err)
+		}
+	}
+
 	if info, err := os.Stat(outputPath); err == nil {
 		if info.IsDir() {
 			return fmt.Errorf("output path %s is a directory", outputPath)

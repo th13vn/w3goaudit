@@ -43,8 +43,30 @@ func (g *Generator) GenerateSummary() *SummaryReport {
 	report.Stats = stats
 	VerboseLog("Database stats: %d contracts, %d functions", stats.TotalContracts, stats.TotalFunctions)
 
-	// Generate summary for each main contract
+	// Generate summary for each main contract. MainContracts is a map, so iterate
+	// in a deterministic order rather than randomized map order — otherwise the
+	// exported overview lists contracts differently on every run. Order matches
+	// the documented "ranked by inheritance weight" intent: weight descending,
+	// with the contract ID as a stable tie-breaker.
+	mainIDs := make([]string, 0, len(g.db.MainContracts))
 	for contractID := range g.db.MainContracts {
+		mainIDs = append(mainIDs, contractID)
+	}
+	sort.Slice(mainIDs, func(i, j int) bool {
+		ci, cj := g.db.Contracts[mainIDs[i]], g.db.Contracts[mainIDs[j]]
+		wi, wj := 0, 0
+		if ci != nil {
+			wi = ci.InheritanceWeight
+		}
+		if cj != nil {
+			wj = cj.InheritanceWeight
+		}
+		if wi != wj {
+			return wi > wj
+		}
+		return mainIDs[i] < mainIDs[j]
+	})
+	for _, contractID := range mainIDs {
 		contract := g.db.Contracts[contractID]
 		if contract != nil {
 			summary := g.generateContractSummary(contract)
@@ -61,6 +83,7 @@ func (g *Generator) generateContractSummary(contract *types.Contract) *ContractS
 	summary := &ContractSummary{
 		Name:              contract.Name,
 		SourceFile:        contract.SourceFile,
+		Version:           g.pragmaVersion(contract.SourceFile),
 		InheritanceChain:  g.flattenInheritance(contract),
 		StateVariables:    make([]*StateSummary, 0),
 		EntryFunctions:    make([]*FunctionSummary, 0),
@@ -93,6 +116,18 @@ func (g *Generator) generateContractSummary(contract *types.Contract) *ContractS
 	VerboseLog("  Generated call graph (%d bytes)", len(summary.CallGraphMermaid))
 
 	return summary
+}
+
+// pragmaVersion returns the Solidity pragma recorded for the given source file,
+// or "" when the file or its pragma is unknown.
+func (g *Generator) pragmaVersion(sourceFile string) string {
+	if g.db == nil || g.db.SourceFiles == nil {
+		return ""
+	}
+	if sf := g.db.SourceFiles[sourceFile]; sf != nil {
+		return sf.PragmaVersion
+	}
+	return ""
 }
 
 // collectAllStateVariables collects all state variables from the inheritance chain
@@ -276,7 +311,11 @@ func (g *Generator) generateCallGraphMermaid(contract *types.Contract) string {
 
 	// Collect all edges within this contract's functions
 	edges := make(map[string]bool)
+	// entryNodes dedups; entryOrder preserves first-encounter order so the styled
+	// node block below is emitted deterministically (a bare map range would
+	// randomize it across runs).
 	entryNodes := make(map[string]bool)
+	entryOrder := make([]string, 0)
 
 	// Collect functions from inheritance chain
 	for _, baseName := range contract.LinearizedBases {
@@ -300,7 +339,10 @@ func (g *Generator) generateCallGraphMermaid(contract *types.Contract) string {
 			// IsEntrypoint() logic might skip fallback/receive depending on implementation
 			// We force them here as they are external entry points
 			if fn.IsEntrypoint() || strings.HasPrefix(funcName, "fallback") || strings.HasPrefix(funcName, "receive") {
-				entryNodes[displayName] = true
+				if !entryNodes[displayName] {
+					entryNodes[displayName] = true
+					entryOrder = append(entryOrder, displayName)
+				}
 			}
 
 			// Add edges for calls
@@ -327,7 +369,7 @@ func (g *Generator) generateCallGraphMermaid(contract *types.Contract) string {
 
 	// Add node styling - using dark mode compatible colors
 	sb.WriteString("\n")
-	for nodeName := range entryNodes {
+	for _, nodeName := range entryOrder {
 		sanitized := sanitizeMermaidNode(nodeName)
 		// Ensure node is defined with label even if unconnected
 		sb.WriteString(fmt.Sprintf("    %s[\"%s\"]\n", sanitized, nodeName))

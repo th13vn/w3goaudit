@@ -1,0 +1,26 @@
+meta:
+  id: 4NALY3ER-H-003
+  title: "msg.value Used Inside Loop"
+  severity: HIGH
+  confidence: HIGH
+  description: >
+    Detects use of msg.value inside a loop body. msg.value is the ETH sent
+    in the transaction and remains fixed for the entire call. Using it in
+    each loop iteration credits each recipient with the full msg.value
+    rather than a share, meaning the contract tracks more ETH than was
+    actually received — a critical accounting bug exploitable for infinite
+    minting or fund drainage.
+    Equivalent to 4naly3er's msg.valueInLoop detector.
+  recommendation: >
+    Never use msg.value inside a loop. Instead, accept an explicit array of
+    amounts and verify their sum equals msg.value before the loop.
+
+query:
+  scope: function
+
+  match:
+    contains:
+      kind: stmt.loop
+      contains:
+        kind: expr.member_access
+        name: "msg\\.value"

@@ -1,0 +1,32 @@
+meta:
+  id: SLITHER-REENTRANCY-ETH
+  title: "Reentrancy with ETH Transfer"
+  severity: HIGH
+  confidence: MEDIUM
+  description: >
+    Detects functions where an external call (that may transfer ETH) occurs before
+    state variable updates, violating the Checks-Effects-Interactions pattern.
+    An attacker can re-enter the function via a fallback/receive to exploit the
+    stale state and drain funds. Equivalent to Slither's reentrancy-eth detector.
+  recommendation: >
+    Apply the Checks-Effects-Interactions pattern: update all state variables
+    BEFORE making external calls. Alternatively, use a ReentrancyGuard modifier
+    (e.g., OpenZeppelin's nonReentrant).
+
+query:
+  scope: entrypoint
+
+  filter:
+    # Reentrancy guard detection is centralized in `preset: unLocked`
+    # (pkg/engine/presets.go). The preset already returns true for
+    # unguarded functions — no `not:` needed.
+    preset: unLocked
+
+  # The "reentrancy with ETH" signature is: an outbound ETH transfer followed
+  # by a state write. Using `eth_transfer` (transfer/send/call{value:}) here
+  # — instead of `outgoing_call` — distinguishes this detector from
+  # reentrancy-no-eth and removes findings on calls that cannot transfer ETH.
+  match:
+    sequence:
+      - kind: eth_transfer
+      - kind: state_write

@@ -1,0 +1,27 @@
+meta:
+  id: DECURITY-UNRESTRICTED-TRANSFEROWNERSHIP
+  title: "Decurity Semgrep: transferOwnership is public/external without owner check"
+  severity: HIGH
+  confidence: MEDIUM
+  description: >
+    Detects transferOwnership entrypoints that write owner-like state from a
+    user-controlled address without authentication.
+  recommendation: >
+    Review the Decurity rule semantics and add access control, validation,
+    reentrancy protection, or safer arithmetic/oracle handling as appropriate.
+  references:
+    - https://github.com/Decurity/semgrep-smart-contracts/tree/master/solidity/security
+
+query:
+  scope: entrypoint
+  filter:
+    all:
+      - func_name: '^transferOwnership$'
+      - preset: unAuthenticated
+  match:
+    contains:
+      kind: state_write
+      left:
+        name: '(?i)owner'
+      right:
+        tainted_from: parameter

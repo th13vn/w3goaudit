@@ -375,6 +375,11 @@ Built-in preset checks for common patterns.
 - `BuiltinPresets` map - Registry of preset functions
 - `IsKnownPreset(name)` - Used by template load to reject typos
 
+**Built-in presets:**
+- `unAuthenticated` — `!Function.IsAccessControlled(db)`. Vulnerable when the function lacks **privileged** access control (owner/admin/role modifiers, auth helpers, or a caller-vs-storage / caller-vs-hardcoded-address guard). A caller self-scoping check like `require(from == msg.sender)` does NOT satisfy this — it is not privileged access control.
+- `unCheckedSender` — `!IsAccessControlled(db) && !Function.ComparesCallerIdentity()`. Vulnerable when the function is neither privileged-gated NOR self-scopes the caller (binds a sensitive argument to `msg.sender`). Use for detectors where self-scoping is a valid mitigation (e.g. arbitrary `transferFrom`).
+- `unLocked` — vulnerable when the function lacks a reentrancy guard modifier.
+
 **Polarity reminder:** every preset returns `true` for the **vulnerable**
 case. Use them WITHOUT a `not:` wrapper in `filter:` — the rule passes
 exactly when you want to scan further.
@@ -401,6 +406,19 @@ Returns `true` (= vulnerable) when function has **no access control**. Checks in
 ```yaml
 filter:
   preset: unAuthenticated   # scan only unauthenticated entry points
+```
+
+#### unCheckedSender
+Returns `true` (= vulnerable) when the function has **neither** privileged
+access control **nor** a caller self-scoping check
+(`!IsAccessControlled(db) && !ComparesCallerIdentity()`). Broader than
+`unAuthenticated` — it also clears functions that bind a sensitive argument to
+`msg.sender` (e.g. `require(from == msg.sender)`). Use for detectors where
+self-scoping is a valid mitigation, such as arbitrary `transferFrom`.
+
+```yaml
+filter:
+  preset: unCheckedSender   # vulnerable unless gated OR caller-self-scoped
 ```
 
 #### unLocked

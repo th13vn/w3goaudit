@@ -1,0 +1,26 @@
+meta:
+  id: DECURITY-ERC721-ARBITRARY-TRANSFERFROM
+  title: "Decurity Semgrep: ERC721 _transfer lacks caller authorization before approval reset"
+  severity: HIGH
+  confidence: MEDIUM
+  description: >
+    Detects ERC721 _transfer implementations that validate previous ownership
+    but reset approvals without an explicit caller authorization check.
+  recommendation: >
+    Review the Decurity rule semantics and add access control, validation,
+    reentrancy protection, or safer arithmetic/oracle handling as appropriate.
+  references:
+    - https://github.com/Decurity/semgrep-smart-contracts/tree/master/solidity/security
+
+query:
+  scope: function
+  filter:
+    func_name: '^_transfer$'
+  match:
+    sequence:
+      - kind: check.require
+        contains:
+          kind: expr.member_access
+          name: '^prevOwnership\.addr$'
+      - kind: call.internal
+        name: '^_approve$'

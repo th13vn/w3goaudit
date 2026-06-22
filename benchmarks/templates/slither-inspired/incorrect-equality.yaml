@@ -1,0 +1,29 @@
+meta:
+  id: SLITHER-INCORRECT-EQUALITY
+  title: "Dangerous Strict Equality"
+  severity: MEDIUM
+  confidence: HIGH
+  description: >
+    Detects use of strict equality (==) with balance or similar values that
+    can be externally manipulated. An attacker can forcibly send ETH to a
+    contract (via selfdestruct or coinbase), breaking any logic that relies
+    on exact balance comparisons. Equivalent to Slither's incorrect-equality
+    detector.
+  recommendation: >
+    Use >= or <= comparisons instead of == when checking balances. Never rely
+    on this.balance being an exact value.
+
+query:
+  scope: function
+
+  match:
+    contains:
+      kind: expr.binary_op
+      operator: "=="
+      any:
+        - contains:
+            kind: expr.member_access
+            name: (?i)(\.balance$|address\(this\)\.balance)
+        - contains:
+            kind: call.external
+            name: (?i)^balanceOf$

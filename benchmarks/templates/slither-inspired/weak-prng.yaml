@@ -1,0 +1,24 @@
+meta:
+  id: SLITHER-WEAK-PRNG
+  title: "Weak PRNG from Block Variables"
+  severity: HIGH
+  confidence: MEDIUM
+  description: >
+    Detects use of block.timestamp, block.number, or blockhash as a source
+    of randomness (typically via modulo). Miners can influence these values
+    to some extent, making any derived randomness predictable and exploitable.
+    Equivalent to Slither's weak-prng detector.
+  recommendation: >
+    Use a commit-reveal scheme or a trusted oracle (e.g., Chainlink VRF) for
+    randomness. Do not rely on block variables for security-critical decisions.
+
+query:
+  scope: function
+
+  match:
+    contains:
+      kind: expr.binary_op
+      operator: "%"
+      contains:
+        kind: expr.member_access
+        name: (?i)(block\.timestamp|block\.number|block\.difficulty|blockhash)

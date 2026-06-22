@@ -1,0 +1,25 @@
+meta:
+  id: SLITHER-CONSTANT-FUNCTION-STATE
+  title: "View/Pure Function Modifies State"
+  severity: MEDIUM
+  confidence: MEDIUM
+  description: >
+    Detects functions declared as view or pure that contain state-modifying
+    operations (state writes). In Solidity >= 0.5.0, the STATICCALL opcode
+    is used for view/pure calls, which will revert on state modification.
+    This indicates incorrectly labeled functions that will trap callers.
+    Equivalent to Slither's constant-function-state detector.
+  recommendation: >
+    Remove the view/pure modifier, or refactor the function so it does not
+    modify state. Ensure the function's actual behavior matches its declared
+    mutability.
+
+query:
+  scope: function
+
+  filter:
+    mutability_filter: view,pure
+
+  match:
+    contains:
+      kind: state_write

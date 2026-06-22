@@ -1,0 +1,25 @@
+meta:
+  id: SLITHER-CONTROLLED-DELEGATECALL
+  title: "Controlled Delegatecall Destination"
+  severity: HIGH
+  confidence: HIGH
+  description: >
+    Detects delegatecall where the target address originates from a function
+    parameter (user-controlled). An attacker can pass a malicious contract address,
+    which will execute arbitrary code in the context of this contract, potentially
+    draining all funds or corrupting storage. Equivalent to Slither's
+    controlled-delegatecall detector.
+  recommendation: >
+    Never delegatecall to user-supplied addresses. Use a whitelist of trusted
+    implementation addresses or an upgradeable proxy pattern with a timelocked
+    admin role for changing the implementation.
+
+query:
+  scope: entrypoint
+
+  match:
+    contains:
+      kind: delegatecall
+      contains:
+        kind: expr.identifier
+        tainted_from: parameter

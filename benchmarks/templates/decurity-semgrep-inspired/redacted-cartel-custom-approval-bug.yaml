@@ -1,0 +1,34 @@
+meta:
+  id: DECURITY-REDACTED-CARTEL-CUSTOM-APPROVAL-BUG
+  title: "Decurity Semgrep: transferFrom decrements allowance using recipient instead of spender"
+  severity: HIGH
+  confidence: MEDIUM
+  description: >
+    Detects transferFrom implementations that decrement allowance using
+    allowance(sender, recipient), allowing recipient-controlled allowance bugs.
+  recommendation: >
+    Review the Decurity rule semantics and add access control, validation,
+    reentrancy protection, or safer arithmetic/oracle handling as appropriate.
+  references:
+    - https://github.com/Decurity/semgrep-smart-contracts/tree/master/solidity/security
+
+query:
+  scope: function
+  filter:
+    func_name: '^transferFrom$'
+  match:
+    contains:
+      kind: call.internal
+      name: '^_approve$'
+      args:
+        2:
+          kind: call.external
+          name: '^sub$'
+          contains:
+            kind: call.internal
+            name: '^allowance$'
+            args:
+              0:
+                name: '^sender$'
+              1:
+                name: '^recipient$'

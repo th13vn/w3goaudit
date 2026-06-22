@@ -1,0 +1,30 @@
+meta:
+  id: SLITHER-UNCHECKED-LOWLEVEL
+  title: "Unchecked Low-Level Call Return Value"
+  severity: MEDIUM
+  confidence: MEDIUM
+  description: >
+    Detects low-level .call() whose boolean return value is not checked.
+    Low-level calls return (bool success, bytes data) but if the bool is
+    ignored, ETH can be locked if the call fails silently. Equivalent to
+    Slither's unchecked-lowlevel detector.
+  recommendation: >
+    Always check the return value: (bool success, ) = addr.call{value: x}("");
+    require(success, "call failed"). Or use transfer() for simple ETH sends.
+
+query:
+  scope: function
+
+  # `stmt.assign` covers the idiomatic destructuring
+  # `(bool success, ) = addr.call(...); require(success, ...)` — the call's
+  # return is captured, then checked downstream, so it shouldn't fire.
+  match:
+    contains:
+      kind: call.lowlevel.call
+      not:
+        inside:
+          any:
+            - kind: check.require
+            - kind: check.assert
+            - kind: stmt.if
+            - kind: stmt.assign

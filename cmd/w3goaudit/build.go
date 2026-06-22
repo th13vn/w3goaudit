@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 
 	"github.com/spf13/cobra"
 	"github.com/th13vn/w3goaudit/pkg/types"
@@ -76,6 +77,13 @@ func runBuild(cmd *cobra.Command, args []string) error {
 	data, err := json.MarshalIndent(db, "", "  ")
 	if err != nil {
 		return fmt.Errorf("error encoding JSON: %w", err)
+	}
+
+	// Create parent directories if they don't exist
+	if dir := filepath.Dir(buildOutputPath); dir != "" && dir != "." {
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			return fmt.Errorf("error creating output directory %s: %w", dir, err)
+		}
 	}
 
 	if err := os.WriteFile(buildOutputPath, data, 0644); err != nil {

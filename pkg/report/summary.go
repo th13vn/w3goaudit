@@ -41,6 +41,10 @@ type ContractSummary struct {
 	// SourceFile where the contract is defined (full path)
 	SourceFile string `json:"sourceFile"`
 
+	// Version is the Solidity pragma of the file defining this contract
+	// (e.g. "^0.8.20"), surfaced in the overview per main contract.
+	Version string `json:"version,omitempty"`
+
 	// EntryFunctionCount is the number of entry point functions
 	EntryFunctionCount int `json:"entryFunctionCount"`
 

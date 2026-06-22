@@ -74,6 +74,11 @@ func (b *Builder) Build(sources []*types.SourceFile) (*types.Database, error) {
 	b.db.CalculateMainContracts()
 	VerboseLog("Phase 6 complete: Found %d main contracts", len(b.db.MainContracts))
 
+	// Phase 7: Per-function effects (state writes, guards, access control)
+	VerboseLog("Phase 7: Analyzing per-function effects")
+	b.analyzeEffects()
+	VerboseLog("Phase 7 complete")
+
 	VerboseLog("Database build complete")
 	return b.db, nil
 }
@@ -81,13 +86,23 @@ func (b *Builder) Build(sources []*types.SourceFile) (*types.Database, error) {
 // parseFile parses a single source file and extracts contracts
 func (b *Builder) parseFile(sf *types.SourceFile) error {
 	VerboseLog("Parsing file: %s", sf.Path)
-	result, err := parser.Parse(sf.Content, &parser.Options{
+	// ParseWithErrors surfaces the errors that tolerant parsing recovers from but
+	// would otherwise discard. A recovered error means the parser desynced and may
+	// have dropped part of a contract body (functions, state) WITHOUT failing the
+	// build — a silent false-negative source for every downstream detector. We
+	// keep the tolerant policy (build the rest of the project) but make the loss
+	// loud via a verbose warning so it is diagnosable instead of invisible.
+	result, parseErrs, err := parser.ParseWithErrors(sf.Content, &parser.Options{
 		Tolerant: true,
 		Loc:      true,
 		Range:    true,
 	})
 	if err != nil {
 		return err
+	}
+	if len(parseErrs) > 0 {
+		VerboseLog("⚠️  %s: %d parse error(s) recovered in tolerant mode — extracted contracts may be INCOMPLETE (functions/state silently dropped). First: %q at line %d",
+			sf.Path, len(parseErrs), parseErrs[0].Message, parseErrs[0].Line)
 	}
 
 	// Stash the parsed tree so the call-graph phase can reuse it instead of
@@ -141,8 +156,35 @@ func (b *Builder) parseFile(sf *types.SourceFile) error {
 // buildASTs builds AST trees for all functions and modifiers
 func (b *Builder) buildASTs() error {
 	VerboseLog("Building AST trees for %d functions and %d modifiers", len(b.functionASTs), len(b.modifierASTs))
+
+	// Building a function AST appends DataFlow edges to the shared graph, so the
+	// order we visit functions becomes the order of db.DataFlow.Edges in the
+	// serialized output. Map iteration order is randomized per run, which made
+	// the exported database non-reproducible. Visit in a stable key order
+	// (contract, source position, name) so edges are emitted identically across
+	// runs. Selectors are not assigned yet (Phase 3), so they cannot be part of
+	// the key here.
+	fns := make([]*types.Function, 0, len(b.functionASTs))
+	for fn := range b.functionASTs {
+		fns = append(fns, fn)
+	}
+	sort.Slice(fns, func(i, j int) bool {
+		a, c := fns[i], fns[j]
+		if a.ContractName != c.ContractName {
+			return a.ContractName < c.ContractName
+		}
+		if a.StartLine != c.StartLine {
+			return a.StartLine < c.StartLine
+		}
+		if a.EndLine != c.EndLine {
+			return a.EndLine < c.EndLine
+		}
+		return a.Name < c.Name
+	})
+
 	// Iterate through function->AST mappings and build AST trees
-	for fn, astNode := range b.functionASTs {
+	for _, fn := range fns {
+		astNode := b.functionASTs[fn]
 		// Find the contract this function belongs to
 		contract := b.db.GetContractByName(fn.ContractName)
 		if contract == nil {
@@ -153,10 +195,27 @@ func (b *Builder) buildASTs() error {
 		fn.AST = BuildFunctionAST(astNode, fn, contract, b.db)
 	}
 
-	// Build AST trees for modifiers
-	for mod, astNode := range b.modifierASTs {
+	// Build AST trees for modifiers in the same stable order. Modifier bodies can
+	// also produce DataFlow edges (assignments inside a modifier), so this loop
+	// must be deterministic too. Modifier has no file/contract field, so order by
+	// source position then name; that is unique within a single build.
+	mods := make([]*types.Modifier, 0, len(b.modifierASTs))
+	for mod := range b.modifierASTs {
+		mods = append(mods, mod)
+	}
+	sort.Slice(mods, func(i, j int) bool {
+		a, c := mods[i], mods[j]
+		if a.StartLine != c.StartLine {
+			return a.StartLine < c.StartLine
+		}
+		if a.EndLine != c.EndLine {
+			return a.EndLine < c.EndLine
+		}
+		return a.Name < c.Name
+	})
+	for _, mod := range mods {
 		// Build AST tree and store in modifier
-		mod.AST = BuildModifierAST(astNode)
+		mod.AST = BuildModifierAST(b.modifierASTs[mod])
 	}
 
 	// Clear the mappings to free memory
@@ -175,7 +234,14 @@ func (b *Builder) buildInheritance() error {
 // buildCallGraph builds the call graph for all contracts
 func (b *Builder) buildCallGraph() error {
 	cg := NewCallGraphBuilder(b.db)
-	return cg.Build()
+	if err := cg.Build(); err != nil {
+		return err
+	}
+	// Make `super` resolution context-aware: bind each super call to the next
+	// definition in EVERY instantiation leaf's MRO, not just the textual
+	// contract's own MRO. Sound union; additive and deduplicated.
+	cg.ResolveSuperAcrossLeaves()
+	return nil
 }
 
 // calculateFunctionSelectors calculates selectors and signatures for all functions

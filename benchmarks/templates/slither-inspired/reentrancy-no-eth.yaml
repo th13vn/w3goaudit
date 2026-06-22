@@ -1,0 +1,26 @@
+meta:
+  id: SLITHER-REENTRANCY-NO-ETH
+  title: "Reentrancy Without ETH (State Modification)"
+  severity: MEDIUM
+  confidence: MEDIUM
+  description: >
+    Detects reentrancy where an external call occurs before state variable
+    updates, but no ETH is transferred. While less severe than ETH-based
+    reentrancy, an attacker can still exploit stale state for logical errors
+    (e.g., double-voting, double-minting). Equivalent to Slither's
+    reentrancy-no-eth detector.
+  recommendation: >
+    Apply the Checks-Effects-Interactions pattern or use a reentrancy guard
+    (e.g. OpenZeppelin nonReentrant).
+
+query:
+  scope: entrypoint
+
+  filter:
+    # Reentrancy guard detection is centralized in `preset: unLocked`.
+    preset: unLocked
+
+  match:
+    sequence:
+      - kind: call.external
+      - kind: state_write

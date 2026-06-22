@@ -1,0 +1,23 @@
+meta:
+  id: DECURITY-OLYMPUS-DAO-STAKING-INCORRECT-CALL-ORDER
+  title: "Decurity Semgrep: stake transfers tokens before rebase"
+  severity: HIGH
+  confidence: MEDIUM
+  description: >
+    Detects stake functions that transfer tokens before calling rebase.
+  recommendation: >
+    Review the Decurity rule semantics and add access control, validation,
+    reentrancy protection, or safer arithmetic/oracle handling as appropriate.
+  references:
+    - https://github.com/Decurity/semgrep-smart-contracts/tree/master/solidity/security
+
+query:
+  scope: function
+  filter:
+    func_name: '^stake$'
+  match:
+    sequence:
+      - kind: token_call
+        name: '^(transferFrom|safeTransferFrom)$'
+      - kind: call.internal
+        name: '^rebase$'

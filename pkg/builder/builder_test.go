@@ -1,6 +1,7 @@
 package builder
 
 import (
+	"encoding/json"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -777,4 +778,93 @@ func hasEdgeFromContains(edges []*types.CallEdge, sub string) bool {
 		}
 	}
 	return false
+}
+
+// TestBuildIsDeterministic guards against map-iteration order leaking into the
+// serialized database. Building the SAME multi-file project twice must produce
+// byte-identical JSON: Go randomizes map iteration per run, so any output slice
+// populated by ranging a map (e.g. DataFlow edges built during AST construction)
+// would otherwise reorder between builds and make `build -o db.json` output
+// non-reproducible. Uses the whole fixture directory (many files, many
+// contracts) to maximize the chance of surfacing such a regression.
+func TestBuildIsDeterministic(t *testing.T) {
+	const dir = "../../test-data/core/build-database"
+
+	build := func() []byte {
+		r := reader.New()
+		sources, err := r.Read(dir)
+		if err != nil {
+			t.Fatalf("reader.Read(%q): %v", dir, err)
+		}
+		db, err := New().Build(sources)
+		if err != nil {
+			t.Fatalf("Build(%q): %v", dir, err)
+		}
+		data, err := json.MarshalIndent(db, "", "  ")
+		if err != nil {
+			t.Fatalf("MarshalIndent: %v", err)
+		}
+		return data
+	}
+
+	// Several rounds: map-order nondeterminism is probabilistic, so one extra
+	// build can coincidentally match. Re-running raises the odds of catching it.
+	first := build()
+	for i := 0; i < 5; i++ {
+		got := build()
+		if string(got) != string(first) {
+			t.Fatalf("build %d produced different JSON than the first build; "+
+				"output is non-deterministic (likely map iteration leaking into an output slice)", i+1)
+		}
+	}
+}
+
+// aclFixture exercises the access-control detection refinement: a caller-identity
+// comparison counts as access control only when the other operand is NOT
+// caller-controlled (state/getter/mapping/immutable/constant/literal), and self-
+// authorization against a function argument does NOT.
+const aclFixture = "../../test-data/core/build-database/15-access-control.sol"
+
+// TestIsAccessControlledStorageAnchored verifies the storage-anchored-target rule
+// end-to-end through the real AST + taint propagation: storage-anchored and
+// hardcoded comparisons are access control; comparisons against a function
+// argument (or an arg-derived local) are self-auth and are not.
+func TestIsAccessControlledStorageAnchored(t *testing.T) {
+	db := buildFixture(t, aclFixture)
+	c := db.GetContractByName("AccessControlChecks")
+	if c == nil {
+		t.Fatal("AccessControlChecks contract not found")
+	}
+	byName := make(map[string]*types.Function, len(c.Functions))
+	for _, fn := range c.Functions {
+		byName[fn.Name] = fn
+	}
+
+	cases := []struct {
+		fn   string
+		want bool
+	}{
+		// storage-anchored → access controlled
+		{"setOwnerState", true},
+		{"acceptOwnership", true},
+		{"adminOnly", true},
+		{"treasuryOnly", true},
+		{"hardcodedGate", true},
+		{"operatorOnly", true},
+		{"localFromState", true},
+		// caller-controlled → NOT access controlled
+		{"selfAuthParam", false},
+		{"selfAuthParam2", false},
+		{"localFromParam", false},
+		{"permissionless", false},
+	}
+	for _, tc := range cases {
+		fn := byName[tc.fn]
+		if fn == nil {
+			t.Fatalf("function %s not found", tc.fn)
+		}
+		if got := fn.IsAccessControlled(db); got != tc.want {
+			t.Errorf("%s: IsAccessControlled = %v, want %v", tc.fn, got, tc.want)
+		}
+	}
 }

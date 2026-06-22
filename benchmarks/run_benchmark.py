@@ -10,12 +10,52 @@ import shutil
 import subprocess
 import sys
 import time
+
+# Local module — same-call-chain mapper that relaxes (case, category,
+# contract, function) equality when two tools attribute the same bug to
+# different functions on the same internal-call chain. See call_chain.py.
+sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parent))
+import call_chain  # noqa: E402
 from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any
 
 
 ROOT = Path(__file__).resolve().parents[1]
+
+# Friendly suite names for normal use. A user should not need to remember long
+# JSON paths for the common benchmark modes.
+SUITES = {
+    # Default: cross-tool union corpus — every vulnerability at least one of the
+    # compared tools (slither / semgrep-decurity / 4naly3er) can find.
+    "competitive": "benchmarks/corpus/competitive.json",
+    # Per-tool parity suites scoped to a single tool's detector set.
+    "slither": "benchmarks/corpus/slither-inspired.json",
+    "decurity": "benchmarks/corpus/decurity-semgrep-inspired.json",
+    "4naly3er": "benchmarks/corpus/4naly3er-inspired.json",
+}
+
+# Common install locations on macOS/Linux. This keeps the guide commands clean:
+# users can run `python3 benchmarks/run_benchmark.py` when Go, Slither, or
+# Semgrep live in a standard place.
+COMMON_BIN_DIRS = [
+    "/usr/local/go/bin",
+    "/opt/homebrew/bin",
+    "/usr/local/bin",
+    "/usr/bin",
+    "/bin",
+]
+
+
+def find_executable(name: str) -> str:
+    found = shutil.which(name)
+    if found:
+        return found
+    for directory in COMMON_BIN_DIRS:
+        candidate = Path(directory) / name
+        if candidate.exists() and os.access(candidate, os.X_OK):
+            return str(candidate)
+    return ""
 
 
 def repo_path(value: str | Path, root: Path = ROOT) -> Path:
@@ -36,10 +76,34 @@ def rel_path(path: str | Path, root: Path = ROOT) -> str:
 
 
 def case_targets(case: dict[str, Any]) -> list[str]:
+    # A case usually has one Solidity file (`target`). Some cases use `targets`
+    # to merge multiple files into one logical benchmark category.
     targets = case.get("targets")
     if isinstance(targets, list) and targets:
         return [str(target) for target in targets]
     return [str(case["target"])]
+
+
+def expanded_solc_targets(case: dict[str, Any], root: Path) -> list[str]:
+    """Variant of case_targets() for adapters that compile each Solidity file
+    independently (Slither/Semgrep): when the corpus target is a directory,
+    return every .sol file inside it as a separate target.
+
+    Why: tools that drive solc (Slither via crytic-compile) abort the whole
+    batch on a single fragment's compile failure. Splitting the directory
+    into per-file targets means one broken fragment doesn't bury the other
+    20–60 fragments' findings. The runner's raw_stem() already supports a
+    multi-target case (produces case_id__<slugified-path> raw files), so
+    expanding here flows through end to end.
+    """
+    out: list[str] = []
+    for target in case_targets(case):
+        path = repo_path(target, root)
+        if path.is_dir():
+            out.extend(rel_path(p, root) for p in sorted(path.rglob("*.sol")) if p.is_file())
+        else:
+            out.append(target)
+    return out
 
 
 def safe_path_slug(value: str) -> str:
@@ -62,6 +126,13 @@ def strip_comments(line: str) -> str:
 
 
 class SourceIndex:
+    """Tiny Solidity source index used to map line numbers back to names.
+
+    Some tools only report "line 123". The benchmark needs "Contract.function"
+    to compare that alert with the expected labels, so this helper scans the
+    source text and builds rough contract/function ranges.
+    """
+
     def __init__(self, path: Path) -> None:
         self.path = path
         self.lines = path.read_text(encoding="utf-8").splitlines()
@@ -130,12 +201,28 @@ class SourceIndex:
 
 
 class CaseSourceIndex:
+    """Source lookup for a benchmark case.
+
+    A case may contain one target file or many target files. This wrapper picks
+    the right SourceIndex based on the file path reported by a tool.
+    """
+
     def __init__(self, targets: list[str], root: Path) -> None:
         self.root = root
         self.default: SourceIndex | None = None
         self.by_path: dict[str, SourceIndex] = {}
+        # Expand any directory target into the .sol files inside it. This lets
+        # a corpus case point a single `target` at a per-detector subdirectory
+        # (e.g. test-data/slither-detectors/) instead of enumerating
+        # every fragment in a verbose `targets:` array.
+        files: list[Path] = []
         for target in targets:
             path = repo_path(target, root)
+            if path.is_dir():
+                files.extend(sorted(p for p in path.rglob("*.sol") if p.is_file()))
+            else:
+                files.append(path)
+        for path in files:
             index = SourceIndex(path)
             if self.default is None:
                 self.default = index
@@ -166,8 +253,25 @@ class CaseSourceIndex:
 
 
 class AliasMatcher:
-    def __init__(self, corpus: dict[str, Any]) -> None:
+    """Maps each tool's rule names onto our shared benchmark categories.
+
+    Example: W3GoAudit may report SEC-GEN-REENTRANCY while Slither reports
+    reentrancy-eth. The corpus says both aliases mean category "reentrancy".
+    """
+
+    def __init__(self, corpus: dict[str, Any], manifest_aliases: dict[str, list[tuple[str, str]]] | None = None) -> None:
         self.by_tool: dict[str, dict[str, str]] = defaultdict(dict)
+        # Per-tool detector manifests (config/<tool>/detectors.json) are loaded
+        # FIRST so the corpus's own `aliases` block can override a manifest entry
+        # when a corpus deliberately narrows a category. The manifest is the
+        # broad safety net: it maps every detector a tool can emit onto its
+        # shared category, so a finding the tool genuinely produced is never
+        # left uncategorized (and therefore never silently dropped from TP).
+        valid_categories = set(corpus.get("categories", {}).keys())
+        for tool, pairs in (manifest_aliases or {}).items():
+            for value, category in pairs:
+                if category in valid_categories:
+                    self.by_tool[tool][norm_rule(value)] = category
         for category, meta in corpus.get("categories", {}).items():
             aliases = meta.get("aliases", {})
             for tool, values in aliases.items():
@@ -268,7 +372,53 @@ def version_from(cmd: list[str], cwd: Path, timeout: int = 30) -> str:
     return text[0] if text else "unknown"
 
 
+def load_tool_manifests(
+    config_dir: str | Path, tools: list[str], root: Path
+) -> dict[str, list[tuple[str, str]]]:
+    """Load per-tool detector manifests from `<config_dir>/<tool>/detectors.json`.
+
+    Slither and 4naly3er have built-in detectors (no rule files), so their
+    `detectors.json` manifest is the canonical map from a native detector
+    id/code onto a shared benchmark category. Returns
+    `{tool: [(match_string, category), ...]}`; the AliasMatcher folds these in
+    as aliases. Tools without a manifest (e.g. semgrep, which runs real rule
+    files) simply contribute nothing here and rely on the corpus `aliases`.
+
+    Each manifest entry may carry an `aliases` list of extra native strings
+    (the real code, title fragments) that also map to the same category — this
+    is what makes output conversion robust across the slightly different forms
+    a tool prints (`H-1`, `tx-origin`, "Use of tx.origin", ...).
+    """
+    base = repo_path(config_dir, root)
+    out: dict[str, list[tuple[str, str]]] = {}
+    for tool in tools:
+        manifest = base / tool / "detectors.json"
+        if not manifest.exists():
+            continue
+        try:
+            data = json.loads(manifest.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        pairs: list[tuple[str, str]] = []
+        for det in data.get("detectors", []):
+            category = det.get("category")
+            if not category:
+                continue
+            for value in [det.get("id")] + list(det.get("aliases", [])):
+                if value:
+                    pairs.append((str(value), category))
+        if pairs:
+            out[tool] = pairs
+    return out
+
+
 class ToolAdapter:
+    """Base class for tool adapters.
+
+    Each adapter runs one scanner and converts its native output into the same
+    finding format. This keeps scoring simple and fair.
+    """
+
     name = "base"
 
     def __init__(self, root: Path, out_dir: Path, matcher: AliasMatcher, args: argparse.Namespace) -> None:
@@ -327,12 +477,15 @@ class W3GoAuditAdapter(ToolAdapter):
 
     def __init__(self, root: Path, out_dir: Path, matcher: AliasMatcher, args: argparse.Namespace) -> None:
         super().__init__(root, out_dir, matcher, args)
-        self.binary = Path(args.w3goaudit_bin) if args.w3goaudit_bin else out_dir / "bin" / "w3goaudit"
+        # The benchmark builds the local tool for repeatable runs. Keep that
+        # binary out of the visible result folder so users only see reports and
+        # raw scanner output.
+        self.binary = Path(args.w3goaudit_bin) if args.w3goaudit_bin else self.raw_dir / ".bin" / "w3goaudit"
 
     def available(self) -> tuple[bool, str]:
         if self.binary.exists():
             return True, ""
-        if not shutil.which("go"):
+        if not find_executable("go"):
             return False, "go is not installed and --w3goaudit-bin was not provided"
         return True, ""
 
@@ -343,7 +496,7 @@ class W3GoAuditAdapter(ToolAdapter):
         stdout = self.raw_dir / "w3goaudit-build.stdout"
         stderr = self.raw_dir / "w3goaudit-build.stderr"
         result = run_command(
-            ["go", "build", "-o", str(self.binary), "./cmd/w3goaudit"],
+            [find_executable("go") or "go", "build", "-o", str(self.binary), "./cmd/w3goaudit"],
             self.root,
             stdout,
             stderr,
@@ -365,7 +518,9 @@ class W3GoAuditAdapter(ToolAdapter):
         last_cmd: list[str] = []
         for target in case_targets(case):
             stem = self.raw_stem(case, target)
-            base = self.raw_dir / f"{stem}.w3goaudit.json"
+            # w3goaudit (>=0.3) writes a result FOLDER, not a single JSON file.
+            # The machine-readable findings land at <out>/corpus/findings.json.
+            outdir = self.raw_dir / f"{stem}.w3goaudit.out"
             stdout = self.raw_dir / f"{stem}.w3goaudit.stdout"
             stderr = self.raw_dir / f"{stem}.w3goaudit.stderr"
             stdout_parts.append((target, stdout))
@@ -373,16 +528,16 @@ class W3GoAuditAdapter(ToolAdapter):
             cmd = [
                 str(self.binary),
                 target,
-                "--template",
+                "-t",
                 case["templates"],
-                "--json",
                 "-o",
-                str(base),
+                str(outdir),
+                "--ignore-invalid-templates",
             ]
             last_cmd = cmd
             result = run_command(cmd, self.root, stdout, stderr, self.args.timeout)
             results.append(result)
-            findings_path = base.with_name(base.stem + ".findings.json")
+            findings_path = outdir / "corpus" / "findings.json"
             if findings_path.exists():
                 try:
                     data = json.loads(findings_path.read_text(encoding="utf-8"))
@@ -414,11 +569,15 @@ class W3GoAuditAdapter(ToolAdapter):
 class SlitherAdapter(ToolAdapter):
     name = "slither"
 
+    def __init__(self, root: Path, out_dir: Path, matcher: AliasMatcher, args: argparse.Namespace) -> None:
+        super().__init__(root, out_dir, matcher, args)
+        self.binary = find_executable("slither")
+
     def available(self) -> tuple[bool, str]:
-        return (True, "") if shutil.which("slither") else (False, "slither is not installed")
+        return (True, "") if self.binary else (False, "slither is not installed")
 
     def version(self) -> str:
-        return version_from(["slither", "--version"], self.root)
+        return version_from([self.binary, "--version"], self.root)
 
     def run_case(self, case: dict[str, Any], source: CaseSourceIndex) -> dict[str, Any]:
         findings: list[dict[str, Any]] = []
@@ -427,19 +586,29 @@ class SlitherAdapter(ToolAdapter):
         stderr_parts: list[tuple[str, Path]] = []
         status = "ok"
         errors: list[str] = []
+        skipped: list[str] = []
+        produced = 0
         last_cmd: list[str] = []
-        for target in case_targets(case):
-            stem = self.raw_stem(case, target)
+        # Expand directory targets into per-file targets so one fragment's
+        # solc compile failure doesn't poison the whole batch (see the
+        # expanded_solc_targets docstring).
+        expanded = expanded_solc_targets(case, self.root)
+        multi = len(expanded) > 1
+        for target in expanded:
+            # Inline stem (rather than self.raw_stem) so multi-target naming
+            # works off the expanded list, not the corpus's `target` count.
+            stem = case["id"] if not multi else f"{case['id']}__{safe_path_slug(target)}"
             output = self.raw_dir / f"{stem}.slither.json"
             stdout = self.raw_dir / f"{stem}.slither.stdout"
             stderr = self.raw_dir / f"{stem}.slither.stderr"
             stdout_parts.append((target, stdout))
             stderr_parts.append((target, stderr))
-            cmd = ["slither", target, "--json", str(output)]
+            cmd = [self.binary, target, "--json", str(output)]
             last_cmd = cmd
             result = run_command(cmd, self.root, stdout, stderr, self.args.timeout)
             results.append(result)
             if output.exists():
+                produced += 1
                 try:
                     data = json.loads(output.read_text(encoding="utf-8"))
                     for item in data.get("results", {}).get("detectors", []):
@@ -462,87 +631,40 @@ class SlitherAdapter(ToolAdapter):
                     status = "error"
                     errors.append(f"could not parse {output}: {exc}")
             else:
-                status = "error"
-                errors.append(f"expected output was not written: {output}")
+                # No JSON for this fragment. For a compiler-based tool this is
+                # almost always a solc compile error on that one file (e.g. a
+                # `view` function with an inline-assembly `sstore`, which solc
+                # rejects). A compiler-based tool legitimately cannot analyze
+                # code that does not compile, so record it as an un-analyzable
+                # skip instead of failing the whole multi-file case — the
+                # expected bugs in that fragment simply become misses for this
+                # tool, which is the fair outcome.
+                skipped.append(rel_path(target, self.root))
+        if expanded and produced == 0:
+            # Nothing compiled at all — the tool/toolchain is genuinely broken
+            # or misconfigured, not merely tripped by one bad fragment.
+            status = "error"
+            errors.append("no targets produced output (compiler/tool failure)")
+        elif skipped:
+            preview = ", ".join(skipped[:5]) + (f" (+{len(skipped) - 5} more)" if len(skipped) > 5 else "")
+            errors.append(f"{len(skipped)} fragment(s) not analyzable (solc compile error): {preview}")
         stdout = combine_raw_files(self.raw_dir / f"{case['id']}.slither.stdout", stdout_parts)
         stderr = combine_raw_files(self.raw_dir / f"{case['id']}.slither.stderr", stderr_parts)
-        return make_run(self.name, case, last_cmd, aggregate_results(results), stdout, stderr, findings, status, "; ".join(errors))
-
-
-class SolhintAdapter(ToolAdapter):
-    name = "solhint"
-
-    def __init__(self, root: Path, out_dir: Path, matcher: AliasMatcher, args: argparse.Namespace) -> None:
-        super().__init__(root, out_dir, matcher, args)
-        if shutil.which("solhint"):
-            self.prefix = ["solhint"]
-        elif args.allow_npx and shutil.which("npx"):
-            self.prefix = ["npx", "--yes", "solhint"]
-        else:
-            self.prefix = []
-
-    def available(self) -> tuple[bool, str]:
-        if self.prefix:
-            return True, ""
-        return False, "solhint is not installed (pass --allow-npx to run it through npx)"
-
-    def version(self) -> str:
-        return version_from(self.prefix + ["--version"], self.root)
-
-    def run_case(self, case: dict[str, Any], source: CaseSourceIndex) -> dict[str, Any]:
-        findings: list[dict[str, Any]] = []
-        results: list[dict[str, Any]] = []
-        stdout_parts: list[tuple[str, Path]] = []
-        stderr_parts: list[tuple[str, Path]] = []
-        status = "ok"
-        errors: list[str] = []
-        last_cmd: list[str] = []
-        config = rel_path(self.args.solhint_config, self.root)
-        for target in case_targets(case):
-            stem = self.raw_stem(case, target)
-            stdout = self.raw_dir / f"{stem}.solhint.json"
-            stderr = self.raw_dir / f"{stem}.solhint.stderr"
-            stdout_parts.append((target, stdout))
-            stderr_parts.append((target, stderr))
-            cmd = self.prefix + ["-f", "json", "-c", config, target]
-            last_cmd = cmd
-            result = run_command(cmd, self.root, stdout, stderr, self.args.timeout)
-            results.append(result)
-            try:
-                data = json.loads(stdout.read_text(encoding="utf-8") or "[]")
-                items = data if isinstance(data, list) else data.get("reports", [])
-                for item in items:
-                    line = int(item.get("line") or 0)
-                    file_path = item.get("filePath", target)
-                    contract, function = source.lookup(line, file_path)
-                    findings.append(
-                        self.finding(
-                            case,
-                            item.get("ruleId", ""),
-                            file_path,
-                            contract,
-                            function,
-                            line,
-                            item.get("severity", ""),
-                            item.get("message", ""),
-                        )
-                    )
-            except Exception as exc:
-                status = "error"
-                errors.append(f"could not parse solhint JSON for {target}: {exc}")
-        stdout = combine_raw_files(self.raw_dir / f"{case['id']}.solhint.json", stdout_parts)
-        stderr = combine_raw_files(self.raw_dir / f"{case['id']}.solhint.stderr", stderr_parts)
         return make_run(self.name, case, last_cmd, aggregate_results(results), stdout, stderr, findings, status, "; ".join(errors))
 
 
 class SemgrepAdapter(ToolAdapter):
     name = "semgrep"
 
+    def __init__(self, root: Path, out_dir: Path, matcher: AliasMatcher, args: argparse.Namespace) -> None:
+        super().__init__(root, out_dir, matcher, args)
+        self.binary = find_executable("semgrep")
+
     def available(self) -> tuple[bool, str]:
-        return (True, "") if shutil.which("semgrep") else (False, "semgrep is not installed")
+        return (True, "") if self.binary else (False, "semgrep is not installed")
 
     def version(self) -> str:
-        return version_from(["semgrep", "--version"], self.root)
+        return version_from([self.binary, "--version"], self.root)
 
     def run_case(self, case: dict[str, Any], source: CaseSourceIndex) -> dict[str, Any]:
         findings: list[dict[str, Any]] = []
@@ -558,12 +680,22 @@ class SemgrepAdapter(ToolAdapter):
             stderr = self.raw_dir / f"{stem}.semgrep.stderr"
             stdout_parts.append((target, stdout))
             stderr_parts.append((target, stderr))
-            cmd = ["semgrep", "scan", "--config", self.args.semgrep_config, "--json", target]
+            semgrep_config = case.get("semgrep_config") or self.args.semgrep_config
+            cmd = [self.binary, "scan", "--config", semgrep_config, "--json", target]
             last_cmd = cmd
             result = run_command(cmd, self.root, stdout, stderr, self.args.timeout, {"SEMGREP_SEND_METRICS": "off"})
             results.append(result)
+            if result.get("exit_code") not in (0, 1):
+                status = "error"
+                errors.append(f"semgrep exited with {result.get('exit_code')} for {target}")
             try:
                 data = json.loads(stdout.read_text(encoding="utf-8") or "{}")
+                config_errors = data.get("errors", [])
+                if config_errors:
+                    status = "error"
+                    for item in config_errors[:3]:
+                        message = item.get("message") if isinstance(item, dict) else str(item)
+                        errors.append(f"semgrep config error for {target}: {message}")
                 for item in data.get("results", []):
                     line = int(item.get("start", {}).get("line") or 0)
                     file_path = item.get("path", target)
@@ -592,11 +724,15 @@ class SemgrepAdapter(ToolAdapter):
 class AderynAdapter(ToolAdapter):
     name = "aderyn"
 
+    def __init__(self, root: Path, out_dir: Path, matcher: AliasMatcher, args: argparse.Namespace) -> None:
+        super().__init__(root, out_dir, matcher, args)
+        self.binary = find_executable("aderyn")
+
     def available(self) -> tuple[bool, str]:
-        return (True, "") if shutil.which("aderyn") else (False, "aderyn is not installed")
+        return (True, "") if self.binary else (False, "aderyn is not installed")
 
     def version(self) -> str:
-        return version_from(["aderyn", "--version"], self.root)
+        return version_from([self.binary, "--version"], self.root)
 
     def run_case(self, case: dict[str, Any], source: CaseSourceIndex) -> dict[str, Any]:
         findings: list[dict[str, Any]] = []
@@ -613,7 +749,7 @@ class AderynAdapter(ToolAdapter):
             stderr = self.raw_dir / f"{stem}.aderyn.stderr"
             stdout_parts.append((target, stdout))
             stderr_parts.append((target, stderr))
-            cmd = ["aderyn", "--skip-update-check", "-o", str(output), target]
+            cmd = [self.binary, "--skip-update-check", "-o", str(output), target]
             last_cmd = cmd
             result = run_command(cmd, self.root, stdout, stderr, self.args.timeout)
             results.append(result)
@@ -651,12 +787,113 @@ class AderynAdapter(ToolAdapter):
         return make_run(self.name, case, last_cmd, aggregate_results(results), stdout, stderr, findings, status, "; ".join(errors))
 
 
+class Naly3erAdapter(ToolAdapter):
+    """Adapter for 4naly3er (https://github.com/Picodes/4naly3er).
+
+    4naly3er is a Node/TypeScript tool with no published single binary; it is
+    normally run from a checkout (`yarn analyze <scope> <out.md>`). We therefore
+    take the invocation as a configurable command (``--naly3er-cmd`` or the
+    ``W3_NALY3ER_CMD`` env var, default ``4naly3er``) and skip gracefully when it
+    is not on PATH — exactly like every other market tool.
+
+    4naly3er emits a Markdown report. Its per-run issue *codes* (`H-1`, `M-2`)
+    are positional and unstable, so we key conversion on the issue *title*
+    (stable) and let the AliasMatcher map it via the title fragments in
+    config/4naly3er/detectors.json. Findings are located by the ``File:`` path
+    and the ``NNN:`` line markers 4naly3er prints in its code excerpts; the
+    shared SourceIndex then resolves contract/function from the line.
+    """
+
+    name = "4naly3er"
+
+    def __init__(self, root: Path, out_dir: Path, matcher: AliasMatcher, args: argparse.Namespace) -> None:
+        super().__init__(root, out_dir, matcher, args)
+        cmd = getattr(args, "naly3er_cmd", "") or os.environ.get("W3_NALY3ER_CMD", "") or "4naly3er"
+        self.cmd = cmd
+        self.binary = find_executable(cmd) or (cmd if Path(cmd).exists() else "")
+
+    def available(self) -> tuple[bool, str]:
+        return (True, "") if self.binary else (False, f"4naly3er command '{self.cmd}' not found (set --naly3er-cmd or W3_NALY3ER_CMD)")
+
+    def version(self) -> str:
+        return version_from([self.binary, "--version"], self.root)
+
+    _HEADER_RX = re.compile(r"^\s*#{1,6}\s*(?:<a\s+name=\"[^\"]*\"></a>)?\s*\[?([HMLN]+-?\d+|GAS-\d+|NC-\d+)\]?\s*(.*?)\s*$")
+    _FILE_RX = re.compile(r"\bFile:\s*([^\s`]+\.sol)")
+    _LINE_RX = re.compile(r"^\s*(\d+):")
+
+    def run_case(self, case: dict[str, Any], source: CaseSourceIndex) -> dict[str, Any]:
+        findings: list[dict[str, Any]] = []
+        results: list[dict[str, Any]] = []
+        stdout_parts: list[tuple[str, Path]] = []
+        stderr_parts: list[tuple[str, Path]] = []
+        status = "ok"
+        errors: list[str] = []
+        last_cmd: list[str] = []
+        for target in case_targets(case):
+            stem = self.raw_stem(case, target)
+            report = self.raw_dir / f"{stem}.4naly3er.md"
+            stdout = self.raw_dir / f"{stem}.4naly3er.stdout"
+            stderr = self.raw_dir / f"{stem}.4naly3er.stderr"
+            stdout_parts.append((target, stdout))
+            stderr_parts.append((target, stderr))
+            # `<cmd> <scope> <out.md>` is the common 4naly3er CLI shape; the
+            # report is also echoed to stdout, so we parse whichever exists.
+            cmd = [self.binary, target, str(report)]
+            last_cmd = cmd
+            result = run_command(cmd, self.root, stdout, stderr, self.args.timeout)
+            results.append(result)
+            text = ""
+            if report.exists():
+                text = report.read_text(encoding="utf-8", errors="replace")
+            if not text:
+                text = stdout.read_text(encoding="utf-8", errors="replace")
+            if not text.strip():
+                status = "error"
+                errors.append(f"no 4naly3er report produced for {target}")
+                continue
+            findings.extend(self._parse_report(case, text, target, source))
+        stdout = combine_raw_files(self.raw_dir / f"{case['id']}.4naly3er.stdout", stdout_parts)
+        stderr = combine_raw_files(self.raw_dir / f"{case['id']}.4naly3er.stderr", stderr_parts)
+        return make_run(self.name, case, last_cmd, aggregate_results(results), stdout, stderr, findings, status, "; ".join(errors))
+
+    def _parse_report(self, case: dict[str, Any], text: str, target: str, source: CaseSourceIndex) -> list[dict[str, Any]]:
+        out: list[dict[str, Any]] = []
+        cur_title = ""
+        cur_file = ""
+        seen: set[tuple[str, str, int]] = set()
+        for raw in text.splitlines():
+            header = self._HEADER_RX.match(raw)
+            if header:
+                # Key on the title (stable) rather than the positional code.
+                cur_title = header.group(2).strip() or header.group(1)
+                # Strip markdown link syntax from the title.
+                cur_title = re.sub(r"\[([^\]]+)\]\([^)]*\)", r"\1", cur_title)
+                cur_file = ""
+                continue
+            file_match = self._FILE_RX.search(raw)
+            if file_match:
+                cur_file = file_match.group(1)
+                continue
+            line_match = self._LINE_RX.match(raw)
+            if line_match and cur_title:
+                line = int(line_match.group(1))
+                path = cur_file or target
+                dedup = (cur_title, path, line)
+                if dedup in seen:
+                    continue
+                seen.add(dedup)
+                contract, function = source.lookup(line, path)
+                out.append(self.finding(case, cur_title, path, contract, function, line, "", cur_title))
+        return out
+
+
 ADAPTERS = {
     "w3goaudit": W3GoAuditAdapter,
     "slither": SlitherAdapter,
     "aderyn": AderynAdapter,
     "semgrep": SemgrepAdapter,
-    "solhint": SolhintAdapter,
+    "4naly3er": Naly3erAdapter,
 }
 
 
@@ -743,6 +980,8 @@ def slither_element_names(element: dict[str, Any]) -> tuple[str, str]:
 
 
 def expected_keys(corpus: dict[str, Any]) -> set[tuple[str, str, str, str]]:
+    # Expected labels are the answer key. A finding is correct only when it has
+    # the same case, bug category, contract, and function as one of these rows.
     keys: set[tuple[str, str, str, str]] = set()
     for case in corpus.get("cases", []):
         for item in case.get("expected", []):
@@ -766,7 +1005,27 @@ def finding_key(finding: dict[str, Any]) -> tuple[str, str, str, str]:
     )
 
 
-def evaluate_tool(tool: str, runs: list[dict[str, Any]], corpus: dict[str, Any]) -> dict[str, Any]:
+def evaluate_tool(
+    tool: str,
+    runs: list[dict[str, Any]],
+    corpus: dict[str, Any],
+    chains_by_case: dict[str, dict[str, dict[str, set[str]]]] | None = None,
+) -> dict[str, Any]:
+    # Convert each tool's raw alerts into one shared shape, then compare against
+    # the corpus answer key:
+    #   TP = expected and found
+    #   FP = found but not expected
+    #   FN = expected but not found
+    #
+    # When chains_by_case is provided (built once per benchmark run from a
+    # `w3goaudit build` of each case's target), the comparison is relaxed: a
+    # reported finding on the same contract is credited as a TP for an
+    # expected entry when their functions are on the same internal-call chain.
+    # This is the "same bug, different attribution" fix — without it Slither
+    # reporting at `_internalDeposit` while the corpus expected the entry
+    # function `depositFrom` would land as FP+FN even though the bug WAS
+    # detected (see call_chain.py).
+    chains_by_case = chains_by_case or {}
     expected = expected_keys(corpus)
     actual_map: dict[tuple[str, str, str, str], list[dict[str, Any]]] = defaultdict(list)
     raw_findings = 0
@@ -783,18 +1042,22 @@ def evaluate_tool(tool: str, runs: list[dict[str, Any]], corpus: dict[str, Any])
             if finding.get("category"):
                 actual_map[finding_key(finding)].append(finding)
     actual = set(actual_map)
-    tp = sorted(expected & actual)
-    fp = sorted(actual - expected)
-    fn = sorted(expected - actual)
+    if chains_by_case:
+        tp, fp, fn = call_chain.match_relaxed(actual, expected, chains_by_case)
+    else:
+        tp = sorted(expected & actual)
+        fp = sorted(actual - expected)
+        fn = sorted(expected - actual)
     metrics = metric_block(len(tp), len(fp), len(fn))
     by_category = {}
     categories = sorted(corpus.get("categories", {}).keys())
+    tp_set = set(tp)
+    fp_set = set(fp)
+    fn_set = set(fn)
     for category in categories:
-        exp_c = {key for key in expected if key[1] == category}
-        act_c = {key for key in actual if key[1] == category}
-        tp_c = exp_c & act_c
-        fp_c = act_c - exp_c
-        fn_c = exp_c - act_c
+        tp_c = {key for key in tp_set if key[1] == category}
+        fp_c = {key for key in fp_set if key[1] == category}
+        fn_c = {key for key in fn_set if key[1] == category}
         by_category[category] = metric_block(len(tp_c), len(fp_c), len(fn_c))
     return {
         "tool": tool,
@@ -815,14 +1078,14 @@ def evaluate_tool(tool: str, runs: list[dict[str, Any]], corpus: dict[str, Any])
 
 def metric_block(tp: int, fp: int, fn: int) -> dict[str, Any]:
     precision = tp / (tp + fp) if tp + fp else 0.0
-    recall = tp / (tp + fn) if tp + fn else 0.0
-    f1 = 2 * precision * recall / (precision + recall) if precision + recall else 0.0
+    detection_rate = tp / (tp + fn) if tp + fn else 0.0
+    f1 = 2 * precision * detection_rate / (precision + detection_rate) if precision + detection_rate else 0.0
     return {
         "tp": tp,
         "fp": fp,
         "fn": fn,
         "precision": round(precision, 4),
-        "recall": round(recall, 4),
+        "detection_rate": round(detection_rate, 4),
         "f1": round(f1, 4),
     }
 
@@ -836,93 +1099,204 @@ def key_to_dict(key: tuple[str, str, str, str]) -> dict[str, str]:
     }
 
 
+def md_escape(value: Any) -> str:
+    return str(value if value is not None else "").replace("|", "\\|").replace("\n", " ")
+
+
+def percent(value: Any) -> str:
+    try:
+        return f"{float(value):.2%}"
+    except Exception:
+        return "-"
+
+
+def finding_label(item: dict[str, Any]) -> str:
+    function = item.get("function") or "<unknown>"
+    return f"`{item.get('case_id', '')}` `{item.get('category', '')}` `{item.get('contract', '')}.{function}()`"
+
+
+def short_status(status: str) -> str:
+    if status == "ok":
+        return "ran"
+    if status == "partial_error":
+        return "ran with errors"
+    if status == "skipped":
+        return "skipped"
+    if status == "error":
+        return "failed"
+    return status or "unknown"
+
+
 def write_markdown(report: dict[str, Any], path: Path) -> None:
     lines: list[str] = []
-    lines.append("# Static Analyzer Benchmark")
+    expected_total = sum(len(case.get("expected", [])) for case in report["corpus"].get("cases", []))
+    category_total = len(report["corpus"].get("categories", {}))
+    lines.append("# Benchmark Results")
     lines.append("")
     lines.append(f"- Generated: `{report['generated_at']}`")
     lines.append(f"- Corpus: `{report['corpus']['name']}`")
+    if report["corpus"].get("path"):
+        lines.append(f"- Corpus file: `{report['corpus']['path']}`")
     lines.append(f"- Cases: `{len(report['corpus']['cases'])}`")
+    lines.append(f"- Expected bugs: `{expected_total}`")
+    lines.append(f"- Bug categories: `{category_total}`")
+    lines.append(f"- Output folder: `{rel_path(path.parent)}`")
     lines.append("")
-    lines.append("## Summary")
+    lines.append("## What This Benchmark Does")
     lines.append("")
-    lines.append("| Tool | Status | Version | Cases | Runtime ms | Raw | Scoped | Precision | Recall | F1 |")
-    lines.append("|---|---:|---|---:|---:|---:|---:|---:|---:|---:|")
+    lines.append("It runs each tool on Solidity files with known bugs, compares tool findings with the corpus answer key, then reports:")
+    lines.append("")
+    lines.append("| Result | Meaning |")
+    lines.append("|---|---|")
+    lines.append("| Found Bugs | Expected bugs the tool found. This is TP. |")
+    lines.append("| Extra Noise | Findings not listed in the answer key. This is FP. |")
+    lines.append("| Missed Bugs | Expected bugs the tool did not find. This is FN. |")
+    lines.append("| Precision | Cleanliness. Higher means fewer extra findings. |")
+    lines.append("| Detection Rate | Coverage. Higher means fewer missed bugs. |")
+    lines.append("| F1 | One combined score for precision and detection rate. |")
+    lines.append("")
+    lines.append("## Plain English Result")
+    lines.append("")
     for tool, info in report["tools"].items():
         if info["status"] == "skipped":
-            lines.append(f"| {tool} | skipped | {info.get('version', '')} | 0 | 0 | 0 | 0 | - | - | - |")
+            lines.append(f"- `{tool}` was skipped: {info.get('reason', 'not available')}.")
+            continue
+        metrics = report["metrics"].get(tool, {})
+        status = short_status(metrics.get("status", info.get("status", "")))
+        line = (
+            f"- `{tool}` {status}: found `{metrics.get('tp', 0)}/{expected_total}` expected bugs, "
+            f"missed `{metrics.get('fn', 0)}`, and produced `{metrics.get('fp', 0)}` extra findings. "
+            f"Precision `{percent(metrics.get('precision', 0))}`, detection rate `{percent(metrics.get('detection_rate', 0))}`, "
+            f"F1 `{percent(metrics.get('f1', 0))}`."
+        )
+        if metrics.get("status") == "partial_error":
+            line += " Some cases failed for this tool, so compare it carefully."
+        lines.append(line)
+    lines.append("")
+    lines.append("## Scoreboard")
+    lines.append("")
+    lines.append("| Tool | Status | Found Bugs | Extra Noise | Missed Bugs | Precision | Detection Rate | F1 |")
+    lines.append("|---|---|---:|---:|---:|---:|---:|---:|")
+    for tool, info in report["tools"].items():
+        if info["status"] == "skipped":
+            lines.append(f"| {tool} | skipped | - | - | - | - | - | - |")
             continue
         metrics = report["metrics"].get(tool, {})
         lines.append(
-            "| {tool} | {status} | {version} | {cases} | {duration} | {raw} | {scoped} | {precision:.2%} | {recall:.2%} | {f1:.2%} |".format(
+            "| {tool} | {status} | {tp} | {fp} | {fn} | {precision} | {detection_rate} | {f1} |".format(
                 tool=tool,
-                status=metrics.get("status", info["status"]),
-                version=info.get("version", "unknown").replace("|", "\\|"),
-                cases=metrics.get("cases", 0),
-                duration=metrics.get("duration_ms", 0),
-                raw=metrics.get("raw_findings", 0),
-                scoped=metrics.get("unique_scoped_findings", 0),
-                precision=metrics.get("precision", 0),
-                recall=metrics.get("recall", 0),
-                f1=metrics.get("f1", 0),
+                status=short_status(metrics.get("status", info["status"])),
+                tp=metrics.get("tp", 0),
+                fp=metrics.get("fp", 0),
+                fn=metrics.get("fn", 0),
+                precision=percent(metrics.get("precision", 0)),
+                detection_rate=percent(metrics.get("detection_rate", 0)),
+                f1=percent(metrics.get("f1", 0)),
             )
         )
     lines.append("")
-    lines.append("## By Category")
+    lines.append("## By Bug Type")
     lines.append("")
-    lines.append("| Tool | Category | TP | FP | FN | Precision | Recall | F1 |")
+    lines.append("| Tool | Bug Type | Found | Noise | Missed | Precision | Detection Rate | F1 |")
     lines.append("|---|---|---:|---:|---:|---:|---:|---:|")
     for tool, metrics in report["metrics"].items():
         for category, block in metrics.get("by_category", {}).items():
             lines.append(
-                f"| {tool} | {category} | {block['tp']} | {block['fp']} | {block['fn']} | {block['precision']:.2%} | {block['recall']:.2%} | {block['f1']:.2%} |"
+                f"| {tool} | {category} | {block['tp']} | {block['fp']} | {block['fn']} | {percent(block['precision'])} | {percent(block['detection_rate'])} | {percent(block['f1'])} |"
             )
     lines.append("")
-    lines.append("## Misses And Noise")
+    lines.append("## Missed Bugs")
     lines.append("")
     for tool, metrics in report["metrics"].items():
-        lines.append(f"### {tool}")
-        lines.append("")
         false_negatives = metrics.get("false_negatives", [])
+        if not false_negatives:
+            lines.append(f"- `{tool}` missed no expected bugs.")
+            continue
+        lines.append(f"- `{tool}` missed `{len(false_negatives)}` expected bugs:")
+        for item in false_negatives[:15]:
+            lines.append(f"  - {finding_label(item)}")
+        if len(false_negatives) > 15:
+            lines.append(f"  - ... {len(false_negatives) - 15} more")
+    lines.append("")
+    lines.append("## Extra Findings")
+    lines.append("")
+    lines.append("These are benchmark-category findings that were not in the corpus answer key. They are noise for scoring, but some may still be real bugs if the answer key is incomplete.")
+    lines.append("")
+    for tool, metrics in report["metrics"].items():
         false_positives = metrics.get("false_positives", [])
-        lines.append(f"- False negatives: `{len(false_negatives)}`")
-        for item in false_negatives[:12]:
-            lines.append(f"  - `{item['case_id']}` `{item['category']}` `{item['contract']}.{item['function']}()`")
-        if len(false_negatives) > 12:
-            lines.append(f"  - ... {len(false_negatives) - 12} more")
-        lines.append(f"- False positives: `{len(false_positives)}`")
-        for item in false_positives[:12]:
-            lines.append(f"  - `{item['case_id']}` `{item['category']}` `{item['contract']}.{item['function']}()`")
-        if len(false_positives) > 12:
-            lines.append(f"  - ... {len(false_positives) - 12} more")
-        lines.append("")
-    lines.append("## Run Status")
+        if not false_positives:
+            lines.append(f"- `{tool}` produced no extra findings.")
+            continue
+        lines.append(f"- `{tool}` produced `{len(false_positives)}` extra findings:")
+        for item in false_positives[:15]:
+            lines.append(f"  - {finding_label(item)}")
+        if len(false_positives) > 15:
+            lines.append(f"  - ... {len(false_positives) - 15} more")
+    lines.append("")
+    lines.append("## Files Created")
+    lines.append("")
+    lines.append("| Path | What It Contains |")
+    lines.append("|---|---|")
+    lines.append(f"| `{rel_path(path)}` | This human-readable report. |")
+    lines.append(f"| `{rel_path(path.with_name('benchmark.json'))}` | The same result as JSON for scripts or dashboards. |")
+    lines.append(f"| `{rel_path(path.parent / 'raw')}/` | Raw output from each tool and case, useful when debugging a failed run. |")
+    lines.append("")
+    lines.append("## Run Details")
+    lines.append("")
+    lines.append("Use this section when a tool was skipped, failed, or returned strange results.")
     lines.append("")
     lines.append("| Tool | Case | Status | Exit | Runtime ms | Raw | Scoped | Error |")
     lines.append("|---|---|---:|---:|---:|---:|---:|---|")
     for run in report["runs"]:
         lines.append(
-            f"| {run['tool']} | {run['case_id']} | {run['status']} | {run.get('exit_code')} | {run.get('duration_ms')} | {run.get('raw_findings')} | {run.get('scoped_findings')} | {run.get('error', '').replace('|', '/')} |"
+            f"| {run['tool']} | {run['case_id']} | {short_status(run['status'])} | {run.get('exit_code')} | {run.get('duration_ms')} | {run.get('raw_findings')} | {run.get('scoped_findings')} | {md_escape(run.get('error', ''))} |"
         )
     lines.append("")
     path.write_text("\n".join(lines), encoding="utf-8")
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Benchmark w3goaudit against Solidity static analyzers.")
+    parser = argparse.ArgumentParser(
+        description=(
+            "Run the W3GoAudit benchmark. Default: the competitive suite "
+            "(cross-tool union corpus), output to benchmarks/results/latest."
+        )
+    )
     parser.add_argument("--root", default=str(ROOT), help="repository root")
-    parser.add_argument("--corpus", default="benchmarks/security-corpus.json", help="benchmark corpus JSON")
-    parser.add_argument("--out", default="benchmark-results/latest", help="output directory")
+    parser.add_argument(
+        "--suite",
+        default="competitive",
+        choices=sorted(SUITES),
+        help="benchmark set to run: competitive (default, cross-tool union), slither, decurity, or 4naly3er",
+    )
+    parser.add_argument(
+        "--corpus",
+        default="",
+        help="advanced: path to a custom corpus JSON; overrides --suite",
+    )
+    parser.add_argument("--out", default="benchmarks/results/latest", help="output folder")
     parser.add_argument(
         "--tools",
-        default="w3goaudit,slither,aderyn,semgrep,solhint",
-        help="comma-separated tool list",
+        default="w3goaudit,slither,semgrep,4naly3er",
+        help="comma-separated tool list (w3goaudit, slither, semgrep, 4naly3er, aderyn)",
     )
     parser.add_argument("--timeout", type=int, default=180, help="per-tool per-case timeout in seconds")
     parser.add_argument("--w3goaudit-bin", default="", help="use an existing w3goaudit binary")
-    parser.add_argument("--allow-npx", action="store_true", help="allow solhint execution through npx when not globally installed")
-    parser.add_argument("--semgrep-config", default="p/solidity", help="Semgrep config or registry ruleset")
-    parser.add_argument("--solhint-config", default="benchmarks/solhint-recommended.json", help="Solhint config file")
+    parser.add_argument(
+        "--config-dir",
+        default="benchmarks/config",
+        help="directory holding per-tool detector manifests (config/<tool>/detectors.json)",
+    )
+    parser.add_argument(
+        "--semgrep-config",
+        default="benchmarks/config/semgrep-decurity",
+        help="Semgrep config dir/file or registry ruleset (default: vendored Decurity rules)",
+    )
+    parser.add_argument(
+        "--naly3er-cmd",
+        default="",
+        help="command used to invoke 4naly3er (default: '4naly3er' on PATH, or $W3_NALY3ER_CMD)",
+    )
     return parser.parse_args()
 
 
@@ -931,13 +1305,21 @@ def main() -> int:
     root = Path(args.root).resolve()
     out_dir = repo_path(args.out, root)
     raw_dir = out_dir / "raw"
+    # Raw files are per-run evidence. Clear old raw logs so skipped tools do
+    # not leave confusing stale files from a previous benchmark.
+    if raw_dir.exists():
+        shutil.rmtree(raw_dir)
     raw_dir.mkdir(parents=True, exist_ok=True)
-    corpus = json.loads(repo_path(args.corpus, root).read_text(encoding="utf-8"))
-    matcher = AliasMatcher(corpus)
+    corpus_path = args.corpus or SUITES[args.suite]
+    corpus = json.loads(repo_path(corpus_path, root).read_text(encoding="utf-8"))
     selected = [name.strip() for name in args.tools.split(",") if name.strip()]
     unknown = [name for name in selected if name not in ADAPTERS]
     if unknown:
         raise SystemExit(f"unknown tools: {', '.join(unknown)}")
+    # Auto-load per-tool detector manifests so a tool's native check IDs map onto
+    # shared categories even when the corpus omits an explicit alias for them.
+    manifest_aliases = load_tool_manifests(args.config_dir, selected, root)
+    matcher = AliasMatcher(corpus, manifest_aliases)
 
     source_indexes = {
         case["id"]: CaseSourceIndex(case_targets(case), root)
@@ -947,6 +1329,12 @@ def main() -> int:
     tools: dict[str, dict[str, Any]] = {}
     runs: list[dict[str, Any]] = []
     metrics: dict[str, dict[str, Any]] = {}
+
+    # Per-case internal-call graphs, built lazily after w3goaudit prepare()
+    # runs. Used to relax (case, category, contract, function) matching when
+    # two tools attribute the same bug at different points on the same chain.
+    chains_by_case: dict[str, dict[str, dict[str, set[str]]]] = {}
+    w3_chain_dir = out_dir / "raw" / ".callgraphs"
 
     for name in selected:
         adapter = ADAPTERS[name](root, out_dir, matcher, args)
@@ -962,12 +1350,24 @@ def main() -> int:
             tools[name] = {"status": "skipped", "reason": str(exc), "version": ""}
             continue
 
+        # First time the w3goaudit adapter is ready, use its binary to build
+        # one call graph per case. Failing silently is fine — scoring falls
+        # back to strict equality if a case's graph isn't available.
+        if name == "w3goaudit" and not chains_by_case:
+            for case in corpus.get("cases", []):
+                db_path = call_chain.build_case_database(
+                    case, root, adapter.binary, w3_chain_dir
+                )
+                graph = call_chain.load_case_chain_db(db_path)
+                if graph is not None:
+                    chains_by_case[case["id"]] = graph
+
         tool_runs = []
         for case in corpus.get("cases", []):
             run = adapter.run_case(case, source_indexes[case["id"]])
             runs.append(run)
             tool_runs.append(run)
-        metrics[name] = evaluate_tool(name, tool_runs, corpus)
+        metrics[name] = evaluate_tool(name, tool_runs, corpus, chains_by_case)
 
     report = {
         "schema_version": "1.0",
@@ -976,6 +1376,7 @@ def main() -> int:
         "corpus": {
             "name": corpus.get("name", ""),
             "description": corpus.get("description", ""),
+            "path": rel_path(corpus_path, root),
             "cases": corpus.get("cases", []),
             "categories": corpus.get("categories", {}),
         },
@@ -986,11 +1387,12 @@ def main() -> int:
 
     (out_dir / "benchmark.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
     write_markdown(report, out_dir / "benchmark.md")
+    shutil.rmtree(raw_dir / ".bin", ignore_errors=True)
     print(f"Wrote {rel_path(out_dir / 'benchmark.md', root)}")
     print(f"Wrote {rel_path(out_dir / 'benchmark.json', root)}")
     for tool, block in metrics.items():
         print(
-            f"{tool}: precision={block['precision']:.2%} recall={block['recall']:.2%} "
+            f"{tool}: precision={block['precision']:.2%} detection_rate={block['detection_rate']:.2%} "
             f"f1={block['f1']:.2%} raw={block['raw_findings']} scoped={block['unique_scoped_findings']}"
         )
     skipped = {tool: info["reason"] for tool, info in tools.items() if info["status"] == "skipped"}

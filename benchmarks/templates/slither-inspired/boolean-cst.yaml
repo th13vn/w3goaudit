@@ -1,0 +1,23 @@
+meta:
+  id: SLITHER-BOOLEAN-CST
+  title: "Boolean Constant Misuse"
+  severity: MEDIUM
+  confidence: MEDIUM
+  description: >
+    Detects misuse of boolean constants in conditions (e.g., if(true),
+    if(false), return (b || true)). Boolean constants in conditional
+    expressions indicate dead code, always-true/false conditions, or
+    leftover debugging code. Equivalent to Slither's boolean-cst detector.
+  recommendation: >
+    Remove the boolean constant and simplify the expression. If the condition
+    is always true/false, the branch can be removed entirely.
+
+query:
+  scope: function
+
+  match:
+    contains:
+      kind: stmt.if
+      contains:
+        kind: expr.literal
+        name: ^(true|false)$

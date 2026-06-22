@@ -523,7 +523,7 @@ func (f *Function) isAccessControlledRecursive(db *Database, visited map[string]
 		hasAuthCheck := false
 		f.AST.WalkDescendants(func(n *ASTNode) bool {
 			// Look for msg.sender in require/assert/if conditions
-			if isAuthCheck(n, f.AST) {
+			if isAuthCheck(n, f.AST, f) {
 				hasAuthCheck = true
 				return false // Stop walking
 			}
@@ -621,6 +621,55 @@ func (f *Function) isAccessControlledRecursive(db *Database, visited map[string]
 	return false
 }
 
+// ComparesCallerIdentity reports whether the function constrains a caller-identity
+// source (msg.sender / tx.origin / _msgSender) by comparing it — inside a guard or
+// condition — against another operand, INCLUDING a function argument
+// (e.g. require(from == msg.sender), if (from != msg.sender) revert,
+// assert(request.from == msg.sender)).
+//
+// This is caller "self-scoping", NOT privileged access control: it does not gate
+// the function to an owner/role, it binds a sensitive value to the caller. It is
+// the canonical mitigation for arbitrary transferFrom (you can only move your own
+// tokens), so detectors for that class treat it as a valid protection even though
+// IsAccessControlled (privileged-only, by design) does not. Keep these concepts
+// separate: self-scoping is permissionless and must not count as access control
+// for entry-point classification.
+func (f *Function) ComparesCallerIdentity() bool {
+	if f.AST == nil {
+		return false
+	}
+	found := false
+	f.AST.WalkDescendants(func(n *ASTNode) bool {
+		if found {
+			return false
+		}
+		// Direct caller-identity source used inside a comparison condition.
+		if isDirectAuthSource(n) && isInsideCondition(n) && hasComparisonOperand(n) {
+			found = true
+			return false
+		}
+		// Local alias of a caller-identity source: address s = _msgSender(); … s == from.
+		if n.Kind == KindExprIdentifier && isTaintedIdentifier(n.Name, f.AST) &&
+			isInsideCondition(n) && hasComparisonOperand(n) {
+			found = true
+			return false
+		}
+		return true
+	})
+	return found
+}
+
+// hasComparisonOperand reports whether n sits inside a binary comparison with a
+// second operand (i.e. it is compared against something, not used standalone like
+// require(isOperator[msg.sender])). The other operand may be anything — argument,
+// state, literal — because this models self-scoping, not authority anchoring.
+func hasComparisonOperand(n *ASTNode) bool {
+	parent := n.FindAncestor(func(a *ASTNode) bool {
+		return a.Kind == KindExprBinaryOp || a.Kind == "binary_op" || a.Kind == "binary_operation"
+	})
+	return parent != nil && len(parent.Children) >= 2
+}
+
 // contractHierarchyContains reports whether contractName appears in the
 // deployment context of mainContract — either as the contract itself or
 // anywhere in its C3 linearization. Used to scope internal-call resolution to
@@ -640,15 +689,34 @@ func contractHierarchyContains(mainContract *Contract, contractName string) bool
 	return false
 }
 
+// hasParameterNamed reports whether the function declares a parameter with the
+// given name. Used as a backstop to reject a comparison target whose RefKind was
+// not resolved by the symbol table but is in fact an argument.
+func (f *Function) hasParameterNamed(name string) bool {
+	if f == nil || name == "" {
+		return false
+	}
+	for _, p := range f.Parameters {
+		if p != nil && p.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
 // isAuthCheck checks if a node represents an authentication check (msg.sender, tx.origin, _msgSender)
 // It checks both direct usage and simple local variable aliases (taint tracking).
-// Returns true only if the auth source is compared against owner()/admin patterns.
-func isAuthCheck(n *ASTNode, root *ASTNode) bool {
+// Returns true only if the auth source is compared against a storage-anchored
+// authority (state var / getter / mapping / immutable / hardcoded address) — NOT
+// against a caller-controlled value such as a function argument. fn supplies the
+// parameter set used as a backstop when an identifier's RefKind is unresolved.
+func isAuthCheck(n *ASTNode, root *ASTNode, fn *Function) bool {
 	// 1. Direct check
 	if isDirectAuthSource(n) {
 		if isInsideCondition(n) {
-			// Must be compared against owner/admin, not just any comparison
-			if isOwnerComparison(n) {
+			// Must be compared against a non-caller-controlled authority anchor,
+			// not just any comparison (require(from == msg.sender) is self-auth).
+			if isOwnerComparison(n, fn) {
 				return true
 			}
 			if isAccessMappingLookup(n) {
@@ -662,7 +730,7 @@ func isAuthCheck(n *ASTNode, root *ASTNode) bool {
 	if n.Kind == KindExprIdentifier {
 		if isTaintedIdentifier(n.Name, root) {
 			if isInsideCondition(n) {
-				if isOwnerComparison(n) {
+				if isOwnerComparison(n, fn) {
 					return true
 				}
 			}
@@ -715,15 +783,22 @@ func isAccessControlName(name string) bool {
 	return pattern.MatchString(name)
 }
 
-// isOwnerComparison checks if the auth source (msg.sender / tx.origin) is compared
-// against a meaningful non-literal target, which constitutes an access control check.
+// isOwnerComparison checks if the auth source (msg.sender / tx.origin / _msgSender)
+// is compared against a non-caller-controlled authority anchor, which constitutes
+// an access control check.
 //
-// This covers both named patterns (owner, admin, endpoint, …) and any comparison
-// against a state variable / stored address — e.g.:
+// A comparison counts as access control unless the other operand is something the
+// caller can freely choose (a function argument or a value derived solely from
+// arguments). It covers state vars, getters, mappings, immutables, constants, and
+// hardcoded literal addresses — e.g.:
 //   - require(msg.sender == owner())
+//   - require(msg.sender == 0xAbC…)          // hardcoded authority
 //   - if (address(endpoint) != msg.sender) revert …
 //   - if (_trustedForwarder != msg.sender) revert …
-func isOwnerComparison(n *ASTNode) bool {
+//
+// But NOT self-authorization, where the caller picks the comparison value:
+//   - require(from == msg.sender)            // `from` is an argument
+func isOwnerComparison(n *ASTNode, fn *Function) bool {
 	// Find immediate Binary Operation ancestor
 	parent := n.FindAncestor(func(a *ASTNode) bool {
 		return a.Kind == KindExprBinaryOp || a.Kind == "binary_op" || a.Kind == "binary_operation"
@@ -742,8 +817,16 @@ func isOwnerComparison(n *ASTNode) bool {
 		// Unwrap type casts like address(endpoint) → endpoint
 		effective := unwrapTypeCast(child)
 
-		// Any non-literal sibling is a valid access-control target
-		if isNonLiteralAuthTarget(effective) {
+		// Skip the caller-identity side itself (the other operand is also a
+		// caller-identity source, or n was wrapped in a cast) — we only judge
+		// the authority target, not a sender-vs-sender comparison.
+		if isDirectAuthSource(effective) {
+			continue
+		}
+
+		// A sibling the caller cannot control is a valid access-control anchor.
+		// Caller-controlled siblings (arguments, arg-derived locals) are not.
+		if !isCallerControlledTarget(effective, fn) {
 			return true
 		}
 	}
@@ -763,31 +846,72 @@ func unwrapTypeCast(n *ASTNode) *ASTNode {
 	return n
 }
 
-// isNonLiteralAuthTarget returns true when a node represents a stored / computed
-// address that is a legitimate access-control target (i.e. NOT a bare literal).
-func isNonLiteralAuthTarget(n *ASTNode) bool {
+// isCallerControlledTarget reports whether the comparison target on the other
+// side of a caller-identity check (msg.sender / tx.origin / _msgSender()) is a
+// value the caller can freely choose — a function parameter, a local tainted
+// SOLELY from parameters, or an index/member access whose base is itself
+// caller-controlled. Such a comparison (e.g. require(from == msg.sender) where
+// `from` is an argument) is self-authorization, not a privileged access gate, so
+// it must NOT count as access control.
+//
+// Everything else is a legitimate authority anchor and is NOT caller-controlled:
+// state variables, state-reading getters (owner(), ownerOf(id), hasRole(...)),
+// state mappings/structs, constants, immutables, address(this), and hardcoded
+// literal addresses (require(msg.sender == 0xAbC…) gates to a fixed bytecode
+// address the caller cannot influence).
+func isCallerControlledTarget(n *ASTNode, fn *Function) bool {
 	if n == nil {
 		return false
 	}
 	switch n.Kind {
 	case KindExprLiteral:
-		// Bare literal (e.g. 0x1234…) — not a meaningful auth target
+		// Hardcoded literal address — fixed in bytecode, not caller-controlled.
 		return false
 	case KindExprIdentifier:
-		// Any named identifier (state var, local alias, parameter) is valid
-		return n.Name != ""
+		switch n.RefKind {
+		case "parameter":
+			return true // caller chooses the argument value
+		case "state_var":
+			return false
+		case "local_var":
+			// Caller-controlled only when every taint source is a parameter. A
+			// local seeded from state (or of unknown provenance) is not.
+			return taintIsParameterOnly(n.TaintSources)
+		default:
+			// "" = constant / immutable / enum / contract ref / unresolved. None
+			// are caller-controlled — but guard against a parameter that missed
+			// the symbol table (or shadows a state var) via the param set.
+			return fn.hasParameterNamed(n.Name)
+		}
 	case KindCallInternal, KindCallExternal:
-		// Internal calls like owner(), _owner(), getAdmin(), endpoint.getAddress(), …
-		return n.Name != ""
-	case KindExprMemberAccess:
-		// e.g. some.field
-		return true
-	case KindExprIndexAccess:
-		// e.g. allowed[msg.sender] or from[i]
-		return true
+		// Getter call (owner(), ownerOf(id), hasRole(...)) — authority comes from
+		// the state it reads, even if an argument selects which slot.
+		return false
+	case KindExprIndexAccess, KindExprMemberAccess:
+		// m[k] / s.f — caller-controlled iff the BASE is caller-controlled.
+		if len(n.Children) > 0 {
+			return isCallerControlledTarget(n.Children[0], fn)
+		}
+		return false
 	default:
 		return false
 	}
+}
+
+// taintIsParameterOnly reports whether a taint set is non-empty and consists
+// exclusively of "parameter" sources. Empty (unknown) taint returns false so an
+// untracked local is conservatively treated as a valid auth anchor rather than
+// silently dropping a real access-control check.
+func taintIsParameterOnly(sources []string) bool {
+	if len(sources) == 0 {
+		return false
+	}
+	for _, s := range sources {
+		if s != "parameter" {
+			return false
+		}
+	}
+	return true
 }
 
 // isDirectAuthSource checks if node is msg.sender, tx.origin, or _msgSender()

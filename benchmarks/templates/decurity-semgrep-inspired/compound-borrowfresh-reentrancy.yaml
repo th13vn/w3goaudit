@@ -1,0 +1,23 @@
+meta:
+  id: DECURITY-COMPOUND-BORROWFRESH-REENTRANCY
+  title: "Decurity Semgrep: Compound borrowFresh transfers out before borrow state update"
+  severity: HIGH
+  confidence: MEDIUM
+  description: >
+    Detects Compound-style borrowFresh implementations that perform the
+    external transfer helper before updating borrow/accounting state.
+  recommendation: >
+    Review the Decurity rule semantics and add access control, validation,
+    reentrancy protection, or safer arithmetic/oracle handling as appropriate.
+  references:
+    - https://github.com/Decurity/semgrep-smart-contracts/tree/master/solidity/security
+
+query:
+  scope: function
+  filter:
+    func_name: '^borrowFresh$'
+  match:
+    sequence:
+      - kind: call.internal
+        name: '^doTransferOut$'
+      - kind: state_write

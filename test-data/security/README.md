@@ -27,12 +27,12 @@ One `Vulnerable_*`/`Safe_*` fixture per promoted detector:
 
 | File | Detector |
 |---|---|
-| `boolean-cst.sol` | `SEC-BOOL-001` Boolean constant misuse |
-| `encode-packed-collision.sol` | `SEC-HASH-001` `abi.encodePacked` hash collision |
-| `proxy-storage-collision.sol` | `SEC-PROXY-001` Proxy storage layout collision |
-| `ecdsa-recover-malleable.sol` | `SEC-SIG-001` Signature malleability |
-| `arbitrary-low-level-call.sol` | `SEC-CALL-001` Arbitrary low-level call |
-| `unrestricted-transferownership.sol` | `SEC-OWNER-001` Unrestricted `transferOwnership` |
+| `boolean-cst.sol` | `MEDIUM-BOOLEAN-CST` Boolean constant misuse |
+| `encode-packed-collision.sol` | `HIGH-ENCODE-PACKED-COLLISION` `abi.encodePacked` hash collision |
+| `proxy-storage-collision.sol` | `HIGH-PROXY-STORAGE-COLLISION` Proxy storage layout collision |
+| `ecdsa-recover-malleable.sol` | `HIGH-ECDSA-RECOVER-MALLEABLE` Signature malleability |
+| `arbitrary-low-level-call.sol` | `HIGH-ARBITRARY-LOW-LEVEL-CALL` Arbitrary low-level call |
+| `unrestricted-transferownership.sol` | `HIGH-UNRESTRICTED-TRANSFEROWNERSHIP` Unrestricted `transferOwnership` |
 
 ## Used by
 

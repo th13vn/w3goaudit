@@ -1,0 +1,23 @@
+meta:
+  id: SLITHER-SUICIDAL
+  title: "Unprotected Selfdestruct"
+  severity: HIGH
+  confidence: HIGH
+  description: >
+    Detects selfdestruct (or its assembly equivalent) that is callable without
+    access control. Any external user can destroy the contract and send its
+    remaining ETH to an arbitrary address. Equivalent to Slither's suicidal
+    detector.
+  recommendation: >
+    Add access control (onlyOwner or role-based modifier) to any function
+    containing selfdestruct, or remove selfdestruct entirely.
+
+query:
+  scope: entrypoint
+
+  filter:
+    preset: unAuthenticated
+
+  match:
+    contains:
+      kind: selfdestruct

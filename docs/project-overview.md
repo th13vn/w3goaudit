@@ -9,8 +9,10 @@
 - Recursive import resolution with remapping support
 - C3 linearization for proper inheritance resolution
 - Comprehensive call graph with recursive tracing
+- Per-function effects analysis (state writes, guards, access control)
 - WQL template-based vulnerability detection
-- Multiple output formats (JSON, Markdown, Interactive HTML with Full-Screen Graphs, Console)
+- Result-folder output: `overview.md`, `findings.md`, `results.sarif`, `run.log`, a machine-readable `corpus/`, and per-main-contract workflow files + a state-change matrix; opt-in HTML mirror
+- Self-provisioning template home (`~/.w3goaudit`) with release download + embedded fallback
 - Project framework detection (Foundry, Hardhat, Truffle)
 
 ---
@@ -35,11 +37,11 @@
 - Generates findings with severity and confidence levels
 
 **3. Reporting**
-- Console output with color-coded severity
-- JSON for integration with other tools
-- Markdown reports with code snippets
-- HTML reports with interactive visualizations
-- Project summaries with call graph diagrams
+- A single opinionated **result folder** per scan (overview, findings, SARIF, run.log, JSON corpus)
+- Per-entry-function workflow files (signature, auth, guards, branch conditions, state effects, call workflow)
+- A per-contract state-change matrix (state var → writers → reaching entry points)
+- Console output with color-coded severity and reachability traces
+- Opt-in HTML mirror with interactive visualizations
 
 ---
 
@@ -71,11 +73,14 @@ w3goaudit/
 ├── cmd/
 │   └── w3goaudit/          # CLI entry point (Cobra-based)
 │       ├── main.go         # Entry: rootCmd.Execute()
-│       ├── root.go         # Default scan command (stats → overview → findings)
+│       ├── root.go         # The scan command (progress → summary → result folder)
 │       ├── build.go        # Build subcommand
 │       ├── extract.go      # Extract subcommand (11 sub-subcommands)
+│       ├── scan_filters.go # Template loading/precedence + severity/include/exclude filters
+│       ├── config_cli.go   # Apply ~/.w3goaudit config defaults; --update-templates
+│       ├── update.go       # --update (go install …@latest self-update)
 │       ├── completion.go   # Shell completion generation
-│       └── helpers.go      # Shared utilities (verbose, DB loading)
+│       └── helpers.go      # Shared utilities (result-folder path, run.log, DB loading)
 │
 ├── pkg/
 │   ├── reader/             # File discovery and loading
@@ -85,18 +90,22 @@ w3goaudit/
 │   │   └── git.go          # Git repository detection and URL building
 │   │
 │   ├── builder/            # Database construction
-│   │   ├── builder.go      # 6-phase build orchestration
+│   │   ├── builder.go      # 7-phase build orchestration
 │   │   ├── contract.go     # Contract extraction from AST
 │   │   ├── ast_builder.go  # Function AST tree building
 │   │   ├── semantic.go     # Lightweight semantic type facts
 │   │   ├── inheritance.go  # C3 linearization
-│   │   └── callgraph.go    # Call graph construction
+│   │   ├── callgraph.go    # Call graph construction
+│   │   └── effects.go      # Phase 7: per-function effects (writes/guards/auth)
 │   │
 │   ├── engine/             # Template execution
 │   │   ├── engine.go       # Query execution engine
 │   │   ├── template.go     # Template loading, parsing, normalization
 │   │   ├── verify.go       # WQL rule verification (recursive Verify)
-│   │   └── presets.go      # Built-in presets (unAuthenticated, unLocked)
+│   │   └── presets.go      # Built-in presets (unAuthenticated, unCheckedSender, unLocked)
+│   │
+│   ├── home/               # ~/.w3goaudit config + template home
+│   │   └── home.go         # config.yml load/init, release download (zipball), --update-templates
 │   │
 │   ├── types/              # Core data structures
 │   │   ├── database.go     # Contract database + MainContractEntry
@@ -108,9 +117,12 @@ w3goaudit/
 │   │   └── dataflow.go     # Data flow graph types
 │   │
 │   ├── report/             # Output formatting
+│   │   ├── bundle.go       # Result-folder writer (overview/findings/SARIF/corpus, per-contract dirs)
+│   │   ├── state_matrix.go # State-change matrix (writers + reachable entry points)
 │   │   ├── generator.go    # Summary report generation (with git detection)
 │   │   ├── markdown.go     # Markdown formatter (git URL links)
 │   │   ├── html.go         # HTML with Mermaid diagrams (git URL links)
+│   │   ├── sarif.go        # SARIF 2.1.0 formatter
 │   │   ├── code_extract.go # Source code extraction
 │   │   ├── scan_formats.go # Findings formatting (Markdown + HTML)
 │   │   └── summary.go      # Project statistics and GitInfo
@@ -169,8 +181,20 @@ w3goaudit/
    divergence-prone heuristic; cycle-safe — `A is B; B is A` errors out instead
    of panicking). Bases are resolved scope-aware via `ResolveContractName`, so a
    duplicate contract name (real vs mock) picks the in-scope definition.
-5. **Build Call Graph** - Resolve all function calls (deterministic iteration order)
+5. **Build Call Graph** - Resolve all function calls (deterministic iteration
+   order). A post-pass (`ResolveSuperAcrossLeaves`) makes `super` resolution
+   context-aware: `super.f()` binds against the linearization of the most-derived
+   contract being instantiated, so each super call is bound to the next definition
+   in **every** instantiation leaf's MRO (sound union, additive + deduplicated),
+   not just the textual contract's own MRO. This closes a reachability
+   false-negative on cooperative-diamond `super` chains.
 6. **Calculate Entry Points** - Identify main contracts and public/external functions
+7. **Analyze Per-Function Effects** - Walk each function's AST and record durable
+   `FunctionEffects`: the state variables it writes (with write kind), its guards
+   (`require`/`assert`/`revert` and `if`/ternary branch conditions), and its auth
+   facts (modifiers, inline `msg.sender` checks, `tx.origin` use, controlled vs
+   unprotected). These feed `state-changes.md` and the per-entry workflow files.
+   Implementation: [pkg/builder/effects.go](../pkg/builder/effects.go)
 
 The Yul classifier in phase 2 now recognizes `create`, `create2`, `log0`–`log4`,
 `revert`, and `return` opcodes in addition to the original
@@ -295,15 +319,53 @@ type Function struct {
 
 ### 5. Report Package
 
-**Responsibility:** Format and output results.
+**Responsibility:** Format results and write the scan **result folder**.
 
-**Supported Formats:**
-- **Console** - Color-coded, human-readable
-- **JSON** - Structured data for tools
-- **Markdown** - Reports with code snippets and tables
-- **HTML** - Interactive reports with Mermaid call graphs
+**Result folder** (`report.WriteBundle`, [pkg/report/bundle.go](../pkg/report/bundle.go)):
+- `overview.md`, `findings.md` — human-readable Markdown
+- `results.sarif` — SARIF 2.1.0 (always)
+- `corpus/{database.json,findings.json,overview.json}` — machine-readable; the
+  canonical database lives only here (reusable via `--db`)
+- `<MainContract>/state-changes.md` — per-contract state-change matrix built by
+  [pkg/report/state_matrix.go](../pkg/report/state_matrix.go): each state variable,
+  the functions that write it, and the entry points that reach a writer (reverse
+  call-graph walk)
+- `<MainContract>/workflows/<entryFn>.md` — one self-contained context block per
+  entry function (signature, auth/access control, guards, branch conditions,
+  transitive state effects, Mermaid call workflow)
+- Folder/file names are sanitized; collisions are disambiguated with
+  `Name__<filestem>` (contracts) and `<entryFn>__<selector>` (overloads); stale
+  per-contract folders from a previous run are pruned on re-scan
+- Opt-in `overview.html` + `findings.html` mirror (`--html`)
+
+**Console:** color-coded summary header, findings grouped by severity with
+reachability traces, an unresolved-references section, and the result-folder
+location. `run.log` (written by the CLI) always captures full verbose detail.
 
 **Code:** [pkg/report/](../pkg/report)
+
+---
+
+### 6. Home Package
+
+**Responsibility:** Manage the cross-platform `~/.w3goaudit` directory — the user
+config and the template home that mirrors the published template pack.
+
+**Features:**
+- First-run init: create `~/.w3goaudit`, write a default `config.yml`, and
+  populate `templates/` from the latest release of `th13vn/w3goaudit-templates`
+  (GitHub Releases **zipball**, nuclei-style — never `git clone`), recording the
+  tag in `templates/.version`
+- Graceful degradation: any download failure (offline, repo/release missing)
+  falls back to the embedded official pack — no hard failure
+- `config.yml` load with built-in defaults; every key is overridable by a CLI flag
+- `UpdateTemplates` powers `--update-templates`; tool self-update (`--update`)
+  lives in `cmd/w3goaudit/update.go` (runs `go install …@latest`)
+
+**Template precedence:** `--template` > `~/.w3goaudit/templates/` (when populated)
+> embedded official pack.
+
+**Code:** [pkg/home/](../pkg/home)
 
 ---
 
@@ -440,7 +502,7 @@ function _processWithdraw() internal {
 - Taint analysis: parameter/state_var/local_var source tracking
 - Call-specific: `args: {0: ...}` or flat `arg.N:` keys
 - Semantic groups: outgoing_call, eth_transfer, delegatecall, check/guard, token_call, state_write/state_read, selfdestruct
-- Presets: unAuthenticated, unLocked
+- Presets: unAuthenticated, unCheckedSender, unLocked
 
 **Extract Subcommands (11 total)**
 - Canonical order widest→narrowest: `main`, `entry`, `inheritance`, `statevar`, `selector`, `involve`, `workflow`, `bundle`, `context`, `source`, `diff`
@@ -452,32 +514,37 @@ function _processWithdraw() internal {
 
 
 **Reporting**
-- Console with severity icons
-- JSON export (stats + overview + findings)
-- Markdown reports (split: overview file + findings file)
-- HTML reports with interactive vis.js call graphs (split output)
+- One **result folder** per scan: `overview.md`, `findings.md`, always-on
+  `results.sarif` + `run.log`, a `corpus/` (database.json + findings.json +
+  overview.json), and one sub-folder per main contract
+- Per-entry workflow files (signature, auth, guards, branches, state effects,
+  call workflow) and a per-contract state-change matrix
+- Console with severity icons and reachability traces
+- Opt-in HTML mirror (`--html`) with interactive vis.js call graphs
 - **Reachability-aware findings** — every finding can carry the call chain
   from an externally-callable entry down to the function that hosts the
   dangerous statement. Formats:
   - **Console**: `↳ via Contract.entry() ⇒ … ⇒ host()` + `↳ fix-here: …`
-  - **JSON**: structured `reachability.steps[]`, `entryPoint`, `primaryAst`
+  - **JSON** (`corpus/findings.json`): structured `reachability.steps[]`, `entryPoint`, `primaryAst`
   - **SARIF 2.1.0**: `result.relatedLocations[]` per hop +
     `result.properties.entryPoint` / `result.properties.primaryAst`
   - **Markdown / HTML**: per-occurrence trace block with dotted-level
     indentation (`.`, `..`, `...`) and line numbers per hop
-- **Location-source switch** — `WGAUDIT_LOCATION_FROM_MATCHED_NODE=1` (or
-  `Engine.SetLocationSource(LocationSourceMatchedNode)`) flips
-  `Finding.Location` from the verifier-function entrypoint (today's
-  default, kept for backward compat) to the host of the matched AST node
-  (Slither / Semgrep / SARIF convention).
+- Bug location is hardcoded to the best provenance: the dangerous-node
+  `file:line:col` anchor plus the reachability chain and fix-here pointer
+
+**Configuration & Distribution**
+- `~/.w3goaudit/config.yml` (defaults overridable by flags), managed by `pkg/home`
+- Self-provisioning template home with release download + embedded fallback;
+  `--update-templates` refreshes it
+- `--update` self-updates the tool via `go install …@latest`
 
 **CLI**
-- default scan, build, extract, completion commands
-- Flexible flag ordering
-- Markdown output by default
-- Database caching via JSON files
-- Enhanced verbose mode
-- Debug logging to files
+- The scan is the root command (no `scan` subcommand); build, extract, completion, version
+- Long + short forms for every scan flag
+- Folder-based output (Markdown + SARIF + JSON corpus)
+- Database caching via JSON files (reuse `corpus/database.json` with `--db`)
+- Verbose terminal mode; full detail always captured in `run.log`
 
 **SDK**
 - Go library for integration
@@ -559,8 +626,8 @@ go test ./pkg/...
 # Integration test: build database
 ./w3goaudit build test-data/core/build-database/ -o test-db.json --verbose
 
-# Full scan with markdown report
-./w3goaudit test-data/security/ --template templates/official/ --md -o test-report.md
+# Full scan → result folder
+./w3goaudit test-data/security/ --template templates/official/ -o test-report/
 ```
 
 ### Adding New Features
@@ -610,8 +677,7 @@ go test ./pkg/...
 # Integration test: Security scan (root command = scan, no 'scan' subcommand)
 ./w3goaudit test-data/security/ \
   --template templates/official/ \
-  --md \
-  -o test-report.md
+  -o test-report/
 ```
 
 ---

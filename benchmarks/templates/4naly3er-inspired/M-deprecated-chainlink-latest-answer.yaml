@@ -1,0 +1,23 @@
+meta:
+  id: 4NALY3ER-M-003
+  title: "Deprecated Chainlink Function latestAnswer()"
+  severity: MEDIUM
+  confidence: HIGH
+  description: >
+    Detects use of Chainlink's deprecated latestAnswer() function.
+    Per Chainlink's official documentation, latestAnswer() is deprecated.
+    Unlike latestRoundData(), it does not revert if no answer has been
+    reached — instead it silently returns 0, which can feed incorrect prices
+    (zero price) into DeFi protocols, causing catastrophic mispricing.
+    Equivalent to 4naly3er's deprecatedChainlinkFunction detector.
+  recommendation: >
+    Migrate to latestRoundData() and always validate: answer > 0,
+    updatedAt > block.timestamp - stalePeriod, answeredInRound >= roundId.
+
+query:
+  scope: function
+
+  match:
+    contains:
+      kind: call.external
+      name: ^latestAnswer$

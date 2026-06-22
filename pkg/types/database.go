@@ -206,6 +206,28 @@ func (db *Database) GetContract(id string) *Contract {
 	return db.Contracts[id]
 }
 
+// UnresolvedBases returns the sorted set of base-contract names referenced in
+// inheritance lists that are not present in the database. These are typically
+// contracts whose imports failed to resolve; surfacing them tells an auditor
+// what the analysis could not see rather than implying full coverage.
+func (db *Database) UnresolvedBases() []string {
+	seen := make(map[string]bool)
+	var out []string
+	for _, c := range db.Contracts {
+		for _, baseName := range c.BaseContracts {
+			if baseName == "" || seen[baseName] {
+				continue
+			}
+			if db.GetContractByName(baseName) == nil {
+				seen[baseName] = true
+				out = append(out, baseName)
+			}
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
 // GetContractByName finds a contract by unqualified name.
 //
 // IMPORTANT: name collisions are common (e.g. a `Token` in `/src/Token.sol`

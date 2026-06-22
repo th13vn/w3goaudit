@@ -1,0 +1,26 @@
+meta:
+  id: SLITHER-UNPROTECTED-UPGRADE
+  title: "Unprotected Initializer Function"
+  severity: HIGH
+  confidence: HIGH
+  description: >
+    Detects initialize/initializer functions without access control. In
+    upgradeable contracts, the initialize function replaces the constructor
+    and must be called exactly once by the deployer. Without access control,
+    anyone can call initialize and take ownership of the proxy.
+    Equivalent to Slither's unprotected-upgrade detector.
+  recommendation: >
+    Add an initializer modifier (OpenZeppelin) and access control to
+    initialize functions. Consider using _disableInitializers() in the
+    constructor of implementation contracts.
+
+query:
+  scope: entrypoint
+
+  filter:
+    func_name: (?i)^(initialize|initialise|init)$
+    preset: unAuthenticated
+
+  match:
+    contains:
+      kind: state_write

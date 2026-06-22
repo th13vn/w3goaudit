@@ -1,0 +1,28 @@
+meta:
+  id: DECURITY-EXACT-BALANCE-CHECK
+  title: "Decurity Semgrep: Exact balance equality is used as an action condition"
+  severity: HIGH
+  confidence: MEDIUM
+  description: >
+    Detects action guards that compare token or ETH balance with exact
+    equality, which can be griefed by dust transfers.
+  recommendation: >
+    Review the Decurity rule semantics and add access control, validation,
+    reentrancy protection, or safer arithmetic/oracle handling as appropriate.
+  references:
+    - https://github.com/Decurity/semgrep-smart-contracts/tree/master/solidity/security
+
+query:
+  scope: function
+  match:
+    contains:
+      kind: check
+      contains:
+        kind: expr.binary_op
+        operator: '=='
+        contains:
+          any:
+            - kind: call.external
+              name: '^balanceOf$'
+            - kind: expr.member_access
+              name: '^balance$'

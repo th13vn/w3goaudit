@@ -1,13 +1,14 @@
-/w3goaudit
-/web/
 .env
+.DS_Store
 .vscode/
 .agent/
 .cursor/
 .idea/
 .claude/
+/w3goaudit
 /scripts/
 /report/
+/web/
 __pycache__/
 
 # Ephemeral default benchmark output (overwritten each run). Named runs

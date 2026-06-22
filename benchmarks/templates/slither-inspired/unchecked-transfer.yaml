@@ -1,0 +1,33 @@
+meta:
+  id: SLITHER-UNCHECKED-TRANSFER
+  title: "Unchecked ERC20 Transfer Return Value"
+  severity: HIGH
+  confidence: MEDIUM
+  description: >
+    Detects ERC20 transfer/transferFrom calls whose boolean return value is not
+    checked. Some tokens return false on failure instead of reverting. If the
+    return value is not checked, the function continues execution assuming the
+    transfer succeeded, leading to accounting errors or fund loss.
+    Equivalent to Slither's unchecked-transfer detector.
+  recommendation: >
+    Use OpenZeppelin's SafeERC20 library (safeTransfer/safeTransferFrom) which
+    reverts on failure, or explicitly check the return value with require().
+
+query:
+  scope: entrypoint
+
+  # Use `token_call` (the semantic group for ERC20/ERC721-shaped external
+  # calls) so we don't trip on every external method named "transfer".
+  # `stmt.assign` is included so `bool ok = token.transfer(...); require(ok);`
+  # is correctly recognised as a checked call.
+  match:
+    contains:
+      kind: token_call
+      name: ^(transfer|transferFrom)$
+      not:
+        inside:
+          any:
+            - kind: check.require
+            - kind: check.assert
+            - kind: stmt.if
+            - kind: stmt.assign

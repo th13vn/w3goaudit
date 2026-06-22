@@ -1,0 +1,19 @@
+meta:
+  id: TEST-TAINT-PARAM
+  title: "Taint probe: transferFrom arg0 is parameter-tainted"
+  severity: INFO
+  confidence: HIGH
+  description: "Probe template for taint-source stress testing. Flags any transferFrom whose FIRST argument carries parameter taint. NO access-control filter — isolates taint tracking only."
+  recommendation: "n/a — diagnostic probe"
+
+query:
+  scope: entrypoint
+
+  # No filter: we want pure taint reachability, not access-control gating.
+  match:
+    contains:
+      kind: token_call
+      name: ^transferFrom$
+      args:
+        0:
+          tainted_from: parameter

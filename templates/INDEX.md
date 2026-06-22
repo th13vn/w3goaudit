@@ -4,8 +4,24 @@
 
 WQL templates for smart-contract security scanning. Each `.yaml` file is a
 self-contained detector. The `official/` pack is embedded in the binary
-(`//go:embed`) and runs by default; point `--template` at any file or directory
-to override it.
+(`//go:embed`) and serves as the always-available offline fallback.
+
+### Template precedence (v0.3)
+
+A scan resolves templates in this order (see `cmd/w3goaudit/scan_filters.go`):
+
+1. `--template <file|dir>` — explicit override (highest).
+2. `~/.w3goaudit/templates/` — the **template home**, populated nuclei-style on
+   first run by downloading the latest release of
+   [`th13vn/w3goaudit-templates`](https://github.com/th13vn/w3goaudit-templates)
+   (zipball, not `git clone`). Refresh with `w3goaudit --update-templates`.
+   Managed by `pkg/home` (see its INDEX).
+3. The embedded `official/` pack — used when the home is empty or a download
+   failed (offline, repo/release missing). The tool never hard-fails on a
+   download error.
+
+This `templates/official/` directory in the repo is both the embedded pack and
+the seed content published to the `w3goaudit-templates` release.
 
 ## Curation Policy
 
@@ -32,8 +48,14 @@ templates/
 > `test/` is **not** a production detector set — it holds low-confidence
 > feature-exercise templates paired with fixtures in
 > [`../test-data/core/engine-features/`](../test-data/core/engine-features/) to
-> smoke-test WQL engine operators (`sequence`, `inside`, semantic groups,
-> `args` + `tainted_from`). Run it with
+> smoke-test WQL engine operators. The five templates are:
+> `feature-sequence.yaml` (`sequence` operator), `feature-inside.yaml`
+> (`contains` + `inside` ancestor traversal), `feature-eth-transfer.yaml`
+> (`eth_transfer` semantic group), `feature-args-taint.yaml` (`args` +
+> `tainted_from`), and `taint-probe-parameter.yaml` (`TEST-TAINT-PARAM`, an
+> INFO probe that isolates pure parameter-taint reachability into
+> `transferFrom` arg0 with **no** access-control filter — used for taint stress
+> testing). Run them with
 > `w3goaudit test-data/core/engine-features/ --template templates/test/`.
 > Do not point production scans at it.
 
@@ -55,31 +77,31 @@ template/category rather than by name prefix alone.
 
 | ID | Severity | File | Detects |
 |---|---|---|---|
-| `SEC-DEST-001` | CRITICAL | `selfdestruct-unprotected.yaml` | `selfdestruct(...)` (Solidity-level OR assembly opcode) reachable from an unauthenticated entrypoint (`preset: unAuthenticated` — modifiers, inline sender guards, and recursive auth helpers) |
-| `SEC-DELEG-001` | CRITICAL | `delegatecall-user-input.yaml` | `delegatecall` whose target flows from a function parameter |
-| `SEC-ETH-001` | HIGH | `arbitrary-send-eth.yaml` | Unprotected ETH withdrawal via `.transfer` / `.send` / `.call{value:}` |
-| `SEC-ERC20-001` | HIGH | `arbitrary-transferfrom.yaml` | `transferFrom(from, ...)` where `from` is user-controlled across entrypoint/helper flows and lacks sender/auth validation |
-| `SEC-ERC20-002` | HIGH | `unchecked-erc20-transfer.yaml` | ERC20 `transfer` / `transferFrom` whose bool return is discarded |
-| `SEC-GEN-REENTRANCY` | HIGH | `reentrancy-pattern.yaml` | CEI violation — ETH-bearing call / raw low-level `.call` / `delegatecall` followed by a state write, on a function lacking a reentrancy guard |
-| `SEC-REENTRANCY-002` | HIGH | `reentrancy-balance.yaml` | `balanceOf` → external-call → balance-read pattern without a reentrancy guard (delta-snapshot exploit) |
-| `SEC-DELEG-002` | HIGH | `delegatecall-in-loop.yaml` | `delegatecall` inside a `for`/`while` body (payable-multicall ETH reuse) |
-| `SEC-UPGRADE-001` | HIGH | `unprotected-initializer.yaml` | `initialize/init/setup` entrypoint that writes state with no access control or `initializer` guard |
-| `SEC-PRNG-001` | HIGH | `weak-prng.yaml` | Modulo over `block.timestamp` / `block.number` / `block.prevrandao` / `blockhash` |
-| `SEC-MSGVAL-001` | HIGH | `msg-value-in-loop.yaml` | `msg.value` referenced inside a loop body in a `payable` entrypoint (multicall ETH reuse) |
-| `SEC-MATH-003` | HIGH | `incorrect-exp.yaml` | `^` (bitwise XOR) used in arithmetic context — "developer meant `**`" foot-gun |
-| `SEC-HASH-001` | HIGH | `encode-packed-collision.yaml` | `keccak256(abi.encodePacked(...))` over ≥2 user-controlled dynamic args (ambiguous packing → collision) |
-| `SEC-PROXY-001` | HIGH | `proxy-storage-collision.yaml` | Proxy subclass declares plain mutable storage alongside a constructor (implementation slot collision) |
-| `SEC-SIG-001` | HIGH | `ecdsa-recover-malleable.yaml` | `ECDSA.recover` result keyed by the raw `signature` bytes (malleability replay) |
-| `SEC-CALL-001` | HIGH | `arbitrary-low-level-call.yaml` | Unauthenticated entrypoint forwards a user-controlled target AND calldata into a low-level `.call` |
-| `SEC-OWNER-001` | HIGH | `unrestricted-transferownership.yaml` | `transferOwnership` entrypoint writes owner-like state from a parameter with no access control |
-| `SEC-SEND-001` | MEDIUM | `unchecked-send.yaml` | `addr.send(amt)` whose bool return is discarded |
-| `SEC-LOWLEVEL-CALL-001` | MEDIUM | `unchecked-lowlevel-call.yaml` | Low-level `.call(data)` / `.call{value:}(data)` whose `(bool, bytes)` return is discarded |
-| `SEC-EQ-001` | MEDIUM | `dangerous-strict-equality.yaml` | `==` / `!=` against `address(this).balance`, `balanceOf(...)`, `block.timestamp`, `block.number` |
-| `SEC-MATH-002` | MEDIUM | `divide-before-multiply.yaml` | `(a / b) * c` shape — divide is the left operand of a multiply (precision-loss bug) |
-| `SEC-MUTABILITY-001` | MEDIUM | `view-pure-modifies-state.yaml` | `view` / `pure` function that writes state (including inline-assembly `sstore` bypass) |
-| `SEC-TXORIGIN-001` | MEDIUM | `tx-origin-auth.yaml` | `tx.origin` used inside any guard (`require` / `assert` / `if` / ternary) |
-| `SEC-MATH-001` | MEDIUM | `unchecked-arithmetic.yaml` | Arithmetic inside `unchecked { ... }` on Solidity `>=0.8.0` |
-| `SEC-BOOL-001` | MEDIUM | `boolean-cst.yaml` | Boolean literal misused as a comparison/logical operand (`x == true`, `a && false`) or directly as an `if`/ternary condition (`if (true)`). Plain `return true` / `flag = false` / `while (true)` are not flagged |
+| `CRITICAL-SELFDESTRUCT-UNPROTECTED` | CRITICAL | `critical/selfdestruct-unprotected.yaml` | `selfdestruct(...)` (Solidity-level OR assembly opcode) reachable from an unauthenticated entrypoint (`preset: unAuthenticated` — modifiers, inline sender guards, and recursive auth helpers) |
+| `CRITICAL-DELEGATECALL-USER-INPUT` | CRITICAL | `critical/delegatecall-user-input.yaml` | `delegatecall` whose target flows from a function parameter |
+| `HIGH-ARBITRARY-SEND-ETH` | HIGH | `high/arbitrary-send-eth.yaml` | Unprotected ETH withdrawal via `.transfer` / `.send` / `.call{value:}` |
+| `HIGH-ARBITRARY-TRANSFERFROM` | HIGH | `high/arbitrary-transferfrom.yaml` | `transferFrom(from, ...)` where `from` is user-controlled across entrypoint/helper flows and the function neither has privileged access control nor self-scopes the caller (`preset: unCheckedSender` — `require(from == msg.sender)` is treated as safe) |
+| `HIGH-UNCHECKED-ERC20-TRANSFER` | HIGH | `high/unchecked-erc20-transfer.yaml` | ERC20 `transfer` / `transferFrom` whose bool return is discarded |
+| `HIGH-REENTRANCY-PATTERN` | HIGH | `high/reentrancy-pattern.yaml` | CEI violation — ETH-bearing call / raw low-level `.call` / `delegatecall` followed by a state write, on a function lacking a reentrancy guard |
+| `HIGH-REENTRANCY-BALANCE` | HIGH | `high/reentrancy-balance.yaml` | `balanceOf` → external-call → balance-read pattern without a reentrancy guard (delta-snapshot exploit) |
+| `HIGH-DELEGATECALL-IN-LOOP` | HIGH | `high/delegatecall-in-loop.yaml` | `delegatecall` inside a `for`/`while` body (payable-multicall ETH reuse) |
+| `HIGH-UNPROTECTED-INITIALIZER` | HIGH | `high/unprotected-initializer.yaml` | `initialize/init/setup` entrypoint that writes state with no access control or `initializer` guard |
+| `HIGH-WEAK-PRNG` | HIGH | `high/weak-prng.yaml` | Modulo over `block.timestamp` / `block.number` / `block.prevrandao` / `blockhash` |
+| `HIGH-MSG-VALUE-IN-LOOP` | HIGH | `high/msg-value-in-loop.yaml` | `msg.value` referenced inside a loop body in a `payable` entrypoint (multicall ETH reuse) |
+| `HIGH-INCORRECT-EXP` | HIGH | `high/incorrect-exp.yaml` | `^` (bitwise XOR) used in arithmetic context — "developer meant `**`" foot-gun |
+| `HIGH-ENCODE-PACKED-COLLISION` | HIGH | `high/encode-packed-collision.yaml` | `keccak256(abi.encodePacked(...))` over ≥2 user-controlled dynamic args (ambiguous packing → collision) |
+| `HIGH-PROXY-STORAGE-COLLISION` | HIGH | `high/proxy-storage-collision.yaml` | Proxy subclass declares plain mutable storage alongside a constructor (implementation slot collision) |
+| `HIGH-ECDSA-RECOVER-MALLEABLE` | HIGH | `high/ecdsa-recover-malleable.yaml` | `ECDSA.recover` result keyed by the raw `signature` bytes (malleability replay) |
+| `HIGH-ARBITRARY-LOW-LEVEL-CALL` | HIGH | `high/arbitrary-low-level-call.yaml` | Unauthenticated entrypoint forwards a user-controlled target AND calldata into a low-level `.call` |
+| `HIGH-UNRESTRICTED-TRANSFEROWNERSHIP` | HIGH | `high/unrestricted-transferownership.yaml` | `transferOwnership` entrypoint writes owner-like state from a parameter with no access control |
+| `MEDIUM-UNCHECKED-SEND` | MEDIUM | `medium/unchecked-send.yaml` | `addr.send(amt)` whose bool return is discarded |
+| `MEDIUM-UNCHECKED-LOWLEVEL-CALL` | MEDIUM | `medium/unchecked-lowlevel-call.yaml` | Low-level `.call(data)` / `.call{value:}(data)` whose `(bool, bytes)` return is discarded |
+| `MEDIUM-DANGEROUS-STRICT-EQUALITY` | MEDIUM | `medium/dangerous-strict-equality.yaml` | `==` / `!=` against `address(this).balance`, `balanceOf(...)`, `block.timestamp`, `block.number` |
+| `MEDIUM-DIVIDE-BEFORE-MULTIPLY` | MEDIUM | `medium/divide-before-multiply.yaml` | `(a / b) * c` shape — divide is the left operand of a multiply (precision-loss bug) |
+| `MEDIUM-VIEW-PURE-MODIFIES-STATE` | MEDIUM | `medium/view-pure-modifies-state.yaml` | `view` / `pure` function that writes state (including inline-assembly `sstore` bypass) |
+| `MEDIUM-TX-ORIGIN-AUTH` | MEDIUM | `medium/tx-origin-auth.yaml` | `tx.origin` used inside any guard (`require` / `assert` / `if` / ternary) |
+| `MEDIUM-UNCHECKED-ARITHMETIC` | MEDIUM | `medium/unchecked-arithmetic.yaml` | Arithmetic inside `unchecked { ... }` on Solidity `>=0.8.0` |
+| `MEDIUM-BOOLEAN-CST` | MEDIUM | `medium/boolean-cst.yaml` | Boolean literal misused as a comparison/logical operand (`x == true`, `a && false`) or directly as an `if`/ternary condition (`if (true)`). Plain `return true` / `flag = false` / `while (true)` are not flagged |
 
 `references` is **optional** — present only where a canonical smart-contract
 reference exists (SWC registry, Slither wiki, Solidity docs, EIPs). The engine
@@ -98,9 +120,12 @@ meta:
   confidence: LEVEL             # LOW|MEDIUM|HIGH
   description: STRING
   recommendation: STRING
+  references:                   # optional list of canonical refs (SWC/Slither/EIP)
+    - https://swcregistry.io/docs/SWC-105
+  fix: STRING                   # optional suggested fix snippet
 
 query:
-  scope: SCOPE                  # entrypoint|function|main_contract|all_contract|contract|library|abstract
+  scope: SCOPE                  # entrypoint|function|main_contract|all_contract|contract|library|abstract|source
 
   filter:                       # Function/contract-level preconditions (optional)
     modifier: REGEX             # function HAS this modifier
@@ -167,7 +192,17 @@ functions you actually want to scan further.
 
 ```yaml
 filter:
-  preset: unAuthenticated    # scan only entry points lacking access control
+  preset: unAuthenticated    # scan only entry points lacking PRIVILEGED access
+                             # control. require(from == msg.sender) is NOT
+                             # privileged auth, so it does NOT clear this preset.
+```
+
+```yaml
+filter:
+  preset: unCheckedSender     # like unAuthenticated, but ALSO clears functions
+                             # that self-scope the caller (require(from ==
+                             # msg.sender)). Use where binding a sensitive arg to
+                             # the caller is a valid mitigation (arbitrary transferFrom).
 ```
 
 ```yaml
@@ -265,8 +300,9 @@ to substring matching.
 ## Usage
 
 `--template` is single-valued and accepts either a file or a directory. When
-given a directory it walks every `.yaml` underneath. When omitted, the embedded
-`official/` pack is used.
+given a directory it walks every `.yaml` underneath. When omitted, the scanner
+uses `~/.w3goaudit/templates` when populated, then falls back to the embedded
+`official/` pack.
 
 ```bash
 # Audit with the built-in official pack (the normal case — no flag needed)
@@ -276,17 +312,17 @@ w3goaudit ./contracts/
 w3goaudit ./contracts/ --template templates/official/
 
 # Run a single specific detector
-w3goaudit ./contracts/ --template templates/official/reentrancy-pattern.yaml
+w3goaudit ./contracts/ --template templates/official/high/reentrancy-pattern.yaml
 
-# Full integration scan with verbose log
-w3goaudit test-data/security/ --template templates/official/ --verbose=/tmp/scan.log
+# Full integration scan with terminal detail (run.log is always written)
+w3goaudit test-data/security/ --template templates/official/ --verbose
 ```
 
 Template directories fail closed by default. Use `--ignore-invalid-templates`
 only for ad-hoc mixed directories; skipped files are then reported with
 `--verbose`:
 ```
-Loaded template: SEC-ERC20-001 (templates/official/arbitrary-transferfrom.yaml)
+Loaded template: HIGH-ARBITRARY-TRANSFERFROM (templates/official/high/arbitrary-transferfrom.yaml)
 Skipping invalid template broken.yaml: parse YAML: yaml: line 3: ...
 Skipping template missing-id.yaml: missing meta.id
 ```

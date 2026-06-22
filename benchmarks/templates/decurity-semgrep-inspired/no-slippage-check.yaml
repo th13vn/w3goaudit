@@ -1,0 +1,35 @@
+meta:
+  id: DECURITY-NO-SLIPPAGE-CHECK
+  title: "Decurity Semgrep: Swap uses zero or max slippage limit"
+  severity: HIGH
+  confidence: MEDIUM
+  description: >
+    Detects swap calls that hard-code zero or max amountOutMin/slippage bounds.
+  recommendation: >
+    Review the Decurity rule semantics and add access control, validation,
+    reentrancy protection, or safer arithmetic/oracle handling as appropriate.
+  references:
+    - https://github.com/Decurity/semgrep-smart-contracts/tree/master/solidity/security
+
+query:
+  scope: entrypoint
+  match:
+    any:
+      - contains:
+          kind: call.external
+          name: '^(swapExactETHForTokens|swapExactETHForTokensSupportingFeeOnTransferTokens)$'
+          args:
+            0:
+              any:
+                - kind: expr.literal
+                  name: '^0$'
+                - name: '^(type|uint256|max)$'
+      - contains:
+          kind: call.external
+          name: '^(swapExactTokensForTokens|swapExactTokensForTokensSupportingFeeOnTransferTokens|swapExactTokensForETH|swapExactTokensForETHSupportingFeeOnTransferTokens|swapTokensForExactTokens|swapTokensForExactETH|swap)$'
+          args:
+            1:
+              any:
+                - kind: expr.literal
+                  name: '^0$'
+                - name: '^(type|uint256|max)$'

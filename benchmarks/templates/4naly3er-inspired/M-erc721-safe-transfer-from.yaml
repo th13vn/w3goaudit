@@ -1,0 +1,30 @@
+meta:
+  id: 4NALY3ER-M-009
+  title: "ERC721 transferFrom() Instead of safeTransferFrom()"
+  severity: MEDIUM
+  confidence: MEDIUM
+  description: >
+    Detects use of transferFrom() which does not verify the recipient can
+    handle ERC721 tokens. If the recipient is a contract without IERC721Receiver
+    support, the NFT becomes permanently locked.
+    Equivalent to 4naly3er's erc721safeTransferFrom detector.
+    Note: to reduce FPs, this targets token_call (external calls) only.
+  recommendation: >
+    Use safeTransferFrom() instead of transferFrom() for ERC721 transfers.
+
+query:
+  scope: function
+
+  # ERC20 and ERC721 transferFrom share the same 3-arg shape, so the AST
+  # alone can't distinguish them. Restrict to contracts that inherit ERC721
+  # to keep the detector usable; without this filter every ERC20
+  # transferFrom call gets flagged.
+  filter:
+    extends: (?i)(ERC721|IERC721|ERC721Upgradeable)
+
+  match:
+    contains:
+      kind: token_call
+      name: ^transferFrom$
+      arg.2:
+        kind: expr.identifier

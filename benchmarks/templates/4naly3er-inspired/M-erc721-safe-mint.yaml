@@ -1,0 +1,27 @@
+meta:
+  id: 4NALY3ER-M-008
+  title: "ERC721 _mint() Instead of _safeMint()"
+  severity: MEDIUM
+  confidence: HIGH
+  description: >
+    Detects direct calls to _mint() in ERC721 contracts. _mint() does not
+    check if the recipient is a contract that implements IERC721Receiver.
+    If tokens are minted to a contract that cannot handle ERC721 tokens,
+    they are permanently locked. _safeMint() performs this check.
+    Equivalent to 4naly3er's erc721safeMint detector.
+  recommendation: >
+    Replace _mint() with _safeMint() for ERC721 tokens to ensure the
+    recipient can handle ERC721 tokens.
+
+query:
+  scope: function
+
+  # `_mint` exists in both ERC20 and ERC721. Restrict to contracts that
+  # inherit ERC721 so we don't flag ERC20 mints as missing safe-mint.
+  filter:
+    extends: (?i)(ERC721|IERC721|ERC721Upgradeable)
+
+  match:
+    contains:
+      kind: call.internal
+      name: ^_mint$

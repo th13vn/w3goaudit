@@ -1,0 +1,23 @@
+meta:
+  id: SLITHER-DELEGATECALL-LOOP
+  title: "Delegatecall Inside a Loop"
+  severity: HIGH
+  confidence: MEDIUM
+  description: >
+    Detects delegatecall used inside a loop. If the delegatecall target can be
+    influenced by the caller, this pattern allows an attacker to execute
+    arbitrary code multiple times in the contract's context. Even with a fixed
+    target, this can cause unexpected storage mutations across iterations.
+    Equivalent to Slither's delegatecall-loop detector.
+  recommendation: >
+    Avoid using delegatecall inside loops. If multicall functionality is needed,
+    use a carefully audited multicall pattern with proper access control.
+
+query:
+  scope: entrypoint
+
+  match:
+    contains:
+      kind: stmt.loop
+      contains:
+        kind: delegatecall

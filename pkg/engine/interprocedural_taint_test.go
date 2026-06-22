@@ -24,7 +24,7 @@ func TestInterproceduralTaintForInternalTransferFrom(t *testing.T) {
 	if err != nil {
 		t.Fatalf("build db: %v", err)
 	}
-	tmpl, err := LoadTemplate(filepath.Join(root, "templates/official/arbitrary-transferfrom.yaml"))
+	tmpl, err := LoadTemplate(filepath.Join(root, "templates/official/high/arbitrary-transferfrom.yaml"))
 	if err != nil {
 		t.Fatalf("load template: %v", err)
 	}
@@ -78,7 +78,7 @@ func TestFindingLocationsUseExactFunctionIDSourceFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("build db: %v", err)
 	}
-	tmpl, err := LoadTemplate(filepath.Join(root, "templates/official/tx-origin-auth.yaml"))
+	tmpl, err := LoadTemplate(filepath.Join(root, "templates/official/medium/tx-origin-auth.yaml"))
 	if err != nil {
 		t.Fatalf("load template: %v", err)
 	}
@@ -123,7 +123,7 @@ func TestTypeCastsDoNotCreateReentrancyFindings(t *testing.T) {
 	if err != nil {
 		t.Fatalf("build db: %v", err)
 	}
-	tmpl, err := LoadTemplate(filepath.Join(root, "templates/official/reentrancy-pattern.yaml"))
+	tmpl, err := LoadTemplate(filepath.Join(root, "templates/official/high/reentrancy-pattern.yaml"))
 	if err != nil {
 		t.Fatalf("load template: %v", err)
 	}
@@ -147,7 +147,7 @@ func TestInterproceduralSequenceFindsCallsInsideInternalHelpers(t *testing.T) {
 	if err != nil {
 		t.Fatalf("build db: %v", err)
 	}
-	tmpl, err := LoadTemplate(filepath.Join(root, "templates/official/reentrancy-pattern.yaml"))
+	tmpl, err := LoadTemplate(filepath.Join(root, "templates/official/high/reentrancy-pattern.yaml"))
 	if err != nil {
 		t.Fatalf("load template: %v", err)
 	}
@@ -181,7 +181,7 @@ func TestUncheckedArithmeticTemplateSeesUncheckedBlocks(t *testing.T) {
 	if err != nil {
 		t.Fatalf("build db: %v", err)
 	}
-	tmpl, err := LoadTemplate(filepath.Join(root, "templates/official/unchecked-arithmetic.yaml"))
+	tmpl, err := LoadTemplate(filepath.Join(root, "templates/official/medium/unchecked-arithmetic.yaml"))
 	if err != nil {
 		t.Fatalf("load template: %v", err)
 	}

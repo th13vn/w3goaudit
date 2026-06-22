@@ -527,6 +527,180 @@ func (cgb *CallGraphBuilder) analyzeFunctionCall(call *ast.FunctionCall) {
 	cgb.addCallToFunction(calledName, targetContract, resolvedContract, resolvedFuncName, callType, targetKind, line, resolved, argCount)
 }
 
+// superSite is a single `super.g()` call discovered during call-graph building:
+// the function that hosts it, the called member name, and its argument count.
+type superSite struct {
+	contract   *types.Contract
+	fn         *types.Function
+	calledName string
+	argCount   int
+	line       int
+}
+
+// ResolveSuperAcrossLeaves makes `super` resolution context-aware.
+//
+// `super` in Solidity is resolved against the C3 linearization of the
+// MOST-DERIVED contract being instantiated, not the contract where the call
+// textually appears. The per-call resolution in resolveTarget only knows the
+// textual contract's own MRO, so for a cooperative diamond it records the
+// standalone target (e.g. StepB.step -> Root.step) and misses the in-leaf target
+// (StepB.step -> StepA.step when StepB runs as part of Full).
+//
+// This post-pass walks every contract's MRO as a potential instantiation leaf
+// and, for each `super` call site hosted by a contract in that MRO, adds an edge
+// to the next contract in THAT leaf's MRO that defines the called function. It is
+// additive (existing standalone edges are kept) and deduplicated, so the result
+// is the SOUND UNION of super targets over every instantiation context. Without
+// it, a function reached only through an intermediate contract's super call would
+// look unreachable from a derived leaf's entry point (a reachability
+// false-negative).
+//
+// Must run after Build() so all super edges and per-function Calls already exist.
+func (cgb *CallGraphBuilder) ResolveSuperAcrossLeaves() {
+	// 1. Collect every super call site from per-function Calls (which carry the
+	//    arg count that the bare call edges do not). Deterministic order: sorted
+	//    contract IDs, then declaration order of functions and calls.
+	contractIDs := make([]string, 0, len(cgb.db.Contracts))
+	for id := range cgb.db.Contracts {
+		contractIDs = append(contractIDs, id)
+	}
+	sort.Strings(contractIDs)
+
+	var sites []superSite
+	for _, id := range contractIDs {
+		c := cgb.db.Contracts[id]
+		for _, fn := range c.Functions {
+			for _, call := range fn.Calls {
+				if call.CallType == types.CallTypeSuper {
+					sites = append(sites, superSite{
+						contract:   c,
+						fn:         fn,
+						calledName: call.Target,
+						argCount:   call.ArgCount,
+						line:       call.Line,
+					})
+				}
+			}
+		}
+	}
+	if len(sites) == 0 {
+		return
+	}
+
+	// 2. Index existing super edges so we only ADD genuinely new (From,To) pairs.
+	cgb.db.CallGraph.EnsureIndex()
+	existing := make(map[string]bool)
+	for _, e := range cgb.db.CallGraph.Edges {
+		if e.Type == types.CallTypeSuper {
+			existing[e.From+"\x00"+e.To] = true
+		}
+	}
+
+	// 3. For each contract treated as an instantiation leaf, walk its MRO and bind
+	//    each hosted super site to the next defining contract in that MRO.
+	for _, leafID := range contractIDs {
+		leaf := cgb.db.Contracts[leafID]
+		mro := leaf.LinearizedBases
+		if len(mro) < 2 {
+			continue
+		}
+		// Position of each MRO name (first occurrence) for O(1) host lookup.
+		pos := make(map[string]int, len(mro))
+		for i, name := range mro {
+			if _, ok := pos[name]; !ok {
+				pos[name] = i
+			}
+		}
+
+		for _, site := range sites {
+			i, ok := pos[site.contract.Name]
+			if !ok {
+				continue // this site's host is not part of this leaf's hierarchy
+			}
+			target, targetContract := cgb.nextDefInMRO(mro, i+1, site.calledName, site.argCount)
+			if target == nil {
+				continue
+			}
+
+			fromSelector := site.fn.Selector
+			if fromSelector == "" {
+				fromSelector = site.fn.Name
+			}
+			toSelector := target.Selector
+			if toSelector == "" {
+				toSelector = target.Name
+			}
+			from := types.MakeFunctionID(site.contract.SourceFile, site.contract.Name, fromSelector)
+			to := types.MakeFunctionID(targetContract.SourceFile, targetContract.Name, toSelector)
+
+			key := from + "\x00" + to
+			if existing[key] {
+				continue
+			}
+			existing[key] = true
+
+			cgb.db.CallGraph.AddEdge(&types.CallEdge{
+				From:             from,
+				To:               to,
+				CalledName:       site.calledName,
+				Type:             types.CallTypeSuper,
+				Line:             site.line,
+				Resolved:         true,
+				ResolvedContract: targetContract.Name,
+				ResolvedFunction: toSelector,
+				TargetKind:       targetContract.Kind,
+			})
+			// Mirror onto the host function's Calls so AST/reachability consumers
+			// that read fn.Calls see the in-leaf target too (deduped above).
+			site.fn.Calls = append(site.fn.Calls, &types.FunctionCall{
+				Target:           site.calledName,
+				ContractName:     targetContract.Name,
+				ResolvedContract: targetContract.Name,
+				ResolvedFunction: toSelector,
+				CallType:         types.CallTypeSuper,
+				TargetKind:       targetContract.Kind,
+				Line:             site.line,
+				Resolved:         true,
+				ArgCount:         site.argCount,
+			})
+		}
+	}
+}
+
+// nextDefInMRO returns the first contract at or after index `start` in the MRO
+// that defines a function named funcName, preferring an exact arity match
+// (argCount >= 0) and falling back to name-only. Returns the function and its
+// owning contract, or (nil, nil) when no base in the remaining MRO defines it.
+func (cgb *CallGraphBuilder) nextDefInMRO(mro []string, start int, funcName string, argCount int) (*types.Function, *types.Contract) {
+	// Pass 1: exact arity.
+	if argCount >= 0 {
+		for j := start; j < len(mro); j++ {
+			base := cgb.db.GetContractByName(mro[j])
+			if base == nil {
+				continue
+			}
+			for _, fn := range base.Functions {
+				if fn.Name == funcName && len(fn.Parameters) == argCount {
+					return fn, base
+				}
+			}
+		}
+	}
+	// Pass 2: name-only.
+	for j := start; j < len(mro); j++ {
+		base := cgb.db.GetContractByName(mro[j])
+		if base == nil {
+			continue
+		}
+		for _, fn := range base.Functions {
+			if fn.Name == funcName {
+				return fn, base
+			}
+		}
+	}
+	return nil, nil
+}
+
 // checkLowLevelCall checks if the call is a low-level call and returns appropriate type
 func (cgb *CallGraphBuilder) checkLowLevelCall(memberName string, currentType types.CallType) types.CallType {
 	switch memberName {

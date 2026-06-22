@@ -1,0 +1,30 @@
+meta:
+  id: 4NALY3ER-M-006
+  title: "Unchecked ERC20 transfer/transferFrom Return Value"
+  severity: MEDIUM
+  confidence: MEDIUM
+  description: >
+    Detects ERC20 transfer() or transferFrom() calls whose boolean return
+    value is not checked. Non-standard tokens like USDT and ZRX return false
+    on failure instead of reverting. Ignoring the return value means the
+    contract proceeds believing the transfer succeeded when it may have
+    silently failed.
+    Equivalent to 4naly3er's uncheckedERC20Transfer detector.
+  recommendation: >
+    Use OpenZeppelin's SafeERC20 library (safeTransfer / safeTransferFrom)
+    which wraps the call and reverts on false returns or missing return values.
+
+query:
+  scope: function
+
+  match:
+    contains:
+      kind: token_call
+      name: ^(transfer|transferFrom)$
+      not:
+        inside:
+          any:
+            - kind: check.require
+            - kind: check.assert
+            - kind: stmt.if
+            - kind: stmt.assign

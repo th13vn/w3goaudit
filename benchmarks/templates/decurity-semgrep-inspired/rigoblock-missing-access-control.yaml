@@ -1,0 +1,20 @@
+meta:
+  id: DECURITY-RIGOBLOCK-MISSING-ACCESS-CONTROL
+  title: "Decurity Semgrep: setMultipleAllowances is public without access control"
+  severity: HIGH
+  confidence: MEDIUM
+  description: >
+    Detects unauthenticated setMultipleAllowances functions.
+  recommendation: >
+    Review the Decurity rule semantics and add access control, validation,
+    reentrancy protection, or safer arithmetic/oracle handling as appropriate.
+  references:
+    - https://github.com/Decurity/semgrep-smart-contracts/tree/master/solidity/security
+
+query:
+  scope: entrypoint
+  filter:
+    all:
+      - func_name: '^setMultipleAllowances$'
+      - preset: unAuthenticated
+  match: {}

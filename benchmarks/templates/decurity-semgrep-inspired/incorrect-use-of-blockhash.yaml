@@ -1,0 +1,25 @@
+meta:
+  id: DECURITY-INCORRECT-USE-OF-BLOCKHASH
+  title: "Decurity Semgrep: blockhash is called with current/future block number"
+  severity: HIGH
+  confidence: MEDIUM
+  description: >
+    Detects blockhash calls that use block.number or a future/current block
+    expression.
+  recommendation: >
+    Review the Decurity rule semantics and add access control, validation,
+    reentrancy protection, or safer arithmetic/oracle handling as appropriate.
+  references:
+    - https://github.com/Decurity/semgrep-smart-contracts/tree/master/solidity/security
+
+query:
+  scope: function
+  match:
+    contains:
+      kind: call.internal
+      name: '^blockhash$'
+      args:
+        0:
+          contains:
+            kind: expr.member_access
+            name: '^block\.number$'

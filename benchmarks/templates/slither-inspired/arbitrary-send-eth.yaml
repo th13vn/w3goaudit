@@ -1,0 +1,29 @@
+meta:
+  id: SLITHER-ARBITRARY-SEND-ETH
+  title: "Unprotected ETH Transfer"
+  severity: HIGH
+  confidence: MEDIUM
+  description: >
+    Detects functions that send ETH (via transfer, send, or low-level call)
+    without access control. Any user can trigger the ETH transfer, potentially
+    draining the contract. Equivalent to Slither's arbitrary-send-eth detector.
+  recommendation: >
+    Add access control modifiers (onlyOwner, onlyRole) to functions that
+    transfer ETH, or ensure the recipient and amount are properly validated.
+
+query:
+  scope: entrypoint
+
+  filter:
+    preset: unAuthenticated
+
+  # An unauthenticated function that hard-codes the recipient (e.g. payable
+  # owner) is not arbitrary-send. Require the eth_transfer to consume an
+  # identifier that flows from a function parameter — that's the actual
+  # "user picks where ETH goes" attack surface.
+  match:
+    contains:
+      kind: eth_transfer
+      contains:
+        kind: expr.identifier
+        tainted_from: parameter

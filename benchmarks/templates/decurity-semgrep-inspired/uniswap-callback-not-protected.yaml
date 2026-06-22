@@ -1,0 +1,23 @@
+meta:
+  id: DECURITY-UNISWAP-CALLBACK-NOT-PROTECTED
+  title: "Decurity Semgrep: Uniswap callback lacks sender verification"
+  severity: HIGH
+  confidence: MEDIUM
+  description: >
+    Detects Uniswap V2/V3 callback functions that lack sender/callback
+    verification.
+  recommendation: >
+    Review the Decurity rule semantics and add access control, validation,
+    reentrancy protection, or safer arithmetic/oracle handling as appropriate.
+  references:
+    - https://github.com/Decurity/semgrep-smart-contracts/tree/master/solidity/security
+
+query:
+  scope: entrypoint
+  filter:
+    all:
+      - func_name: '^(uniswapV2Call|uniswapV3SwapCallback|uniswapV3FlashCallback|uniswapV3MintCallback)$'
+      - preset: unAuthenticated
+      - not:
+          source_regex: '(\.verifyCallback\s*\(|\b_?verifyCallback\s*\(|\bisCallback\b)'
+  match: {}

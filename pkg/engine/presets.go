@@ -10,6 +10,7 @@ type PresetFunc func(fn *types.Function, contract *types.Contract, e *Engine) bo
 // BuiltinPresets contains all built-in preset checks
 var BuiltinPresets = map[string]PresetFunc{
 	"unAuthenticated": checkUnAuthenticated,
+	"unCheckedSender": checkUnCheckedSender,
 	"unLocked":        checkUnLocked,
 }
 
@@ -37,9 +38,25 @@ func IsKnownPreset(name string) bool {
 
 // checkUnAuthenticated checks if a function does NOT have authentication
 // Returns true if the function is NOT authenticated (vulnerable)
-// Logic delegated to types.Function.IsAccessControlled()
+// Logic delegated to types.Function.IsAccessControlled() — privileged access
+// control only (owner/admin/role modifiers, auth helpers, and caller-vs-storage
+// or caller-vs-hardcoded-address guards). A caller self-scoping check such as
+// require(from == msg.sender) is NOT privileged access control and does NOT
+// satisfy this preset — use `unCheckedSender` where self-scoping is a valid
+// mitigation (e.g. arbitrary transferFrom).
 func checkUnAuthenticated(fn *types.Function, contract *types.Contract, e *Engine) bool {
 	return !fn.IsAccessControlled(e.db)
+}
+
+// checkUnCheckedSender is the safety predicate for arbitrary-transferFrom-style
+// detectors, where binding a sensitive argument to the caller is itself a valid
+// mitigation ("you can only act on your own behalf"). A function is vulnerable
+// only when it has NEITHER privileged access control NOR a caller self-scoping
+// equality check (e.g. require(from == msg.sender) / if (from != msg.sender)
+// revert). This is broader than `unAuthenticated`: it also clears functions that
+// scope the caller without gating to a privileged role.
+func checkUnCheckedSender(fn *types.Function, contract *types.Contract, e *Engine) bool {
+	return !fn.IsAccessControlled(e.db) && !fn.ComparesCallerIdentity()
 }
 
 // checkUnLocked checks if a function does NOT have reentrancy protection

@@ -1,0 +1,135 @@
+{
+  "schema_version": "1.0",
+  "name": "4naly3er-inspired detector parity",
+  "description": "Parity benchmark comparing benchmarks/templates/4naly3er-inspired (W3GoAudit's 4naly3er port) against the real 4naly3er tool on the per-detector fixtures in benchmarks/fixtures/4naly3er-detectors/. Scope is 4naly3er's High/Medium security issues; gas (GAS-) and non-critical (NC-) issues are out of scope.",
+  "categories": {
+    "comparison-outside-condition": {
+      "title": "Comparison operator result used outside a condition",
+      "aliases": {
+        "w3goaudit": ["4NALY3ER-H-001"],
+        "4naly3er": ["comparison-outside-condition", "comparison operator", "result of a comparison"]
+      }
+    },
+    "delegatecall-loop": {
+      "title": "delegatecall inside a loop",
+      "aliases": {
+        "w3goaudit": ["4NALY3ER-H-002"],
+        "4naly3er": ["delegatecall-in-loop", "delegatecall in a loop"],
+        "slither": ["delegatecall-loop", "calls-loop"]
+      }
+    },
+    "msg-value-loop": {
+      "title": "msg.value inside a loop",
+      "aliases": {
+        "w3goaudit": ["4NALY3ER-H-003"],
+        "4naly3er": ["msg-value-in-loop", "msg.value in a loop"],
+        "slither": ["msg-value-loop"]
+      }
+    },
+    "wsteth-steth-price": {
+      "title": "wstETH price assumed 1:1 with stETH",
+      "aliases": {
+        "w3goaudit": ["4NALY3ER-H-004"],
+        "4naly3er": ["wsteth-steth-price", "stethpertoken", "wsteth"]
+      }
+    },
+    "tx-origin": {
+      "title": "tx.origin used for authorization",
+      "aliases": {
+        "w3goaudit": ["4NALY3ER-M-001"],
+        "4naly3er": ["tx-origin-auth", "tx.origin"],
+        "slither": ["tx-origin"]
+      }
+    },
+    "centralization-risk": {
+      "title": "Centralization risk for privileged functions",
+      "aliases": {
+        "w3goaudit": ["4NALY3ER-M-002"],
+        "4naly3er": ["centralization-risk", "centralization risk"]
+      }
+    },
+    "deprecated-chainlink-latestanswer": {
+      "title": "Deprecated Chainlink latestAnswer()",
+      "aliases": {
+        "w3goaudit": ["4NALY3ER-M-003"],
+        "4naly3er": ["deprecated-chainlink-latestanswer", "latestanswer"]
+      }
+    },
+    "stale-oracle-data": {
+      "title": "Chainlink latestRoundData staleness not validated",
+      "aliases": {
+        "w3goaudit": ["4NALY3ER-M-004"],
+        "4naly3er": ["stale-oracle-data", "latestrounddata", "stale price"]
+      }
+    },
+    "approve-non-zero-first": {
+      "title": "ERC20 approve() without resetting allowance to 0 first",
+      "aliases": {
+        "w3goaudit": ["4NALY3ER-M-005"],
+        "4naly3er": ["approve-non-zero-first", "approve race", "reset to 0"]
+      }
+    },
+    "unchecked-erc20-transfer": {
+      "title": "Unchecked ERC20 transfer/transferFrom return value",
+      "aliases": {
+        "w3goaudit": ["4NALY3ER-M-006"],
+        "4naly3er": ["unchecked-erc20-transfer", "return value of"],
+        "slither": ["unchecked-transfer"]
+      }
+    },
+    "block-number-l2": {
+      "title": "block.number used on L2 (unreliable)",
+      "aliases": {
+        "w3goaudit": ["4NALY3ER-M-007"],
+        "4naly3er": ["block-number-l2", "block.number"]
+      }
+    },
+    "erc721-safemint": {
+      "title": "ERC721 _mint() used instead of _safeMint()",
+      "aliases": {
+        "w3goaudit": ["4NALY3ER-M-008"],
+        "4naly3er": ["erc721-safemint", "_safemint", "safemint"]
+      }
+    },
+    "erc721-safetransferfrom": {
+      "title": "ERC721 transferFrom() used instead of safeTransferFrom()",
+      "aliases": {
+        "w3goaudit": ["4NALY3ER-M-009"],
+        "4naly3er": ["erc721-safetransferfrom", "safetransferfrom"]
+      }
+    },
+    "fee-over-100": {
+      "title": "Fee parameter can exceed 100%",
+      "aliases": {
+        "w3goaudit": ["4NALY3ER-M-010"],
+        "4naly3er": ["fee-over-100", "fee over", "100%"]
+      }
+    }
+  },
+  "cases": [
+    {
+      "id": "4naly3er-detectors",
+      "title": "4naly3er per-detector fixtures",
+      "target": "benchmarks/fixtures/4naly3er-detectors/",
+      "templates": "benchmarks/templates/4naly3er-inspired",
+      "requires_compilation": true,
+      "expected": [
+        { "category": "comparison-outside-condition", "contract": "Vulnerable_ComparisonOutsideCondition", "function": "setValue" },
+        { "category": "delegatecall-loop", "contract": "Vulnerable_DelegateCallInLoop", "function": "multiExecute" },
+        { "category": "msg-value-loop", "contract": "Vulnerable_MsgValueInLoop", "function": "batchDeposit" },
+        { "category": "wsteth-steth-price", "contract": "Vulnerable_WstEthPrice", "function": "getWstEthPrice" },
+        { "category": "tx-origin", "contract": "Vulnerable_TxOrigin", "function": "withdraw" },
+        { "category": "centralization-risk", "contract": "Vulnerable_CentralizationRisk", "function": "setFee" },
+        { "category": "centralization-risk", "contract": "Vulnerable_CentralizationRisk", "function": "drainTo" },
+        { "category": "deprecated-chainlink-latestanswer", "contract": "Vulnerable_DeprecatedChainlink", "function": "getPrice" },
+        { "category": "stale-oracle-data", "contract": "Vulnerable_StaleOracleData", "function": "getPrice" },
+        { "category": "approve-non-zero-first", "contract": "Vulnerable_ApproveZeroFirst", "function": "approveSpender" },
+        { "category": "unchecked-erc20-transfer", "contract": "Vulnerable_UncheckedERC20Transfer", "function": "pay" },
+        { "category": "block-number-l2", "contract": "Vulnerable_BlockNumberL2", "function": "cooldown" },
+        { "category": "erc721-safemint", "contract": "Vulnerable_ERC721SafeMint", "function": "mint" },
+        { "category": "erc721-safetransferfrom", "contract": "Vulnerable_ERC721SafeTransferFrom", "function": "sendNFT" },
+        { "category": "fee-over-100", "contract": "Vulnerable_FeeOver100", "function": "setFee" }
+      ]
+    }
+  ]
+}

@@ -288,3 +288,77 @@ func TestIsAccessControlledViaMsgSenderRequire(t *testing.T) {
 		t.Fatal("require(msg.sender == owner()) should be detected as access control")
 	}
 }
+
+// TestIsAccessControlledRejectsParameterCompare documents the false positive fix:
+// require(from == msg.sender) where `from` is a function argument is self-auth,
+// not a privileged access gate, so it must NOT count as access control.
+func TestIsAccessControlledRejectsParameterCompare(t *testing.T) {
+	// Build: require(from == msg.sender)
+	//   require
+	//     binary_op
+	//       identifier "from" (parameter)
+	//       member_access "sender" -> identifier "msg"
+	root := NewASTNode(KindDeclFunction)
+	req := NewASTNode(KindCheckRequire)
+	binop := NewASTNode(KindExprBinaryOp)
+
+	fromIdent := NewASTNode(KindExprIdentifier)
+	fromIdent.Name = "from"
+	fromIdent.RefKind = "parameter"
+
+	memberAccess := NewASTNode(KindExprMemberAccess)
+	memberAccess.Name = "sender"
+	msgIdent := NewASTNode(KindExprIdentifier)
+	msgIdent.Name = "msg"
+	memberAccess.AddChild(msgIdent)
+
+	binop.AddChild(fromIdent)
+	binop.AddChild(memberAccess)
+	req.AddChild(binop)
+	root.AddChild(req)
+
+	fn := &Function{
+		Name:       "move",
+		Visibility: VisibilityExternal,
+		Parameters: []*Parameter{{Name: "from"}},
+		AST:        root,
+	}
+
+	if fn.IsAccessControlled(NewDatabase()) {
+		t.Fatal("require(from == msg.sender) is self-auth, must NOT be access control")
+	}
+}
+
+// TestIsAccessControlledAcceptsHardcodedAddress verifies that comparing the
+// caller against a hardcoded literal address is access control (the caller
+// cannot control a bytecode literal).
+func TestIsAccessControlledAcceptsHardcodedAddress(t *testing.T) {
+	// Build: require(msg.sender == 0xAbc…)
+	root := NewASTNode(KindDeclFunction)
+	req := NewASTNode(KindCheckRequire)
+	binop := NewASTNode(KindExprBinaryOp)
+
+	memberAccess := NewASTNode(KindExprMemberAccess)
+	memberAccess.Name = "sender"
+	msgIdent := NewASTNode(KindExprIdentifier)
+	msgIdent.Name = "msg"
+	memberAccess.AddChild(msgIdent)
+
+	lit := NewASTNode(KindExprLiteral)
+	lit.Value = "0xAbcdEF0123456789012345678901234567890123"
+
+	binop.AddChild(memberAccess)
+	binop.AddChild(lit)
+	req.AddChild(binop)
+	root.AddChild(req)
+
+	fn := &Function{
+		Name:       "hardcodedGate",
+		Visibility: VisibilityExternal,
+		AST:        root,
+	}
+
+	if !fn.IsAccessControlled(NewDatabase()) {
+		t.Fatal("require(msg.sender == 0xAbc…) should be detected as access control")
+	}
+}

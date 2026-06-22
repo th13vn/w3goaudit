@@ -1,0 +1,24 @@
+meta:
+  id: SLITHER-DIVIDE-BEFORE-MULTIPLY
+  title: "Division Before Multiplication (Precision Loss)"
+  severity: MEDIUM
+  confidence: MEDIUM
+  description: >
+    Detects arithmetic where division is performed before multiplication.
+    Since Solidity integer division truncates, performing division first
+    causes precision loss that multiplication cannot recover. For example,
+    (5/10)*2 = 0 instead of (5*2)/10 = 1. Equivalent to Slither's
+    divide-before-multiply detector.
+  recommendation: >
+    Reorder arithmetic to perform multiplication before division. Use a scaling
+    factor if needed to maintain precision.
+
+query:
+  scope: function
+
+  match:
+    sequence:
+      - kind: expr.binary_op
+        operator: "/"
+      - kind: expr.binary_op
+        operator: "\\*"

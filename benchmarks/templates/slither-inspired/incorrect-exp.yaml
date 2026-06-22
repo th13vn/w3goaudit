@@ -1,0 +1,28 @@
+meta:
+  id: SLITHER-INCORRECT-EXP
+  title: "Incorrect Exponentiation (^ Instead of **)"
+  severity: HIGH
+  confidence: MEDIUM
+  description: >
+    Detects use of the ^ operator (bitwise XOR) which is often confused with
+    the ** exponentiation operator. In Solidity, ^ is XOR, not power. Using
+    2^8 yields 10, not 256. Equivalent to Slither's incorrect-exp detector.
+  recommendation: >
+    Replace ^ with ** for exponentiation. Use ^ only when bitwise XOR is
+    intentionally needed.
+
+query:
+  scope: function
+
+  # Require both operands to be numeric literals (e.g. 2^256, 10^18). Bitwise
+  # XOR with at least one non-literal is almost always intentional, so
+  # restricting to literal-only operands eliminates the bulk of FPs while
+  # still catching the classic "developer typed ^ when they meant **" bug.
+  match:
+    contains:
+      kind: expr.binary_op
+      operator: "^"
+      left:
+        kind: expr.literal
+      right:
+        kind: expr.literal

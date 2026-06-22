@@ -17,7 +17,16 @@ import (
 func loadScanTemplates() ([]*engine.Template, string, error) {
 	opts := engine.TemplateLoadOptions{IgnoreInvalid: ignoreInvalidTemplates}
 
+	// Precedence: explicit --template > ~/.w3goaudit/templates (when populated)
+	// > the embedded official pack (always available offline fallback).
 	if templatePath == "" {
+		if templateHomeDir != "" {
+			tmpls, err := engine.LoadTemplatesWithOptions(templateHomeDir, opts)
+			if err != nil {
+				return nil, "", fmt.Errorf("loading templates from %s: %w", templateHomeDir, err)
+			}
+			return tmpls, "template home (" + templateHomeDir + ")", nil
+		}
 		tmpls, err := engine.LoadTemplatesFromFS(templates.Official, templates.OfficialDir, opts)
 		if err != nil {
 			return nil, "", fmt.Errorf("loading built-in templates: %w", err)
@@ -77,15 +86,27 @@ func sortTemplates(tmpls []*engine.Template) {
 	}
 }
 
-// filterFindings applies --min-severity, --include, and --exclude. The include
-// and exclude lists are comma-separated template-ID globs (filepath.Match
-// syntax); a finding must match at least one include (if any) and no exclude.
+// filterFindings applies --severity / --min-severity, --include, and --exclude.
+// --severity is an exact set (e.g. "high,critical"); --min-severity is a
+// threshold (that level and above). The two are mutually exclusive (enforced by
+// the caller). The include/exclude lists are comma-separated template-ID globs
+// (filepath.Match syntax); a finding must match at least one include (if any)
+// and no exclude.
 func filterFindings(findings []*engine.Finding) ([]*engine.Finding, error) {
 	includes := splitGlobs(includeTemplates)
 	excludes := splitGlobs(excludeTemplates)
 
+	// Build the exact-severity set (lowercased) for --severity.
+	sevSet := make(map[string]bool)
+	for _, s := range splitGlobs(severityList) {
+		sevSet[strings.ToLower(s)] = true
+	}
+
 	out := findings[:0:0] // new backing array so the caller's slice is untouched
 	for _, f := range findings {
+		if len(sevSet) > 0 && !sevSet[strings.ToLower(f.Severity)] {
+			continue
+		}
 		if minSeverity != "" && !report.SeverityAtLeast(f.Severity, minSeverity) {
 			continue
 		}

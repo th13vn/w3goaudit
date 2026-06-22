@@ -2,17 +2,17 @@
 
 ## Purpose
 
-Parses Solidity AST and builds a comprehensive contract database through 6 phases.
+Parses Solidity AST and builds a comprehensive contract database through 7 phases.
 
 ## Key Files
 
 ### builder.go
-Main orchestrator for the 6-phase build process.
+Main orchestrator for the 7-phase build process.
 
 **Exports:**
 - `Builder` struct
 - `New()` - Create builder instance
-- `Build(sources)` - Main entry point (6 phases)
+- `Build(sources)` - Main entry point (7 phases)
 - `GetDatabase()` - Get built database
 
 **Build Phases:**
@@ -22,6 +22,22 @@ Main orchestrator for the 6-phase build process.
 4. **Build Inheritance** - Apply C3 linearization
 5. **Build Call Graph** - Resolve all function calls
 6. **Calculate Entry Points** - Identify main contracts and their entry functions
+7. **Analyze Effects** (`effects.go`) - Walk each function's AST to record
+   per-function `FunctionEffects` (state writes, require/assert/revert + branch
+   guards, access control) into `Database.Semantics.FunctionEffects`.
+
+### effects.go
+Phase-7 per-function effects analysis.
+
+- `analyzeEffects()` iterates every contract's functions, computing
+  `types.FunctionEffects` keyed by function ID.
+- State writes are detected from `stmt.assign` nodes flagged `is_state_var`
+  (kind `assign`/`compound`), `delete` unary ops, and `asm.sstore`.
+- Guards come from `check.require`/`check.assert`/`check.revert`/`stmt.if`
+  nodes; their condition text is reconstructed from the AST via `astText`
+  (the builder does not record source positions on AST nodes).
+- Auth: function modifiers plus `msg.sender`/`tx.origin` references found in
+  guard conditions. Consumed by `pkg/report` (`state_matrix.go`, `bundle.go`).
 
 ### verbose.go
 Debug logging infrastructure.
@@ -34,7 +50,7 @@ Debug logging infrastructure.
 **Output Prefix:** None (clean output)
 
 **What it logs:**
-- All 6 build phases (start and completion)
+- All 7 build phases (start and completion)
 - File parsing progress
 - Contract extraction with types and function counts
 - AST building statistics
@@ -236,10 +252,17 @@ C3 linearization algorithm for proper Solidity inheritance.
   deep diamonds. Verified by `TestC3Linearization` (`02-inheritance.sol`),
   `TestC3DiamondMatchesSolc` (`07-diamond.sol`), and `TestC3MergeCanonicalClassicExample`
   (the classic K1/K2/K3/Z example that distinguishes true C3 from the old
-  chain-draining variant → `[Z, K1, K2, K3, D, A, B, C, E, O]`). The asymmetric
+  chain-draining variant → `[Z, K1, K2, K3, D, A, B, C, E, O]`).
+  `TestC3ClassicKZEndToEnd` (`11-c3-classic-kz.sol`) re-runs that same classic
+  example through the FULL `c3Linearize` pipeline from Solidity source (base-list
+  reversal + merge), guarding the reversal step the in-isolation merge test does
+  not cover. The asymmetric
   Base/Left/Right/Middle/Derived diamond in `10-override-state-order.sol` pins C3
   linearization, state-variable storage order, and MRO function-override binding
-  together. Output stays
+  together; `TestCodingStylesParsing` (`13-coding-styles.sol`) adds
+  constructor-argument bases (`is Priced(100)`), interface-of-interfaces, an
+  abstract mid-chain contract, multi-target `override(Base, Middle)`, and a
+  six-contract storage-layout assertion. Output stays
   derived-first for readable display and method-resolution scans. An inconsistent
   hierarchy (which solc rejects) degrades gracefully: `c3Merge` forces the first
   remaining head and logs, rather than aborting the build.
@@ -251,6 +274,7 @@ Function call graph construction.
 - `CallGraphBuilder` struct
 - `NewCallGraphBuilder(db)`
 - `Build()` - Build call graph for all contracts
+- `ResolveSuperAcrossLeaves()` - Context-aware `super` resolution post-pass (see below)
 
 **What it tracks:**
 - Internal calls (within contract)
@@ -273,6 +297,27 @@ false-negative gaps for code that places calls in those positions.
 
 **Stores:** `Function.Calls` / `Modifier.Calls` with resolved target information.
 
+**Context-aware `super` resolution (`ResolveSuperAcrossLeaves`):** in Solidity,
+`super.f()` binds against the C3 linearization of the **most-derived contract
+being instantiated**, not the contract where the call textually appears. The
+per-call resolver in `resolveTarget` only knows the textual contract's own MRO,
+so for a cooperative diamond it records the *standalone* target and misses the
+*in-leaf* target (e.g. `StepB.step → Root.step` but not `StepB.step → StepA.step`
+when `StepB` runs as part of `Full`, whose MRO is `[Full, StepB, StepA, Root]`).
+This phase-5 post-pass walks **every** contract's MRO as a potential
+instantiation leaf and, for each `super` call site hosted by a contract in that
+MRO, adds an edge to the next contract in *that* leaf's MRO that defines the
+function (exact-arity preferred, name-only fallback — `nextDefInMRO`). It is
+**additive** (standalone edges kept) and **deduplicated by `(From,To)`**, so the
+result is the **sound union** of super targets over all instantiation contexts.
+Without it, a function reached only through an intermediate contract's `super`
+call looks unreachable from a derived leaf's entry point (a reachability
+false-negative). Iteration is deterministic (sorted contract IDs). Verified by
+`TestSuperChainContextSensitivity` (`12-super-chain.sol`) and
+`TestSuperSharedMixinMultipleLeaves` (`14-super-multi-leaf.sol` — a shared mixin
+reached by two distinct leaves whose `super` targets differ; pins the exact
+7-edge union with no spurious extras).
+
 **Deterministic iteration:** `Build()` sorts the source-file map keys before
 walking, so call-graph construction is reproducible across runs. Per-file parse
 failures emit a verbose log instead of being silently skipped. From-IDs use
@@ -282,6 +327,17 @@ failures emit a verbose log instead of being silently skipped. From-IDs use
 `SourceFile.AST`; the call-graph phase reuses it instead of re-parsing every
 file (re-parses only for a database reloaded from JSON, where the tree is not
 serialized).
+
+**Tolerant-parse guard:** Phase 1 calls `parser.ParseWithErrors` (solast-go
+≥ v0.1.6) instead of `parser.Parse`. Tolerant parsing recovers from syntax
+errors so one broken file doesn't abort the build, but it previously did so
+*silently* — a parser desync (e.g. a struct field named with a contextual
+keyword like `from`, fixed in solast-go v0.1.5) could drop the rest of a
+contract body, producing false negatives in every detector with no signal.
+`parseFile` now emits a verbose `⚠️` warning naming the file, the recovered
+error count, and the first error+line whenever tolerant recovery occurred, so
+incomplete extraction is diagnosable rather than invisible. Policy is unchanged
+(the build still proceeds); only the visibility improves.
 
 **Assembly opcode coverage:** `classifyAssemblyCall` recognizes the full
 security-relevant Yul opcode set: `create`, `create2`, `log0`–`log4`, `revert`,
