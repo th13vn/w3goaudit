@@ -141,6 +141,10 @@ type FunctionCall struct {
 	// Line where the call occurs
 	Line int `json:"line,omitempty"`
 
+	// Col is the 1-based column of the call site; Byte is its character offset.
+	Col  int `json:"col,omitempty"`
+	Byte int `json:"byte,omitempty"`
+
 	// Resolved indicates if target was fully resolved
 	Resolved bool `json:"resolved,omitempty"`
 

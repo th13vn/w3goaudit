@@ -455,11 +455,8 @@ func (cgb *CallGraphBuilder) analyzeFunctionCall(call *ast.FunctionCall) {
 		return
 	}
 
-	// Get line number
-	line := 0
-	if call.Loc != nil {
-		line = call.Loc.Start.Line
-	}
+	// Get line/column/byte-offset of the call site
+	line, _, col, _, byteOff, _ := spanFields(call)
 
 	// Resolve the actual target function and contract
 	// Pass argument count so overloaded functions are disambiguated correctly
@@ -515,6 +512,8 @@ func (cgb *CallGraphBuilder) analyzeFunctionCall(call *ast.FunctionCall) {
 		CalledName:       calledName,
 		Type:             callType,
 		Line:             line,
+		Col:              col,
+		Byte:             byteOff,
 		Resolved:         resolved,
 		ResolvedContract: resolvedContract,
 		ResolvedFunction: resolvedFuncName,
@@ -524,7 +523,7 @@ func (cgb *CallGraphBuilder) analyzeFunctionCall(call *ast.FunctionCall) {
 	cgb.db.CallGraph.AddEdge(edge)
 
 	// Also add call to the function object
-	cgb.addCallToFunction(calledName, targetContract, resolvedContract, resolvedFuncName, callType, targetKind, line, resolved, argCount)
+	cgb.addCallToFunction(calledName, targetContract, resolvedContract, resolvedFuncName, callType, targetKind, line, col, byteOff, resolved, argCount)
 }
 
 // superSite is a single `super.g()` call discovered during call-graph building:
@@ -535,6 +534,8 @@ type superSite struct {
 	calledName string
 	argCount   int
 	line       int
+	col        int
+	byteOff    int
 }
 
 // ResolveSuperAcrossLeaves makes `super` resolution context-aware.
@@ -578,6 +579,8 @@ func (cgb *CallGraphBuilder) ResolveSuperAcrossLeaves() {
 						calledName: call.Target,
 						argCount:   call.ArgCount,
 						line:       call.Line,
+						col:        call.Col,
+						byteOff:    call.Byte,
 					})
 				}
 			}
@@ -645,6 +648,8 @@ func (cgb *CallGraphBuilder) ResolveSuperAcrossLeaves() {
 				CalledName:       site.calledName,
 				Type:             types.CallTypeSuper,
 				Line:             site.line,
+				Col:              site.col,
+				Byte:             site.byteOff,
 				Resolved:         true,
 				ResolvedContract: targetContract.Name,
 				ResolvedFunction: toSelector,
@@ -660,6 +665,8 @@ func (cgb *CallGraphBuilder) ResolveSuperAcrossLeaves() {
 				CallType:         types.CallTypeSuper,
 				TargetKind:       targetContract.Kind,
 				Line:             site.line,
+				Col:              site.col,
+				Byte:             site.byteOff,
 				Resolved:         true,
 				ArgCount:         site.argCount,
 			})
@@ -911,7 +918,7 @@ func (cgb *CallGraphBuilder) resolveTarget(funcName, contractName string, callTy
 
 // addCallToFunction adds a call reference to the function object, or to the
 // modifier object when analyzing a modifier body.
-func (cgb *CallGraphBuilder) addCallToFunction(target, targetContract, resolvedContract, resolvedFunc string, callType types.CallType, targetKind types.ContractKind, line int, resolved bool, argCount int) {
+func (cgb *CallGraphBuilder) addCallToFunction(target, targetContract, resolvedContract, resolvedFunc string, callType types.CallType, targetKind types.ContractKind, line, col, byteOff int, resolved bool, argCount int) {
 	if cgb.currentModifierObj != nil {
 		cgb.currentModifierObj.Calls = append(cgb.currentModifierObj.Calls, &types.FunctionCall{
 			Target:           target,
@@ -921,6 +928,8 @@ func (cgb *CallGraphBuilder) addCallToFunction(target, targetContract, resolvedC
 			CallType:         callType,
 			TargetKind:       targetKind,
 			Line:             line,
+			Col:              col,
+			Byte:             byteOff,
 			Resolved:         resolved,
 			ArgCount:         argCount,
 		})
@@ -956,6 +965,8 @@ func (cgb *CallGraphBuilder) addCallToFunction(target, targetContract, resolvedC
 				CallType:         callType,
 				TargetKind:       targetKind,
 				Line:             line,
+				Col:              col,
+				Byte:             byteOff,
 				Resolved:         resolved,
 				ArgCount:         argCount,
 			})
@@ -1047,11 +1058,8 @@ func (cgb *CallGraphBuilder) analyzeModifiers(modifiers []*ast.ModifierInvocatio
 			continue
 		}
 
-		// Get line number if available
-		line := 0
-		if modInv.Loc != nil {
-			line = modInv.Loc.Start.Line
-		}
+		// Get line/column/byte-offset if available
+		line, _, col, _, byteOff, _ := spanFields(modInv)
 
 		// Resolve the modifier in the contract's inheritance chain
 		resolvedContract, resolvedModifier, resolved := cgb.resolveModifier(modInv.Name, cgb.currentContract)
@@ -1081,6 +1089,8 @@ func (cgb *CallGraphBuilder) analyzeModifiers(modifiers []*ast.ModifierInvocatio
 			CalledName:       modInv.Name,
 			Type:             types.CallTypeModifier,
 			Line:             line,
+			Col:              col,
+			Byte:             byteOff,
 			Resolved:         resolved,
 			ResolvedContract: resolvedContract,
 			ResolvedFunction: resolvedModifier,
@@ -1090,7 +1100,7 @@ func (cgb *CallGraphBuilder) analyzeModifiers(modifiers []*ast.ModifierInvocatio
 		cgb.db.CallGraph.AddEdge(edge)
 
 		// Also add modifier call to the function object
-		cgb.addModifierCallToFunction(modInv.Name, resolvedContract, resolvedModifier, line, resolved)
+		cgb.addModifierCallToFunction(modInv.Name, resolvedContract, resolvedModifier, line, col, byteOff, resolved)
 	}
 }
 
@@ -1123,7 +1133,7 @@ func (cgb *CallGraphBuilder) resolveModifier(modifierName, contractName string) 
 }
 
 // addModifierCallToFunction adds a modifier call reference to the function object
-func (cgb *CallGraphBuilder) addModifierCallToFunction(modifierName, resolvedContract, resolvedModifier string, line int, resolved bool) {
+func (cgb *CallGraphBuilder) addModifierCallToFunction(modifierName, resolvedContract, resolvedModifier string, line, col, byteOff int, resolved bool) {
 	// Find the current function in the database
 	parts := strings.SplitN(cgb.currentFunction, ".", 2)
 	if len(parts) != 2 {
@@ -1148,6 +1158,8 @@ func (cgb *CallGraphBuilder) addModifierCallToFunction(modifierName, resolvedCon
 				CallType:         types.CallTypeModifier,
 				TargetKind:       types.ContractKindContract,
 				Line:             line,
+				Col:              col,
+				Byte:             byteOff,
 				Resolved:         resolved,
 			})
 			break

@@ -64,6 +64,26 @@ func TestStateVariableHasLocation(t *testing.T) {
 	}
 }
 
+func TestCallSiteHasColumn(t *testing.T) {
+	db := buildFixture(t, "../../test-data/core/build-database/03-function-calls.sol")
+	var found bool
+	for _, c := range db.Contracts {
+		for _, fn := range c.Functions {
+			for _, call := range fn.Calls {
+				if call.Line != 0 {
+					found = true
+					if call.Col == 0 && call.Byte == 0 {
+						t.Errorf("call %q has line %d but no column/byte", call.Target, call.Line)
+					}
+				}
+			}
+		}
+	}
+	if !found {
+		t.Skip("fixture has no resolved call sites")
+	}
+}
+
 func TestInteriorNodesHaveSpans(t *testing.T) {
 	db := buildFixture(t, statementsFixture) // "../../test-data/core/build-database/09-statements.sol"
 	fn := funcByName(t, db, "StatementForms", "guardedRevert")
