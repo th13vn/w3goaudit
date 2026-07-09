@@ -104,6 +104,18 @@ func WriteBundle(dir string, db *types.Database, summary *SummaryReport, finding
 	} else if err := writeFile(filepath.Join(data, "manifest.json"), string(mfJSON)); err != nil {
 		return err
 	}
+	// Extension navigation index.
+	if navJSON, err := json.MarshalIndent(BuildNavJSON(db), "", "  "); err != nil {
+		return fmt.Errorf("encoding nav JSON: %w", err)
+	} else if err := writeFile(filepath.Join(data, "nav.json"), string(navJSON)); err != nil {
+		return err
+	}
+	// Extension explorer model.
+	if expJSON, err := json.MarshalIndent(BuildExplorerJSON(db), "", "  "); err != nil {
+		return fmt.Errorf("encoding explorer JSON: %w", err)
+	} else if err := writeFile(filepath.Join(data, "explorer.json"), string(expJSON)); err != nil {
+		return err
+	}
 
 	// Optional HTML mirror.
 	if opts.HTML {

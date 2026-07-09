@@ -231,7 +231,7 @@ w3goaudit ./contracts/ -v
 
 📂 Results written to: ./contracts-audit
    README.md · summary.md · overview.md · findings.md · results.sarif · run.log
-   data/ (manifest.json, findings.json, overview.json, database.json)
+   data/ (manifest.json, findings.json, overview.json, database.json, nav.json, explorer.json)
    contracts/<path>/<Contract>/ (README.md, state-changes.md, workflows/)
 ```
 
@@ -254,7 +254,9 @@ to be fed to a human or an AI auditor:
 │   ├── manifest.json      # index: tool, scope, counts, file list, per-contract refs
 │   ├── database.json      # canonical DB — reuse via --db data/database.json
 │   ├── findings.json
-│   └── overview.json
+│   ├── overview.json
+│   ├── nav.json           # extension navigation index (symbols, callers, interfaceImpl)
+│   └── explorer.json      # extension explorer model (per-contract constants/storage/entries/getters)
 └── contracts/             # one sub-tree per main contract, mirroring source paths
     └── <relative-source-path-without-ext>/
         └── <ContractName>/
@@ -769,6 +771,10 @@ Machine-readable mirror; each carries `schemaVersion: "2.0.0"`.
 | `data/database.json` | Canonical database (reusable via `--db`); carries pragma versions |
 | `data/overview.json` | `{ schemaVersion, tool, generatedAt, stats, overview }`           |
 | `data/findings.json` | `{ schemaVersion, tool, generatedAt, counts, findings[] }`        |
+| `data/nav.json` | `{ schemaVersion, symbols[], callers[], interfaceImpl[] }` — navigation index for the VSCode extension |
+| `data/explorer.json` | `{ schemaVersion, contracts[] }` — per-deployable-contract constants/storage/entryFunctions/getters, for the extension's explorer tab |
+
+See [`docs/extension-output.md`](./extension-output.md) for the full `nav.json` / `explorer.json` schema.
 
 Each finding includes optional `references[]`, `fix`, and `recommendation`.
 Findings can also carry structured context fields:

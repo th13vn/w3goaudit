@@ -2,6 +2,8 @@ package report
 
 import (
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -133,5 +135,27 @@ func TestBuildNavJSON_InterfaceImpl(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("expected IToken.transfer -> Token.transfer mapping, got %+v", nav.InterfaceImpl)
+	}
+}
+
+func TestWriteBundleEmitsNavAndExplorer(t *testing.T) {
+	db := navFixtureDB()
+	dir := t.TempDir()
+	err := WriteBundle(dir, db, &SummaryReport{}, nil, ToolMeta{Name: "w3goaudit", Version: "test"}, BundleOptions{})
+	if err != nil {
+		t.Fatalf("WriteBundle: %v", err)
+	}
+
+	for _, name := range []string{"nav.json", "explorer.json"} {
+		b, err := os.ReadFile(filepath.Join(dir, "data", name))
+		if err != nil {
+			t.Fatalf("reading data/%s: %v", name, err)
+		}
+		if !json.Valid(b) {
+			t.Fatalf("data/%s: invalid JSON", name)
+		}
+		if !strings.Contains(string(b), `"schemaVersion": "`+SchemaVersion+`"`) {
+			t.Errorf("data/%s: missing schemaVersion %q, got:\n%s", name, SchemaVersion, b)
+		}
 	}
 }

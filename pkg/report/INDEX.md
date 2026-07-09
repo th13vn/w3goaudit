@@ -79,7 +79,7 @@ Writes the **result folder** — the default output of a scan. One call,
 
 ```
 <dir>/README.md, summary.md, overview.md, findings.md, results.sarif
-<dir>/data/{manifest.json, database.json, findings.json, overview.json}   # canonical DB lives here only
+<dir>/data/{manifest.json, database.json, findings.json, overview.json, nav.json, explorer.json}   # canonical DB lives here only
 <dir>/contracts/<rel-src-path-no-ext>/<MainContract>/README.md
 <dir>/contracts/<rel-src-path-no-ext>/<MainContract>/state-changes.md
 <dir>/contracts/<rel-src-path-no-ext>/<MainContract>/workflows/<entryFn>.md
@@ -87,6 +87,11 @@ Writes the **result folder** — the default output of a scan. One call,
 
 - Folder-level docs (README/summary/overview/per-contract README) are rendered by
   `folder_docs.go`; `manifest.json` by `manifest.go` (see below).
+- `data/nav.json` (`BuildNavJSON`, `nav.go`) and `data/explorer.json`
+  (`BuildExplorerJSON`, `explorer.go`) are the VSCode-extension data layer —
+  written right after `manifest.json` in the same `data/` step. See
+  "nav.go" / "explorer.go" below and
+  [`docs/extension-output.md`](../../docs/extension-output.md) for the schema.
 - Per-contract folders mirror the source layout via `contractFolderRel(mc)` =
   `contracts/<relPathForReport(src) without ext>/<sanitizeName(Name)>`. Because
   the path encodes the source file, same-named contracts in different files never
@@ -133,7 +138,45 @@ the machine-readable index of the whole folder: `schemaVersion`, `tool`,
 `generatedAt`, `target`, finding `counts` (reuses `FindingsCounts`), compact
 `stats`, a `files` map of every artifact's relative path, and a `contracts[]`
 list (`ContractRef`: name, source, dir, findings) so a consumer discovers the
-tree from one file.
+tree from one file. `files.data.nav` = `data/nav.json` and
+`files.data.explorer` = `data/explorer.json` index the extension data layer
+(see `nav.go`/`explorer.go` above).
+
+### nav.go
+
+`BuildNavJSON(db) *NavJSON` → `data/nav.json`, the semantic navigation index
+consumed by the VSCode extension:
+
+- `symbols[]` (`NavSymbol`) — every contract/function/state-variable
+  declaration, `id`/`kind`/`name`/`selector`/`range` (`SrcRange`, shared with
+  `explorer.go`). IDs: `file#Contract` (contract), `file#Contract.selector`
+  (function, via `types.MakeFunctionID`), `contractID.varName` (state var).
+- `callers[]` (`NavCaller`) — one entry per `db.CallGraph.Edges` edge:
+  `callee`/`caller` function IDs plus `site` (the call-site `SrcRange`).
+- `interfaceImpl[]` (`NavInterfaceImpl`, via `resolveInterfaceImpls`) — for
+  each interface method, the most-derived concrete override found by walking
+  implementing contracts' `LinearizedBases` MRO (`findImpl`).
+- All three slices are sorted before return (map iteration over
+  `db.Contracts` is unordered) so `nav.json` is byte-stable across runs.
+
+### explorer.go
+
+`BuildExplorerJSON(db) *ExplorerJSON` → `data/explorer.json`, the
+explorer-tab model: one `ExplorerContract` per **deployable** contract
+(`db.MainContracts`), not every contract in the database.
+
+- `constants`/`storage` (`ExplorerStateVar`) — state variables walked
+  most-base-first along `LinearizedBases` (reversed, since it's
+  derived-first) to preserve real storage-slot order; constant/immutable
+  variables go to `constants`, everything else to `storage`.
+- `entryFunctions`/`getters` (`ExplorerFunc`) — functions walked
+  derived-first, first selector wins (most-derived override), split by
+  `fn.IsEntrypoint()` vs `isGetter(fn)` (public/external view/pure).
+- `SrcRange` (declared in this file, shared with `nav.go`) carries 1-based
+  `startLine`/`startCol`/`endLine`/`endCol` plus `startByte`/`endByte`; zero
+  fields are `omitempty` so synthetic/location-less decls stay compact.
+- `out.Contracts` is sorted by ID for determinism (map iteration over
+  `db.MainContracts` is unordered).
 
 ### state_matrix.go
 

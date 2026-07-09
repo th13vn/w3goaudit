@@ -41,6 +41,8 @@ type ManifestFiles struct {
 		Findings string `json:"findings"`
 		Overview string `json:"overview"`
 		Database string `json:"database"`
+		Nav      string `json:"nav,omitempty"`
+		Explorer string `json:"explorer,omitempty"`
 	} `json:"data"`
 }
 
@@ -83,5 +85,7 @@ func BuildManifest(tool ToolMeta, summary *SummaryReport, findings []*engine.Fin
 	m.Files.Data.Findings = "data/findings.json"
 	m.Files.Data.Overview = "data/overview.json"
 	m.Files.Data.Database = "data/database.json"
+	m.Files.Data.Nav = "data/nav.json"
+	m.Files.Data.Explorer = "data/explorer.json"
 	return m
 }

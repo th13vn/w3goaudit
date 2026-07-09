@@ -26,6 +26,14 @@ edits):
   before assuming shape compatibility.
 - Requires `github.com/th13vn/solast-go` **v0.1.7**, which added `Loc`/`Range`
   accessors on call/member/index postfix expressions.
+- **Extension data layer:** `WriteBundle` now also emits `data/nav.json`
+  (`report.BuildNavJSON` — navigable symbols, reverse call edges, and
+  interface→implementation mappings) and `data/explorer.json`
+  (`report.BuildExplorerJSON` — one entry per deployable contract with
+  ordered constants/storage, entry functions, and getters), both carrying
+  the precise `SrcRange` locations above. `data/manifest.json` indexes them
+  under `files.data.nav` / `files.data.explorer`. See
+  [`docs/extension-output.md`](docs/extension-output.md) for the schema.
 
 ## Unreleased — Standardized result-folder layout (output tree)
 
