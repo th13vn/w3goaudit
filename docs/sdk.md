@@ -212,6 +212,9 @@ type Contract struct {
     Structs           []*Struct
     Enums             []*Enum
     IsAbstract        bool
+    StartLine, EndLine       int  // source location
+    StartCol, EndCol         int  // 1-based columns (v0.4)
+    StartByte, EndByte       int  // character offsets (v0.4)
 }
 
 type Function struct {
@@ -228,8 +231,25 @@ type Function struct {
     Calls           []*FunctionCall
     StartLine       int
     EndLine         int
+    StartCol        int  // 1-based column of StartLine (v0.4)
+    EndCol          int  // 1-based column of EndLine (v0.4)
+    StartByte       int  // character offset into the source file (v0.4)
+    EndByte         int  // character offset into the source file (v0.4)
 }
 ```
+
+> **v0.4 — precise source locations:** `StartCol`/`EndCol`/`StartByte`/
+> `EndByte` are new on `Contract` and `Function` above, and on every other
+> declaration type (`Modifier`, `StateVariable`, `Event`, `Struct`, `Enum`,
+> `Parameter`) plus `ASTNode` itself — including interior statement/expression
+> nodes, not just declaration roots. Columns are 1-based; byte offsets are
+> character offsets into the source file; all four are zero for synthetic
+> nodes with no source counterpart. `FunctionCall` and `CallEdge` (the
+> call-graph edge type) gained a matching `Col`/`Byte` pair for the call site.
+> Output `schemaVersion` bumped `1.0.0` → `2.0.0` for this change. See
+> [`pkg/types/INDEX.md`](../pkg/types/INDEX.md) and
+> [`pkg/builder/INDEX.md`](../pkg/builder/INDEX.md#locationgo) for the full
+> field/helper reference.
 
 **Exported Functions:**
 ```go

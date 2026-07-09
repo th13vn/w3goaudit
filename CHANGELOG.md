@@ -1,5 +1,32 @@
 # Changelog
 
+## Unreleased — v0.4: Precise source locations (breaking output schema)
+
+AST nodes and declarations now carry column and byte-offset ranges, not just
+line numbers, closing the gap between "which line" and "which exact span" for
+downstream tooling (editor jump-to, precise highlighting, diffing across
+edits):
+
+- **`StartCol`/`EndCol`/`StartByte`/`EndByte`** added to `types.ASTNode`,
+  `Function`, `Modifier`, `Contract`, `StateVariable`, `Event`, `Struct`,
+  `Enum`, and `Parameter` — 1-based columns, character byte offsets, zero for
+  synthetic nodes with no source counterpart.
+- **Interior AST nodes are now located, not just declaration roots.** Every
+  statement/expression/assembly node built by `pkg/builder`'s AST builder
+  passes through a dispatch chokepoint (`buildStatement`, `buildExpression`,
+  `buildAssemblyOperation`, `buildAssemblyCall`, `buildInlineAssembly`, plus
+  the `BuildFunctionAST`/`BuildModifierAST` roots) that stamps a real span via
+  the new `pkg/builder/location.go` helpers (`spanFields`/`applySpan`).
+- **Call sites carry a column and byte offset too:** `types.FunctionCall` and
+  `types.CallEdge` gained `Col`/`Byte` alongside the existing `Line`.
+- `StateWrite.Line` / `Guard.Line` (per-function effects facts) are now
+  populated from the underlying AST node's `StartLine`.
+- **Output schema bumped `1.0.0` → `2.0.0` (breaking):** consumers parsing
+  `data/overview.json` / `data/findings.json` should check `schemaVersion`
+  before assuming shape compatibility.
+- Requires `github.com/th13vn/solast-go` **v0.1.7**, which added `Loc`/`Range`
+  accessors on call/member/index postfix expressions.
+
 ## v0.3.1 - 2026-06-22
 
 - Removed old benchmark results and scripts from the repository.

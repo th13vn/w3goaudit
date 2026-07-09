@@ -750,7 +750,7 @@ Per-main-contract folders add `state-changes.md` and one
 
 ### JSON — `corpus/`
 
-Machine-readable mirror; each carries `schemaVersion: "1.0.0"`.
+Machine-readable mirror; each carries `schemaVersion: "2.0.0"`.
 
 | File                   | Content                                                           |
 | ---------------------- | ----------------------------------------------------------------- |

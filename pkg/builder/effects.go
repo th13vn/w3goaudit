@@ -164,8 +164,10 @@ func conditionText(n *types.ASTNode) string {
 }
 
 // astText reconstructs a readable source-like string from an expression subtree.
-// The builder does not record source positions on AST nodes, so reports render
-// conditions from the tree itself.
+// Interior nodes now carry StartLine (and StartCol/StartByte) via the builder's
+// span chokepoints, but this renders the condition text from the AST shape
+// itself rather than slicing source text, so formatting stays normalized
+// regardless of the original source's whitespace/parenthesization.
 func astText(n *types.ASTNode) string {
 	if n == nil {
 		return ""

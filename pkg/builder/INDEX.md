@@ -35,7 +35,9 @@ Phase-7 per-function effects analysis.
   (kind `assign`/`compound`), `delete` unary ops, and `asm.sstore`.
 - Guards come from `check.require`/`check.assert`/`check.revert`/`stmt.if`
   nodes; their condition text is reconstructed from the AST via `astText`
-  (the builder does not record source positions on AST nodes).
+  (rendered from the tree, not sliced from source text — even though nodes
+  now carry `StartLine`/`StartCol`/`StartByte`, below). `StateWrite.Line` /
+  `Guard.Line` are populated from each node's `StartLine` (v0.4).
 - Auth: function modifiers plus `msg.sender`/`tx.origin` references found in
   guard conditions. Consumed by `pkg/report` (`state_matrix.go`, `bundle.go`).
 
@@ -75,11 +77,50 @@ Contract extraction from raw AST.
 
 **Uses:** `solast-go` parser to get raw AST
 
+### location.go
+Source-location helpers shared by `ast_builder.go` (v0.4).
+
+**Exports:**
+- `spanFields(src ast.Node) (startLine, endLine, startCol, endCol, startByte, endByte int)` -
+  extracts line/column/byte-offset location from any solast-go `ast.Node` via
+  its `GetLocation()`/`GetRange()`. Returns all zeros for a nil node or one
+  with no location (synthetic).
+- `applySpan(dst *types.ASTNode, src ast.Node)` - copies `spanFields(src)`
+  onto `dst`. No-op if either is nil. Preserves an existing `StartLine`/
+  `EndLine` when `src` has no location (does not zero them out), so a
+  chokepoint call on a node built without a direct source counterpart can't
+  regress previously-set fields.
+
+Depends on `github.com/th13vn/solast-go` **v0.1.7**, which added `Loc`/`Range`
+accessors to call/member/index postfix expressions — the source of call-site
+`Col`/`Byte` on `types.FunctionCall`/`types.CallEdge` (see
+[`pkg/types/INDEX.md`](../types/INDEX.md#callgraphgo)).
+
 ### ast_builder.go
 Builds simplified AST trees for function bodies.
 
 **Exports:**
-- `BuildFunctionAST()` - Convert raw AST to simplified tree
+- `BuildFunctionAST()` - Convert raw AST to simplified tree; applies its own
+  span (`applySpan(root, fndef)`) as the function-body root.
+- `BuildModifierAST()` - Same, for modifier bodies.
+
+**Interior-node locations (v0.4):** every interior node is stamped via a
+dispatch-wrapper chokepoint rather than ad hoc call sites, so no statement or
+expression type can be added without a location:
+- `buildStatement()` calls `buildStatementInner()` then `applySpan(node, stmt)`.
+- `buildExpression()` calls `buildExpressionInner()` then `applySpan(node, expr)`.
+- `buildAssemblyOperation()` / `buildAssemblyCall()` follow the same
+  `*Inner` + `applySpan` pattern for assembly opcodes/calls.
+- `buildInlineAssembly()` applies its own span directly (single call site,
+  no `*Inner` split).
+
+All recursive callers (`buildBlock`, `buildAssemblyBlock`, condition/branch
+builders, …) go through these wrappers, so switching a leaf case from a
+direct `types.NewASTNode(...)` return to calling deeper into the dispatcher
+does not lose location coverage. `types.ASTNode.StartCol/EndCol/StartByte/
+EndByte` are zero only for genuinely synthetic nodes (e.g. a generic
+fallback node built directly in a `default:` branch without a matching
+`ast.Node`).
 
 **AST Node Types:**
 

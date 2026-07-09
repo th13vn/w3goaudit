@@ -134,6 +134,7 @@ type Contract struct {
     BaseContracts     []string
     LinearizedBases   []string  // C3 linearization (derived-first order)
     InheritanceWeight int
+    StartLine, EndLine, StartCol, EndCol, StartByte, EndByte int  // see ast.go note above
 }
 ```
 
@@ -165,8 +166,24 @@ type Function struct {
     Calls           []*FunctionCall
     StartLine       int
     EndLine         int
+    StartCol        int  // 1-based column of StartLine
+    EndCol          int  // 1-based column of EndLine
+    StartByte       int  // character offset into the source file
+    EndByte         int  // character offset into the source file
 }
 ```
+
+> **Precise locations (v0.4):** `StartCol`/`EndCol`/`StartByte`/`EndByte` are new
+> alongside the pre-existing `StartLine`/`EndLine`. Columns are 1-based;
+> byte offsets are character offsets (not UTF-8 byte offsets) into the
+> source file's `Content`. All four are zero for synthetic nodes that have
+> no source counterpart (e.g. the engine's synthetic `decl.contract` roots).
+> The same six fields (`StartLine/EndLine/StartCol/EndCol/StartByte/EndByte`)
+> also exist on `Modifier`, `Contract`, `StateVariable`, `Event`, `Struct`,
+> `Enum`, and `Parameter` (declared in `contract.go`/`function.go`) — not
+> repeated verbatim below. They are populated by the builder via
+> `pkg/builder/location.go`'s `spanFields`/`applySpan` helpers; see
+> [`pkg/builder/INDEX.md`](../builder/INDEX.md#locationgo).
 
 > **Naming caveat:** these field names are inverted relative to common industry
 > usage, where "selector" means the 4-byte hash and "signature" the text form.
@@ -197,8 +214,21 @@ type ASTNode struct {
     RefKind    string  // parameter|state_var|local_var (for taint)
     StartLine  int
     EndLine    int
+    StartCol   int  // 1-based column of StartLine
+    EndCol     int  // 1-based column of EndLine
+    StartByte  int  // character offset into the source file
+    EndByte    int  // character offset into the source file
 }
 ```
+
+> **Interior-node locations (v0.4):** `StartCol`/`EndCol`/`StartByte`/`EndByte`
+> are populated on interior AST nodes too, not just function/modifier roots —
+> every statement and expression built via the `pkg/builder` dispatch
+> wrappers (`buildStatement`, `buildExpression`, `buildAssemblyOperation`,
+> `buildAssemblyCall`, `buildInlineAssembly`) carries a real span sourced from
+> solast-go's `Loc`/`Range`. Zero on synthetic nodes (no source counterpart).
+> See [`pkg/builder/INDEX.md`](../builder/INDEX.md#locationgo) for the
+> chokepoint mechanism.
 
 **AST Kinds — Dot-Notation:**
 
@@ -323,10 +353,14 @@ type FunctionCall struct {
     CallType         CallType
     TargetKind       ContractKind
     Line             int
+    Col              int          // 1-based column of the call site (v0.4)
+    Byte             int          // character offset of the call site (v0.4)
     Resolved         bool
     ArgCount         int          // -1 means unknown (old JSON)
 }
 
+// CallEdge (callgraph.go) carries the same Col/Byte pair as FunctionCall,
+// sourced from the same call-site location.
 type CallGraph struct {
     Edges    []*CallEdge          // serialized
     outgoing map[string][]*CallEdge // caller -> callees (rebuilt via EnsureIndex)

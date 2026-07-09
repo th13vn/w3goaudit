@@ -169,7 +169,11 @@ Schema-stable JSON output structures.
 - `ToolMeta`, `FindingsCounts` — shared shapes
 
 **Constants:**
-- `SchemaVersion` (currently `"1.0.0"`) — bumped on any breaking change to the JSON shape; consumers should refuse to parse on a major-version mismatch.
+- `SchemaVersion` (currently `"2.0.0"`, bumped from `"1.0.0"` in v0.4 for the
+  precise-location fields on `types.ASTNode`/declarations/`FunctionCall`/
+  `CallEdge` — see [`pkg/types/INDEX.md`](../types/INDEX.md#astgo)) — bumped
+  on any breaking change to the JSON shape; consumers should refuse to parse
+  on a major-version mismatch.
 
 **Finding fields surfaced under each `findings[]` entry:**
 
