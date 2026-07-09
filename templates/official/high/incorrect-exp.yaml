@@ -4,12 +4,17 @@ meta:
   severity: HIGH
   confidence: MEDIUM
   description: >
-    The `^` operator is used in arithmetic-looking code. In Solidity `^` is
-    bitwise XOR, not power. `2 ^ 8` evaluates to `10` (0b0010 XOR 0b1000),
-    not `256`. Developers coming from Python / math notation routinely write
-    this bug. Real bitwise-XOR use cases in Solidity are very rare
-    (cryptographic primitives, low-level masking), so any unexplained `^`
-    deserves a manual review. Equivalent to Slither's incorrect-exp detector.
+    A `^` operator is applied to plain value operands outside any bitwise
+    context — e.g. `base ^ exp`, `2 ^ 8`, `10 ^ 18`. In Solidity `^` is bitwise
+    XOR, not power: `2 ^ 8` evaluates to `10` (0b0010 XOR 0b1000), not `256`.
+    Developers coming from Python / math notation routinely write this when they
+    mean `**`. To stay precise we require BOTH operands to be simple values
+    (identifier or decimal number — not a sub-expression, not a hex mask) AND the
+    enclosing statement to contain no other bitwise/shift operator. That keeps
+    real typos like `base ^ exp` while excluding genuine bit manipulation —
+    `(a & b) + (a ^ b) / 2` (OpenZeppelin `Math.average`, has a `&` sibling),
+    `(3 * denominator) ^ 2` (`Math.mulDiv` inverse seed, complex left operand),
+    and `x ^ 0xFF` (hex mask).
   recommendation: >
     Replace `^` with `**` for exponentiation. If bitwise XOR is intentional,
     add a comment explaining what you're masking, and prefer a named bit-
@@ -22,10 +27,35 @@ query:
   scope: function
 
   match:
-    # Engine note: there is no `type:` matcher (no Solidity type info reaches
-    # the AST). We therefore can't restrict to uint-typed operands — the
-    # cleanest filter we can offer is "the operand is an identifier or
-    # literal", which excludes nothing meaningful but documents the intent.
+    # Flag `^` only when it looks like exponentiation, not bit manipulation:
+    #   1. both operands are simple values — an identifier or a DECIMAL number
+    #      literal (so `(3*d) ^ 2` and `x ^ 0xFF` are excluded), and
+    #   2. the enclosing statement has no other bitwise/shift operator
+    #      (so `(a & b) + (a ^ b) / 2` is excluded).
+    # This catches `base ^ exp`, `2 ^ 8`, `10 ^ 18` while leaving genuine XOR
+    # (OpenZeppelin Math.average / mulDiv, hex masks) alone.
     contains:
       kind: expr.binary_op
       operator: "\\^"
+      left:
+        any:
+          - kind: expr.identifier
+          - kind: expr.literal
+            attr:
+              subtype: number
+      right:
+        any:
+          - kind: expr.identifier
+          - kind: expr.literal
+            attr:
+              subtype: number
+      # Exclude genuine bit manipulation: if the same statement holds another
+      # bitwise/shift operator (`&`, `|`, `<<`, `>>`, `~`), the `^` is intentional
+      # XOR (e.g. `(a & b) + (a ^ b) / 2`), not an exponentiation typo.
+      not:
+        statement_contains:
+          any:
+            - kind: expr.binary_op
+              operator: "&|\\||<<|>>"
+            - kind: expr.unary_op
+              operator: "~"

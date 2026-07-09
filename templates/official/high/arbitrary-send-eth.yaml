@@ -20,10 +20,14 @@ query:
   scope: entrypoint
 
   filter:
-    # The unAuthenticated preset walks modifiers + inline msg.sender/owner
-    # guards + recursive auth-checks in callees — strictly stronger than a
-    # plain modifier regex.
-    preset: unAuthenticated
+    # unCheckedSender = NOT privileged-access-controlled AND NOT caller-self-scoped.
+    # Sending ETH to a caller-chosen destination is safe when the caller can only
+    # move value tied to a resource they own — the NFT-vault pattern where
+    # `redeemETH`/`withdrawETH` forward msg.sender into `_withdraw` and gate on
+    # `ownerOf(tokenId) == caller` (item-ownership self-scoping, the ETH analogue
+    # of `require(from == msg.sender)` for transferFrom). A genuine arbitrary send
+    # — neither privileged-gated nor caller-scoped — still matches.
+    preset: unCheckedSender
 
   match:
     # Engine fixes that make this template precise:

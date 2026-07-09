@@ -64,7 +64,9 @@ templates/
 Templates are exercised against fixtures under
 [`../test-data/security/`](../test-data/security/). Detectors whose
 **FP exclusions** matter (e.g. `selfdestruct-unprotected`'s inline-guard
-carve-out, `tx-origin-auth`'s `msg.sender == tx.origin` whitelist) have
+carve-out, `tx-origin-auth`'s `msg.sender == tx.origin` whitelist,
+`incorrect-exp`'s literal-base gate vs. intentional XOR, `unchecked-arithmetic`'s
+pure/view library-math exclusion) have
 dedicated `Vulnerable*`/`Safe*` fixtures named after the template. Some
 contracts named `Safe_*` for one vulnerability class intentionally still
 contain other bug classes, so whole-directory scans are assessed by
@@ -79,7 +81,7 @@ template/category rather than by name prefix alone.
 |---|---|---|---|
 | `CRITICAL-SELFDESTRUCT-UNPROTECTED` | CRITICAL | `critical/selfdestruct-unprotected.yaml` | `selfdestruct(...)` (Solidity-level OR assembly opcode) reachable from an unauthenticated entrypoint (`preset: unAuthenticated` — modifiers, inline sender guards, and recursive auth helpers) |
 | `CRITICAL-DELEGATECALL-USER-INPUT` | CRITICAL | `critical/delegatecall-user-input.yaml` | `delegatecall` whose target flows from a function parameter |
-| `HIGH-ARBITRARY-SEND-ETH` | HIGH | `high/arbitrary-send-eth.yaml` | Unprotected ETH withdrawal via `.transfer` / `.send` / `.call{value:}` |
+| `HIGH-ARBITRARY-SEND-ETH` | HIGH | `high/arbitrary-send-eth.yaml` | Unprotected ETH withdrawal via `.transfer` / `.send` / `.call{value:}`. Uses `preset: unCheckedSender` — clears functions that self-scope the caller to a resource they own (NFT-vault `_withdraw(msg.sender,…)` + `ownerOf(id) == caller`), the ETH analogue of `require(from == msg.sender)`. Item-ownership is treated as self-scoping, NOT privileged access control, so the SpiceFiNFT4626 false positive is gone without mis-marking `deposit`/`mint` |
 | `HIGH-ARBITRARY-TRANSFERFROM` | HIGH | `high/arbitrary-transferfrom.yaml` | `transferFrom(from, ...)` where `from` is user-controlled across entrypoint/helper flows and the function neither has privileged access control nor self-scopes the caller (`preset: unCheckedSender` — `require(from == msg.sender)` is treated as safe) |
 | `HIGH-UNCHECKED-ERC20-TRANSFER` | HIGH | `high/unchecked-erc20-transfer.yaml` | ERC20 `transfer` / `transferFrom` whose bool return is discarded |
 | `HIGH-REENTRANCY-PATTERN` | HIGH | `high/reentrancy-pattern.yaml` | CEI violation — ETH-bearing call / raw low-level `.call` / `delegatecall` followed by a state write, on a function lacking a reentrancy guard |
@@ -88,7 +90,7 @@ template/category rather than by name prefix alone.
 | `HIGH-UNPROTECTED-INITIALIZER` | HIGH | `high/unprotected-initializer.yaml` | `initialize/init/setup` entrypoint that writes state with no access control or `initializer` guard |
 | `HIGH-WEAK-PRNG` | HIGH | `high/weak-prng.yaml` | Modulo over `block.timestamp` / `block.number` / `block.prevrandao` / `blockhash` |
 | `HIGH-MSG-VALUE-IN-LOOP` | HIGH | `high/msg-value-in-loop.yaml` | `msg.value` referenced inside a loop body in a `payable` entrypoint (multicall ETH reuse) |
-| `HIGH-INCORRECT-EXP` | HIGH | `high/incorrect-exp.yaml` | `^` (bitwise XOR) used in arithmetic context — "developer meant `**`" foot-gun |
+| `HIGH-INCORRECT-EXP` | HIGH | `high/incorrect-exp.yaml` | `^` (bitwise XOR) used where `**` was meant. Flags `base ^ exp`, `2 ^ 8`, `10 ^ 18` — both operands simple (identifier/decimal) AND `not: { statement_contains: <bitwise> }`. Excludes genuine XOR: `(a & b) + (a ^ b)/2` (`&` sibling), `(3*x) ^ 2` (complex left), `x ^ 0xFF` (hex) — no OpenZeppelin `Math.average`/`mulDiv` false positives |
 | `HIGH-ENCODE-PACKED-COLLISION` | HIGH | `high/encode-packed-collision.yaml` | `keccak256(abi.encodePacked(...))` over ≥2 user-controlled dynamic args (ambiguous packing → collision) |
 | `HIGH-PROXY-STORAGE-COLLISION` | HIGH | `high/proxy-storage-collision.yaml` | Proxy subclass declares plain mutable storage alongside a constructor (implementation slot collision) |
 | `HIGH-ECDSA-RECOVER-MALLEABLE` | HIGH | `high/ecdsa-recover-malleable.yaml` | `ECDSA.recover` result keyed by the raw `signature` bytes (malleability replay) |
@@ -100,7 +102,7 @@ template/category rather than by name prefix alone.
 | `MEDIUM-DIVIDE-BEFORE-MULTIPLY` | MEDIUM | `medium/divide-before-multiply.yaml` | `(a / b) * c` shape — divide is the left operand of a multiply (precision-loss bug) |
 | `MEDIUM-VIEW-PURE-MODIFIES-STATE` | MEDIUM | `medium/view-pure-modifies-state.yaml` | `view` / `pure` function that writes state (including inline-assembly `sstore` bypass) |
 | `MEDIUM-TX-ORIGIN-AUTH` | MEDIUM | `medium/tx-origin-auth.yaml` | `tx.origin` used inside any guard (`require` / `assert` / `if` / ternary) |
-| `MEDIUM-UNCHECKED-ARITHMETIC` | MEDIUM | `medium/unchecked-arithmetic.yaml` | Arithmetic inside `unchecked { ... }` on Solidity `>=0.8.0` |
+| `MEDIUM-UNCHECKED-ARITHMETIC` | MEDIUM | `medium/unchecked-arithmetic.yaml` | Arithmetic inside `unchecked { ... }` on Solidity `>=0.8.0`, **scoped to state-mutating functions** (`mutability: payable,nonpayable`) and **only when operands are not range-checked first** (`unchecked_var: true`). Excludes `pure`/`view` library math (SafeMath/Math/Strings) and guarded subtraction like `require(a>=b); … a-b` (OpenZeppelin `SafeERC20.safeDecreaseAllowance`) |
 | `MEDIUM-BOOLEAN-CST` | MEDIUM | `medium/boolean-cst.yaml` | Boolean literal misused as a comparison/logical operand (`x == true`, `a && false`) or directly as an `if`/ternary condition (`if (true)`). Plain `return true` / `flag = false` / `while (true)` are not flagged |
 
 `references` is **optional** — present only where a canonical smart-contract
@@ -130,8 +132,8 @@ query:
   filter:                       # Function/contract-level preconditions (optional)
     modifier: REGEX             # function HAS this modifier
     func_name: REGEX            # function name matches regex
-    visibility_filter: a,b      # comma-separated: public,external,internal,private
-    mutability_filter: a,b      # comma-separated: payable,view,pure,nonpayable
+    visibility: a,b      # comma-separated: public,external,internal,private
+    mutability: a,b      # comma-separated: payable,view,pure,nonpayable
     has_guard:                  # function body must contain a guard matching this rule
       contains:
         kind: expr.identifier
@@ -146,6 +148,13 @@ query:
       - kind: outgoing_call
       - kind: state_write
 ```
+
+At contract scopes (`main_contract`, `all_contract`, `contract`, `library`,
+`abstract`), `match:` runs on a synthetic `decl.contract` AST whose children are
+resolved function ASTs from the contract's C3 linearized inheritance chain. Use
+this for same-contract combination detectors that need multiple conditions in one
+contract context, such as payable `msg.value` entrypoints plus inherited
+`Multicall.multicall`, without falling back to `regex`.
 
 ---
 
@@ -172,10 +181,10 @@ filter:
   func_name: ^(withdraw|deposit)$
 
   # Match only public or external functions
-  visibility_filter: public,external
+  visibility: public,external
 
   # Match only payable functions
-  mutability_filter: payable
+  mutability: payable
 
   # Match only functions that have a msg.sender guard
   has_guard:

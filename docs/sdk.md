@@ -122,6 +122,7 @@ func SetVerboseWriter(w io.Writer)  // Set custom verbose output writer
 - `TemplateLoadOptions` - Directory loading policy
 - `Finding` - Vulnerability finding
 - `Location` - Finding location
+- `RelatedLocation` - Additional matched source site for multi-condition findings
 
 **Exported Functions:**
 ```go
@@ -286,7 +287,7 @@ func FormatFindingsAsHTML(findings []*engine.Finding, db *types.Database) string
 func FormatFindingsAsSARIF(findings []*engine.Finding, tool ToolMeta, projectRoot string) (string, error)
 
 // WriteBundle renders the complete scan result folder (overview.md, findings.md,
-// results.sarif, corpus/{database,findings,overview}.json, and one folder per
+// results.sarif, data/{database,findings,overview}.json, and one folder per
 // main contract with state-changes.md + workflows/<entryFn>.md). run.log is
 // written separately by the CLI; HTML mirrors are added when opts.HTML is set.
 func WriteBundle(dir string, db *types.Database, summary *SummaryReport,
@@ -768,7 +769,7 @@ Selects how `Finding.Location` is computed.
 The env var `WGAUDIT_LOCATION_FROM_MATCHED_NODE` (`1`/`true`/`matched`)
 takes precedence over the API call so CI/scripts can flip the mode without
 touching code. The new structured fields on `Finding` (`Reachability`,
-`PrimaryAST`, `EntryPoint`) are populated **regardless** of this setting —
+`PrimaryAST`, `EntryPoint`, `Related`) are populated **regardless** of this setting —
 only `Location` itself changes.
 
 **Example:**
@@ -784,17 +785,28 @@ findings := e.ExecuteAll(templates)
 
 #### Finding (extended shape)
 
-`Finding` carries three optional structured fields populated whenever the
-engine can determine them. They sit alongside the existing
+`Finding` carries optional structured fields populated whenever the engine can
+determine them. They sit alongside the existing
 `TemplateID`/`Severity`/`Title`/`Location`/etc.:
 
 ```go
 type Finding struct {
     // ...existing fields...
 
+    Related      []RelatedLocation  // additional sites contributing to this finding
     Reachability *ReachabilityPath // call chain entry -> ... -> host
     PrimaryAST   *NodeRef          // kind / name / line of the matched AST node
     EntryPoint   *EntryRef         // auditor-actionable fix-here function
+}
+
+type RelatedLocation struct {
+    Label    string // from the matched `match.all` branch's `label:` field; falls back to "condition N"
+    File     string
+    Contract string
+    Function string
+    Line     int
+    Kind     string // matched AST kind
+    Name     string // matched AST name
 }
 
 type ReachabilityPath struct { Steps []ReachStep }
@@ -829,6 +841,10 @@ Reading these from SDK code:
 
 ```go
 for _, f := range findings {
+    for _, rel := range f.Related {
+        fmt.Printf("  related: %s %s.%s() L%d\n",
+            rel.Label, rel.Contract, rel.Function, rel.Line)
+    }
     if f.Reachability == nil { continue }
     for i, step := range f.Reachability.Steps {
         fmt.Printf("  step[%d]: %s.%s() L%d (%s)\n",

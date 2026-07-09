@@ -475,11 +475,18 @@ func modifierBodyHasAuthSignal(root *ASTNode) bool {
 //  3. Recursive checks on internal calls
 func (f *Function) IsAccessControlled(db *Database) bool {
 	visited := make(map[string]bool)
-	return f.isAccessControlledRecursive(db, visited)
+	return f.isAccessControlledRecursive(db, visited, nil)
 }
 
-// isAccessControlledRecursive internal recursive check
-func (f *Function) isAccessControlledRecursive(db *Database, visited map[string]bool) bool {
+// isAccessControlledRecursive internal recursive check.
+//
+// callerParams names parameters of THIS function that were bound to a
+// caller-identity source (msg.sender / tx.origin / _msgSender()) at the call
+// site that recursed into it. They let an ownership guard written against a
+// forwarded caller — e.g. `_withdraw(msg.sender, ...)` then
+// `if (ownerOf(id) != caller) revert` — count as access control. nil for the
+// top-level entry (no forwarding).
+func (f *Function) isAccessControlledRecursive(db *Database, visited map[string]bool, callerParams map[string]bool) bool {
 	// 0. Cycle detection
 	key := f.ContractName + "." + f.Name
 	if visited[key] {
@@ -539,7 +546,7 @@ func (f *Function) isAccessControlledRecursive(db *Database, visited map[string]
 		hasAuthCheck := false
 		f.AST.WalkDescendants(func(n *ASTNode) bool {
 			// Look for msg.sender in require/assert/if conditions
-			if isAuthCheck(n, f.AST, f) {
+			if isAuthCheck(n, f.AST, f, callerParams) {
 				hasAuthCheck = true
 				return false // Stop walking
 			}
@@ -550,91 +557,85 @@ func (f *Function) isAccessControlledRecursive(db *Database, visited map[string]
 		}
 	}
 
-	// 4. Recursive check on internal calls (Deep Inspection)
+	// 4. Recursive check on internal calls (Deep Inspection). A callee counts
+	// when it is itself access-controlled; caller-identity arguments forwarded
+	// into it (see forwardedCallerParams) let an ownership/role guard written
+	// against the forwarded value be recognized.
 	if db != nil {
-		// Iterate main contracts in deterministic (sorted) order, and only
-		// consider deployment contexts whose linearized hierarchy actually
-		// contains THIS function's contract. Previously this scanned every main
-		// contract by bare function name, so a protected helper of the same name
-		// in an unrelated contract would mark this function as access-controlled
-		// (a false negative) — and because it walked a map, the result was
-		// non-deterministic when two hierarchies defined same-named helpers.
-		mainIDs := make([]string, 0, len(db.MainContracts))
-		for id := range db.MainContracts {
-			mainIDs = append(mainIDs, id)
-		}
-		sort.Strings(mainIDs)
-
 		for _, call := range f.Calls {
-			// Only follow internal/inherited/self/super calls
-			if call.CallType == "internal" || call.CallType == "inherited" ||
-				call.CallType == "self" || call.CallType == "super" {
-
-				// For inherited calls, we need to check the OVERRIDDEN version in the main contract
-				// not the abstract base. Use the main contract's linearized bases to find the implementation.
-				targetFuncName := call.ResolvedFunction
-				if targetFuncName == "" {
-					targetFuncName = call.Target
-				}
-
-				// Get the main contract that contains this function (or its most derived version)
-				// We use db.MainContracts to find the actual runtime implementation
-				foundInMain := false
-				for _, mainContractID := range mainIDs {
-					mainContract := db.GetContract(mainContractID)
-					if mainContract == nil {
-						continue
-					}
-					// Skip deployment contexts that don't contain this function's
-					// contract — resolving the callee elsewhere is meaningless.
-					if !contractHierarchyContains(mainContract, f.ContractName) {
-						continue
-					}
-					// LinearizedBases is derived-first: [MostDerived, ..., MostBase]
-					// Iterate forward to find most-derived implementation first
-					for _, baseName := range mainContract.LinearizedBases {
-						baseContract := db.GetContractByName(baseName)
-						if baseContract == nil {
-							continue
-						}
-						for _, baseFn := range baseContract.Functions {
-							if baseFn.Name == targetFuncName {
-								if baseFn.isAccessControlledRecursive(db, visited) {
-									return true
-								}
-								foundInMain = true
-								break // Found function in this base, stop searching this base
-							}
-						}
-						if foundInMain {
-							break
-						} // Found in linearized bases, stop
-					}
-					if foundInMain {
-						break
-					}
-				}
-
-				// Fallback: if not found in main contracts, use original resolution
-				if !foundInMain && call.ResolvedContract != "" && call.ResolvedFunction != "" {
-					targetContract := db.GetContractByName(call.ResolvedContract)
-					if targetContract != nil {
-						for _, targetFn := range targetContract.Functions {
-							if targetFn.Name == call.ResolvedFunction {
-								result := targetFn.isAccessControlledRecursive(db, visited)
-								if result {
-									return true
-								}
-								break
-							}
-						}
-					}
-				}
+			if !isInternalCall(call.CallType) {
+				continue
+			}
+			callee := f.resolveInternalCallee(db, call)
+			if callee != nil &&
+				callee.isAccessControlledRecursive(db, visited, f.forwardedCallerParams(call, callee)) {
+				return true
 			}
 		}
 	}
 
 	return false
+}
+
+// isInternalCall reports whether a call stays within the contract's own code
+// (so its body is in scope for recursive auth/self-scoping analysis).
+func isInternalCall(t CallType) bool {
+	return t == "internal" || t == "inherited" || t == "self" || t == "super"
+}
+
+// resolveInternalCallee resolves an internal/inherited/self/super call to the
+// most-derived implementation of the target function, or nil.
+//
+// It prefers the runtime implementation: iterate the deployment (main) contracts
+// whose linearized hierarchy contains THIS function's contract, in deterministic
+// order, and return the first match walking the C3 list derived-first. Falls
+// back to the statically resolved contract. Resolution matches by bare function
+// name (see calleeNameMatches) because the stored selector carries arg types.
+func (f *Function) resolveInternalCallee(db *Database, call *FunctionCall) *Function {
+	if db == nil || call == nil {
+		return nil
+	}
+	targetFuncName := call.ResolvedFunction
+	if targetFuncName == "" {
+		targetFuncName = call.Target
+	}
+
+	mainIDs := make([]string, 0, len(db.MainContracts))
+	for id := range db.MainContracts {
+		mainIDs = append(mainIDs, id)
+	}
+	sort.Strings(mainIDs)
+
+	for _, mainContractID := range mainIDs {
+		mainContract := db.GetContract(mainContractID)
+		if mainContract == nil || !contractHierarchyContains(mainContract, f.ContractName) {
+			continue
+		}
+		// LinearizedBases is derived-first: [MostDerived, ..., MostBase].
+		for _, baseName := range mainContract.LinearizedBases {
+			baseContract := db.GetContractByName(baseName)
+			if baseContract == nil {
+				continue
+			}
+			for _, baseFn := range baseContract.Functions {
+				if calleeNameMatches(baseFn, call, targetFuncName) {
+					return baseFn
+				}
+			}
+		}
+	}
+
+	// Fallback: statically resolved contract.
+	if call.ResolvedContract != "" && call.ResolvedFunction != "" {
+		if targetContract := db.GetContractByName(call.ResolvedContract); targetContract != nil {
+			for _, targetFn := range targetContract.Functions {
+				if calleeNameMatches(targetFn, call, call.ResolvedFunction) {
+					return targetFn
+				}
+			}
+		}
+	}
+	return nil
 }
 
 // ComparesCallerIdentity reports whether the function constrains a caller-identity
@@ -650,29 +651,71 @@ func (f *Function) isAccessControlledRecursive(db *Database, visited map[string]
 // IsAccessControlled (privileged-only, by design) does not. Keep these concepts
 // separate: self-scoping is permissionless and must not count as access control
 // for entry-point classification.
-func (f *Function) ComparesCallerIdentity() bool {
-	if f.AST == nil {
+func (f *Function) ComparesCallerIdentity(db *Database) bool {
+	return f.comparesCallerIdentityRecursive(db, make(map[string]bool), nil)
+}
+
+// comparesCallerIdentityRecursive is the interprocedural worker. callerParams
+// names parameters of THIS function bound to a caller identity at the call site
+// that recursed into it, so an item-ownership scope written against a forwarded
+// caller — `_withdraw(msg.sender, …)` then `if (ownerOf(tokenId) != caller)
+// revert` — is recognized as self-scoping even though the comparison lives in a
+// callee. This is the NFT analogue of `require(from == msg.sender)`: it scopes
+// the caller to their own resource, it does not gate to a privileged principal.
+func (f *Function) comparesCallerIdentityRecursive(db *Database, visited, callerParams map[string]bool) bool {
+	if f == nil {
 		return false
 	}
-	found := false
-	f.AST.WalkDescendants(func(n *ASTNode) bool {
+	key := f.ContractName + "." + f.Name
+	if visited[key] {
+		return false
+	}
+	visited[key] = true
+
+	if f.AST != nil {
+		found := false
+		f.AST.WalkDescendants(func(n *ASTNode) bool {
+			if found {
+				return false
+			}
+			// Direct caller-identity source used inside a comparison condition.
+			if isDirectAuthSource(n) && isInsideCondition(n) && hasComparisonOperand(n) {
+				found = true
+				return false
+			}
+			// Local alias of a caller-identity source: address s = _msgSender(); … s == from.
+			if n.Kind == KindExprIdentifier && isTaintedIdentifier(n.Name, f.AST) &&
+				isInsideCondition(n) && hasComparisonOperand(n) {
+				found = true
+				return false
+			}
+			// Forwarded caller identity: a parameter the caller bound to msg.sender
+			// at the call site, compared inside a condition (e.g. ownerOf(id) != caller).
+			if len(callerParams) > 0 && n.Kind == KindExprIdentifier && callerParams[n.Name] &&
+				isInsideCondition(n) && hasComparisonOperand(n) {
+				found = true
+				return false
+			}
+			return true
+		})
 		if found {
-			return false
+			return true
 		}
-		// Direct caller-identity source used inside a comparison condition.
-		if isDirectAuthSource(n) && isInsideCondition(n) && hasComparisonOperand(n) {
-			found = true
-			return false
+	}
+
+	if db != nil {
+		for _, call := range f.Calls {
+			if !isInternalCall(call.CallType) {
+				continue
+			}
+			callee := f.resolveInternalCallee(db, call)
+			if callee != nil &&
+				callee.comparesCallerIdentityRecursive(db, visited, f.forwardedCallerParams(call, callee)) {
+				return true
+			}
 		}
-		// Local alias of a caller-identity source: address s = _msgSender(); … s == from.
-		if n.Kind == KindExprIdentifier && isTaintedIdentifier(n.Name, f.AST) &&
-			isInsideCondition(n) && hasComparisonOperand(n) {
-			found = true
-			return false
-		}
-		return true
-	})
-	return found
+	}
+	return false
 }
 
 // hasComparisonOperand reports whether n sits inside a binary comparison with a
@@ -720,13 +763,105 @@ func (f *Function) hasParameterNamed(name string) bool {
 	return false
 }
 
+// calleeNameMatches reports whether fn is the function referred to by a call.
+// Resolution stores the callee as a full selector (`_withdraw(address,uint256,
+// address,uint256)`) while Function.Name is the bare identifier (`_withdraw`),
+// so a raw `fn.Name == resolved` comparison silently never matched and the
+// interprocedural auth descent was dead for resolved calls. Compare against the
+// bare name taken from the resolved selector, then fall back to the call target.
+func calleeNameMatches(fn *Function, call *FunctionCall, resolved string) bool {
+	if fn == nil {
+		return false
+	}
+	if bare := bareFuncName(resolved); bare != "" && fn.Name == bare {
+		return true
+	}
+	return call != nil && call.Target != "" && fn.Name == call.Target
+}
+
+// bareFuncName strips a selector's argument list: `f(uint256,address)` → `f`.
+// A name with no `(` is returned unchanged.
+func bareFuncName(s string) string {
+	if i := strings.IndexByte(s, '('); i >= 0 {
+		return s[:i]
+	}
+	return s
+}
+
+// forwardedCallerParams returns the set of `callee` parameter names that receive
+// a caller-identity argument (msg.sender / tx.origin / _msgSender(), or a local
+// aliased from one) at this call site within f.AST. It lets the recursive auth
+// check recognize an ownership guard written against a forwarded caller, e.g.
+// `_withdraw(msg.sender, tokenId, receiver)` then `if (ownerOf(tokenId) !=
+// caller) revert` — without it the gated NFT-vault withdrawal looks like an
+// arbitrary ETH send. Returns nil when nothing is forwarded.
+func (f *Function) forwardedCallerParams(call *FunctionCall, callee *Function) map[string]bool {
+	if f == nil || f.AST == nil || call == nil || callee == nil || len(callee.Parameters) == 0 {
+		return nil
+	}
+	var result map[string]bool
+	f.AST.WalkDescendants(func(n *ASTNode) bool {
+		if n.Name != call.Target || !strings.HasPrefix(string(n.Kind), "call.") {
+			return true
+		}
+		for i, arg := range solidityArgNodes(n) {
+			if i >= len(callee.Parameters) {
+				break
+			}
+			p := callee.Parameters[i]
+			if p == nil || p.Name == "" {
+				continue
+			}
+			if isForwardedCallerIdentity(arg, f.AST) {
+				if result == nil {
+					result = make(map[string]bool)
+				}
+				result[p.Name] = true
+			}
+		}
+		return true
+	})
+	return result
+}
+
+// solidityArgNodes returns a call node's positional Solidity argument children,
+// skipping the metadata children the AST builder attaches (the tagged
+// `call_receiver` and the `{value:/gas:}` call-option expressions). This mirrors
+// how the engine's matchArgs indexes arguments.
+func solidityArgNodes(call *ASTNode) []*ASTNode {
+	var args []*ASTNode
+	for _, c := range call.Children {
+		if c == nil {
+			continue
+		}
+		if c.GetAttributeBool("call_receiver") || c.GetAttributeString("call_option") != "" {
+			continue
+		}
+		args = append(args, c)
+	}
+	return args
+}
+
+// isForwardedCallerIdentity reports whether an argument expression is a
+// caller-identity source: a direct msg.sender / tx.origin / _msgSender(), or a
+// local variable aliased from one.
+func isForwardedCallerIdentity(arg *ASTNode, root *ASTNode) bool {
+	if arg == nil {
+		return false
+	}
+	if isDirectAuthSource(arg) {
+		return true
+	}
+	return arg.Kind == KindExprIdentifier && isTaintedIdentifier(arg.Name, root)
+}
+
 // isAuthCheck checks if a node represents an authentication check (msg.sender, tx.origin, _msgSender)
 // It checks both direct usage and simple local variable aliases (taint tracking).
 // Returns true only if the auth source is compared against a storage-anchored
 // authority (state var / getter / mapping / immutable / hardcoded address) — NOT
 // against a caller-controlled value such as a function argument. fn supplies the
 // parameter set used as a backstop when an identifier's RefKind is unresolved.
-func isAuthCheck(n *ASTNode, root *ASTNode, fn *Function) bool {
+func isAuthCheck(n *ASTNode, root *ASTNode, fn *Function, callerParams map[string]bool) bool {
 	// 1. Direct check
 	if isDirectAuthSource(n) {
 		if isInsideCondition(n) {
@@ -750,6 +885,18 @@ func isAuthCheck(n *ASTNode, root *ASTNode, fn *Function) bool {
 					return true
 				}
 			}
+		}
+	}
+
+	// 3. Forwarded caller identity: a parameter the caller bound to msg.sender /
+	// tx.origin / _msgSender() at the call site (see forwardedCallerParams).
+	// Treated like a direct caller-identity source — `if (ownerOf(id) != caller)
+	// revert` is an ownership gate — but still requires the OTHER operand to be a
+	// real authority anchor, so self-scoping (`require(other == caller)` where
+	// `other` is an argument) is NOT promoted to access control.
+	if len(callerParams) > 0 && n.Kind == KindExprIdentifier && callerParams[n.Name] {
+		if isInsideCondition(n) && isOwnerComparison(n, fn) {
+			return true
 		}
 	}
 
@@ -851,15 +998,35 @@ func isOwnerComparison(n *ASTNode, fn *Function) bool {
 
 // unwrapTypeCast strips a single-argument type-cast call (e.g. address(x), uint160(x))
 // and returns the inner node. If the node is not a type-cast, it is returned as-is.
+//
+// The callee NAME must be an actual type — `address`, `payable`, `uintN`,
+// `bytesN`, etc. A single-argument call to a non-type callee is a regular
+// function, NOT a cast: unwrapping it conflated a state-reading getter with its
+// argument, so `ownerOf(tokenId) == msg.sender` looked like `tokenId ==
+// msg.sender` (a caller-controlled compare) and the ownership gate was dropped.
 func unwrapTypeCast(n *ASTNode) *ASTNode {
 	if n == nil {
 		return n
 	}
-	// A type cast looks like: call.internal{name="address"} with exactly one child
-	if (n.Kind == KindCallInternal || n.Kind == KindCallExternal) && len(n.Children) == 1 {
+	if (n.Kind == KindCallInternal || n.Kind == KindCallExternal) &&
+		len(n.Children) == 1 && isTypeCastName(n.Name) {
 		return n.Children[0]
 	}
 	return n
+}
+
+// elementaryTypeCastRegex matches Solidity built-in type names usable as a
+// conversion: address, payable, bool, string, bytes, byte, and the sized
+// uint/int/bytes families (uint, uint8…uint256, int…, bytes1…bytes32).
+var elementaryTypeCastRegex = regexp.MustCompile(`^(address|payable|bool|string|byte|bytes([1-9]|[12][0-9]|3[0-2])?|uint([0-9]+)?|int([0-9]+)?)$`)
+
+// isTypeCastName reports whether name is a built-in elementary type usable in a
+// conversion expression. User-defined type casts (contract/interface) are
+// intentionally excluded — they don't appear as the authority operand in a
+// caller-identity comparison, and excluding them keeps getters from being
+// misread as casts.
+func isTypeCastName(name string) bool {
+	return name != "" && elementaryTypeCastRegex.MatchString(name)
 }
 
 // isCallerControlledTarget reports whether the comparison target on the other
@@ -871,10 +1038,12 @@ func unwrapTypeCast(n *ASTNode) *ASTNode {
 // it must NOT count as access control.
 //
 // Everything else is a legitimate authority anchor and is NOT caller-controlled:
-// state variables, state-reading getters (owner(), ownerOf(id), hasRole(...)),
+// state variables, contract-fixed getters (owner(), hasRole(ROLE, msg.sender)),
 // state mappings/structs, constants, immutables, address(this), and hardcoded
 // literal addresses (require(msg.sender == 0xAbC…) gates to a fixed bytecode
-// address the caller cannot influence).
+// address the caller cannot influence). A getter the caller indexes with a
+// resource id of their own choosing (ownerOf(tokenId)) is the exception — it is
+// resource self-scoping, handled as caller-controlled (see getterIsResourceScoped).
 func isCallerControlledTarget(n *ASTNode, fn *Function) bool {
 	if n == nil {
 		return false
@@ -900,9 +1069,13 @@ func isCallerControlledTarget(n *ASTNode, fn *Function) bool {
 			return fn.hasParameterNamed(n.Name)
 		}
 	case KindCallInternal, KindCallExternal:
-		// Getter call (owner(), ownerOf(id), hasRole(...)) — authority comes from
-		// the state it reads, even if an argument selects which slot.
-		return false
+		// Getter call. A getter whose result is fixed by the contract — `owner()`,
+		// `getOwner()`, a role check like `hasRole(ROLE, msg.sender)` — is a
+		// privileged authority anchor (NOT caller-controlled). But a getter the
+		// CALLER indexes with a resource id of their own choosing — `ownerOf(tokenId)`,
+		// `positions(id).owner` — only asserts "you own the item you named". That is
+		// resource self-scoping, not a privileged gate, so it IS caller-controlled.
+		return getterIsResourceScoped(n, fn)
 	case KindExprIndexAccess, KindExprMemberAccess:
 		// m[k] / s.f — caller-controlled iff the BASE is caller-controlled.
 		if len(n.Children) > 0 {
@@ -912,6 +1085,25 @@ func isCallerControlledTarget(n *ASTNode, fn *Function) bool {
 	default:
 		return false
 	}
+}
+
+// getterIsResourceScoped reports whether a getter call asserts ownership of a
+// CALLER-SELECTED resource rather than membership in a contract-fixed authority.
+// True when an argument is a free caller-controlled value (a parameter or
+// arg-derived local) that is NOT itself a caller-identity source — i.e. the
+// caller picks which item (`ownerOf(tokenId)`), so the check scopes the caller
+// to their own asset instead of gating to a privileged principal. False for
+// `owner()` (no args) and `hasRole(ROLE, msg.sender)` (no free resource selector).
+func getterIsResourceScoped(call *ASTNode, fn *Function) bool {
+	for _, arg := range solidityArgNodes(call) {
+		if isDirectAuthSource(arg) {
+			continue // msg.sender / tx.origin / _msgSender() is not a resource id
+		}
+		if isCallerControlledTarget(arg, fn) {
+			return true
+		}
+	}
+	return false
 }
 
 // taintIsParameterOnly reports whether a taint set is non-empty and consists

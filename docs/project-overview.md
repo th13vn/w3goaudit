@@ -11,7 +11,7 @@
 - Comprehensive call graph with recursive tracing
 - Per-function effects analysis (state writes, guards, access control)
 - WQL template-based vulnerability detection
-- Result-folder output: `overview.md`, `findings.md`, `results.sarif`, `run.log`, a machine-readable `corpus/`, and per-main-contract workflow files + a state-change matrix; opt-in HTML mirror
+- Result-folder output: `overview.md`, `findings.md`, `results.sarif`, `run.log`, a machine-readable `data/`, and per-main-contract workflow files + a state-change matrix; opt-in HTML mirror
 - Self-provisioning template home (`~/.w3goaudit`) with release download + embedded fallback
 - Project framework detection (Foundry, Hardhat, Truffle)
 
@@ -37,7 +37,7 @@
 - Generates findings with severity and confidence levels
 
 **3. Reporting**
-- A single opinionated **result folder** per scan (overview, findings, SARIF, run.log, JSON corpus)
+- A single opinionated **result folder** per scan (overview, findings, SARIF, run.log, JSON data/)
 - Per-entry-function workflow files (signature, auth, guards, branch conditions, state effects, call workflow)
 - A per-contract state-change matrix (state var → writers → reaching entry points)
 - Console output with color-coded severity and reachability traces
@@ -117,7 +117,7 @@ w3goaudit/
 │   │   └── dataflow.go     # Data flow graph types
 │   │
 │   ├── report/             # Output formatting
-│   │   ├── bundle.go       # Result-folder writer (overview/findings/SARIF/corpus, per-contract dirs)
+│   │   ├── bundle.go       # Result-folder writer (overview/findings/SARIF/data, per-contract dirs)
 │   │   ├── state_matrix.go # State-change matrix (writers + reachable entry points)
 │   │   ├── generator.go    # Summary report generation (with git detection)
 │   │   ├── markdown.go     # Markdown formatter (git URL links)
@@ -240,10 +240,16 @@ interface/contract methods with the same names.
   straight-line)
 - Recursive internal call tracing from entrypoints with a bounded depth guard
   (`MaxInterproceduralTaintDepth = 12`)
+- Contract-scope AST matching through a synthetic `decl.contract` root whose
+  children are resolved function ASTs from the C3 linearized inheritance chain;
+  same-contract combination rules can match local and inherited functions
+  without raw source regexes
 - Generate findings with locations
 - Transactional matched-node attribution: failed candidate branches roll back
   provisional `PrimaryAST` capture, so reports point at the node that actually
   satisfied the rule.
+- Multi-site contract findings can populate `Finding.Related`, allowing reports
+  to show every contributing matched site rather than only the first match.
 
 **Thread-safety:** `Engine` is **not safe for concurrent use** — it carries
 per-scan context fields. SDK callers wanting parallelism must allocate one
@@ -324,7 +330,7 @@ type Function struct {
 **Result folder** (`report.WriteBundle`, [pkg/report/bundle.go](../pkg/report/bundle.go)):
 - `overview.md`, `findings.md` — human-readable Markdown
 - `results.sarif` — SARIF 2.1.0 (always)
-- `corpus/{database.json,findings.json,overview.json}` — machine-readable; the
+- `data/{database.json,findings.json,overview.json}` — machine-readable; the
   canonical database lives only here (reusable via `--db`)
 - `<MainContract>/state-changes.md` — per-contract state-change matrix built by
   [pkg/report/state_matrix.go](../pkg/report/state_matrix.go): each state variable,
@@ -498,7 +504,7 @@ function _processWithdraw() internal {
 - Logic operators: all, any, not, sequence
 - Traversal: contains (descendants), inside (ancestors)
 - Atomic matchers: kind, regex name, attr
-- Filter helpers: modifier, extends, func_name, visibility_filter, mutability_filter, has_guard, version, has_param
+- Filter helpers: modifier, extends, func_name, visibility, mutability, has_guard, version, has_param
 - Taint analysis: parameter/state_var/local_var source tracking
 - Call-specific: `args: {0: ...}` or flat `arg.N:` keys
 - Semantic groups: outgoing_call, eth_transfer, delegatecall, check/guard, token_call, state_write/state_read, selfdestruct
@@ -515,7 +521,7 @@ function _processWithdraw() internal {
 
 **Reporting**
 - One **result folder** per scan: `overview.md`, `findings.md`, always-on
-  `results.sarif` + `run.log`, a `corpus/` (database.json + findings.json +
+  `results.sarif` + `run.log`, a `data/` (database.json + findings.json +
   overview.json), and one sub-folder per main contract
 - Per-entry workflow files (signature, auth, guards, branches, state effects,
   call workflow) and a per-contract state-change matrix
@@ -525,11 +531,13 @@ function _processWithdraw() internal {
   from an externally-callable entry down to the function that hosts the
   dangerous statement. Formats:
   - **Console**: `↳ via Contract.entry() ⇒ … ⇒ host()` + `↳ fix-here: …`
-  - **JSON** (`corpus/findings.json`): structured `reachability.steps[]`, `entryPoint`, `primaryAst`
+  - **JSON** (`data/findings.json`): structured `reachability.steps[]`, `entryPoint`, `primaryAst`, `related[]`
   - **SARIF 2.1.0**: `result.relatedLocations[]` per hop +
     `result.properties.entryPoint` / `result.properties.primaryAst`
   - **Markdown / HTML**: per-occurrence trace block with dotted-level
-    indentation (`.`, `..`, `...`) and line numbers per hop
+    indentation (`.`, `..`, `...`) and line numbers per hop; Markdown also
+    renders `All matched sites` plus full function excerpts for
+    `Finding.Related`
 - Bug location is hardcoded to the best provenance: the dangerous-node
   `file:line:col` anchor plus the reachability chain and fix-here pointer
 
@@ -542,8 +550,8 @@ function _processWithdraw() internal {
 **CLI**
 - The scan is the root command (no `scan` subcommand); build, extract, completion, version
 - Long + short forms for every scan flag
-- Folder-based output (Markdown + SARIF + JSON corpus)
-- Database caching via JSON files (reuse `corpus/database.json` with `--db`)
+- Folder-based output (Markdown + SARIF + JSON data/)
+- Database caching via JSON files (reuse `data/database.json` with `--db`)
 - Verbose terminal mode; full detail always captured in `run.log`
 
 **SDK**
@@ -767,6 +775,7 @@ MIT License
 
 ## Related Documentation
 
+- [Internals](./internals.md) - Technical deep-dive: functions, workflows, algorithms, edge cases
 - [Workflows](./workflows.md) - Detailed internal workflows
 - [Usage Guide](./usage.md) - CLI and SDK usage
 - [WQL Syntax](./wql-syntax.md) - Template language reference

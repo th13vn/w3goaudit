@@ -16,4 +16,4 @@ meta:
 query:
   scope: source
   match:
-    source_regex: '[\x{202A}\x{202B}\x{202D}\x{202E}\x{2066}\x{2067}\x{2068}\x{202C}\x{2069}]'
+    regex: '[\x{202A}\x{202B}\x{202D}\x{202E}\x{2066}\x{2067}\x{2068}\x{202C}\x{2069}]'

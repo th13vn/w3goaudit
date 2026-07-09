@@ -362,3 +362,89 @@ func TestIsAccessControlledAcceptsHardcodedAddress(t *testing.T) {
 		t.Fatal("require(msg.sender == 0xAbc…) should be detected as access control")
 	}
 }
+
+// TestForwardedOwnerOfIsSelfScopingNotAccessControl covers the SpiceFiNFT4626
+// case: an entry point forwards msg.sender into an internal helper
+// (`_withdraw(msg.sender, tokenId, receiver)`), and the helper checks
+// `if (ownerOf(tokenId) != caller) revert`. `ownerOf(tokenId)` is indexed by a
+// caller-chosen resource id, so this is item-ownership SELF-SCOPING — NOT
+// privileged access control. IsAccessControlled must stay false (the function
+// is not gated to an owner/role), while ComparesCallerIdentity must follow the
+// forwarded caller and report true so detectors like arbitrary-send-eth
+// (preset unCheckedSender) treat it as a valid mitigation.
+func TestForwardedOwnerOfIsSelfScopingNotAccessControl(t *testing.T) {
+	db := NewDatabase()
+
+	// _withdraw(address caller, uint256 tokenId, address receiver):
+	//   if (ownerOf(tokenId) != caller) revert;
+	withdrawAST := NewASTNode(KindDeclFunction)
+	ifStmt := NewASTNode(KindStmtIf)
+	cmp := NewASTNode(KindExprBinaryOp)
+	cmp.SetAttribute("operator", "!=")
+	ownerOf := NewASTNode(KindCallInternal)
+	ownerOf.Name = "ownerOf"
+	ownerOfArg := NewASTNode(KindExprIdentifier) // ownerOf(tokenId) — caller-selected resource id
+	ownerOfArg.Name = "tokenId"
+	ownerOfArg.RefKind = "parameter"
+	ownerOf.AddChild(ownerOfArg)
+	callerIdent := NewASTNode(KindExprIdentifier)
+	callerIdent.Name = "caller"
+	callerIdent.RefKind = "parameter"
+	cmp.AddChild(ownerOf)
+	cmp.AddChild(callerIdent)
+	ifStmt.AddChild(cmp)
+	withdrawAST.AddChild(ifStmt)
+
+	withdrawFn := &Function{
+		Name:         "_withdraw",
+		ContractName: "Vault",
+		Visibility:   VisibilityInternal,
+		Parameters:   []*Parameter{{Name: "caller"}, {Name: "tokenId"}, {Name: "receiver"}},
+		AST:          withdrawAST,
+	}
+
+	// redeemETH(uint256 tokenId, address receiver):
+	//   _withdraw(msg.sender, tokenId, receiver);
+	redeemAST := NewASTNode(KindDeclFunction)
+	call := NewASTNode(KindCallInternal)
+	call.Name = "_withdraw"
+	msgSender := NewASTNode(KindExprMemberAccess)
+	msgSender.Name = "sender"
+	msgIdent := NewASTNode(KindExprIdentifier)
+	msgIdent.Name = "msg"
+	msgSender.AddChild(msgIdent)
+	tokenIdArg := NewASTNode(KindExprIdentifier)
+	tokenIdArg.Name = "tokenId"
+	receiverArg := NewASTNode(KindExprIdentifier)
+	receiverArg.Name = "receiver"
+	call.AddChild(msgSender)   // arg 0 -> caller
+	call.AddChild(tokenIdArg)  // arg 1 -> tokenId
+	call.AddChild(receiverArg) // arg 2 -> receiver
+	redeemAST.AddChild(call)
+
+	redeemFn := &Function{
+		Name:         "redeemETH",
+		ContractName: "Vault",
+		Visibility:   VisibilityExternal,
+		Parameters:   []*Parameter{{Name: "tokenId"}, {Name: "receiver"}},
+		AST:          redeemAST,
+		Calls: []*FunctionCall{{
+			Target:   "_withdraw",
+			CallType: CallTypeInternal,
+			// Resolution stores the full selector, not the bare name — the auth
+			// descent must still resolve it to the `_withdraw` function.
+			ResolvedContract: "Vault",
+			ResolvedFunction: "_withdraw(address,uint256,address,uint256)",
+		}},
+	}
+
+	vault := &Contract{Name: "Vault", Functions: []*Function{redeemFn, withdrawFn}}
+	db.AddContract(vault)
+
+	if redeemFn.IsAccessControlled(db) {
+		t.Fatal("ownerOf(tokenId) == caller is item-ownership self-scoping, NOT privileged access control")
+	}
+	if !redeemFn.ComparesCallerIdentity(db) {
+		t.Fatal("forwarded caller compared to ownerOf(tokenId) must be recognized as self-scoping")
+	}
+}

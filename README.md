@@ -56,10 +56,11 @@ Example console output:
 📂 Results written to: ./contracts-audit
 ```
 
-Results land in a folder — `overview.md`, `findings.md`, `results.sarif`,
-`run.log`, a machine-readable `corpus/` (JSON + DB), and one sub-folder per main
-contract with per-entry workflow files and a state-change report. See
-[Result folder layout](#result-folder-layout).
+Results land in a folder — `README.md` (landing page), `summary.md`,
+`overview.md`, `findings.md`, `results.sarif`, `run.log`, a machine-readable
+`data/` folder (JSON + DB + manifest index), and a `contracts/` tree (one
+sub-folder per main contract, mirroring source paths) with per-entry workflow
+files and a state-change report. See [Result folder layout](#result-folder-layout).
 
 ---
 
@@ -71,12 +72,12 @@ contract with per-entry workflow files and a state-change report. See
 - **C3 Linearization** - Proper Solidity inheritance resolution
 - **Function Selectors** - Calculate 4-byte keccak256 selectors
 - **Call Graph** - Recursive tracing with filtered built-ins and optimized styling
-- **WQL Templates** - Powerful query language for security pattern matching, with load-time validation (regex, preset names, filter/match placement) so typos fail fast instead of producing silent zero-finding scans. Includes scope-aware `source_regex` for rare raw-source predicates.
-- **Result Folder** - One opinionated folder per scan: `overview.md`, `findings.md`, always-on `results.sarif` + `run.log`, a machine-readable `corpus/` (database.json reusable via `--db`, findings.json, overview.json), and one sub-folder per main contract. Opt-in HTML mirror with `--html`.
+- **WQL Templates** - Powerful query language for security pattern matching, with load-time validation (regex, preset names, filter/match placement) so typos fail fast instead of producing silent zero-finding scans. Includes scope-aware `source_regex` for rare raw-source predicates and contract-scope AST matching for same-contract local/inherited combination rules.
+- **Result Folder** - One opinionated folder per scan: a `README.md` landing page, `summary.md`, `overview.md` (metrics + in-scope contract index), `findings.md`, always-on `results.sarif` + `run.log`, a machine-readable `data/` (manifest.json index, database.json reusable via `--db`, findings.json, overview.json), and a `contracts/` tree mirroring source paths (one sub-folder per main contract). Opt-in HTML mirror with `--html`.
 - **Per-Entry Workflow Files** - For every entry function, a self-contained context block (signature, auth / access control, guards & checks, branch conditions, transitive state effects, Mermaid call workflow) — built to be fed to a human or an AI auditor.
 - **State-Change Matrix** - Per contract, each state variable mapped to the functions that write it and the entry points that reach a writer (reverse call-graph walk).
 - **Self-Provisioning Templates** - Downloads the latest [`w3goaudit-templates`](https://github.com/th13vn/w3goaudit-templates) release on first run (nuclei-style, no git clone), refreshable with `--update-templates`; embedded official pack is the always-available offline fallback.
-- **Reachability-Aware Findings** - Every finding can carry the full call chain from an externally-callable entry down to the function that hosts the dangerous statement: structured `reachability.steps[]` + `entryPoint` (auditor's fix-here pointer) + `primaryAst` in JSON, `relatedLocations` in SARIF, dotted-level trace block in Markdown / HTML, `↳ via …` continuation line on the `--verbose` console.
+- **Reachability-Aware Findings** - Every finding can carry the full call chain from an externally-callable entry down to the function that hosts the dangerous statement: structured `reachability.steps[]` + `entryPoint` (auditor's fix-here pointer) + `primaryAst` in JSON, `relatedLocations` in SARIF, dotted-level trace block in Markdown / HTML, `↳ via …` continuation line on the `--verbose` console. Multi-site findings also carry `related[]`, and Markdown renders all matched sites with full function context.
 - **SARIF 2.1.0** - Always emitted (`results.sarif`) for GitHub Code Scanning, with portable relative URIs + `srcRoot`; fail-closed template loading, `NO_COLOR`-aware console.
 - **Project Detection** - Auto-detect Foundry, Hardhat, Truffle
 - **Git Integration** - Auto-detect git repos and generate clickable file links to GitHub/GitLab
@@ -94,6 +95,7 @@ Comprehensive guides available in [`docs/`](./docs):
 - **[SDK Documentation](./docs/sdk.md)** - Comprehensive SDK API reference and integration guide
 - **[WQL Syntax](./docs/wql-syntax.md)** - Template writing reference
 - **[Project Overview](./docs/project-overview.md)** - Architecture and design
+- **[Internals](./docs/internals.md)** - Technical deep-dive: functions, workflows, algorithms (C3, taint, access-control), and precision/edge-case decisions
 
 ---
 
@@ -134,19 +136,25 @@ human or AI auditor:
 
 ```
 <output>/
-├── overview.md            # all main contracts; pragma version per contract
+├── README.md              # landing page: counts + links to everything
+├── summary.md             # metrics + findings-by-severity + rules-hit tables
+├── overview.md            # metrics + in-scope contract index (table, links into contracts/)
 ├── findings.md            # human-readable findings
 ├── results.sarif          # SARIF 2.1.0 (always)
 ├── run.log                # full verbose detail (always; replaces --log)
-├── corpus/                # machine-readable JSON
-│   ├── database.json      # canonical DB — reuse via --db corpus/database.json
+├── data/                  # machine-readable output
+│   ├── manifest.json      # index: tool, scope, counts, file list, per-contract refs
+│   ├── database.json      # canonical DB — reuse via --db data/database.json
 │   ├── findings.json
 │   └── overview.json
-└── <MainContract>/        # one folder per main contract (Name__<filestem> on collision)
-    ├── state-changes.md   # state var → Written By (fns) → Reachable From (entries)
-    └── workflows/
-        ├── <entryFn>.md             # one file per entry function
-        └── <entryFn>__<selector>.md # overloads disambiguated by 4-byte selector
+└── contracts/             # one sub-tree per main contract, mirroring source paths
+    └── <relative-source-path-without-ext>/
+        └── <ContractName>/
+            ├── README.md          # per-contract landing: findings + architecture detail
+            ├── state-changes.md   # state var → Written By (fns) → Reachable From (entries)
+            └── workflows/
+                ├── <entryFn>.md             # one file per entry function
+                └── <entryFn>__<selector>.md # overloads disambiguated by 4-byte selector
 ```
 
 The default folder name is the scanned project dir name (or `.sol` file stem);
@@ -216,8 +224,8 @@ w3goaudit ./contracts/ -q
 # List the active template set (no path needed)
 w3goaudit -l
 
-# Re-scan a pre-built database (e.g. the corpus DB from a previous run)
-w3goaudit -d ./contracts/corpus/database.json
+# Re-scan a pre-built database (e.g. the DB from a previous run)
+w3goaudit -d ./contracts/data/database.json
 
 # Refresh templates from the latest release; update the tool itself
 w3goaudit --update-templates
@@ -337,7 +345,7 @@ Input → Reader → Builder → Database → Engine → Findings → Result-fol
 4. Load WQL templates (home → embedded fallback)
 5. Execute queries
 6. Generate findings
-7. Write the result folder (overview, findings, SARIF, run.log, corpus, per-contract workflows + state-changes)
+7. Write the result folder (overview, findings, SARIF, run.log, data/, per-contract workflows + state-changes)
 
 ### 2. Build Workflow
 
@@ -402,7 +410,7 @@ Test contracts are documented in:
 - Recursive call graph building
 - Per-function effects analysis (state writes, guards, access control)
 - WQL query language
-- Result-folder output: Markdown + SARIF + JSON corpus + per-entry workflows + state-change matrix
+- Result-folder output: Markdown + SARIF + JSON data/ + per-entry workflows + state-change matrix
 - Self-provisioning template home (`~/.w3goaudit`) with release download + embedded fallback
 - CLI and SDK
 - Source/context/workflow extraction for report writing

@@ -19,7 +19,7 @@ query:
   filter:
     # Reentrancy guard detection is centralized in `preset: unLocked`
     # (pkg/engine/presets.go). The preset already returns true for
-    # unguarded functions — no `not:` needed.
+    # unchecked_var functions — no `not:` needed.
     preset: unLocked
 
   # The "reentrancy with ETH" signature is: an outbound ETH transfer followed

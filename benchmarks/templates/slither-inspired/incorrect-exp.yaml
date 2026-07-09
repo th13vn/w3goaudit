@@ -14,15 +14,31 @@ meta:
 query:
   scope: function
 
-  # Require both operands to be numeric literals (e.g. 2^256, 10^18). Bitwise
-  # XOR with at least one non-literal is almost always intentional, so
-  # restricting to literal-only operands eliminates the bulk of FPs while
-  # still catching the classic "developer typed ^ when they meant **" bug.
+  # Flag `^` that looks like exponentiation, not bit manipulation: both operands
+  # are simple values (identifier or decimal number — not a sub-expression, not a
+  # hex mask) AND the enclosing statement has no other bitwise/shift operator.
+  # Catches `base ^ exp`, `2 ^ 8`, `10 ^ 18` while excluding `(a & b) + (a ^ b)/2`,
+  # `(3 * d) ^ 2`, and `x ^ 0xFF`.
   match:
     contains:
       kind: expr.binary_op
-      operator: "^"
+      operator: "\\^"
       left:
-        kind: expr.literal
+        any:
+          - kind: expr.identifier
+          - kind: expr.literal
+            attr:
+              subtype: number
       right:
-        kind: expr.literal
+        any:
+          - kind: expr.identifier
+          - kind: expr.literal
+            attr:
+              subtype: number
+      not:
+        statement_contains:
+          any:
+            - kind: expr.binary_op
+              operator: "&|\\||<<|>>"
+            - kind: expr.unary_op
+              operator: "~"

@@ -17,7 +17,7 @@ query:
   filter:
     all:
       - func_name: '^redeemFresh$'
-      - visibility_filter: internal
+      - visibility: internal
   match:
     contains:
       kind: stmt.assign

@@ -15,7 +15,7 @@ meta:
 query:
   scope: function
   filter:
-    source_regex: '(?m)^\s*(?:[A-Za-z_][A-Za-z0-9_]*(?:\[[^\]]+\])?|\w+\s*==\s*\w+)\s*;'
+    regex: '(?m)^\s*(?:[A-Za-z_][A-Za-z0-9_]*(?:\[[^\]]+\])?|\w+\s*==\s*\w+)\s*;'
   match:
     contains:
       any:

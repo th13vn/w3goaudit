@@ -2,14 +2,18 @@ meta:
   id: MEDIUM-UNCHECKED-ARITHMETIC
   title: Arithmetic in Unchecked Block (Potential Overflow)
   severity: MEDIUM
-  confidence: HIGH
+  confidence: MEDIUM
   description: >
-    Arithmetic operations (+ - * /) are performed inside an unchecked block
-    in a contract compiled with Solidity >=0.8.0. The unchecked keyword removes
-    the automatic overflow/underflow protection added in 0.8.0, making the
-    code behave like pre-0.8.0 — overflows will silently wrap rather than revert.
-    This is intentional in some cases (e.g., gas optimization) but dangerous
-    when applied to critical accounting logic.
+    Arithmetic operations (+ - * /) are performed inside an unchecked block of
+    a STATE-MUTATING function compiled with Solidity >=0.8.0. The unchecked
+    keyword removes the automatic overflow/underflow protection added in 0.8.0,
+    so an overflow silently wraps instead of reverting — dangerous when it feeds
+    persistent accounting (balances, totalSupply, shares). Pure/view functions
+    are excluded: they cannot corrupt state, and overflow there is the
+    deliberate, audited idiom used by library math such as OpenZeppelin
+    `SafeMath.tryAdd`, `Math.mulDiv`, `Math.log10` and `Strings.toString`. This
+    scoping removes the bulk of the false positives this detector raised on
+    vendored libraries while keeping real stateful-accounting overflows.
   recommendation: >
     Remove the unchecked block if overflow/underflow protection is needed.
     If unchecked is used intentionally for gas optimization, add a comment
@@ -24,6 +28,12 @@ query:
 
   filter:
     version: ">=0.8.0"
+    # Overflow only damages persistent state in state-mutating functions.
+    # pure/view library math (SafeMath/Math/Strings) computes bounded local
+    # values and cannot corrupt accounting, so exclude it here. Note: this is
+    # the in-template control; a genuinely vendored dependency tree (lib/,
+    # node_modules/, src/@openzeppelin/) is better excluded by scan scope.
+    mutability: "payable,nonpayable"
 
   match:
     contains:
@@ -31,3 +41,10 @@ query:
       contains:
         kind: expr.binary_op
         operator: "[+\\-*/]"
+        # Only flag arithmetic whose operands were NOT bounded by a preceding
+        # guard. A range check that references every operand — e.g.
+        # `require(oldAllowance >= value); … oldAllowance - value;` (OpenZeppelin
+        # SafeERC20.safeDecreaseAllowance) or `require(b <= a); … a - b;`
+        # (SafeMath.sub) — makes the unchecked op deliberate and safe, so it is
+        # excluded. Arithmetic with no such preceding guard is still reported.
+        unchecked_var: true

@@ -24,7 +24,7 @@ query:
   # rather than authenticating. Slither excludes the same form.
   filter:
     not:
-      source_regex: "(msg\\.sender\\s*==\\s*tx\\.origin|tx\\.origin\\s*==\\s*msg\\.sender)"
+      regex: "(msg\\.sender\\s*==\\s*tx\\.origin|tx\\.origin\\s*==\\s*msg\\.sender)"
 
   match:
     # `tx.origin` inside ANY guard or branch (require / assert / revert /

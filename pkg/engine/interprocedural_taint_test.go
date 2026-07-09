@@ -193,8 +193,16 @@ func TestUncheckedArithmeticTemplateSeesUncheckedBlocks(t *testing.T) {
 	}
 	sort.Strings(got)
 
+	// Safe_GuardedUncheckedSub.withdrawAll is intentionally ABSENT: its
+	// `require(bal >= amount)` is an ordering bound over both operands of
+	// `bal - amount`, so the `unchecked_var:` predicate excludes it.
+	// Vulnerable_NonOrderingGuard.pay IS flagged: `require(bal != amount)`
+	// references both operands but is not an ordering bound. incrementSmall stays
+	// flagged because its `require(amount <= 100)` bounds only one operand of
+	// `balances[user] + amount`.
 	want := []string{
 		"Safe_BoundedUncheckedArithmetic.incrementSmall",
+		"Vulnerable_NonOrderingGuard.pay",
 		"Vulnerable_UncheckedArithmetic.credit",
 	}
 	if !reflect.DeepEqual(got, want) {

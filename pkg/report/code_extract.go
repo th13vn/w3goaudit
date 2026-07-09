@@ -119,3 +119,149 @@ func extractCodeForFinding(finding *engine.Finding, contextLines int) string {
 
 	return strings.Join(lines, "\n") + "\n"
 }
+
+func extractFullFunctionForLocation(location engine.Location) string {
+	if location.File == "" {
+		return "// Code context not available (no source file).\n"
+	}
+	if location.Line == 0 {
+		return "// Code context not available (line unknown).\n"
+	}
+
+	allLines, totalLines, err := readSourceLines(location.File)
+	if err != nil {
+		return fmt.Sprintf("// Unable to read source file: %s\n", location.File)
+	}
+	if location.Line > totalLines {
+		return fmt.Sprintf("// Line %d is past end of file (%d lines). Source may have changed since scan.\n",
+			location.Line, totalLines)
+	}
+
+	start := location.Line
+	if location.Function != "" {
+		for line := location.Line; line > 0 && line > location.Line-80; line-- {
+			if declaresFunction(allLines[line], location.Function) {
+				start = line
+				break
+			}
+		}
+	}
+
+	end := findBlockEnd(allLines, totalLines, start)
+	if end == 0 {
+		end = location.Line + 8
+		if end > totalLines {
+			end = totalLines
+		}
+	}
+
+	lines := make([]string, 0, end-start+1)
+	for i := start; i <= end; i++ {
+		prefix := "  "
+		if i == location.Line {
+			prefix = "→ "
+		}
+		lines = append(lines, fmt.Sprintf("%s%4d | %s", prefix, i, allLines[i]))
+	}
+	return strings.Join(lines, "\n") + "\n"
+}
+
+// declaresFunction reports whether line declares `function <name>` with a word
+// boundary after the name, so a search for `withdraw` does not match a line
+// declaring `withdrawAll`.
+func declaresFunction(line, name string) bool {
+	needle := "function " + name
+	idx := strings.Index(line, needle)
+	if idx < 0 {
+		return false
+	}
+	after := idx + len(needle)
+	if after >= len(line) {
+		return true
+	}
+	c := line[after]
+	isIdent := c == '_' || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')
+	return !isIdent
+}
+
+func readSourceLines(path string) (map[int]string, int, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer file.Close()
+
+	scanner := bufio.NewScanner(file)
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	currentLine := 0
+	allLines := make(map[int]string)
+	for scanner.Scan() {
+		currentLine++
+		allLines[currentLine] = scanner.Text()
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, 0, err
+	}
+	return allLines, currentLine, nil
+}
+
+func findBlockEnd(lines map[int]string, totalLines, start int) int {
+	depth := 0
+	seenOpen := false
+	for i := start; i <= totalLines; i++ {
+		line := stripStringContent(stripLineCommentForReport(lines[i]))
+		for _, r := range line {
+			switch r {
+			case '{':
+				depth++
+				seenOpen = true
+			case '}':
+				if seenOpen {
+					depth--
+					if depth == 0 {
+						return i
+					}
+				}
+			}
+		}
+	}
+	return 0
+}
+
+func stripLineCommentForReport(line string) string {
+	if idx := strings.Index(line, "//"); idx >= 0 {
+		return line[:idx]
+	}
+	return line
+}
+
+func stripStringContent(line string) string {
+	inString := false
+	escaped := false
+	quote := rune(0)
+	out := make([]rune, 0, len(line))
+	for _, r := range line {
+		if inString {
+			if escaped {
+				escaped = false
+				continue
+			}
+			if r == '\\' {
+				escaped = true
+				continue
+			}
+			if r == quote {
+				inString = false
+				quote = 0
+			}
+			continue
+		}
+		if r == '\'' || r == '"' {
+			inString = true
+			quote = r
+			continue
+		}
+		out = append(out, r)
+	}
+	return string(out)
+}

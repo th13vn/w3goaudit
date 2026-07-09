@@ -15,7 +15,7 @@ meta:
 query:
   scope: function
   filter:
-    visibility_filter: public,external
+    visibility: public,external
   match:
     contains:
       any:

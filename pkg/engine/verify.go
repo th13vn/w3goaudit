@@ -70,6 +70,19 @@ func (e *Engine) Verify(node *types.ASTNode, r Rule) (matched bool) {
 		}
 	}
 
+	// UncheckedVar: the (arithmetic) node's operands must NOT be bounded by a
+	// preceding require/assert/if guard. Skips range-checked unchecked math.
+	if r.UncheckedVar && operandsGuardedBefore(node) {
+		return false
+	}
+
+	// StatementContains: the node's nearest enclosing statement must have a
+	// descendant matching the sub-rule. Statement-scoped sibling search (see the
+	// Rule field doc); combine with `not:` for "no such node in this statement".
+	if r.StatementContains != nil && !e.statementContains(node, *r.StatementContains) {
+		return false
+	}
+
 	// ========== LOGIC OPERATORS (all conditions must pass) ==========
 
 	// Handle ALL (AND logic)
@@ -373,7 +386,7 @@ func (e *Engine) matchAtomic(node *types.ASTNode, r Rule) bool {
 	// Check raw source text for the active AST scope. Prefer the node's own
 	// line range when available, then fall back to the current function,
 	// contract, or file context.
-	if r.SourceRegex != "" {
+	if r.Regex != "" {
 		source := e.astNodeSource(node)
 		if source == "" && e.currentFunction != nil {
 			source = e.functionSource(e.currentFunction, e.currentContract)
@@ -384,9 +397,20 @@ func (e *Engine) matchAtomic(node *types.ASTNode, r Rule) bool {
 		if source == "" && e.currentSourceFile != nil {
 			source = e.sourceContent(e.currentSourceFile.Path)
 		}
-		if !sourceRegexMatches(r.SourceRegex, source) {
+		if !sourceRegexMatches(r.Regex, source) {
 			return false
 		}
+	}
+
+	// Check visibility / mutability against the node's attributes (set on
+	// decl.function nodes). Comma-separated "is one of" semantics, e.g.
+	// `visibility: public,external`. The same `visibility:`/`mutability:` keyword
+	// is a function precondition when used in filter: (see verifyFunctionFilters).
+	if r.Visibility != "" && !attrInCSV(node, "visibility", r.Visibility) {
+		return false
+	}
+	if r.Mutability != "" && !attrInCSV(node, "mutability", r.Mutability) {
+		return false
 	}
 
 	// Check taint source
@@ -396,6 +420,29 @@ func (e *Engine) matchAtomic(node *types.ASTNode, r Rule) bool {
 	}
 
 	return true
+}
+
+// attrInCSV reports whether the node's named attribute equals one of the
+// comma-separated, case-insensitive values in csv (e.g. "public,external").
+func attrInCSV(node *types.ASTNode, attr, csv string) bool {
+	// Require the node to actually carry the attribute. Otherwise a non-function
+	// node (no `mutability`/`visibility` attr) would read "" and spuriously match
+	// `mutability: nonpayable`. decl.function nodes always set both attributes
+	// (empty string = the default nonpayable), so this only rejects nodes the
+	// predicate was never meant to apply to.
+	if _, has := node.GetAttribute(attr); !has {
+		return false
+	}
+	got := strings.ToLower(strings.TrimSpace(node.GetAttributeString(attr)))
+	if got == "" && attr == "mutability" {
+		got = "nonpayable" // present-but-empty state mutability is the default nonpayable
+	}
+	for _, v := range strings.Split(csv, ",") {
+		if strings.TrimSpace(strings.ToLower(v)) == got {
+			return true
+		}
+	}
+	return false
 }
 
 // matchLeftRight checks left/right matching for binary expression nodes
@@ -865,7 +912,7 @@ func (e *Engine) verifyAtFunctionWithEnv(fn *types.Function, r Rule, contract *t
 
 	// Split rule into context and AST parts. Logical operators can carry either
 	// kind of predicate, so detect the actual leaves instead of treating all/any
-	// as AST-only. source_regex is intentionally scope-aware and counts as a
+	// as AST-only. regex is intentionally scope-aware and counts as a
 	// context predicate at function scope.
 	hasContext := ruleHasContextFields(r)
 	hasAST := ruleHasASTFields(r)
@@ -896,11 +943,11 @@ func (e *Engine) verifyAtFunctionWithEnv(fn *types.Function, r Rule, contract *t
 	astRule.Version = ""
 	astRule.Preset = ""
 	astRule.FuncName = ""
-	astRule.VisibilityFilter = ""
-	astRule.MutabilityFilter = ""
+	astRule.Visibility = ""
+	astRule.Mutability = ""
 	astRule.HasGuard = nil
 	astRule.HasParam = ""
-	astRule.SourceRegex = ""
+	astRule.Regex = ""
 	if r.Not != nil && r.Not.IsContextOnly() {
 		astRule.Not = nil
 	}
@@ -1254,10 +1301,10 @@ func (e *Engine) checkFunctionContext(fn *types.Function, contract *types.Contra
 		}
 	}
 
-	// Check visibility filter (filter.visibility_filter)
+	// Check visibility precondition (filter.visibility)
 	// Accepts comma-separated list: "public,external"
-	if r.VisibilityFilter != "" {
-		allowed := strings.Split(r.VisibilityFilter, ",")
+	if r.Visibility != "" {
+		allowed := strings.Split(r.Visibility, ",")
 		matched := false
 		fnVis := strings.ToLower(strings.TrimSpace(string(fn.Visibility)))
 		for _, v := range allowed {
@@ -1271,10 +1318,10 @@ func (e *Engine) checkFunctionContext(fn *types.Function, contract *types.Contra
 		}
 	}
 
-	// Check mutability filter (filter.mutability_filter)
+	// Check mutability precondition (filter.mutability)
 	// Accepts comma-separated list: "payable,nonpayable"
-	if r.MutabilityFilter != "" {
-		allowed := strings.Split(r.MutabilityFilter, ",")
+	if r.Mutability != "" {
+		allowed := strings.Split(r.Mutability, ",")
 		matched := false
 		fnMut := strings.ToLower(strings.TrimSpace(string(fn.StateMutability)))
 		if fnMut == "" {
@@ -1291,8 +1338,8 @@ func (e *Engine) checkFunctionContext(fn *types.Function, contract *types.Contra
 		}
 	}
 
-	if r.SourceRegex != "" {
-		if !sourceRegexMatches(r.SourceRegex, e.functionSource(fn, contract)) {
+	if r.Regex != "" {
+		if !sourceRegexMatches(r.Regex, e.functionSource(fn, contract)) {
 			return false
 		}
 	}
@@ -1374,7 +1421,7 @@ func (e *Engine) checkFunctionContext(fn *types.Function, contract *types.Contra
 
 // IsContextOnly returns true if rule only contains context-level checks
 // (modifier, extends, version, preset, func_name, visibility_filter,
-// mutability_filter, has_guard, has_param, source_regex)
+// mutability_filter, has_guard, has_param, regex)
 func (r *Rule) IsContextOnly() bool {
 	return ruleHasContextFields(*r) && !ruleHasASTFields(*r)
 }
@@ -1505,6 +1552,14 @@ func (e *Engine) verifyAtContract(contract *types.Contract, r Rule) bool {
 		return true
 	}
 
+	if ruleHasASTFields(r) {
+		root := e.contractAST(contract)
+		if root == nil {
+			return false
+		}
+		return e.Verify(root, r)
+	}
+
 	if r.Extends != "" {
 		found := false
 		for _, baseName := range contract.LinearizedBases {
@@ -1526,8 +1581,8 @@ func (e *Engine) verifyAtContract(contract *types.Contract, r Rule) bool {
 		return false
 	}
 
-	if r.SourceRegex != "" {
-		if !sourceRegexMatches(r.SourceRegex, e.contractSource(contract)) {
+	if r.Regex != "" {
+		if !sourceRegexMatches(r.Regex, e.contractSource(contract)) {
 			return false
 		}
 	}
@@ -1559,6 +1614,238 @@ func (e *Engine) verifyAtContract(contract *types.Contract, r Rule) bool {
 	return true
 }
 
+// contractAST returns the synthetic `decl.contract` AST for a contract. It is
+// memoized in a single slot (see Engine.contractASTContract/Root) so the match
+// pass and the related-site enrichment for the SAME contract share one tree
+// without rebuilding; a different contract evicts the previous one.
+func (e *Engine) contractAST(contract *types.Contract) *types.ASTNode {
+	if contract == nil {
+		return nil
+	}
+	if e.contractASTContract == contract && e.contractASTRoot != nil {
+		return e.contractASTRoot
+	}
+	root := e.buildContractAST(contract)
+	e.contractASTContract, e.contractASTRoot = contract, root
+	return root
+}
+
+// buildContractAST constructs the synthetic `decl.contract` AST: a root whose
+// children are cloned `decl.function` ASTs from the contract's linearized
+// inheritance chain.
+func (e *Engine) buildContractAST(contract *types.Contract) *types.ASTNode {
+	root := types.NewASTNode(types.KindDeclContract)
+	root.Name = contract.Name
+	root.SetAttribute("kind", string(contract.Kind))
+	if content := e.sourceContent(contract.SourceFile); content != "" {
+		root.StartLine, root.EndLine = sourceContractRange(content, contract.Name)
+	}
+
+	for _, baseName := range contract.LinearizedBases {
+		base := e.db.ResolveContractName(baseName, contract.SourceFile)
+		if base == nil {
+			continue
+		}
+		for _, fn := range base.Functions {
+			if fn == nil || fn.AST == nil {
+				continue
+			}
+			root.AddChild(cloneFunctionAST(fn, base.SourceFile))
+		}
+	}
+	if len(contract.LinearizedBases) == 0 {
+		for _, fn := range contract.Functions {
+			if fn == nil || fn.AST == nil {
+				continue
+			}
+			root.AddChild(cloneFunctionAST(fn, contract.SourceFile))
+		}
+	}
+	return root
+}
+
+func cloneFunctionAST(fn *types.Function, sourceFile string) *types.ASTNode {
+	if fn == nil || fn.AST == nil {
+		return nil
+	}
+	root := cloneASTWithSource(fn.AST, sourceFile)
+	if root == nil {
+		return nil
+	}
+	root.Name = fn.Name
+	root.StartLine = fn.StartLine
+	root.EndLine = fn.EndLine
+	root.SetAttribute("contract", fn.ContractName)
+	if sourceFile != "" {
+		root.SetAttribute("source_file", sourceFile)
+	}
+	return root
+}
+
+func cloneASTWithSource(node *types.ASTNode, sourceFile string) *types.ASTNode {
+	if node == nil {
+		return nil
+	}
+	clone := types.NewASTNode(node.Kind)
+	clone.Name = node.Name
+	clone.Value = node.Value
+	clone.RefID = node.RefID
+	clone.RefKind = node.RefKind
+	clone.TaintSources = append([]string(nil), node.TaintSources...)
+	clone.StartLine = node.StartLine
+	clone.EndLine = node.EndLine
+	for key, value := range node.Attributes {
+		clone.Attributes[key] = value
+	}
+	if sourceFile != "" {
+		clone.Attributes["source_file"] = sourceFile
+	}
+	for _, child := range node.Children {
+		clone.AddChild(cloneASTWithSource(child, sourceFile))
+	}
+	return clone
+}
+
+// operandsGuardedBefore reports whether an arithmetic binary-op node has all of
+// its operand identifiers bounded by an earlier require/assert/if guard in the
+// enclosing function/modifier. It powers the `unchecked_var:` predicate,
+// separating a deliberately range-checked `unchecked` block
+// (`require(a >= b); … a - b;`) from a genuinely unchecked one. A guard counts
+// only when it (a) references EVERY operand identifier and (b) uses an ordering
+// comparison (`<`, `<=`, `>`, `>=`) — so `require(a != b)` or `require(a == b)`
+// before `a - b` does NOT count (they don't bound the subtraction). Requiring
+// all operands and an ordering relation keeps it conservative: real overflow
+// risk is still reported.
+func operandsGuardedBefore(node *types.ASTNode) bool {
+	if node == nil {
+		return false
+	}
+	names := operandIdentifierNames(node)
+	if len(names) == 0 {
+		return false
+	}
+	root := node.FindAncestor(func(a *types.ASTNode) bool {
+		return a.Kind == types.KindDeclFunction || a.Kind == types.KindDeclModifier
+	})
+	if root == nil {
+		return false
+	}
+
+	// Expression/statement nodes carry no reliable StartLine here, so "before" is
+	// determined by document (DFS) order: a guard counts only if it is visited
+	// before the arithmetic node itself. An enclosing `if (a >= b) { … a - b … }`
+	// also counts — its condition is visited before the body. WalkDescendants
+	// stops the whole traversal when the visitor returns false.
+	guarded := false
+	root.WalkDescendants(func(n *types.ASTNode) bool {
+		if n == node {
+			return false // reached the arithmetic; only earlier guards count
+		}
+		if cond := guardCondition(n); cond != nil && conditionBoundsOperands(cond, names) {
+			guarded = true
+			return false
+		}
+		return true
+	})
+	return guarded
+}
+
+// guardCondition returns the condition expression carried by a guard node — the
+// whole require/assert node (its subtree is the condition plus optional message)
+// or an `if` statement's first child — and nil for any other node.
+func guardCondition(n *types.ASTNode) *types.ASTNode {
+	switch n.Kind {
+	case types.KindCheckRequire, types.KindCheckAssert:
+		return n
+	case types.KindStmtIf:
+		if len(n.Children) > 0 {
+			return n.Children[0]
+		}
+	}
+	return nil
+}
+
+// operandIdentifierNames collects the identifier names in a binary op's two
+// operand subtrees (e.g. {oldAllowance, value} for `oldAllowance - value`).
+func operandIdentifierNames(binop *types.ASTNode) map[string]bool {
+	names := make(map[string]bool)
+	var walk func(n *types.ASTNode)
+	walk = func(n *types.ASTNode) {
+		if n == nil {
+			return
+		}
+		if n.Kind == types.KindExprIdentifier && n.Name != "" {
+			names[n.Name] = true
+		}
+		for _, c := range n.Children {
+			walk(c)
+		}
+	}
+	for _, c := range binop.Children {
+		walk(c)
+	}
+	return names
+}
+
+// conditionBoundsOperands reports whether cond bounds the operands: every name
+// in names appears inside cond AND cond contains an ordering comparison
+// (`<`, `<=`, `>`, `>=`). Equality/inequality (`==`/`!=`) do not bound an
+// arithmetic operation, so they are intentionally excluded.
+func conditionBoundsOperands(cond *types.ASTNode, names map[string]bool) bool {
+	seen := make(map[string]bool)
+	hasOrdering := false
+	var walk func(n *types.ASTNode)
+	walk = func(n *types.ASTNode) {
+		if n == nil {
+			return
+		}
+		if n.Kind == types.KindExprIdentifier && names[n.Name] {
+			seen[n.Name] = true
+		}
+		if n.Kind == types.KindExprBinaryOp {
+			switch n.GetAttributeString("operator") {
+			case "<", "<=", ">", ">=":
+				hasOrdering = true
+			}
+		}
+		for _, c := range n.Children {
+			walk(c)
+		}
+	}
+	walk(cond)
+	return hasOrdering && len(seen) == len(names)
+}
+
+// statementContains reports whether the node's nearest enclosing statement has a
+// descendant matching rule. The "statement" is the closest stmt.* / check.* /
+// decl.variable ancestor, so the search is scoped to one statement (not the whole
+// function, which `inside` would over-match across sibling statements). The
+// operator/kind vocabulary lives entirely in rule — the engine stays generic.
+// Powers the `statement_contains:` predicate; templates pair it with `not:` to
+// require the absence of a related node (e.g. a `^` with no sibling bitwise op).
+func (e *Engine) statementContains(node *types.ASTNode, rule Rule) bool {
+	scope := node.FindAncestor(func(a *types.ASTNode) bool {
+		return strings.HasPrefix(string(a.Kind), "stmt.") ||
+			strings.HasPrefix(string(a.Kind), "check.") ||
+			a.Kind == types.KindDeclVariable
+	})
+	if scope == nil {
+		return false
+	}
+	found := false
+	scope.WalkDescendants(func(n *types.ASTNode) bool {
+		if found {
+			return false
+		}
+		if e.Verify(n, rule) {
+			found = true
+			return false
+		}
+		return true
+	})
+	return found
+}
+
 func sourceRegexMatches(pattern, source string) bool {
 	if pattern == "" {
 		return true
@@ -1569,12 +1856,15 @@ func sourceRegexMatches(pattern, source string) bool {
 	return MatchesRegex(pattern, source)
 }
 
+// ruleHasContextFields reports whether the rule tree carries any function/
+// contract precondition. Dual fields (regex/visibility/mutability) count as
+// context here so a dual-only rule routes through the precondition path.
+// Classification comes from presentRuleFields (single source of truth).
 func ruleHasContextFields(r Rule) bool {
-	if r.Modifier != "" || r.Extends != "" || r.Version != "" ||
-		r.Preset != "" || r.FuncName != "" || r.VisibilityFilter != "" ||
-		r.MutabilityFilter != "" || r.HasGuard != nil || r.HasParam != "" ||
-		r.SourceRegex != "" {
-		return true
+	for _, f := range presentRuleFields(&r) {
+		if f.class == classContext || f.class == classDual {
+			return true
+		}
 	}
 	for _, subRule := range r.All {
 		if ruleHasContextFields(subRule) {
@@ -1586,19 +1876,19 @@ func ruleHasContextFields(r Rule) bool {
 			return true
 		}
 	}
-	if r.Not != nil && ruleHasContextFields(*r.Not) {
-		return true
-	}
-	return false
+	return r.Not != nil && ruleHasContextFields(*r.Not)
 }
 
+// ruleHasASTFields reports whether the rule tree carries any AST-level field.
+// Dual fields (regex/visibility/mutability) are NOT AST here — they lean
+// context for routing; contract-scope matches still reach matchAtomic via
+// contains/kind, which check them on the node regardless. Classification comes
+// from presentRuleFields (single source of truth).
 func ruleHasASTFields(r Rule) bool {
-	if len(r.Sequence) > 0 || r.Contains != nil || r.Inside != nil ||
-		r.Kind != "" || r.Name != "" || len(r.Attr) > 0 || len(r.Args) > 0 ||
-		r.TaintedFrom != "" || r.Left != nil || r.Right != nil ||
-		r.Operator != "" || r.IsStateVar != nil || r.Visibility != "" ||
-		r.Mutability != "" {
-		return true
+	for _, f := range presentRuleFields(&r) {
+		if f.class == classAST {
+			return true
+		}
 	}
 	for _, subRule := range r.All {
 		if ruleHasASTFields(subRule) {
@@ -1610,10 +1900,7 @@ func ruleHasASTFields(r Rule) bool {
 			return true
 		}
 	}
-	if r.Not != nil && ruleHasASTFields(*r.Not) {
-		return true
-	}
-	return false
+	return r.Not != nil && ruleHasASTFields(*r.Not)
 }
 
 // hasAtomicPredicate reports whether the rule carries at least one
@@ -1624,7 +1911,7 @@ func ruleHasASTFields(r Rule) bool {
 func hasAtomicPredicate(r Rule) bool {
 	return r.Kind != "" ||
 		r.Name != "" ||
-		r.SourceRegex != "" ||
+		r.Regex != "" ||
 		len(r.Attr) > 0 ||
 		r.IsStateVar != nil ||
 		r.Operator != "" ||
@@ -1646,6 +1933,15 @@ func (e *Engine) hostFunctionFor(node *types.ASTNode) (hostName, hostContract, h
 		switch n.Kind {
 		case types.KindDeclFunction, types.KindDeclModifier:
 			hostName = n.Name
+			if contractName := n.GetAttributeString("contract"); contractName != "" {
+				hostContract = contractName
+			}
+			if sourceFile := n.GetAttributeString("source_file"); sourceFile != "" {
+				hostFile = sourceFile
+			}
+			if n.StartLine > 0 {
+				hostLine = n.StartLine
+			}
 			// Resolve contract via the matched node's chain map (populated
 			// by the interprocedural walker) or from the verifier context.
 			if path, ok := e.ipChains[node]; ok && len(path.Functions) > 0 {
@@ -1658,10 +1954,12 @@ func (e *Engine) hostFunctionFor(node *types.ASTNode) (hostName, hostContract, h
 				}
 				return
 			}
-			if e.currentContract != nil {
+			if e.currentContract != nil && hostContract == "" {
 				hostContract = e.currentContract.Name
+			}
+			if e.currentContract != nil && hostFile == "" {
 				hostFile = e.currentContract.SourceFile
-			} else if e.currentFunction != nil {
+			} else if e.currentFunction != nil && hostContract == "" {
 				hostContract = e.currentFunction.ContractName
 				if c := e.db.GetContractByName(e.currentFunction.ContractName); c != nil {
 					hostFile = c.SourceFile

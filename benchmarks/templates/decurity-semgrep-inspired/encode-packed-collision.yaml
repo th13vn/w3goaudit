@@ -16,8 +16,8 @@ query:
   scope: function
   filter:
     all:
-      - visibility_filter: public,external
-      - source_regex: '(?s)function\s+\w+\([^)]*(?:bytes|string|address\[\]|uint256\[\])\s+\w+[^)]*(?:bytes|string|address\[\]|uint256\[\])\s+\w+'
+      - visibility: public,external
+      - regex: '(?s)function\s+\w+\([^)]*(?:bytes|string|address\[\]|uint256\[\])\s+\w+[^)]*(?:bytes|string|address\[\]|uint256\[\])\s+\w+'
   match:
     any:
       - contains:

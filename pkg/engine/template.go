@@ -34,7 +34,7 @@ const (
 	// ScopeAbstract loops over abstract contract definitions only
 	ScopeAbstract Scope = "abstract"
 	// ScopeSource loops over raw source files. Most templates should use an
-	// AST scope; source_regex is also available as a scoped predicate there.
+	// AST scope; regex is also available as a scoped predicate there.
 	ScopeSource Scope = "source"
 )
 
@@ -79,6 +79,13 @@ type QueryBlock struct {
 // Default logic: ALL fields must match (AND semantics).
 // Aliases are normalized to internal fields during loading.
 type Rule struct {
+	// ========== METADATA ==========
+	// Label is a human-readable name for this rule branch. It carries no
+	// matching semantics; it is surfaced in a finding's related-site list so
+	// contract-scope combination rules can name each matched site (e.g.
+	// "payable msg.value entrypoint"). Optional.
+	Label string `yaml:"label,omitempty" json:"label,omitempty"`
+
 	// ========== LOGIC OPERATORS ==========
 	All []Rule `yaml:"all,omitempty" json:"all,omitempty"`
 	Any []Rule `yaml:"any,omitempty" json:"any,omitempty"`
@@ -91,10 +98,27 @@ type Rule struct {
 	Kind string `yaml:"kind,omitempty" json:"kind,omitempty"`
 	Name string `yaml:"name,omitempty" json:"name,omitempty"`
 
-	// SourceRegex matches raw source text for the active scope. With
+	// Regex (`regex:`) matches raw source text for the active scope. With
 	// query.scope=source it scans the whole file; in contract/function/AST
 	// contexts it checks the scoped source snippet.
-	SourceRegex string `yaml:"source_regex,omitempty" json:"source_regex,omitempty"`
+	Regex string `yaml:"regex,omitempty" json:"regex,omitempty"`
+
+	// StatementContains matches when the node's nearest enclosing statement
+	// (the closest `stmt.*` / `check.*` / `decl.variable` ancestor) has a
+	// descendant matching this sub-rule. It is a statement-scoped sibling search
+	// — narrower than `inside` (any ancestor) and wider than `contains` (this
+	// node's own descendants). Combine with `not:` to require the absence of a
+	// related node in the same statement, e.g. an exponentiation-typo `^` whose
+	// statement holds no other bitwise/shift operator. The operator vocabulary
+	// lives in the template, not the engine.
+	StatementContains *Rule `yaml:"statement_contains,omitempty" json:"statement_contains,omitempty"`
+
+	// UncheckedVar, on an arithmetic binary_op, matches only when the operation's
+	// operands were NOT bounded by a preceding guard (require/assert/if condition
+	// that references every operand identifier) earlier in the same function. It
+	// separates a deliberate, range-checked `unchecked` block — e.g.
+	// `require(a >= b); … a - b;` — from a genuinely unchecked one.
+	UncheckedVar bool `yaml:"unchecked_var,omitempty" json:"unchecked_var,omitempty"`
 
 	// ========== ATTRIBUTES ==========
 	Attr map[string]interface{} `yaml:"attr,omitempty" json:"attr,omitempty"`
@@ -102,8 +126,14 @@ type Rule struct {
 	// Inline attributes (promoted into Attr during normalization)
 	IsStateVar interface{} `yaml:"is_state_var,omitempty" json:"is_state_var,omitempty"`
 	Operator   string      `yaml:"operator,omitempty" json:"operator,omitempty"`
-	Visibility string      `yaml:"visibility,omitempty" json:"visibility,omitempty"`
-	Mutability string      `yaml:"mutability,omitempty" json:"mutability,omitempty"`
+
+	// Visibility / Mutability accept a comma-separated "is one of" list
+	// (`public,external`, `payable,nonpayable`). In a filter: block they are a
+	// function-level precondition; in a match: block they match a node's
+	// visibility/mutability attribute (e.g. a `decl.function` at contract scope).
+	// One keyword, routed by layer — no `_filter` variant.
+	Visibility string `yaml:"visibility,omitempty" json:"visibility,omitempty"`
+	Mutability string `yaml:"mutability,omitempty" json:"mutability,omitempty"`
 
 	// ========== CONTEXT HELPERS (function-level filters) ==========
 	Extends  string `yaml:"extends,omitempty" json:"extends,omitempty"`
@@ -113,16 +143,6 @@ type Rule struct {
 	// Use this in filter blocks to restrict which functions are checked.
 	// Named FuncName to avoid collision with AST `name`.
 	FuncName string `yaml:"func_name,omitempty" json:"func_name,omitempty"`
-
-	// VisibilityFilter restricts matching to functions with the given visibility.
-	// Accepted values: public, external, internal, private
-	// Supports comma-separated list: "public,external"
-	VisibilityFilter string `yaml:"visibility_filter,omitempty" json:"visibility_filter,omitempty"`
-
-	// MutabilityFilter restricts matching to functions with the given mutability.
-	// Accepted values: payable, view, pure, nonpayable
-	// Supports comma-separated list: "payable,nonpayable"
-	MutabilityFilter string `yaml:"mutability_filter,omitempty" json:"mutability_filter,omitempty"`
 
 	// HasGuard checks if the function body contains a require/assert guard
 	// with a specific pattern. Used in filter blocks.
@@ -203,25 +223,14 @@ func finalizeTemplate(tmpl *Template, data []byte, source string) error {
 		return err
 	}
 
-	// Contract scopes only evaluate a small set of fields; reject the rest so
-	// AST/function predicates don't silently match every contract.
-	if isContractScope(tmpl.Query.Scope) {
-		if err := validateContractScopeRule(&tmpl.Query.Match, "match"); err != nil {
-			return err
-		}
-		if err := validateContractScopeRule(tmpl.Query.Filter, "filter"); err != nil {
-			return err
-		}
-	}
-
-	// Source scope is regex-only and reads only a top-level match.source_regex;
-	// a filter or nested source_regex would silently do nothing.
+	// Source scope is regex-only and reads only a top-level match.regex;
+	// a filter or nested regex would silently do nothing.
 	if tmpl.Query.Scope == ScopeSource {
 		if tmpl.Query.Filter != nil {
-			return fmt.Errorf("template %s: scope: source does not support filter: — use a top-level match.source_regex", source)
+			return fmt.Errorf("template %s: scope: source does not support filter: — use a top-level match.regex", source)
 		}
-		if tmpl.Query.Match.SourceRegex == "" {
-			return fmt.Errorf("template %s: scope: source requires a top-level match.source_regex", source)
+		if tmpl.Query.Match.Regex == "" {
+			return fmt.Errorf("template %s: scope: source requires a top-level match.regex", source)
 		}
 	}
 
@@ -285,23 +294,8 @@ func normalizeRule(r *Rule) {
 		r.Attr["operator"] = r.Operator
 		// Don't clear Operator — it's also used for display/debug
 	}
-	// Promote inline visibility/mutability into Attr so they match against the
-	// decl.function node's visibility/mutability attributes. Previously these
-	// fields were declared but never read, so `match: { visibility: external }`
-	// was a silent no-op. (Function-level filtering still uses visibility_filter
-	// / mutability_filter in filter:.)
-	if r.Visibility != "" {
-		if r.Attr == nil {
-			r.Attr = make(map[string]interface{})
-		}
-		r.Attr["visibility"] = r.Visibility
-	}
-	if r.Mutability != "" {
-		if r.Attr == nil {
-			r.Attr = make(map[string]interface{})
-		}
-		r.Attr["mutability"] = r.Mutability
-	}
+	// visibility/mutability are matched directly by matchAtomic (CSV-aware) and
+	// by the function-filter path — no attr promotion needed.
 
 	// Recurse into sub-rules
 	for i := range r.All {
@@ -319,6 +313,7 @@ func normalizeRule(r *Rule) {
 	normalizeRule(r.Left)
 	normalizeRule(r.Right)
 	normalizeRule(r.HasGuard)
+	normalizeRule(r.StatementContains)
 	for k, v := range r.Args {
 		vCopy := v
 		normalizeRule(&vCopy)
@@ -507,58 +502,80 @@ func validateRulePlacement(q *QueryBlock) error {
 	return nil
 }
 
+// fieldClass tags a Rule field by the layer(s) it is valid in.
+type fieldClass uint8
+
+const (
+	classAST     fieldClass = iota // AST-level — only valid in match:
+	classContext                   // function/contract precondition — only valid in filter:
+	classDual                      // valid in both layers
+)
+
+// ruleField is one classified field present on a Rule node.
+type ruleField struct {
+	name  string
+	class fieldClass
+}
+
+// presentRuleFields is the SINGLE source of truth for classifying Rule fields as
+// AST-level, context-level, or dual. It returns the classifiable fields set on r
+// (node-local, no recursion). All three consumers read it — checkRule (placement
+// validation), ruleHasASTFields, and ruleHasContextFields — so adding a field
+// means editing exactly one table. `label` and the logical operators
+// (all/any/not/sequence) are not layer-classified and are intentionally omitted.
+func presentRuleFields(r *Rule) []ruleField {
+	var out []ruleField
+	add := func(present bool, name string, class fieldClass) {
+		if present {
+			out = append(out, ruleField{name, class})
+		}
+	}
+	// AST-level
+	add(r.Kind != "", "kind", classAST)
+	add(r.Name != "", "name", classAST)
+	add(r.Contains != nil, "contains", classAST)
+	add(r.Inside != nil, "inside", classAST)
+	add(len(r.Sequence) > 0, "sequence", classAST)
+	add(len(r.Args) > 0, "args", classAST)
+	add(r.TaintedFrom != "", "tainted_from", classAST)
+	add(r.Left != nil, "left", classAST)
+	add(r.Right != nil, "right", classAST)
+	add(len(r.Attr) > 0, "attr", classAST)
+	add(r.Operator != "", "operator", classAST)
+	add(r.IsStateVar != nil, "is_state_var", classAST)
+	add(r.UncheckedVar, "unchecked_var", classAST)
+	add(r.StatementContains != nil, "statement_contains", classAST)
+	// Context-level
+	add(r.Modifier != "", "modifier", classContext)
+	add(r.Extends != "", "extends", classContext)
+	add(r.FuncName != "", "func_name", classContext)
+	add(r.HasGuard != nil, "has_guard", classContext)
+	add(r.HasParam != "", "has_param", classContext)
+	add(r.Version != "", "version", classContext)
+	add(r.Preset != "", "preset", classContext)
+	// Dual — valid in both layers (precondition in filter:, attribute/scoped
+	// match in match:)
+	add(r.Regex != "", "regex", classDual)
+	add(r.Visibility != "", "visibility", classDual)
+	add(r.Mutability != "", "mutability", classDual)
+	return out
+}
+
 // checkRule recursively walks a rule tree. inMatch=true means we're inside
 // `match:` (AST layer), so context-only fields are forbidden. inMatch=false
-// means `filter:` (context layer), so AST-only fields are forbidden.
+// means `filter:` (context layer), so AST-only fields are forbidden. Dual
+// fields are allowed in either.
 func checkRule(r *Rule, where string, inMatch bool) error {
 	if r == nil {
 		return nil
 	}
 
-	// AST-only fields — forbidden inside filter:.
-	astOnly := map[string]bool{
-		"kind":         r.Kind != "",
-		"name":         r.Name != "",
-		"contains":     r.Contains != nil,
-		"inside":       r.Inside != nil,
-		"sequence":     len(r.Sequence) > 0,
-		"args":         len(r.Args) > 0,
-		"tainted_from": r.TaintedFrom != "",
-		"left":         r.Left != nil,
-		"right":        r.Right != nil,
-		"attr":         len(r.Attr) > 0,
-		"operator":     r.Operator != "",
-		"is_state_var": r.IsStateVar != nil,
-		"visibility":   r.Visibility != "",
-		"mutability":   r.Mutability != "",
-	}
-
-	// Context-only fields — forbidden inside match:.
-	ctxOnly := map[string]bool{
-		"modifier":          r.Modifier != "",
-		"extends":           r.Extends != "",
-		"func_name":         r.FuncName != "",
-		"visibility_filter": r.VisibilityFilter != "",
-		"mutability_filter": r.MutabilityFilter != "",
-		"has_guard":         r.HasGuard != nil,
-		"has_param":         r.HasParam != "",
-		"version":           r.Version != "",
-		"preset":            r.Preset != "",
-	}
-
-	if !inMatch {
-		// In filter:, AST-only fields are forbidden.
-		for field, present := range astOnly {
-			if present {
-				return fmt.Errorf("invalid template: `%s` is an AST-level field and cannot appear inside `filter:` — move it under `match:`", field)
-			}
+	for _, f := range presentRuleFields(r) {
+		if inMatch && f.class == classContext {
+			return fmt.Errorf("invalid template: `%s` is a context-level field and cannot appear inside `match:` — move it under `filter:`", f.name)
 		}
-	} else {
-		// In match:, context-only fields are forbidden.
-		for field, present := range ctxOnly {
-			if present {
-				return fmt.Errorf("invalid template: `%s` is a context-level field and cannot appear inside `match:` — move it under `filter:`", field)
-			}
+		if !inMatch && f.class == classAST {
+			return fmt.Errorf("invalid template: `%s` is an AST-level field and cannot appear inside `filter:` — move it under `match:`", f.name)
 		}
 	}
 
@@ -776,13 +793,14 @@ func (r *Rule) IsEmpty() bool {
 	return len(r.All) == 0 && len(r.Any) == 0 && len(r.Sequence) == 0 &&
 		r.Not == nil && r.Contains == nil && r.Inside == nil &&
 		r.Kind == "" && r.Name == "" && len(r.Attr) == 0 &&
-		r.SourceRegex == "" &&
+		r.Regex == "" &&
 		r.Extends == "" && r.Modifier == "" && len(r.Args) == 0 &&
 		r.TaintedFrom == "" && r.Version == "" && r.Preset == "" &&
 		r.Left == nil && r.Right == nil && r.HasParam == "" &&
-		r.FuncName == "" && r.VisibilityFilter == "" && r.MutabilityFilter == "" &&
+		r.FuncName == "" &&
 		r.HasGuard == nil && r.IsStateVar == nil &&
-		r.Operator == "" && r.Visibility == "" && r.Mutability == ""
+		r.Operator == "" && r.Visibility == "" && r.Mutability == "" &&
+		!r.UncheckedVar && r.StatementContains == nil
 }
 
 // regexCache memoizes compiled regexes so a pattern referenced from N AST
@@ -882,6 +900,9 @@ func walkRules(r *Rule, visit func(*Rule) error) error {
 	if err := walkRules(r.HasGuard, visit); err != nil {
 		return err
 	}
+	if err := walkRules(r.StatementContains, visit); err != nil {
+		return err
+	}
 	// Visit args in sorted key order so error reporting is deterministic.
 	if len(r.Args) > 0 {
 		keys := make([]int, 0, len(r.Args))
@@ -942,7 +963,7 @@ func validateRegexes(r *Rule) error {
 	return walkRules(r, func(n *Rule) error {
 		checks := []struct{ field, pattern string }{
 			{"name", n.Name},
-			{"source_regex", n.SourceRegex},
+			{"regex", n.Regex},
 			{"modifier", n.Modifier},
 			{"extends", n.Extends},
 			{"func_name", n.FuncName},
@@ -989,10 +1010,10 @@ func validateRuleValues(r *Rule) error {
 		if n.TaintedFrom != "" && !validTaintSources[n.TaintedFrom] {
 			return fmt.Errorf("unknown tainted_from %q — must be one of: parameter, state_var, local_var, sender", n.TaintedFrom)
 		}
-		if err := validateCSVVocabulary("visibility_filter", n.VisibilityFilter, validVisibilities); err != nil {
+		if err := validateCSVVocabulary("visibility", n.Visibility, validVisibilities); err != nil {
 			return err
 		}
-		if err := validateCSVVocabulary("mutability_filter", n.MutabilityFilter, validMutabilities); err != nil {
+		if err := validateCSVVocabulary("mutability", n.Mutability, validMutabilities); err != nil {
 			return err
 		}
 		if n.Version != "" {
@@ -1041,17 +1062,6 @@ func validateVersionConstraint(constraint string) error {
 	return nil
 }
 
-// isContractScope reports whether a scope iterates contract definitions (and so
-// is evaluated by verifyAtContract, which only understands name/kind/extends/
-// source_regex/all/any/not).
-func isContractScope(s Scope) bool {
-	switch s {
-	case ScopeContract, ScopeLibrary, ScopeAbstract, ScopeAllContract, ScopeMainContract:
-		return true
-	}
-	return false
-}
-
 // validateScope rejects an unknown scope at load. An empty scope is allowed and
 // defaults to entrypoint (see Engine.Execute); a non-empty unknown scope used to
 // silently fall through to entrypoint, changing what code got scanned.
@@ -1062,64 +1072,4 @@ func validateScope(s Scope) error {
 		return nil
 	}
 	return fmt.Errorf("unknown scope %q — must be one of: source, function, entrypoint, contract, library, abstract, all_contract, main_contract", s)
-}
-
-// contractScopeIgnoredFields reports a field name present in r that
-// verifyAtContract silently ignores at a contract scope (which would make the
-// rule match every contract). Returns "" if none.
-func contractScopeIgnoredField(r *Rule) string {
-	switch {
-	case r.Contains != nil:
-		return "contains"
-	case r.Inside != nil:
-		return "inside"
-	case len(r.Sequence) > 0:
-		return "sequence"
-	case len(r.Args) > 0:
-		return "args"
-	case r.TaintedFrom != "":
-		return "tainted_from"
-	case r.Left != nil:
-		return "left"
-	case r.Right != nil:
-		return "right"
-	case len(r.Attr) > 0:
-		return "attr"
-	case r.Operator != "":
-		return "operator"
-	case r.IsStateVar != nil:
-		return "is_state_var"
-	case r.Visibility != "":
-		return "visibility"
-	case r.Mutability != "":
-		return "mutability"
-	case r.Modifier != "":
-		return "modifier"
-	case r.FuncName != "":
-		return "func_name"
-	case r.VisibilityFilter != "":
-		return "visibility_filter"
-	case r.MutabilityFilter != "":
-		return "mutability_filter"
-	case r.HasGuard != nil:
-		return "has_guard"
-	case r.HasParam != "":
-		return "has_param"
-	case r.Preset != "":
-		return "preset"
-	}
-	return ""
-}
-
-// validateContractScopeRule rejects fields a contract scope cannot evaluate, so
-// e.g. `scope: contract` + `match: { contains: ... }` errors at load instead of
-// matching every contract. Only name/kind/extends/source_regex/version and the
-// all/any/not combinators are supported there.
-func validateContractScopeRule(r *Rule, where string) error {
-	return walkRules(r, func(n *Rule) error {
-		if field := contractScopeIgnoredField(n); field != "" {
-			return fmt.Errorf("invalid template: `%s` is not supported at a contract scope (in %s) — contract scopes only evaluate name, kind, extends, source_regex and all/any/not. Use scope: entrypoint or scope: function for AST or function-level predicates", field, where)
-		}
-		return nil
-	})
 }

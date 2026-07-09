@@ -56,7 +56,7 @@ func checkUnAuthenticated(fn *types.Function, contract *types.Contract, e *Engin
 // revert). This is broader than `unAuthenticated`: it also clears functions that
 // scope the caller without gating to a privileged role.
 func checkUnCheckedSender(fn *types.Function, contract *types.Contract, e *Engine) bool {
-	return !fn.IsAccessControlled(e.db) && !fn.ComparesCallerIdentity()
+	return !fn.IsAccessControlled(e.db) && !fn.ComparesCallerIdentity(e.db)
 }
 
 // checkUnLocked checks if a function does NOT have reentrancy protection

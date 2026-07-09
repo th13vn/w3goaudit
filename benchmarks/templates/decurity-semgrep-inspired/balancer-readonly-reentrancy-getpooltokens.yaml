@@ -17,9 +17,9 @@ query:
   filter:
     all:
       - not:
-          source_regex: 'VaultReentrancyLib\.ensureNotInVaultContext\s*\('
+          regex: 'VaultReentrancyLib\.ensureNotInVaultContext\s*\('
       - not:
-          source_regex: '\.manageUserBalance\s*\('
+          regex: '\.manageUserBalance\s*\('
   match:
     contains:
       kind: call.external

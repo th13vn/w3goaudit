@@ -16,7 +16,7 @@ type SourceFile struct {
 	// Content is the file content.
 	//
 	// Serialized so a `build → JSON → scan --db` round-trip is self-contained:
-	// source-text predicates (`source_regex`, `scope: source`) reproduce the
+	// source-text predicates (`regex`, `scope: source`) reproduce the
 	// same findings without depending on the original files still being present
 	// at their absolute paths. The engine still falls back to reading the file
 	// from disk when Content is empty (e.g. a database produced before this

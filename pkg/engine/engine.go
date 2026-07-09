@@ -4,6 +4,7 @@ import (
 	"os"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/th13vn/w3goaudit/pkg/types"
@@ -58,6 +59,16 @@ type Engine struct {
 	// locationSource(); the env var WGAUDIT_LOCATION_FROM_MATCHED_NODE takes
 	// precedence so CI/scripts can opt in without touching code.
 	locationOverride LocationSource
+
+	// contractASTContract / contractASTRoot are a SINGLE-slot memo of the
+	// synthetic `decl.contract` AST for the contract currently being processed.
+	// The execute loop handles one contract end-to-end (filter → match → related-
+	// site enrichment) before moving on, so this lets verifyAtContract build the
+	// tree once and the enrichment reuse the SAME tree — without holding every
+	// contract's tree for the whole scan (a map would grow unbounded since each
+	// contract is visited only once). Reset at the top of Execute.
+	contractASTContract *types.Contract
+	contractASTRoot     *types.ASTNode
 }
 
 // matchTrace accumulates the metadata needed to build a Finding with
@@ -102,6 +113,7 @@ type Finding struct {
 	Message        string                 `json:"message,omitempty"`
 	Recommendation string                 `json:"recommendation,omitempty"`
 	Location       Location               `json:"location"`
+	Related        []RelatedLocation      `json:"related,omitempty"`
 	Context        map[string]interface{} `json:"context,omitempty"`
 
 	// Reachability records the call chain from an externally-callable entry
@@ -139,6 +151,19 @@ type Location struct {
 	Contract string `json:"contract,omitempty"`
 	Function string `json:"function,omitempty"`
 	Line     int    `json:"line,omitempty"`
+}
+
+// RelatedLocation identifies an additional source site that contributes to a
+// multi-condition finding. Contract-scope combination rules use this to show
+// every exploitable site instead of only the first matched node.
+type RelatedLocation struct {
+	Label    string `json:"label,omitempty"`
+	File     string `json:"file"`
+	Contract string `json:"contract,omitempty"`
+	Function string `json:"function,omitempty"`
+	Line     int    `json:"line,omitempty"`
+	Kind     string `json:"kind,omitempty"`
+	Name     string `json:"name,omitempty"`
 }
 
 // ReachabilityPath records the call chain a finding traversed from an entry
@@ -236,6 +261,7 @@ func newFinding(tmpl *Template, loc Location) *Finding {
 // Execute runs a template and returns findings
 func (e *Engine) Execute(tmpl *Template) []*Finding {
 	VerboseLog("Executing template: %s (ID: %s, Scope: %s)", tmpl.Meta.Title, tmpl.Meta.ID, tmpl.Query.Scope)
+	e.contractASTContract, e.contractASTRoot = nil, nil // fresh per Execute
 	var findings []*Finding
 
 	switch tmpl.Query.Scope {
@@ -268,10 +294,10 @@ func (e *Engine) Execute(tmpl *Template) []*Finding {
 // small and regex-only; AST-aware rules should continue to use function or
 // entrypoint scopes.
 func (e *Engine) executeOnSourceFiles(tmpl *Template) []*Finding {
-	if tmpl.Query.Match.SourceRegex == "" {
+	if tmpl.Query.Match.Regex == "" {
 		return nil
 	}
-	re, err := compileRegexCached(tmpl.Query.Match.SourceRegex)
+	re, err := compileRegexCached(tmpl.Query.Match.Regex)
 	if err != nil || re == nil {
 		return nil
 	}
@@ -408,6 +434,11 @@ func (e *Engine) astNodeSource(node *types.ASTNode) string {
 	if node == nil || node.StartLine <= 0 || node.EndLine <= 0 {
 		return ""
 	}
+	if sourceFile := node.GetAttributeString("source_file"); sourceFile != "" {
+		if snippet := e.sourceSnippet(sourceFile, node.StartLine, node.EndLine); snippet != "" {
+			return snippet
+		}
+	}
 	if e.currentContract != nil && e.currentContract.SourceFile != "" {
 		if snippet := e.sourceSnippet(e.currentContract.SourceFile, node.StartLine, node.EndLine); snippet != "" {
 			return snippet
@@ -484,11 +515,15 @@ func (e *Engine) executeOnAllContracts(tmpl *Template) []*Finding {
 				continue
 			}
 		}
-		if e.VerifyAtContract(contract, tmpl.Query.Match) {
-			findings = append(findings, newFinding(tmpl, Location{
-				File:     contract.SourceFile,
-				Contract: contract.Name,
-			}))
+		trace := &matchTrace{}
+		e.match = trace
+		matched := e.VerifyAtContract(contract, tmpl.Query.Match)
+		e.match = nil
+		if matched {
+			f := newFinding(tmpl, e.buildContractLocation(trace, contract))
+			e.enrichFindingFromTrace(f, trace, nil, contract)
+			e.enrichContractRelatedLocations(f, contract, tmpl.Query.Match)
+			findings = append(findings, f)
 		}
 	}
 
@@ -510,11 +545,15 @@ func (e *Engine) executeOnMainContracts(tmpl *Template) []*Finding {
 				continue
 			}
 		}
-		if e.VerifyAtContract(contract, tmpl.Query.Match) {
-			findings = append(findings, newFinding(tmpl, Location{
-				File:     contract.SourceFile,
-				Contract: contract.Name,
-			}))
+		trace := &matchTrace{}
+		e.match = trace
+		matched := e.VerifyAtContract(contract, tmpl.Query.Match)
+		e.match = nil
+		if matched {
+			f := newFinding(tmpl, e.buildContractLocation(trace, contract))
+			e.enrichFindingFromTrace(f, trace, nil, contract)
+			e.enrichContractRelatedLocations(f, contract, tmpl.Query.Match)
+			findings = append(findings, f)
 		}
 	}
 
@@ -674,6 +713,34 @@ func (e *Engine) buildLocation(trace *matchTrace, verifierFn *types.Function, ve
 	return loc
 }
 
+func (e *Engine) buildContractLocation(trace *matchTrace, contract *types.Contract) Location {
+	loc := Location{}
+	if contract != nil {
+		loc.File = contract.SourceFile
+		loc.Contract = contract.Name
+	}
+	if trace == nil || trace.Primary == nil {
+		return loc
+	}
+
+	hostName, hostContract, hostFile, hostLine := e.hostFunctionFor(trace.Primary)
+	if hostFile != "" {
+		loc.File = hostFile
+	}
+	if hostContract != "" {
+		loc.Contract = hostContract
+	}
+	if hostName != "" {
+		loc.Function = hostName
+	}
+	if hostLine > 0 {
+		loc.Line = hostLine
+	} else if trace.Primary.StartLine > 0 {
+		loc.Line = trace.Primary.StartLine
+	}
+	return loc
+}
+
 // enrichFindingFromTrace populates the new optional fields (Reachability,
 // PrimaryAST, EntryPoint) from the captured trace. Always additive — these
 // fields are populated regardless of LocationSource so consumers can read
@@ -731,6 +798,106 @@ func (e *Engine) enrichFindingFromTrace(f *Finding, trace *matchTrace, verifierF
 		s := f.Reachability.Steps[0]
 		f.EntryPoint = &EntryRef{Contract: s.Contract, Function: s.Function}
 	}
+}
+
+func (e *Engine) enrichContractRelatedLocations(f *Finding, contract *types.Contract, r Rule) {
+	if f == nil || contract == nil || !ruleHasASTFields(r) {
+		return
+	}
+	root := e.contractAST(contract)
+	if root == nil {
+		return
+	}
+	rules := r.All
+	if len(rules) == 0 {
+		rules = []Rule{r}
+	}
+	seen := make(map[string]bool)
+	for i, branch := range rules {
+		label := contractBranchLabel(branch, i)
+		for _, related := range e.collectContractRelatedLocations(root, branch, label) {
+			key := related.File + "|" + related.Contract + "|" + related.Function + "|" + related.Label + "|" + strconv.Itoa(related.Line)
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+			f.Related = append(f.Related, related)
+		}
+	}
+}
+
+func (e *Engine) collectContractRelatedLocations(root *types.ASTNode, r Rule, label string) []RelatedLocation {
+	// The function-targeting sub-rule(s) of this branch. A branch like
+	// `contains: { kind: decl.function, ... }` matches a function as a
+	// descendant of the contract root; we re-identify which function(s) satisfy
+	// it by matching each decl.function/modifier node against those sub-rules.
+	// Collecting ALL of them (not just the first) keeps `any:` branches with
+	// several function shapes faithful. Falls back to the branch itself when it
+	// has no explicit function sub-rule.
+	fnRules := containedFunctionRules(r)
+	if len(fnRules) == 0 {
+		fnRules = []Rule{r}
+	}
+	var out []RelatedLocation
+	root.WalkDescendants(func(n *types.ASTNode) bool {
+		if n.Kind != types.KindDeclFunction && n.Kind != types.KindDeclModifier {
+			return true
+		}
+		for i := range fnRules {
+			if e.Verify(n, fnRules[i]) {
+				out = append(out, e.relatedLocationForNode(n, label))
+				break
+			}
+		}
+		return true
+	})
+	return out
+}
+
+func (e *Engine) relatedLocationForNode(node *types.ASTNode, label string) RelatedLocation {
+	hostName, hostContract, hostFile, hostLine := e.hostFunctionFor(node)
+	return RelatedLocation{
+		Label:    label,
+		File:     hostFile,
+		Contract: hostContract,
+		Function: hostName,
+		Line:     hostLine,
+		Kind:     node.Kind,
+		Name:     node.Name,
+	}
+}
+
+// contractBranchLabel names a matched branch for the related-site list. The
+// name comes from the template's `label:` field on that branch; templates that
+// omit it fall back to a positional "condition N". The engine deliberately
+// holds no per-detector knowledge — labels live in the WQL template.
+func contractBranchLabel(r Rule, idx int) string {
+	if r.Label != "" {
+		return r.Label
+	}
+	return "condition " + strconv.Itoa(idx+1)
+}
+
+// containedFunctionRules returns every decl.function / decl.modifier rule
+// reachable in a branch through `contains` / `all` / `any` (positive paths
+// only). A function-kind rule is returned as-is, with its own sub-structure
+// intact, and recursion stops there. `not:` is skipped — a negated branch
+// describes the ABSENCE of a function, which has no positive related site.
+func containedFunctionRules(r Rule) []Rule {
+	if r.Kind == types.KindDeclFunction || r.Kind == types.KindDeclModifier {
+		return []Rule{r}
+	}
+	var out []Rule
+	if r.Contains != nil {
+		out = append(out, containedFunctionRules(*r.Contains)...)
+	}
+	for i := range r.All {
+		out = append(out, containedFunctionRules(r.All[i])...)
+	}
+	for i := range r.Any {
+		out = append(out, containedFunctionRules(r.Any[i])...)
+	}
+	return out
 }
 
 func (e *Engine) lookupFunctionWithContractByID(funcID string) (*types.Function, *types.Contract) {

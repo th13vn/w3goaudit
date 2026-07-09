@@ -23,7 +23,7 @@ query:
     # Only payable entries can receive ETH — non-payable functions cannot
     # exhibit this bug because msg.value is always 0. Restricting here cuts
     # the FP surface dramatically.
-    mutability_filter: payable
+    mutability: payable
 
   match:
     contains:

@@ -9,7 +9,7 @@ import (
 )
 
 // TestRunScanWritesBundle verifies a scan produces the full result folder:
-// top-level reports, the machine-readable corpus, and per-contract folders.
+// top-level reports, the machine-readable data/ folder, and per-contract folders.
 func TestRunScanWritesBundle(t *testing.T) {
 	resetScanGlobals := func() {
 		templatePath = ""
@@ -46,35 +46,45 @@ func TestRunScanWritesBundle(t *testing.T) {
 	}
 
 	// Top-level artifacts.
-	for _, name := range []string{"overview.md", "findings.md", "results.sarif", "run.log"} {
+	for _, name := range []string{"README.md", "summary.md", "overview.md", "findings.md", "results.sarif", "run.log"} {
 		if _, err := os.Stat(filepath.Join(outDir, name)); err != nil {
 			t.Errorf("expected %s to be created: %v", name, err)
 		}
 	}
 
-	// Corpus (machine-readable mirror).
-	for _, name := range []string{"database.json", "findings.json", "overview.json"} {
-		if _, err := os.Stat(filepath.Join(outDir, "corpus", name)); err != nil {
-			t.Errorf("expected corpus/%s to be created: %v", name, err)
+	// data/ (machine-readable mirror + manifest index).
+	for _, name := range []string{"database.json", "findings.json", "overview.json", "manifest.json"} {
+		if _, err := os.Stat(filepath.Join(outDir, "data", name)); err != nil {
+			t.Errorf("expected data/%s to be created: %v", name, err)
 		}
 	}
 
-	// At least one per-contract folder with a state-changes.md.
-	entries, err := os.ReadDir(outDir)
-	if err != nil {
-		t.Fatalf("reading output dir: %v", err)
+	// The legacy corpus/ folder must NOT exist under the new layout.
+	if _, err := os.Stat(filepath.Join(outDir, "corpus")); err == nil {
+		t.Error("unexpected legacy corpus/ folder in new-layout bundle")
 	}
+
+	// At least one per-contract folder under contracts/ with a README.md,
+	// state-changes.md, mirroring the source path.
 	foundContract := false
-	for _, e := range entries {
-		if e.IsDir() && e.Name() != "corpus" {
-			if _, err := os.Stat(filepath.Join(outDir, e.Name(), "state-changes.md")); err == nil {
-				foundContract = true
-				break
+	err := filepath.WalkDir(filepath.Join(outDir, "contracts"), func(p string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			if _, statErr := os.Stat(filepath.Join(p, "state-changes.md")); statErr == nil {
+				if _, rmErr := os.Stat(filepath.Join(p, "README.md")); rmErr == nil {
+					foundContract = true
+				}
 			}
 		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walking contracts dir: %v", err)
 	}
 	if !foundContract {
-		t.Error("expected at least one per-contract folder with state-changes.md")
+		t.Error("expected a per-contract folder under contracts/ with README.md + state-changes.md")
 	}
 }
 
@@ -91,7 +101,7 @@ func TestResolveOutputDir(t *testing.T) {
 	}
 
 	// A database path uses its stem.
-	if got := resolveOutputDir("", "audit/corpus/database.json", ""); got != "database" {
+	if got := resolveOutputDir("", "audit/data/database.json", ""); got != "database" {
 		t.Errorf("db stem: got %q, want database", got)
 	}
 }

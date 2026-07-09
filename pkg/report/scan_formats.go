@@ -82,16 +82,19 @@ func FormatFindingsAsMarkdown(findings []*engine.Finding, db *types.Database) st
 				location := formatLocation(f)
 				sb.WriteString(fmt.Sprintf("<details>\n<summary>%s</summary>\n\n", location))
 				sb.WriteString(renderFindingTraceMarkdown(f))
-				// Use a fence longer than any backtick run in the excerpt so
-				// source containing ``` cannot break out of the code block.
-				code := extractCodeForFinding(f, 3)
-				fence := mdFence(code)
-				sb.WriteString(fence + "solidity\n")
-				sb.WriteString(code)
-				if !strings.HasSuffix(code, "\n") {
-					sb.WriteString("\n")
+				sb.WriteString(renderRelatedLocationsMarkdown(f))
+				if len(f.Related) == 0 {
+					// Use a fence longer than any backtick run in the excerpt so
+					// source containing ``` cannot break out of the code block.
+					code := extractCodeForFinding(f, 3)
+					fence := mdFence(code)
+					sb.WriteString(fence + "solidity\n")
+					sb.WriteString(code)
+					if !strings.HasSuffix(code, "\n") {
+						sb.WriteString("\n")
+					}
+					sb.WriteString(fence + "\n\n")
 				}
-				sb.WriteString(fence + "\n\n")
 				sb.WriteString("</details>\n\n")
 			}
 
@@ -123,6 +126,57 @@ func FormatFindingsAsMarkdown(findings []*engine.Finding, db *types.Database) st
 	}
 
 	return sb.String()
+}
+
+func renderRelatedLocationsMarkdown(f *engine.Finding) string {
+	if f == nil || len(f.Related) == 0 {
+		return ""
+	}
+	var sb strings.Builder
+	sb.WriteString("**All matched sites**\n\n")
+	for _, loc := range f.Related {
+		label := loc.Label
+		if label == "" {
+			label = "matched site"
+		}
+		sb.WriteString(fmt.Sprintf("- **%s:** `%s`\n", label, formatRelatedLocation(loc)))
+	}
+	sb.WriteString("\n**Matched site context**\n\n")
+	for _, loc := range f.Related {
+		label := loc.Label
+		if label == "" {
+			label = "matched site"
+		}
+		sb.WriteString(fmt.Sprintf("#### %s — `%s`\n\n", label, formatRelatedLocation(loc)))
+		code := extractFullFunctionForLocation(engine.Location{
+			File:     loc.File,
+			Contract: loc.Contract,
+			Function: loc.Function,
+			Line:     loc.Line,
+		})
+		fence := mdFence(code)
+		sb.WriteString(fence + "solidity\n")
+		sb.WriteString(code)
+		if !strings.HasSuffix(code, "\n") {
+			sb.WriteString("\n")
+		}
+		sb.WriteString(fence + "\n\n")
+	}
+	return sb.String()
+}
+
+func formatRelatedLocation(loc engine.RelatedLocation) string {
+	location := relPathForReport(loc.File)
+	if loc.Contract != "" {
+		location += " :: " + loc.Contract
+	}
+	if loc.Function != "" {
+		location += "." + loc.Function + "()"
+	}
+	if loc.Line > 0 {
+		location += fmt.Sprintf(":%d", loc.Line)
+	}
+	return location
 }
 
 // normalizeSeverity uppercases a finding's severity and maps any value outside

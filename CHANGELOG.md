@@ -27,6 +27,127 @@ edits):
 - Requires `github.com/th13vn/solast-go` **v0.1.7**, which added `Loc`/`Range`
   accessors on call/member/index postfix expressions.
 
+## Unreleased — Standardized result-folder layout (output tree)
+
+The result folder was reorganized from a flat pile (an all-contracts
+`overview.md` dump plus one per-contract folder at the top level) into a
+navigable, tool-conventional tree:
+
+- **New root landing files:** `README.md` (counts + a Contents table linking
+  every artifact) and `summary.md` (metrics + findings-by-severity + a rules-hit
+  table sorted by severity then occurrence count).
+- **`overview.md` is now an index, not a dump:** project metrics plus a
+  one-row-per-contract table (entry-point / state-var / finding counts and a link
+  into `contracts/`). The full per-contract detail moved into each contract's own
+  `README.md`.
+- **`corpus/` → `data/`**, and a new **`data/manifest.json`** machine index
+  (tool, scope, counts, every artifact's relative path, and a `contracts[]` list)
+  so a consumer discovers the whole folder from one file. A legacy `corpus/`
+  folder from an older run is removed automatically.
+- **Per-contract folders moved under `contracts/` and mirror source paths:**
+  `contracts/<relative-source-path-without-ext>/<ContractName>/` with a new
+  per-contract `README.md`, plus the existing `state-changes.md` and
+  `workflows/`. Because the path encodes the source file, same-named contracts in
+  different files no longer collide (no `Name__<filestem>` suffix). The
+  `contracts/` tree is regenerated wholesale each run (idempotent; no stale
+  folders).
+- Reuse a pre-built DB via `--db data/database.json` (was `--db
+  corpus/database.json`).
+
+## Unreleased — Engine quality & correctness cleanups
+
+Internal hardening from a self-review of the precision work (no template-syntax
+changes):
+
+- **Contract-scope related sites:** the synthetic `decl.contract` AST is now
+  built **once** per contract and held in a single-slot memo; the match pass and
+  `Finding.Related` enrichment share one tree instead of rebuilding it (bounded
+  memory — a new contract evicts the previous, since each is visited once).
+  Per-branch site collection now gathers *all* function sub-rules of a branch
+  (`containedFunctionRules`), so an `any:` of several function shapes is faithful.
+- **Single field-classification source of truth:** `presentRuleFields()` tags
+  each Rule field `classAST` / `classContext` / `classDual`; `checkRule`,
+  `ruleHasASTFields`, and `ruleHasContextFields` all read it (no more three
+  hand-synced lists).
+- **`unchecked_var`** now requires the bounding guard to use an **ordering**
+  comparison (`<`/`<=`/`>`/`>=`), so `require(a != b); … a - b` is correctly
+  flagged (was a false negative).
+- **`attrInCSV`** requires the node to actually carry the attribute, so
+  `mutability: nonpayable` in `match:` no longer spuriously matches attribute-less
+  nodes.
+- **Report extraction** anchors the function-start search to a word boundary
+  (`function withdraw` no longer matches `withdrawAll`).
+- Renamed the Go field `Rule.SourceRegex` → `Rule.Regex` to match the `regex:`
+  keyword (no YAML change).
+
+## Unreleased — WQL keyword simplification (breaking template syntax)
+
+Template-facing keyword renames toward a simpler, more uniform WQL. Update
+custom templates accordingly (the official pack is already migrated):
+
+- `source_regex:` → `regex:`
+- `visibility_filter:` → `visibility:` and `mutability_filter:` → `mutability:`
+  (one keyword each, valid in both `filter:` and `match:` — function precondition
+  in filter, node-attribute match in match)
+- `unguarded:` → `unchecked_var:`
+- `not_bitwise_context:` (interim) → generic `statement_contains:` sub-rule
+
+Docs (`docs/wql-syntax.md`) rewritten: implicit-AND emphasized (no need to wrap
+sibling fields in `all:`), a complete Node Kinds reference (incl. the Declaration
+group), and a fuller attributes table (`call_receiver`, `has_value`, `has_gas`,
+`has_salt`, `call_option`, `parent`, …).
+
+## Unreleased — Detector precision & access-control accuracy
+
+False-positive reduction across the official pack, validated on a real on-chain
+target (SpiceFiNFT4626) and the competitive benchmark.
+
+### Engine / access-control analysis (`pkg/types/function.go`)
+
+- **Privileged access control vs. item ownership are now distinguished.**
+  `ownerOf(tokenId) == msg.sender` (a getter the caller indexes with a resource
+  id of their own choosing) is item-ownership *self-scoping*, not a privileged
+  gate — `getterIsResourceScoped`. It no longer counts toward `IsAccessControlled`
+  (so `deposit`/`mint`-style functions are no longer mis-marked access-controlled)
+  and instead feeds `ComparesCallerIdentity`.
+- `ComparesCallerIdentity` is now **interprocedural**: it follows a `msg.sender`
+  forwarded into a callee (`_withdraw(msg.sender, …)` → `ownerOf(id) != caller`).
+  The `unCheckedSender` preset therefore treats item-ownership scoping as a valid
+  mitigation (the ETH analogue of `require(from == msg.sender)`).
+- Fixed `unwrapTypeCast` to unwrap only genuine type names (`address`, `uintN`, …)
+  so a one-arg getter like `ownerOf(id)` is no longer mistaken for a cast.
+- Fixed the interprocedural auth descent to resolve callees by bare name
+  (`calleeNameMatches`) — previously it compared against the full selector and
+  silently never matched.
+
+### New WQL predicates (`pkg/engine`)
+
+- `unchecked_var` — on arithmetic `binary_op`, matches only when operands were not
+  range-checked by a preceding `require`/`assert`/`if` guard.
+- `statement_contains` — a generic statement-scoped sibling search (sub-rule
+  matched against the node's nearest enclosing statement). The operator
+  vocabulary lives in the template; used as `not: { statement_contains: … }` by
+  incorrect-exp to exclude a `^` that shares a statement with another bitwise op.
+- `label` — optional name on a `match.all` branch, surfaced in `Finding.Related`.
+
+### Builder
+
+- A `0x…` number literal is now tagged `subtype: hex` (not `number`).
+
+### Official templates
+
+- `arbitrary-send-eth`: `preset: unAuthenticated` → `unCheckedSender` (clears
+  owner-gated NFT-vault withdrawals; still flags genuine arbitrary sends).
+- `incorrect-exp`: flags `base ^ exp` / `2 ^ 8` / `10 ^ 18` (simple operands,
+  `not_bitwise_context`); excludes OpenZeppelin `Math.average`/`mulDiv` and hex masks.
+- `unchecked-arithmetic`: scoped to state-mutating functions and `unchecked_var`
+  arithmetic; excludes pure library math and range-checked subtraction.
+
+### Benchmark
+
+- Competitive corpus: w3goaudit **105/109 found (96.3% recall), 60.0% precision,
+  F1 73.9%** vs slither 33/109 (30.3% / 44.6% / F1 36.1%).
+
 ## v0.3.1 - 2026-06-22
 
 - Removed old benchmark results and scripts from the repository.

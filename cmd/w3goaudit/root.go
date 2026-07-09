@@ -26,9 +26,10 @@ var rootCmd = &cobra.Command{
 	Long: `W3GoAudit - A Go-based static analysis engine for Solidity smart contracts.
 
 Scan a project (or a single .sol file) for security vulnerabilities using WQL
-templates. Results are written to a folder: overview, findings, a machine-readable
-corpus (JSON + SARIF), and one sub-folder per main contract containing per-entry
-workflow files and a state-change report.
+templates. Results are written to a folder: README, summary, overview, findings,
+a machine-readable data/ folder (JSON + SARIF), and one sub-folder per main
+contract (under contracts/, mirroring source paths) containing per-entry workflow
+files and a state-change report.
 
 Examples:
   w3goaudit ./contracts/                       # scan → ./contracts result folder
@@ -36,7 +37,7 @@ Examples:
   w3goaudit ./contracts/ -t ./my-templates/    # use a custom template dir
   w3goaudit ./contracts/ -s high,critical      # only high+critical findings
   w3goaudit ./contracts/ -q                    # print summary only, write nothing
-  w3goaudit -d audit/corpus/database.json      # re-scan a pre-built database`,
+  w3goaudit -d audit/data/database.json        # re-scan a pre-built database`,
 	Args:          cobra.MaximumNArgs(1),
 	RunE:          runScan,
 	SilenceUsage:  true,
@@ -290,9 +291,9 @@ func printResultLocation(dir string, html, plain bool) {
 	}
 	fmt.Println()
 	fmt.Printf("%sResults written to: %s\n", icon, dir)
-	fmt.Printf("   overview.md · findings.md · results.sarif · run.log\n")
-	fmt.Printf("   corpus/ (database.json, findings.json, overview.json)\n")
-	fmt.Printf("   <contract>/ (state-changes.md, workflows/)\n")
+	fmt.Printf("   README.md · summary.md · overview.md · findings.md · results.sarif · run.log\n")
+	fmt.Printf("   data/ (manifest.json, findings.json, overview.json, database.json)\n")
+	fmt.Printf("   contracts/<path>/<Contract>/ (README.md, state-changes.md, workflows/)\n")
 	if html {
 		fmt.Printf("   overview.html · findings.html\n")
 	}
@@ -414,7 +415,7 @@ func printFindings(findings []*engine.Finding, plainMode bool) {
 			// Default console output is title-only to stay within terminal
 			// width — full detail (location, reachability, message,
 			// recommendation) is always written to the result folder
-			// (findings.md / corpus/findings.json). Use --verbose to tee the
+			// (findings.md / data/findings.json). Use --verbose to tee the
 			// full per-finding detail to the terminal as well.
 			if !verbose {
 				fmt.Printf("  %d. %s\n", i+1, title)

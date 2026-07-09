@@ -19,5 +19,5 @@ query:
       - func_name: '^(uniswapV2Call|uniswapV3SwapCallback|uniswapV3FlashCallback|uniswapV3MintCallback)$'
       - preset: unAuthenticated
       - not:
-          source_regex: '(\.verifyCallback\s*\(|\b_?verifyCallback\s*\(|\bisCallback\b)'
+          regex: '(\.verifyCallback\s*\(|\b_?verifyCallback\s*\(|\bisCallback\b)'
   match: {}

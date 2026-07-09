@@ -30,9 +30,9 @@ func TestLoadRejectsBadValues(t *testing.T) {
 			want: "unknown tainted_from",
 		},
 		{
-			name: "bad visibility_filter",
-			yaml: validMeta + "query:\n  scope: entrypoint\n  filter:\n    visibility_filter: exernal\n  match:\n    kind: call.external\n",
-			want: "unknown visibility_filter",
+			name: "bad visibility",
+			yaml: validMeta + "query:\n  scope: entrypoint\n  filter:\n    visibility: exernal\n  match:\n    kind: call.external\n",
+			want: "unknown visibility",
 		},
 		{
 			name: "bad version constraint",
@@ -40,17 +40,12 @@ func TestLoadRejectsBadValues(t *testing.T) {
 			want: "invalid version constraint",
 		},
 		{
-			name: "AST op at contract scope matches everything",
-			yaml: validMeta + "query:\n  scope: contract\n  match:\n    contains:\n      kind: call.external\n",
-			want: "not supported at a contract scope",
-		},
-		{
 			name: "bad severity",
 			yaml: "meta:\n  id: T\n  severity: hgih\n  confidence: HIGH\nquery:\n  scope: entrypoint\n  match:\n    kind: call.external\n",
 			want: "invalid severity",
 		},
 		{
-			name: "source scope without source_regex",
+			name: "source scope without regex",
 			yaml: validMeta + "query:\n  scope: source\n  match:\n    kind: call.external\n",
 			want: "scope: source",
 		},
@@ -79,6 +74,7 @@ func TestLoadAcceptsValidForms(t *testing.T) {
 		"caret version":        validMeta + "query:\n  scope: entrypoint\n  filter:\n    version: ^0.8.0\n  match:\n    kind: call.external\n",
 		"empty scope defaults": "meta:\n  id: T\n  severity: LOW\n  confidence: LOW\nquery:\n  match:\n    kind: call.external\n",
 		"contract scope name":  validMeta + "query:\n  scope: contract\n  match:\n    name: Vault\n",
+		"contract scope AST":   validMeta + "query:\n  scope: contract\n  match:\n    contains:\n      kind: call.external\n",
 	}
 	for name, y := range cases {
 		t.Run(name, func(t *testing.T) {

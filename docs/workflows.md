@@ -170,7 +170,7 @@ graph TD
    surface predicate AND the full branch succeeds, the engine records the
    matched AST node as the finding's `PrimaryAST` (the dangerous statement
    to report). Failed branches roll back their provisional capture.
-3. **Evaluate context helpers**: `modifier`, `extends`, `source_regex`, `has_guard`
+3. **Evaluate context helpers**: `modifier`, `extends`, `regex`, `has_guard`
 4. **Traverse AST** for `contains` (descendants) / `inside` (ancestors) operators
 5. **Check `sequence`** for ordered patterns
 6. **Perform taint analysis** for source tracking, including caller argument bindings when entrypoints invoke internal helpers — the call chain traversed becomes the finding's `Reachability` (entry → … → host of `PrimaryAST`)
@@ -178,7 +178,14 @@ graph TD
 **Advanced features:**
 - **Recursive internal call tracing**: Engine follows entrypoint → helper call chains and maps caller argument taint onto callee parameters; the chain itself is preserved on the finding
 - **Inheritance-aware matching**: Checks base contracts and modifiers
+- **Contract-scope AST matching**: Contract scopes run `match:` on a synthetic
+  `decl.contract` root containing cloned function ASTs from the linearized
+  inheritance chain, so one `match.all` can prove multiple local/inherited
+  same-contract conditions
 - **Argument position matching**: Validates specific function arguments
+- **Related matched sites**: Multi-condition contract findings can carry
+  `Finding.Related`, which reports every contributing source site and not only
+  the primary location
 - **Bug location**: hardcoded to the best provenance — the dangerous-node
   `file:line:col` is the primary anchor, with the `Reachability` chain and
   `EntryPoint` fix-here pointer populated whenever the sink is reached through
@@ -189,7 +196,7 @@ graph TD
 
 The findings, the database, and the summary are written to a single
 **result folder** (`report.WriteBundle`, [bundle.go](../pkg/report/bundle.go)).
-There is no format flag: Markdown + SARIF + a JSON corpus are always produced; an
+There is no format flag: Markdown + SARIF + a JSON data/ are always produced; an
 HTML mirror is opt-in via `--html`.
 
 ```mermaid
@@ -197,7 +204,7 @@ graph TD
     A[Findings + Database + Summary] --> B[WriteBundle]
     B --> C[overview.md / findings.md]
     B --> D[results.sarif]
-    B --> E[corpus/ database.json, findings.json, overview.json]
+    B --> E[data/ database.json, findings.json, overview.json]
     B --> F["per-contract: state-changes.md + workflows/&lt;entryFn&gt;.md"]
     B -->|--html| G[overview.html / findings.html]
     H[CLI] --> I[run.log: full verbose detail, always]
@@ -205,10 +212,11 @@ graph TD
 
 **Top-level artifacts:**
 - `overview.md` — all main contracts with their pragma version, stats, call graphs
-- `findings.md` — severity-sorted findings with recommendation, fix, references,
-  and a per-occurrence reachability trace block
+- `findings.md` — severity-sorted findings with recommendation, fix,
+  references, per-occurrence reachability trace blocks, and `All matched sites`
+  blocks for multi-site findings
 - `results.sarif` — SARIF 2.1.0 (always)
-- `corpus/{database.json,findings.json,overview.json}` — machine-readable mirror;
+- `data/{database.json,findings.json,overview.json}` — machine-readable mirror;
   the canonical database lives only here and is reusable via `--db`
 - `run.log` — full verbose detail, always written by the CLI regardless of `--verbose`
 
@@ -226,9 +234,9 @@ graph TD
 - Location information (file, contract, function, line)
 - Vulnerability description, recommendation, code snippets, confidence
 - **Reachability trace** (when populated): full call chain from entry to host:
-  - JSON — `reachability.steps[]`, `entryPoint`, `primaryAst`
+  - JSON — `reachability.steps[]`, `entryPoint`, `primaryAst`, `related[]`
   - SARIF — `result.relatedLocations[]` + `result.properties.entryPoint` / `…primaryAst`
-  - Markdown — per-occurrence trace block with dotted-level indentation and line numbers per hop
+  - Markdown — per-occurrence trace block with dotted-level indentation and line numbers per hop; related matched sites include full function excerpts
   - HTML — `<div class="w3a-trace">` with depth-scaled `margin-left`
   - Console — `↳ via Entry.func() ⇒ … ⇒ host()` and `↳ fix-here: …` continuation lines
 
@@ -302,7 +310,7 @@ The output JSON contains:
 
 **Purpose:** The scan is the root command (there is no `scan` subcommand). It
 builds the database, runs the templates, prints a terminal summary, and writes
-the result folder (overview, findings, SARIF, run.log, corpus, per-contract
+the result folder (overview, findings, SARIF, run.log, data/, per-contract
 workflows + state-changes).
 
 **Template source:** precedence is `--template` (explicit path) >
@@ -339,7 +347,7 @@ graph LR
     F --> G[Console Summary]
     F --> H[Result Folder]
     H --> I[overview.md / findings.md / results.sarif / run.log]
-    H --> J[corpus/ JSON]
+    H --> J[data/ JSON]
     H --> K[per-contract workflows + state-changes]
     H -->|--html| L[HTML mirror]
 ```
@@ -543,7 +551,7 @@ w3goaudit ./contracts/ \
 4. **Engine** iterates entry functions (scope: entrypoint)
 5. **Engine** verifies each function against template rules
 6. **Engine** creates findings for matches
-7. **Report** writes the `report/` result folder (overview, findings, SARIF, corpus, per-contract workflows + state-changes)
+7. **Report** writes the `report/` result folder (overview, findings, SARIF, data/, per-contract workflows + state-changes)
 8. **CLI** prints the terminal summary and captures full detail in `report/run.log`
 
 **Verbose output shows:**

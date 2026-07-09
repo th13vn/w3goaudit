@@ -227,7 +227,10 @@ Unknown or complex expressions keep the previous heuristic behavior.
 **Literal Subtype (`subtype`):**
 - `buildLiteral()` tags each `expr.literal` with `subtype`: `number`, `string`,
   `bool`, or `hex`. Templates match `attr: { subtype: bool }` to target boolean
-  literals precisely (avoids matching a string literal `"true"`).
+  literals precisely (avoids matching a string literal `"true"`). A `0x…` number
+  literal (e.g. `0xFF`) is tagged `hex`, not `number`, even though the grammar
+  classifies it `NumberLiteral` — so value-vs-bitmask templates (incorrect-exp)
+  treat `10 ^ 18` (decimal, likely `**` typo) differently from `x ^ 0xFF` (mask).
 
 **Assembly Block Handling:**
 - `buildAssemblyBlock()` - Process inline assembly

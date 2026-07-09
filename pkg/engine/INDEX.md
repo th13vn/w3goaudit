@@ -15,8 +15,10 @@ Main query execution engine.
 - `Execute(template)` - Run single template
 - `ExecuteAll(templates)` - Run multiple templates
 - `Finding` struct - Vulnerability finding result (now carries optional
-  `Reachability`, `PrimaryAST`, `EntryPoint`)
+  `Reachability`, `PrimaryAST`, `EntryPoint`, and `Related` matched sites)
 - `Location` struct - Finding location info
+- `RelatedLocation` struct - Additional matched source site for multi-condition
+  findings, including label, file/contract/function/line, and matched node kind/name
 - `ReachabilityPath`, `ReachStep` - Call chain from entry to host of the
   dangerous statement
 - `NodeRef` - Matched AST node identification (kind / name / range)
@@ -44,6 +46,17 @@ documented inline at the struct definition.
 - `library` - Library-type definitions only
 - `abstract` - Abstract contract definitions only
 
+Contract scopes (`all_contract`, `main_contract`, `contract`, `library`,
+`abstract`) evaluate `match:` against a synthetic `decl.contract` AST. Its
+children are cloned `decl.function` AST roots collected from the contract's
+linearized inheritance chain, so structural `contains` rules can span local and
+inherited functions in the same contract context (for example: payable
+`msg.value` accounting plus inherited `Multicall.multicall`). Each `match.all`
+branch may carry an optional `label:` (a `Rule.Label` field, no matching
+semantics) used to name its matched sites in `Finding.Related`; branches with no
+label fall back to a positional `condition N` (`contractBranchLabel`). The
+engine carries no per-detector label knowledge — naming lives in the template.
+
 **Filter Support:**
 - When `filter:` is present, evaluates those rules first
 - Only functions/contracts passing the filter are then checked against `match:`
@@ -59,8 +72,8 @@ documented inline at the struct definition.
 
 **Matched-node attribution & Reachability (additive, opt-in default):**
 
-Every `Finding` carries three optional fields populated whenever the engine
-can determine them; they are always emitted when present, regardless of the
+Every `Finding` carries optional fields populated whenever the engine can
+determine them; they are always emitted when present, regardless of the
 location-source mode:
 
 - `Finding.PrimaryAST` (`*NodeRef`) — the matched AST node's `kind` / `name` /
@@ -73,6 +86,10 @@ location-source mode:
   today this is `Reachability.Steps[0]` (the entry). When the semantic
   access-control analyzer ships, it becomes the highest hop with a
   sub-Verified `AuthVerdict`.
+- `Finding.Related` (`[]RelatedLocation`) — all contributing sites for
+  multi-condition contract-scope findings. For example, a single contract-level
+  issue can list both `depositETH` and `mintETH` payable `msg.value` entrypoints
+  plus the inherited `Multicall.multicall` batch function.
 
 **Location provenance switch:**
 
@@ -99,8 +116,9 @@ The switch is opt-in:
 **How the capture works (internal):**
 
 - `Engine.match *matchTrace` — set to a fresh struct by `executeOnEntryFunctions`
-  before each match attempt; cleared after. Records `Primary` (the first
-  committed atomic match) and `Chain` (the call chain that reached `Primary`).
+  and contract-scope execution before each match attempt; cleared after. Records
+  `Primary` (the first committed atomic match) and `Chain` (the call chain that
+  reached `Primary`).
 - `Verify` populates `e.match.Primary` when `matchAtomic` returns true AND the
   current rule has at least one surface predicate (`hasAtomicPredicate`).
   This means logical containers (`any:`/`contains:`/`sequence:` wrappers)
@@ -117,6 +135,18 @@ The switch is opt-in:
   the optional fields. `hostFunctionFor` walks the matched node's parent
   chain to resolve `decl.function` / `decl.modifier` ancestors and their
   contract.
+- `buildContractLocation` and `enrichContractRelatedLocations` handle
+  contract-scope findings. They build a primary location from the synthetic AST
+  and collect every matching function-level site for top-level `match.all`
+  branches into `Finding.Related`. The synthetic `decl.contract` AST is built
+  **once** per contract and held in a single-slot memo
+  (`Engine.contractASTContract`/`contractASTRoot`, reset each `Execute`; a new
+  contract evicts the previous one — bounded memory since each contract is
+  visited once), so the match pass (`verifyAtContract`) and the related-site
+  enrichment share one tree — no rebuild. Per-branch site collection uses
+  `containedFunctionRules` (all function sub-rules of a branch, so `any:` of
+  several function shapes is faithful), re-matched against each `decl.function`
+  node of the shared tree.
 
 ### verbose.go
 Debug logging infrastructure.
@@ -171,14 +201,16 @@ query:
 **Rule Fields (Default logic is AND if multiple fields are set):**
 - **Logic:** `all`, `any`, `not`, `sequence`
 - **Atomic:** `kind`, `name`, `attr` (+ inline `is_state_var`, `operator`, `visibility`, `mutability`)
-- **Source:** `source_regex` as a scope-aware raw-text predicate
+- **`unchecked_var`:** on an arithmetic `expr.binary_op`, matches only when no preceding `require`/`assert`/`if` guard (document order, same function) both references **every** operand identifier AND uses an **ordering** comparison (`<`/`<=`/`>`/`>=`) — so `require(a != b); … a-b` is still flagged. Distinguishes range-checked `unchecked` math (`require(a>=b); … a-b`) from unprotected. Implemented by `operandsGuardedBefore`/`operandIdentifierNames`/`conditionBoundsOperands` in verify.go.
+- **`statement_contains`:** sub-rule matched against the node's nearest enclosing statement (closest `stmt.*`/`check.*`/`decl.variable` ancestor). Statement-scoped sibling search — narrower than `inside`, wider than `contains`. Generic: the match vocabulary lives in the sub-rule, not the engine. Pair with `not:` for "no such node in this statement" (e.g. incorrect-exp excludes a `^` whose statement holds another bitwise op). Implemented by `statementContains` in verify.go; wired through `normalizeRule`/`walkRules`.
+- **Source:** `regex` as a scope-aware raw-text predicate
 - **Traversal:** `contains`, `inside`
 - **Filter (function-level preconditions):**
   - `modifier` — regex match on function modifiers
   - `extends` — regex match on inherited contracts
   - `func_name` — regex match on function name
-  - `visibility_filter` — comma-separated: `public,external,internal,private`
-  - `mutability_filter` — comma-separated: `payable,view,pure,nonpayable`
+  - `visibility` — comma-separated: `public,external,internal,private`
+  - `mutability` — comma-separated: `payable,view,pure,nonpayable`
   - `has_guard` — rule: function body must contain a matching guard
   - `version` — Solidity version constraint
   - `preset` — built-in preset check
@@ -198,7 +230,7 @@ query:
   aborts the load, and a directory with zero valid templates errors. Use
   `LoadTemplatesWithOptions(dir, TemplateLoadOptions{IgnoreInvalid: true})`
   or `LoadTemplatesLenient()` only when skipping invalid files is intentional.
-- `validateRulePlacement()` rejects AST-level fields inside `filter:` and filter-level fields inside `match:` with a precise error
+- `validateRulePlacement()` rejects AST-level fields inside `filter:` and filter-level fields inside `match:` with a precise error. Field classification lives in **one** table — `presentRuleFields()` tags each field `classAST` / `classContext` / `classDual` — and is the single source of truth shared by `checkRule`, `ruleHasASTFields`, and `ruleHasContextFields`, so adding a field means editing one place. Dual fields (`regex`, `visibility`, `mutability`) are valid in both layers.
 - `validateRegexes()` compiles every regex pattern at load time and
   rejects invalid patterns immediately. A bad regex never silently falls
   back to case-insensitive substring matching.
@@ -216,14 +248,14 @@ query:
   scope is allowed and defaults to `entrypoint`. Previously an unknown scope
   silently fell through to entrypoint, changing what code was scanned.
 - `validateRuleValues()` rejects out-of-vocabulary `tainted_from`
-  (`parameter`/`state_var`/`local_var`/`sender`), `visibility_filter`,
-  `mutability_filter`, and malformed `version:` constraints.
+  (`parameter`/`state_var`/`local_var`/`sender`), `visibility`,
+  `mutability`, and malformed `version:` constraints.
 - `finalizeTemplate()` also rejects an out-of-enum `severity:` (must be
   CRITICAL/HIGH/MEDIUM/LOW/INFO — otherwise the finding vanishes from the
-  Markdown/HTML reports), AST operators at a **contract scope**
-  (`validateContractScopeRule` — they would otherwise match every contract), and
-  a `scope: source` template that lacks a top-level `match.source_regex` or
-  carries a `filter:`.
+  Markdown/HTML reports) and a `scope: source` template that lacks a top-level
+  `match.regex` or carries a `filter:`. Contract scopes now support AST
+  traversal through the synthetic `decl.contract` root, so `contains` / `all` /
+  `any` are valid there.
 - All of the recursive validators share one `walkRules` visitor, so a new Rule
   field is validated in one place instead of N hand-rolled walkers that drift.
 - The same pipeline is shared by `LoadTemplate` (files), `ParseTemplate`
@@ -319,7 +351,7 @@ WQL rule verification logic (THE CORE).
   through a callee's return value.
 
 **Filter Helpers:**
-- `checkFunctionContext()` - Check modifiers, inheritance, func_name, visibility_filter, mutability_filter, has_guard
+- `checkFunctionContext()` - Check modifiers, inheritance, func_name, visibility, mutability, has_guard
 - `VerifyAtFunction()` - Entry point for function-scope verification (auto-separates filter vs AST checks)
 - `VerifyAtFunctionWithCallees()` - Entry-point match helper that follows internal calls with context-sensitive argument taint
 - `VerifyAtContract()` - Entry point for contract-scope verification
@@ -341,7 +373,7 @@ WQL rule verification logic (THE CORE).
 | `state_read` | expr.identifier (state_var) + asm.sload |
 | `any_call` | All Solidity call kinds (no asm), including `call.builtin.selfdestruct` |
 
-**Source regex:** `source_regex` is scope-aware. With `scope: source` it scans
+**Source regex:** `regex` is scope-aware. With `scope: source` it scans
 each raw source file; with contract/function scopes it checks the current
 contract/function snippet; inside AST matching it checks the node source range
 when line data is available. Use it for exact syntax that is not represented
@@ -355,12 +387,12 @@ well in the AST, not as a replacement for context, taint, or call matching.
 | Field | Effect |
 |---|---|
 | `func_name: REGEX` | Filter by function name regex |
-| `visibility_filter: a,b` | Filter by comma-separated visibility values |
-| `mutability_filter: a,b` | Filter by comma-separated mutability values |
+| `visibility: a,b` | Filter by comma-separated visibility values |
+| `mutability: a,b` | Filter by comma-separated mutability values |
 | `has_guard: {rule}` | Function body must contain a check.*/guard node matching rule |
 
 **`IsContextOnly()`:**  
-Returns `true` if a rule contains ONLY filter-level fields (modifier, extends, version, preset, func_name, visibility_filter, mutability_filter, has_guard, has_param, source_regex) and NO AST-level fields (kind, name, contains, etc.).
+Returns `true` if a rule contains ONLY filter-level fields (modifier, extends, version, preset, func_name, visibility, mutability, has_guard, has_param, regex) and NO AST-level fields (kind, name, contains, etc.).
 
 **Binary Matching:**
 - Handles `left`/`right` for member_access, assignment, binary_op
@@ -377,7 +409,7 @@ Built-in preset checks for common patterns.
 
 **Built-in presets:**
 - `unAuthenticated` — `!Function.IsAccessControlled(db)`. Vulnerable when the function lacks **privileged** access control (owner/admin/role modifiers, auth helpers, or a caller-vs-storage / caller-vs-hardcoded-address guard). A caller self-scoping check like `require(from == msg.sender)` does NOT satisfy this — it is not privileged access control.
-- `unCheckedSender` — `!IsAccessControlled(db) && !Function.ComparesCallerIdentity()`. Vulnerable when the function is neither privileged-gated NOR self-scopes the caller (binds a sensitive argument to `msg.sender`). Use for detectors where self-scoping is a valid mitigation (e.g. arbitrary `transferFrom`).
+- `unCheckedSender` — `!IsAccessControlled(db) && !Function.ComparesCallerIdentity(db)`. Vulnerable when the function is neither privileged-gated NOR self-scopes the caller. Self-scoping is interprocedural and includes **item-ownership** scopes — binding a sensitive argument to `msg.sender` (`require(from == msg.sender)`) or restricting the caller to a resource they own (`ownerOf(tokenId) == msg.sender`, including the forwarded `_withdraw(msg.sender,…)` form). Use for detectors where self-scoping is a valid mitigation (arbitrary `transferFrom`, arbitrary-send-eth).
 - `unLocked` — vulnerable when the function lacks a reentrancy guard modifier.
 
 **Polarity reminder:** every preset returns `true` for the **vulnerable**
@@ -411,10 +443,13 @@ filter:
 #### unCheckedSender
 Returns `true` (= vulnerable) when the function has **neither** privileged
 access control **nor** a caller self-scoping check
-(`!IsAccessControlled(db) && !ComparesCallerIdentity()`). Broader than
-`unAuthenticated` — it also clears functions that bind a sensitive argument to
-`msg.sender` (e.g. `require(from == msg.sender)`). Use for detectors where
-self-scoping is a valid mitigation, such as arbitrary `transferFrom`.
+(`!IsAccessControlled(db) && !ComparesCallerIdentity(db)`). Broader than
+`unAuthenticated` — it also clears functions that scope the caller: binding a
+sensitive argument to `msg.sender` (`require(from == msg.sender)`) or
+restricting the caller to a resource they own (`ownerOf(tokenId) == msg.sender`,
+including the interprocedural forwarded `_withdraw(msg.sender,…)` form). Use for
+detectors where self-scoping is a valid mitigation, such as arbitrary
+`transferFrom` and arbitrary-send-eth.
 
 ```yaml
 filter:
@@ -446,8 +481,8 @@ Extended test suite for engine features.
 - `TestMatchKindTokenCall` — token_call semantic group
 - `TestCanonicalSyntaxAccepted` — `filter:` + `match:` parses correctly
 - `TestContextFuncNameFilter` — func_name regex matching
-- `TestContextVisibilityFilter` — visibility_filter comma-separated matching
-- `TestContextMutabilityFilter` — mutability_filter matching
+- `TestContextVisibilityFilter` — visibility comma-separated matching
+- `TestContextMutabilityFilter` — mutability matching
 - `TestContextHasGuard` — has_guard sub-rule matching
 - `TestArgNYAMLParsing` — arg.N YAML key parsing
 - `TestLoadTemplateValidation` — invalid YAML returns error (not silence)
@@ -462,7 +497,7 @@ Template → validateRulePlacement() → normalizeQueryBlock() → Engine → Sc
 ```
 
 **For each scope item:**
-1. Check filter (modifier, extends, func_name, visibility_filter, mutability_filter, has_guard, has_param, source_regex, presets, version)
+1. Check filter (modifier, extends, func_name, visibility, mutability, has_guard, has_param, regex, presets, version)
 2. Verify AST rules in `match:` (kind, name, contains, sequence, etc.)
 3. If match, create Finding with location
 

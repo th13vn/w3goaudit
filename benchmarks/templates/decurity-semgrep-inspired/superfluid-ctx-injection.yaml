@@ -16,7 +16,7 @@ query:
   scope: function
   filter:
     not:
-      source_regex: '\.isCtxValid\s*\('
+      regex: '\.isCtxValid\s*\('
   match:
     contains:
       kind: call.external

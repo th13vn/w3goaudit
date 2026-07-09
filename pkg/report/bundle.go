@@ -22,24 +22,34 @@ type BundleOptions struct {
 // WriteBundle renders a complete result folder for a scan:
 //
 //	<dir>/
-//	├── overview.md
-//	├── findings.md
+//	├── README.md          # landing page (counts + links to everything)
+//	├── summary.md         # metrics + findings-by-severity + rules-hit
+//	├── overview.md        # metrics + in-scope contract index
+//	├── findings.md        # full findings
 //	├── results.sarif
-//	├── corpus/{database.json,findings.json,overview.json}
-//	└── <MainContract>/
+//	├── data/{manifest.json,findings.json,overview.json,database.json}
+//	└── contracts/<relative-source-path-without-ext>/<ContractName>/
+//	    ├── README.md          # per-contract landing (findings + detail)
 //	    ├── state-changes.md
 //	    └── workflows/<entryFn>.md
 //
 // run.log is written separately (it is open for the whole scan), and HTML
 // mirrors are added when opts.HTML is set. The canonical database lives only
-// under corpus/ (reusable via --db).
+// under data/ (reusable via --db). The contracts/ tree is regenerated wholesale
+// on every run so a re-scan is idempotent.
 func WriteBundle(dir string, db *types.Database, summary *SummaryReport, findings []*engine.Finding, tool ToolMeta, opts BundleOptions) error {
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return fmt.Errorf("creating output folder %s: %w", dir, err)
 	}
 
 	// Top-level human reports.
-	if err := writeFile(filepath.Join(dir, "overview.md"), summary.ToMarkdown()); err != nil {
+	if err := writeFile(filepath.Join(dir, "README.md"), FormatFolderReadme(tool, summary, findings)); err != nil {
+		return err
+	}
+	if err := writeFile(filepath.Join(dir, "summary.md"), FormatSummaryMarkdown(tool, summary, findings)); err != nil {
+		return err
+	}
+	if err := writeFile(filepath.Join(dir, "overview.md"), FormatOverviewMarkdown(summary, findings, db)); err != nil {
 		return err
 	}
 	if err := writeFile(filepath.Join(dir, "findings.md"), FormatFindingsAsMarkdown(findings, db)); err != nil {
@@ -55,24 +65,43 @@ func WriteBundle(dir string, db *types.Database, summary *SummaryReport, finding
 		return err
 	}
 
-	// Machine-readable corpus (canonical DB + JSON report mirror).
-	corpus := filepath.Join(dir, "corpus")
-	if err := os.MkdirAll(corpus, 0755); err != nil {
-		return fmt.Errorf("creating corpus folder: %w", err)
+	// Pre-compute each in-scope contract's mirrored folder + finding tally so the
+	// manifest can index them before the folders themselves are written.
+	contractRefs := make([]ContractRef, len(summary.MainContracts))
+	for i, mc := range summary.MainContracts {
+		contractRefs[i] = ContractRef{
+			Name:     mc.Name,
+			Source:   filepath.ToSlash(relPathForReport(mc.SourceFile)),
+			Dir:      contractFolderRel(mc),
+			Findings: len(findingsForContract(findings, mc)),
+		}
+	}
+
+	// Machine-readable data/ (canonical DB + JSON report mirror + manifest index).
+	// Remove any legacy corpus/ folder from an older layout so re-scans migrate.
+	_ = os.RemoveAll(filepath.Join(dir, "corpus"))
+	data := filepath.Join(dir, "data")
+	if err := os.MkdirAll(data, 0755); err != nil {
+		return fmt.Errorf("creating data folder: %w", err)
 	}
 	if dbJSON, err := json.MarshalIndent(db, "", "  "); err != nil {
 		return fmt.Errorf("encoding database JSON: %w", err)
-	} else if err := writeFile(filepath.Join(corpus, "database.json"), string(dbJSON)); err != nil {
+	} else if err := writeFile(filepath.Join(data, "database.json"), string(dbJSON)); err != nil {
 		return err
 	}
 	if ovJSON, err := json.MarshalIndent(BuildOverviewJSON(tool, summary, summary.Stats), "", "  "); err != nil {
 		return fmt.Errorf("encoding overview JSON: %w", err)
-	} else if err := writeFile(filepath.Join(corpus, "overview.json"), string(ovJSON)); err != nil {
+	} else if err := writeFile(filepath.Join(data, "overview.json"), string(ovJSON)); err != nil {
 		return err
 	}
 	if fdJSON, err := json.MarshalIndent(BuildFindingsJSON(tool, findings), "", "  "); err != nil {
 		return fmt.Errorf("encoding findings JSON: %w", err)
-	} else if err := writeFile(filepath.Join(corpus, "findings.json"), string(fdJSON)); err != nil {
+	} else if err := writeFile(filepath.Join(data, "findings.json"), string(fdJSON)); err != nil {
+		return err
+	}
+	if mfJSON, err := json.MarshalIndent(BuildManifest(tool, summary, findings, contractRefs), "", "  "); err != nil {
+		return fmt.Errorf("encoding manifest JSON: %w", err)
+	} else if err := writeFile(filepath.Join(data, "manifest.json"), string(mfJSON)); err != nil {
 		return err
 	}
 
@@ -86,11 +115,10 @@ func WriteBundle(dir string, db *types.Database, summary *SummaryReport, finding
 		}
 	}
 
-	// Per-main-contract folders. Prune any stale contract dirs from a prior run
-	// so a re-scan doesn't leave deleted contracts behind.
-	dirNames := contractDirNames(summary.MainContracts)
-	if err := pruneStaleContractDirs(dir, dirNames); err != nil {
-		return err
+	// Per-main-contract folders under contracts/, mirroring source paths. The
+	// whole tree is regenerated each run, so drop the previous one first.
+	if err := os.RemoveAll(filepath.Join(dir, "contracts")); err != nil {
+		return fmt.Errorf("clearing contracts folder: %w", err)
 	}
 	for i, mc := range summary.MainContracts {
 		// Resolve the summary back to its database contract so we can attach the
@@ -100,7 +128,9 @@ func WriteBundle(dir string, db *types.Database, summary *SummaryReport, finding
 		if c := db.GetContract(types.MakeContractID(mc.SourceFile, mc.Name)); c != nil {
 			smb = newStateMatrixBuilder(db, c)
 		}
-		if err := writeContractFolder(filepath.Join(dir, dirNames[i]), db, mc, smb); err != nil {
+		cdir := filepath.Join(dir, filepath.FromSlash(contractRefs[i].Dir))
+		rootPrefix := rootPrefixFor(contractRefs[i].Dir)
+		if err := writeContractFolder(cdir, db, mc, smb, findings, summary.GitInfo, db.ProjectRoot, rootPrefix); err != nil {
 			return err
 		}
 	}
@@ -108,11 +138,24 @@ func WriteBundle(dir string, db *types.Database, summary *SummaryReport, finding
 	return nil
 }
 
-// writeContractFolder writes state-changes.md and workflows/<entry>.md for one
-// main contract. smb may be nil when the contract could not be resolved.
-func writeContractFolder(cdir string, db *types.Database, mc *ContractSummary, smb *stateMatrixBuilder) error {
+// rootPrefixFor returns the "../" chain that walks from a contract folder (given
+// as a slash path relative to the result root) back up to the root, so links to
+// top-level files resolve at any nesting depth.
+func rootPrefixFor(relDir string) string {
+	depth := strings.Count(relDir, "/") + 1
+	return strings.Repeat("../", depth)
+}
+
+// writeContractFolder writes README.md, state-changes.md and workflows/<entry>.md
+// for one main contract. smb may be nil when the contract could not be resolved.
+func writeContractFolder(cdir string, db *types.Database, mc *ContractSummary, smb *stateMatrixBuilder, findings []*engine.Finding, gitInfo *GitInfo, projectRoot, rootPrefix string) error {
 	if err := os.MkdirAll(cdir, 0755); err != nil {
 		return fmt.Errorf("creating contract folder %s: %w", cdir, err)
+	}
+
+	if err := writeFile(filepath.Join(cdir, "README.md"),
+		FormatContractReadme(mc, findings, gitInfo, projectRoot, rootPrefix)); err != nil {
+		return err
 	}
 
 	var rows []StateRow
@@ -343,31 +386,6 @@ func sanitizeName(s string) string {
 	return s
 }
 
-// contractDirNames assigns a folder name to each main contract, disambiguating
-// duplicate contract names (across files) by appending the source file stem.
-func contractDirNames(contracts []*ContractSummary) []string {
-	counts := make(map[string]int)
-	for _, c := range contracts {
-		counts[c.Name]++
-	}
-	names := make([]string, len(contracts))
-	used := make(map[string]bool)
-	for i, c := range contracts {
-		base := sanitizeName(c.Name)
-		if counts[c.Name] > 1 {
-			stem := fileStem(c.SourceFile)
-			base = sanitizeName(c.Name + "__" + stem)
-		}
-		name := base
-		for n := 2; used[name]; n++ {
-			name = fmt.Sprintf("%s__%d", base, n)
-		}
-		used[name] = true
-		names[i] = name
-	}
-	return names
-}
-
 // workflowFileNames assigns "<entryFn>.md" to each entry function, appending the
 // 4-byte selector hash to disambiguate overloaded names within one contract.
 func workflowFileNames(fns []*FunctionSummary) []string {
@@ -390,42 +408,6 @@ func workflowFileNames(fns []*FunctionSummary) []string {
 		names[i] = name
 	}
 	return names
-}
-
-// fileStem returns the base filename without its extension.
-func fileStem(path string) string {
-	b := filepath.Base(path)
-	return strings.TrimSuffix(b, filepath.Ext(b))
-}
-
-// pruneStaleContractDirs removes contract folders left by a previous scan that
-// are not part of the current set. It only touches directories containing a
-// workflows/ subdir or state-changes.md so it never deletes unrelated files a
-// user may have placed in the output folder.
-func pruneStaleContractDirs(dir string, keep []string) error {
-	keepSet := make(map[string]bool, len(keep))
-	for _, k := range keep {
-		keepSet[k] = true
-	}
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return nil // folder is new; nothing to prune
-	}
-	reserved := map[string]bool{"corpus": true}
-	for _, e := range entries {
-		if !e.IsDir() || keepSet[e.Name()] || reserved[e.Name()] {
-			continue
-		}
-		cdir := filepath.Join(dir, e.Name())
-		_, scErr := os.Stat(filepath.Join(cdir, "state-changes.md"))
-		_, wfErr := os.Stat(filepath.Join(cdir, "workflows"))
-		if scErr == nil || wfErr == nil {
-			if err := os.RemoveAll(cdir); err != nil {
-				return fmt.Errorf("pruning stale contract folder %s: %w", cdir, err)
-			}
-		}
-	}
-	return nil
 }
 
 // writeFile writes content to path, creating parent dirs.

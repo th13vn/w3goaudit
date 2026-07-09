@@ -17,9 +17,9 @@ query:
   filter:
     all:
       - not:
-          source_regex: 'remove_liquidity\s*\('
+          regex: 'remove_liquidity\s*\('
       - not:
-          source_regex: 'claim_admin_fees\s*\('
+          regex: 'claim_admin_fees\s*\('
   match:
     contains:
       kind: call.external

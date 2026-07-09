@@ -9,7 +9,7 @@ import (
 
 // TestSourceContentSurvivesJSONRoundTrip guards the `build -> JSON -> scan --db`
 // path for source-text templates. SourceFile.Content is serialized so a reloaded
-// database is self-contained: `scope: source` / `source_regex` reproduce the
+// database is self-contained: `scope: source` / `regex` reproduce the
 // same findings even when the original files are no longer present on disk
 // (the path below is virtual and never exists, so the engine's os.ReadFile
 // fallback cannot rescue a non-serialized Content).
@@ -31,7 +31,7 @@ func TestSourceContentSurvivesJSONRoundTrip(t *testing.T) {
 		Meta: TemplateMeta{ID: "TEST-SRC-ROUNDTRIP", Severity: "LOW", Confidence: "LOW"},
 		Query: QueryBlock{
 			Scope: ScopeSource,
-			Match: Rule{SourceRegex: "selfdestruct"},
+			Match: Rule{Regex: "selfdestruct"},
 		},
 	}
 

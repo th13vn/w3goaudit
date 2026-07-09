@@ -8,7 +8,7 @@ Every file output is **split into two files**: an overview half (project stats, 
 
 ## Reachability-aware findings — quick map
 
-Every `engine.Finding` can carry three optional structured fields populated
+Every `engine.Finding` can carry optional structured fields populated
 by the engine (see `pkg/engine/INDEX.md`, "Matched-node attribution &
 Reachability"):
 
@@ -16,20 +16,30 @@ Reachability"):
   down to the function that hosts the dangerous statement
 - `EntryPoint` — auditor-actionable fix-here function
 - `PrimaryAST` — kind / name / line of the matched AST node
+- `Related` — additional matched source sites for multi-condition findings
+  (for example all payable `msg.value` entrypoints plus the matching multicall
+  function in one contract-level issue)
 
 Per-format treatment:
 
 | Format            | File                                                                           | Where it renders the trace                                                                                                             |
 | ----------------- | ------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------- |
 | Console           | `cmd/w3goaudit/root.go` *(driver)*                                             | `↳ via …` + `↳ fix-here: …` continuation lines under `Location:`                                                                       |
-| JSON              | `json_split.go` *(passthrough)*                                                | `findings[].reachability.steps[]`, `findings[].entryPoint`, `findings[].primaryAst` — emitted with `omitempty`                         |
+| JSON              | `json_split.go` *(passthrough)*                                                | `findings[].reachability.steps[]`, `findings[].entryPoint`, `findings[].primaryAst`, `findings[].related[]` — emitted with `omitempty` |
 | SARIF 2.1.0       | `sarif.go`                                                                     | One `result.relatedLocations[]` per hop (`entry:` / `hop:` / `host:`); `result.properties.entryPoint` + `result.properties.primaryAst` |
-| Markdown findings | `scan_formats.go::FormatFindingsAsMarkdown` (via `renderFindingTraceMarkdown`) | Dotted-level list block (`.`, `..`, `...`) inside each occurrence `<details>`                                                          |
+| Markdown findings | `scan_formats.go::FormatFindingsAsMarkdown` (via `renderFindingTraceMarkdown` and `renderRelatedLocationsMarkdown`) | Dotted-level trace block plus `All matched sites`; related sites render full function excerpts inside each occurrence `<details>` |
 | HTML findings     | `scan_formats.go::FormatFindingsAsHTML` (via `renderFindingTraceHTML`)         | `<div class="w3a-trace">` with depth-scaled `margin-left` per `<li class="w3a-trace-step">`                                            |
 
 The fields are populated regardless of the `LocationSource` setting on the
 engine; `WGAUDIT_LOCATION_FROM_MATCHED_NODE=1` only changes which step of
 the chain `Location.Function` / `Location.Contract` itself names.
+
+`Finding.Related` is independent of reachability. It is populated for
+contract-scope combination rules so auditors can see every source site that made
+the condition true, not just the first match used as the primary location. Each
+entry's `Label` is taken from the matched `match.all` branch's `label:` field in
+the template (falling back to `condition N`); the engine carries no per-detector
+label vocabulary.
 
 ## Key Files
 
@@ -64,22 +74,29 @@ are byte-stable across runs and diff cleanly.
 
 ### bundle.go
 
-Writes the **result folder** — the default output of a scan (v0.3). One call,
+Writes the **result folder** — the default output of a scan. One call,
 `WriteBundle(dir, db, summary, findings, tool, BundleOptions{HTML})`, produces:
 
 ```
-<dir>/overview.md, findings.md, results.sarif
-<dir>/corpus/{database.json, findings.json, overview.json}   # canonical DB lives here only
-<dir>/<MainContract>/state-changes.md
-<dir>/<MainContract>/workflows/<entryFn>.md
+<dir>/README.md, summary.md, overview.md, findings.md, results.sarif
+<dir>/data/{manifest.json, database.json, findings.json, overview.json}   # canonical DB lives here only
+<dir>/contracts/<rel-src-path-no-ext>/<MainContract>/README.md
+<dir>/contracts/<rel-src-path-no-ext>/<MainContract>/state-changes.md
+<dir>/contracts/<rel-src-path-no-ext>/<MainContract>/workflows/<entryFn>.md
 ```
 
-- Folder name dedup: `contractDirNames` disambiguates duplicate contract names
-  (across files) as `Name__<filestem>`; `workflowFileNames` disambiguates
-  overloaded entries as `<fn>__<selector>.md`. All names go through `sanitizeName`.
-- `pruneStaleContractDirs` removes per-contract folders from a previous run that
-  aren't in the current scan (re-scan is idempotent); it only touches dirs that
-  contain `state-changes.md`/`workflows/` and never `corpus/`.
+- Folder-level docs (README/summary/overview/per-contract README) are rendered by
+  `folder_docs.go`; `manifest.json` by `manifest.go` (see below).
+- Per-contract folders mirror the source layout via `contractFolderRel(mc)` =
+  `contracts/<relPathForReport(src) without ext>/<sanitizeName(Name)>`. Because
+  the path encodes the source file, same-named contracts in different files never
+  collide — no `Name__<filestem>` suffix. `workflowFileNames` still disambiguates
+  overloaded entries as `<fn>__<selector>.md`.
+- `rootPrefixFor(relDir)` returns the `../` chain from a per-contract folder back
+  to the result root, so links in the per-contract README resolve at any depth.
+- Idempotency: the whole `contracts/` tree is `os.RemoveAll`'d and regenerated
+  each run (no stale-folder pruning needed); a legacy `corpus/` folder is also
+  removed so older bundles migrate to `data/`.
 - `renderStateChanges(mc, rows)` renders the reachability matrix (see
   `state_matrix.go`); falls back to a plain variable list when rows are absent.
 - `renderWorkflow(mc, fn, *types.FunctionEffects, stateWrites)` renders one
@@ -89,6 +106,34 @@ Writes the **result folder** — the default output of a scan (v0.3). One call,
   from `Database.Semantics.FunctionEffects` (builder Phase 7).
 - `run.log` is NOT written here — the CLI owns it (open for the whole scan).
   HTML mirrors are added only when `BundleOptions.HTML` is set.
+
+### folder_docs.go
+
+Renders the folder-level human documents (the pieces that reorganized the bundle
+into a navigable tree):
+
+- `FormatFolderReadme(tool, summary, findings)` → `README.md` landing page:
+  headline counts + a Contents table linking every artifact.
+- `FormatSummaryMarkdown(tool, summary, findings)` → `summary.md`: project
+  metrics, findings-by-severity, and a rules-hit table (`renderRulesHit`, sorted
+  by severity then occurrence count).
+- `FormatOverviewMarkdown(summary, findings, db)` → `overview.md`: metrics plus a
+  one-row-per-contract **index** table (with per-contract finding counts and a
+  link into `contracts/`). Replaces the old inline per-contract dump.
+- `FormatContractReadme(mc, findings, gitInfo, projectRoot, rootPrefix)` →
+  per-contract `README.md`: header, "Findings in this contract" table, detail
+  links, then the architectural detail via `mc.renderRestOfContract()`.
+- Helpers: `contractFolderRel(mc)` (source-mirroring folder path),
+  `findingsForContract`, `renderProjectMetrics`, `renderSeverityCounts`.
+
+### manifest.go
+
+`BuildManifest(tool, summary, findings, contractRefs)` → `data/manifest.json`,
+the machine-readable index of the whole folder: `schemaVersion`, `tool`,
+`generatedAt`, `target`, finding `counts` (reuses `FindingsCounts`), compact
+`stats`, a `files` map of every artifact's relative path, and a `contracts[]`
+list (`ContractRef`: name, source, dir, findings) so a consumer discovers the
+tree from one file.
 
 ### state_matrix.go
 
@@ -142,6 +187,20 @@ Static Markdown report renderer.
 - `ToMarkdown()` - Renders `SummaryReport` to Markdown string.
 - `renderInheritanceFlattened()` - Single-line C3 MRO (derived → base).
 
+### scan_formats.go
+
+Findings Markdown/HTML renderers.
+
+**Markdown findings behavior:**
+- `FormatFindingsAsMarkdown(findings, db)` groups by severity/template and
+  renders one `<details>` block per occurrence.
+- `renderFindingTraceMarkdown(f)` renders reachability / primary-node context
+  when present.
+- `renderRelatedLocationsMarkdown(f)` renders `All matched sites` for
+  `Finding.Related` and then emits one full function code block per related
+  site. This is used by contract-scope combination findings where multiple
+  source sites jointly prove the issue.
+
 ### summary.go
 Output structures for reports.
 
@@ -180,7 +239,7 @@ Schema-stable JSON output structures.
 The JSON renderer is a passthrough — every exported field on `engine.Finding`
 is serialized. In addition to the established
 `template_id` / `severity` / `confidence` / `title` / `message` /
-`recommendation` / `location` / `references[]` / `fix` keys, three optional
+`recommendation` / `location` / `references[]` / `fix` keys, optional
 structured fields are emitted (with `omitempty`) when the engine has them:
 
 ```jsonc
@@ -193,13 +252,24 @@ structured fields are emitted (with `omitempty`) when the engine has them:
     ]
   },
   "entryPoint": { "contract": "...", "function": "...", "authVerdict": "", "authReasons": [] },
-  "primaryAst": { "kind": "call.external", "name": "transferFrom", "startLine": 352 }
+  "primaryAst": { "kind": "call.external", "name": "transferFrom", "startLine": 352 },
+  "related": [
+    {
+      "label": "payable msg.value entrypoint",
+      "file": ".../Vault.sol",
+      "contract": "Vault",
+      "function": "depositETH",
+      "line": 120,
+      "kind": "decl.function",
+      "name": "depositETH"
+    }
+  ]
 }
 ```
 
-These keys are absent in JSON for findings without a chain (e.g. contract-
-scope or source-scope matches), so today's JSON consumers parse the same
-shape they did before — the new fields are strictly additive.
+These keys are absent in JSON when the engine does not populate them, so today's
+JSON consumers parse the same shape they did before — the new fields are
+strictly additive.
 
 ### sarif.go
 
@@ -261,7 +331,7 @@ prints only the numbered finding title per severity group on the terminal,
 because the full per-finding block overflowed narrow terminals on large scans.
 The full detail (`Location:`, `Confidence:`, `Details:`, and the reachability
 continuation below) is always written to the result folder (`findings.md`,
-`corpus/findings.json`) and is teed to the terminal only when `--verbose` is
+`data/findings.json`) and is teed to the terminal only when `--verbose` is
 set. The footer prints a one-line hint pointing at the result folder /
 `--verbose` when not verbose.
 
@@ -387,22 +457,32 @@ for _, f := range findings {
 
 ## File Layout
 
-A scan writes a **result folder** (v0.3) via `WriteBundle` (`bundle.go`):
+A scan writes a **result folder** via `WriteBundle` (`bundle.go`):
 
 ```
 <output>/
-├── overview.md            # SummaryReport.ToMarkdown(); pragma Version per contract
+├── README.md              # FormatFolderReadme (landing page: counts + links)
+├── summary.md             # FormatSummaryMarkdown (metrics + severity + rules-hit)
+├── overview.md            # FormatOverviewMarkdown (metrics + in-scope contract index)
 ├── findings.md            # FormatFindingsAsMarkdown
 ├── results.sarif          # FormatFindingsAsSARIF (always)
 ├── run.log                # written by the CLI (always)
-├── corpus/                # machine-readable mirror
-│   ├── database.json      # canonical DB (reuse via --db corpus/database.json)
+├── data/                  # machine-readable mirror
+│   ├── manifest.json      # BuildManifest — index of tool/scope/counts/files/contracts
+│   ├── database.json      # canonical DB (reuse via --db data/database.json)
 │   ├── findings.json      # BuildFindingsJSON
 │   └── overview.json      # BuildOverviewJSON
-└── <MainContract>/
+└── contracts/<rel-src-path-no-ext>/<MainContract>/
+    ├── README.md          # FormatContractReadme (findings + architecture detail)
     ├── state-changes.md   # reachability matrix (state_matrix.go)
     └── workflows/<entryFn>.md
 ```
+
+`overview.md` is now a navigable index (project metrics + a one-row-per-contract
+table linking into `contracts/`), NOT a per-contract inline dump — the full
+per-contract detail lives in each `contracts/.../README.md`. `SummaryReport.ToMarkdown`
+(the old inline dump) is retained for `ToHTML`/SDK callers but no longer drives
+`overview.md`.
 
 `--html` additionally emits `overview.html` + `findings.html`. The default
 folder name and the `--stdout` (no-files) path are owned by

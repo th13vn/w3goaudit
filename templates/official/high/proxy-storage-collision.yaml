@@ -22,7 +22,7 @@ query:
     extends: '(UpgradeabilityProxy|AdminUpgradeabilityProxy|OwnedUpgradeabilityProxy|TransparentUpgradeableProxy|ERC1967Proxy)'
   match:
     all:
-      - source_regex: '(?m)^\s*[A-Za-z_][A-Za-z0-9_<>,\[\] ]+\s+(?:public|private|internal)?\s*[A-Za-z_][A-Za-z0-9_]*\s*(?:=|;)'
-      - source_regex: '\bconstructor\s*\('
+      - regex: '(?m)^\s*[A-Za-z_][A-Za-z0-9_<>,\[\] ]+\s+(?:public|private|internal)?\s*[A-Za-z_][A-Za-z0-9_]*\s*(?:=|;)'
+      - regex: '\bconstructor\s*\('
       - not:
-          source_regex: '(?m)^\s*[A-Za-z_][A-Za-z0-9_<>,\[\] ]+\s+(?:immutable|constant)\b'
+          regex: '(?m)^\s*[A-Za-z_][A-Za-z0-9_<>,\[\] ]+\s+(?:immutable|constant)\b'

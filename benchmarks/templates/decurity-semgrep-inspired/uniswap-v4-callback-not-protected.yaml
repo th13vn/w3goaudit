@@ -17,7 +17,7 @@ query:
   filter:
     all:
       - func_name: '^(beforeInitialize|afterInitialize|beforeAddLiquidity|afterAddLiquidity|beforeRemoveLiquidity|afterRemoveLiquidity|beforeSwap|afterSwap|beforeDonate|afterDonate)$'
-      - visibility_filter: external
+      - visibility: external
       - preset: unAuthenticated
       - not:
           modifier: '(?i)onlyPoolManager'

@@ -20,7 +20,8 @@ meta:
 
 query:
   scope: entrypoint
-
+  filter:
+    mutability: payable
   match:
     # `kind: delegatecall` is the semantic group covering both
     # call.lowlevel.delegatecall and asm.delegatecall. Wrapping it in

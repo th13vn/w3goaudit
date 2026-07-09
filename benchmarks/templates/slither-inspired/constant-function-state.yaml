@@ -18,7 +18,7 @@ query:
   scope: function
 
   filter:
-    mutability_filter: view,pure
+    mutability: view,pure
 
   match:
     contains:

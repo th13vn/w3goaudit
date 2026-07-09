@@ -17,7 +17,7 @@ query:
   filter:
     all:
       - func_name: '.*burnFrom.*'
-      - source_regex: '(?:_allowances|allowance)\s*(?:\[|\()'
+      - regex: '(?:_allowances|allowance)\s*(?:\[|\()'
   match:
     sequence:
       - kind: check.require

@@ -111,8 +111,8 @@ query:
 	}
 }
 
-func TestSourceRegexAcceptedInFilterAndMatch(t *testing.T) {
-	yamlWithScopedSourceRegex := `
+func TestRegexAcceptedInFilterAndMatch(t *testing.T) {
+	yamlWithScopedRegex := `
 meta:
   id: TEST-SOURCE-REGEX-SCOPE
   title: "source regex scope"
@@ -122,19 +122,19 @@ meta:
 query:
   scope: function
   filter:
-    source_regex: "onlyFunctionBody"
+    regex: "onlyFunctionBody"
   match:
-    source_regex: "rawSnippetPredicate"
+    regex: "rawSnippetPredicate"
 `
-	tmpl, err := ParseTemplate(yamlWithScopedSourceRegex)
+	tmpl, err := ParseTemplate(yamlWithScopedRegex)
 	if err != nil {
-		t.Fatalf("ParseTemplate should accept source_regex in filter and match: %v", err)
+		t.Fatalf("ParseTemplate should accept regex in filter and match: %v", err)
 	}
-	if tmpl.Query.Filter == nil || tmpl.Query.Filter.SourceRegex == "" {
-		t.Fatal("expected filter.source_regex to be preserved")
+	if tmpl.Query.Filter == nil || tmpl.Query.Filter.Regex == "" {
+		t.Fatal("expected filter.regex to be preserved")
 	}
-	if tmpl.Query.Match.SourceRegex == "" {
-		t.Fatal("expected match.source_regex to be preserved")
+	if tmpl.Query.Match.Regex == "" {
+		t.Fatal("expected match.regex to be preserved")
 	}
 }
 
@@ -174,7 +174,7 @@ func TestContextFuncNameFilter(t *testing.T) {
 	}
 }
 
-func TestContextVisibilityFilter(t *testing.T) {
+func TestContextVisibility(t *testing.T) {
 	db := types.NewDatabase()
 	e := New(db)
 
@@ -201,16 +201,16 @@ func TestContextVisibilityFilter(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			rule := Rule{VisibilityFilter: tt.visibilityFilter}
+			rule := Rule{Visibility: tt.visibilityFilter}
 			result := e.VerifyAtFunction(tt.fn, rule, contract)
 			if result != tt.expected {
-				t.Errorf("VisibilityFilter %q = %v, want %v", tt.visibilityFilter, result, tt.expected)
+				t.Errorf("Visibility %q = %v, want %v", tt.visibilityFilter, result, tt.expected)
 			}
 		})
 	}
 }
 
-func TestContextMutabilityFilter(t *testing.T) {
+func TestContextMutability(t *testing.T) {
 	db := types.NewDatabase()
 	e := New(db)
 
@@ -236,16 +236,16 @@ func TestContextMutabilityFilter(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			rule := Rule{MutabilityFilter: tt.mutabilityFilter}
+			rule := Rule{Mutability: tt.mutabilityFilter}
 			result := e.VerifyAtFunction(tt.fn, rule, contract)
 			if result != tt.expected {
-				t.Errorf("MutabilityFilter %q = %v, want %v", tt.mutabilityFilter, result, tt.expected)
+				t.Errorf("Mutability %q = %v, want %v", tt.mutabilityFilter, result, tt.expected)
 			}
 		})
 	}
 }
 
-func TestSourceRegexScopedFunctionAndFilter(t *testing.T) {
+func TestRegexScopedFunctionAndFilter(t *testing.T) {
 	db := types.NewDatabase()
 	e := New(db)
 
@@ -278,28 +278,28 @@ func TestSourceRegexScopedFunctionAndFilter(t *testing.T) {
 	}
 	db.AddContract(contract)
 
-	t.Run("source_regex matches current function source", func(t *testing.T) {
-		result := e.VerifyAtFunction(fn, Rule{SourceRegex: `emit\s+Flagged`}, contract)
+	t.Run("regex matches current function source", func(t *testing.T) {
+		result := e.VerifyAtFunction(fn, Rule{Regex: `emit\s+Flagged`}, contract)
 		if !result {
-			t.Fatal("expected source_regex to match function source")
+			t.Fatal("expected regex to match function source")
 		}
 	})
 
-	t.Run("source_regex can compose with function filters", func(t *testing.T) {
+	t.Run("regex can compose with function filters", func(t *testing.T) {
 		rule := Rule{All: []Rule{
-			{SourceRegex: `emit\s+Flagged`},
-			{VisibilityFilter: "external"},
+			{Regex: `emit\s+Flagged`},
+			{Visibility: "external"},
 		}}
 		result := e.VerifyAtFunction(fn, rule, contract)
 		if !result {
-			t.Fatal("expected source_regex and visibility_filter to match together")
+			t.Fatal("expected regex and visibility to match together")
 		}
 	})
 
-	t.Run("source_regex rejects non-matching scoped source", func(t *testing.T) {
-		result := e.VerifyAtFunction(fn, Rule{SourceRegex: `NotHere`}, contract)
+	t.Run("regex rejects non-matching scoped source", func(t *testing.T) {
+		result := e.VerifyAtFunction(fn, Rule{Regex: `NotHere`}, contract)
 		if result {
-			t.Fatal("expected source_regex to reject non-matching function source")
+			t.Fatal("expected regex to reject non-matching function source")
 		}
 	})
 }
@@ -328,6 +328,152 @@ func TestContractContextAllExtends(t *testing.T) {
 	}}
 	if e.VerifyAtContract(contract, missingBase) {
 		t.Fatal("expected contract to reject missing inherited base")
+	}
+}
+
+func TestContractScopeASTMatchesInheritedAndLocalFunctions(t *testing.T) {
+	db := types.NewDatabase()
+
+	main := &types.Contract{
+		ID:              types.MakeContractID("Vault.sol", "Vault"),
+		Name:            "Vault",
+		SourceFile:      "Vault.sol",
+		Kind:            types.ContractKindContract,
+		LinearizedBases: []string{"Vault", "Multicall"},
+	}
+	depositRoot := types.NewASTNode(types.KindDeclFunction)
+	depositRoot.Name = "depositETH"
+	depositRoot.StartLine = 10
+	depositRoot.EndLine = 20
+	depositRoot.SetAttribute("visibility", "external")
+	depositRoot.SetAttribute("mutability", "payable")
+	msgValue := types.NewASTNode(types.KindExprMemberAccess)
+	msgValue.Name = "value"
+	msgValue.StartLine = 12
+	msgValue.EndLine = 12
+	msgValue.SetAttribute("parent", "msg")
+	depositRoot.AddChild(msgValue)
+	mintRoot := types.NewASTNode(types.KindDeclFunction)
+	mintRoot.Name = "mintETH"
+	mintRoot.StartLine = 22
+	mintRoot.EndLine = 35
+	mintRoot.SetAttribute("visibility", "external")
+	mintRoot.SetAttribute("mutability", "payable")
+	mintMsgValue := types.NewASTNode(types.KindExprMemberAccess)
+	mintMsgValue.Name = "value"
+	mintMsgValue.StartLine = 24
+	mintMsgValue.EndLine = 24
+	mintMsgValue.SetAttribute("parent", "msg")
+	mintRoot.AddChild(mintMsgValue)
+	main.Functions = []*types.Function{{
+		Name:            "depositETH",
+		ContractName:    "Vault",
+		Visibility:      types.VisibilityExternal,
+		StateMutability: types.StateMutabilityPayable,
+		StartLine:       10,
+		EndLine:         20,
+		AST:             depositRoot,
+	}, {
+		Name:            "mintETH",
+		ContractName:    "Vault",
+		Visibility:      types.VisibilityExternal,
+		StateMutability: types.StateMutabilityPayable,
+		StartLine:       22,
+		EndLine:         35,
+		AST:             mintRoot,
+	}}
+
+	multicall := &types.Contract{
+		ID:         types.MakeContractID("Multicall.sol", "Multicall"),
+		Name:       "Multicall",
+		SourceFile: "Multicall.sol",
+		Kind:       types.ContractKindAbstract,
+	}
+	multicallRoot := types.NewASTNode(types.KindDeclFunction)
+	multicallRoot.Name = "multicall"
+	multicallRoot.StartLine = 30
+	multicallRoot.EndLine = 40
+	multicallRoot.SetAttribute("visibility", "external")
+	loop := types.NewASTNode(types.KindStmtLoop)
+	loop.SetAttribute("loop_type", "for")
+	delegate := types.NewASTNode(types.KindCallExternal)
+	delegate.Name = "functionDelegateCall"
+	loop.AddChild(delegate)
+	multicallRoot.AddChild(loop)
+	multicall.Functions = []*types.Function{{
+		Name:         "multicall",
+		ContractName: "Multicall",
+		Visibility:   types.VisibilityExternal,
+		StartLine:    30,
+		EndLine:      40,
+		AST:          multicallRoot,
+	}}
+
+	db.AddContract(main)
+	db.AddContract(multicall)
+	db.MainContracts[main.ID] = &types.MainContractEntry{}
+	e := New(db)
+
+	rule := Rule{All: []Rule{
+		{Label: "payable msg.value entrypoint", Contains: &Rule{
+			Kind:       types.KindDeclFunction,
+			Mutability: "payable",
+			Contains: &Rule{
+				Kind: types.KindExprMemberAccess,
+				Name: "^value$",
+				Left: &Rule{Name: "^msg$"},
+			},
+		}},
+		{Label: "batch delegatecall entrypoint", Contains: &Rule{
+			Kind: types.KindDeclFunction,
+			Name: "(?i)multicall",
+			Contains: &Rule{
+				Kind: types.KindStmtLoop,
+				Contains: &Rule{Any: []Rule{
+					{Kind: "delegatecall"},
+					{Kind: types.KindCallExternal, Name: "functionDelegateCall"},
+				}},
+			},
+		}},
+	}}
+
+	if !e.VerifyAtContract(main, rule) {
+		t.Fatal("expected contract-scope AST rule to match local payable msg.value and inherited multicall")
+	}
+
+	tmpl := &Template{
+		Meta: TemplateMeta{ID: "T", Severity: "HIGH", Confidence: "HIGH"},
+		Query: QueryBlock{
+			Scope: ScopeMainContract,
+			Match: rule,
+		},
+	}
+	findings := e.Execute(tmpl)
+	if len(findings) != 1 {
+		t.Fatalf("Execute() findings = %d, want 1", len(findings))
+	}
+	if findings[0].Location.Line == 0 || findings[0].Location.Function != "depositETH" {
+		t.Fatalf("contract-scope finding location = %+v, want depositETH with nonzero line", findings[0].Location)
+	}
+	gotRelated := map[string]bool{}
+	gotLabels := map[string]string{}
+	for _, loc := range findings[0].Related {
+		gotRelated[loc.Function] = true
+		gotLabels[loc.Function] = loc.Label
+	}
+	for _, want := range []string{"depositETH", "mintETH", "multicall"} {
+		if !gotRelated[want] {
+			t.Fatalf("related locations missing %s: %+v", want, findings[0].Related)
+		}
+	}
+	// Labels come from the template branch's `label:` field, not engine
+	// hardcoding. The payable sites carry the payable label; multicall carries
+	// the batch label.
+	if got := gotLabels["depositETH"]; got != "payable msg.value entrypoint" {
+		t.Fatalf("depositETH label = %q, want %q", got, "payable msg.value entrypoint")
+	}
+	if got := gotLabels["multicall"]; got != "batch delegatecall entrypoint" {
+		t.Fatalf("multicall label = %q, want %q", got, "batch delegatecall entrypoint")
 	}
 }
 
@@ -543,8 +689,8 @@ func TestIsContextOnly(t *testing.T) {
 	}{
 		{"modifier only", Rule{Modifier: "onlyOwner"}, true},
 		{"func_name only", Rule{FuncName: "^withdraw$"}, true},
-		{"visibility_filter only", Rule{VisibilityFilter: "public"}, true},
-		{"mutability_filter only", Rule{MutabilityFilter: "payable"}, true},
+		{"visibility only", Rule{Visibility: "public"}, true},
+		{"mutability only", Rule{Mutability: "payable"}, true},
 		{"has_guard only", Rule{HasGuard: &Rule{Kind: "check.require"}}, true},
 		{"kind only — NOT context", Rule{Kind: "call.external"}, false},
 		{"contains only — NOT context", Rule{Contains: &Rule{Kind: "call.external"}}, false},

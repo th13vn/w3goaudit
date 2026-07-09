@@ -88,8 +88,9 @@ the full results are written to a **result folder** (see
 2. **Summary header** — severity counts, elapsed time, contract count
 3. **Findings** — grouped by severity. The console shows **titles only** (one
    line per finding) to stay within terminal width; full per-finding detail
-   (location, reachability trace, message, recommendation) is written to the
-   result folder (`findings.md`, `corpus/findings.json`). Re-run with
+   (location, reachability trace, related matched sites, message,
+   recommendation) is written to the result folder (`findings.md`,
+   `data/findings.json`). Re-run with
    `--verbose` to tee the full detail to the terminal as well.
 4. **⚠ Unresolved references** — bases/imports the builder could not resolve (when any)
 5. **Result location** — where the folder landed
@@ -98,7 +99,7 @@ the full results are written to a **result folder** (see
 
 ```bash
 w3goaudit <path> [flags]
-w3goaudit --db <corpus/database.json> [flags]
+w3goaudit --db <data/database.json> [flags]
 ```
 
 #### Flags
@@ -109,7 +110,7 @@ Every flag has a long and short form.
 | ---------------------------- | ----- | ------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `--output`                   | `-o`  | string | Result folder path. Default: a folder named after the scanned project dir (or `.sol` file stem); `-audit` is appended if that would collide with the scanned dir |
 | `--template`                 | `-t`  | string | Template file or directory. Precedence: `--template` > `~/.w3goaudit/templates/` (when populated) > embedded official pack                                       |
-| `--db`                       | `-d`  | string | Load a pre-built database JSON (e.g. `corpus/database.json`) instead of parsing source                                                                           |
+| `--db`                       | `-d`  | string | Load a pre-built database JSON (e.g. `data/database.json`) instead of parsing source                                                                           |
 | `--verbose`                  | `-v`  | bool   | Show detailed progress on the terminal. Full detail is **always** written to `run.log` regardless of this flag                                                   |
 | `--severity`                 | `-s`  | string | Report **exactly** these severities, comma-separated (e.g. `high,critical`)                                                                                      |
 | `--min-severity`             | `-m`  | string | Report findings at or above this threshold (`critical`/`high`/`medium`/`low`/`info`)                                                                             |
@@ -128,11 +129,11 @@ Every flag has a long and short form.
 
 **Behavior notes:**
 
-- **Markdown is the human format and JSON lives in `corpus/`** — there are no
+- **Markdown is the human format and JSON lives in `data/`** — there are no
   `--json`/`--md`/`--format` flags. SARIF (`results.sarif`) and the verbose
   `run.log` are always written.
-- The result folder is **overwritten in place** on a re-scan; stale per-contract
-  folders from a previous run are pruned.
+- The result folder is **overwritten in place** on a re-scan; the `contracts/`
+  tree is regenerated wholesale, so no stale per-contract folders survive.
 - `--template README.md` is rejected before YAML parsing — only `.yaml` /
   `.yml` files or directories are accepted.
 - Template directories fail closed by default. A malformed template, missing
@@ -193,8 +194,8 @@ w3goaudit ./contracts/ -q
 # Build once
 w3goaudit build ./contracts/ -o db.json
 
-# …or reuse the corpus DB from a previous scan
-w3goaudit -d ./contracts/corpus/database.json
+# …or reuse the DB (data/database.json) from a previous scan
+w3goaudit -d ./contracts/data/database.json
 ```
 
 **List the active template set (no path required):**
@@ -229,9 +230,9 @@ w3goaudit ./contracts/ -v
   (full detail in the result folder; re-run with --verbose for console detail)
 
 📂 Results written to: ./contracts-audit
-   overview.md · findings.md · results.sarif · run.log
-   corpus/ (database.json, findings.json, overview.json)
-   <contract>/ (state-changes.md, workflows/)
+   README.md · summary.md · overview.md · findings.md · results.sarif · run.log
+   data/ (manifest.json, findings.json, overview.json, database.json)
+   contracts/<path>/<Contract>/ (README.md, state-changes.md, workflows/)
 ```
 
 ---
@@ -243,19 +244,25 @@ to be fed to a human or an AI auditor:
 
 ```
 <output>/
-├── overview.md            # all main contracts; pragma Version per contract
+├── README.md              # landing page: counts + links to everything
+├── summary.md             # metrics + findings-by-severity + rules-hit tables
+├── overview.md            # metrics + in-scope contract index (table, links into contracts/)
 ├── findings.md            # human-readable findings
 ├── results.sarif          # SARIF 2.1.0 (always)
 ├── run.log                # full verbose detail (always; replaces --log)
-├── corpus/                # machine-readable JSON
-│   ├── database.json      # canonical DB — reuse via --db corpus/database.json
+├── data/                  # machine-readable output
+│   ├── manifest.json      # index: tool, scope, counts, file list, per-contract refs
+│   ├── database.json      # canonical DB — reuse via --db data/database.json
 │   ├── findings.json
 │   └── overview.json
-└── <MainContract>/        # one folder per main contract
-    ├── state-changes.md   # state var → Written By (fns) → Reachable From (entries)
-    └── workflows/
-        ├── <entryFn>.md             # one file per entry function
-        └── <entryFn>__<selector>.md # overloads disambiguated by 4-byte selector
+└── contracts/             # one sub-tree per main contract, mirroring source paths
+    └── <relative-source-path-without-ext>/
+        └── <ContractName>/
+            ├── README.md          # per-contract landing: findings + architecture detail
+            ├── state-changes.md   # state var → Written By (fns) → Reachable From (entries)
+            └── workflows/
+                ├── <entryFn>.md             # one file per entry function
+                └── <entryFn>__<selector>.md # overloads disambiguated by 4-byte selector
 ```
 
 **Naming & dedup:**
@@ -264,13 +271,18 @@ to be fed to a human or an AI auditor:
   file stem). `-o/--output` overrides the full path. If the default would equal
   the scanned directory, `-audit` is appended so source is never overwritten.
   `config.yml: output.base_dir` redirects where default-named folders are created.
-- Duplicate main-contract names (the same name in different files) get
-  `Name__<filestem>/`; otherwise a clean `Name/`. All names are sanitized to
-  filesystem-safe components.
-- `corpus/database.json` is the **only** copy of the database; reuse it with
-  `--db corpus/database.json`.
+- Per-contract folders live under `contracts/` and mirror the source layout:
+  `contracts/<relative-source-path-without-ext>/<ContractName>/`. Because the
+  path already encodes the source file, contracts that share a name in different
+  files never collide — no `Name__<filestem>` suffix is needed. Contract names
+  are sanitized to filesystem-safe components.
+- The `contracts/` tree is regenerated wholesale on every run, so a re-scan is
+  idempotent (no stale folders from deleted contracts).
+- `data/database.json` is the **only** copy of the database; reuse it with
+  `--db data/database.json`.
 
-**Per-entry-function workflow file** (`<MainContract>/workflows/<entryFn>.md`)
+**Per-entry-function workflow file**
+(`contracts/<path>/<Contract>/workflows/<entryFn>.md`)
 is a self-contained context block for one entry point:
 
 - **Signature** — selector, 4-byte hash, `payable`, pragma version of the file
@@ -709,7 +721,7 @@ See [SDK Documentation](./sdk.md) for full API reference.
 ## Result Folder & Artifacts
 
 A scan writes one result folder (see [Result Folder Layout](#result-folder-layout)).
-`results.sarif`, `run.log`, and the `corpus/` JSON are always produced; the HTML
+`results.sarif`, `run.log`, and the `data/` JSON are always produced; the HTML
 mirror is opt-in via `--html/-H`.
 
 ### Console (Terminal)
@@ -735,31 +747,31 @@ By default the console lists **finding titles only** (one line each) so output
 fits the terminal; the `Location:`/`Confidence:`/`Details:` block and the
 reachability continuation shown above are printed to the terminal only under
 `--verbose`. The full detail is always written to `findings.md` and
-`corpus/findings.json` in the result folder.
+`data/findings.json` in the result folder.
 
 ### Markdown — `overview.md` + `findings.md`
 
 | File          | Content                                                                                                                                                                                                                                                                                                             |
 | ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `overview.md` | All main contracts with their pragma version, stats, Mermaid call graphs, inheritance, entry-point tables                                                                                                                                                                                                           |
-| `findings.md` | Severity-sorted findings with recommendation, suggested fix, and references. Each occurrence includes a **reachability trace block** — file path, entry-point (fix-here), and a dotted-level list (`.`, `..`, `...`) from the entry function down to the host of the dangerous statement, with line numbers per hop |
+| `findings.md` | Severity-sorted findings with recommendation, suggested fix, and references. Each occurrence includes a **reachability trace block** when present — file path, entry-point (fix-here), and a dotted-level list (`.`, `..`, `...`) from the entry function down to the host of the dangerous statement, with line numbers per hop. Multi-site findings also include `All matched sites` and full matched-function excerpts |
 
 Per-main-contract folders add `state-changes.md` and one
 `workflows/<entryFn>.md` per entry point (see
 [Result Folder Layout](#result-folder-layout) for their structure).
 
-### JSON — `corpus/`
+### JSON — `data/`
 
 Machine-readable mirror; each carries `schemaVersion: "2.0.0"`.
 
 | File                   | Content                                                           |
 | ---------------------- | ----------------------------------------------------------------- |
-| `corpus/database.json` | Canonical database (reusable via `--db`); carries pragma versions |
-| `corpus/overview.json` | `{ schemaVersion, tool, generatedAt, stats, overview }`           |
-| `corpus/findings.json` | `{ schemaVersion, tool, generatedAt, counts, findings[] }`        |
+| `data/database.json` | Canonical database (reusable via `--db`); carries pragma versions |
+| `data/overview.json` | `{ schemaVersion, tool, generatedAt, stats, overview }`           |
+| `data/findings.json` | `{ schemaVersion, tool, generatedAt, counts, findings[] }`        |
 
 Each finding includes optional `references[]`, `fix`, and `recommendation`.
-Findings that traversed an internal call chain also carry structured fields:
+Findings can also carry structured context fields:
 
 ```jsonc
 {
@@ -772,12 +784,28 @@ Findings that traversed an internal call chain also carry structured fields:
       { "contract": "VulnerableSwappedArgsForward", "function": "_commit",     "visibility": "internal", "line": 352 }
     ]
   },
-  "entryPoint": { "contract": "VulnerableSwappedArgsForward", "function": "depositFrom" }
+  "entryPoint": { "contract": "VulnerableSwappedArgsForward", "function": "depositFrom" },
+  "related": [
+    {
+      "label": "payable msg.value entrypoint",
+      "file": ".../Vault.sol",
+      "contract": "Vault",
+      "function": "depositETH",
+      "line": 120,
+      "kind": "decl.function",
+      "name": "depositETH"
+    }
+  ]
 }
 ```
 
 `reachability.steps[0]` is the externally-callable entry; the last step hosts the
 dangerous statement. `entryPoint` is the auditor-actionable fix-here pointer.
+`related[]` lists every source site that contributed to a multi-condition
+finding, such as each payable `msg.value` function and the inherited multicall
+function in a contract-scope combination rule. Each entry's `label` is taken
+from the matched `match.all` branch's `label:` field in the template (falling
+back to `condition N` when the branch has none).
 
 ### HTML (`--html/-H`) — Accessible
 
