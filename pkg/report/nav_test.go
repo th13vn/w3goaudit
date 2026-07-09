@@ -91,7 +91,7 @@ func TestBuildNavJSON_InterfaceImpl(t *testing.T) {
 	var found bool
 	for _, ii := range nav.InterfaceImpl {
 		if ii.Method == "transfer(address,uint256)" &&
-			contains(ii.Interface, "IToken") && contains(ii.Implementation, "Token.") {
+			contains(ii.Interface, "IToken") && contains(ii.Implementation, "#Token.") {
 			found = true
 		}
 	}

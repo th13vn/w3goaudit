@@ -124,15 +124,27 @@ type implRef struct {
 }
 
 // findImpl walks c's MRO derived-first and returns the first non-interface
-// function whose selector matches (most-derived override wins).
+// function with a real body whose selector matches (most-derived override
+// wins). The first entry of LinearizedBases (index 0) is c itself by C3
+// linearization semantics, so it is resolved via the c pointer directly
+// rather than by name: db.GetContractByName can pick the wrong contract when
+// multiple contracts across files share the same name.
 func findImpl(db *types.Database, c *types.Contract, selector string) *implRef {
-	for _, baseName := range c.LinearizedBases {
-		base := db.GetContractByName(baseName)
+	for i, baseName := range c.LinearizedBases {
+		var base *types.Contract
+		if i == 0 {
+			base = c
+		} else {
+			base = db.GetContractByName(baseName)
+		}
 		if base == nil || base.Kind == types.ContractKindInterface {
 			continue
 		}
 		for _, fn := range base.Functions {
-			if fn.Selector == selector {
+			// fn.AST == nil means the function has no body (an interface
+			// declaration or an abstract/virtual re-declaration) and does
+			// not count as an implementation.
+			if fn.Selector == selector && fn.AST != nil {
 				return &implRef{contractFile: base.SourceFile, contractName: base.Name}
 			}
 		}
