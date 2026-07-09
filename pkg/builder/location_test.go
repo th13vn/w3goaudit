@@ -53,10 +53,10 @@ func TestStateVariableHasLocation(t *testing.T) {
 	db := buildFixture(t, statementsFixture)
 	c := db.GetContractByName("StatementForms")
 	if c == nil {
-		t.Skip("fixture has no StatementForms contract with state vars")
+		t.Fatalf("precondition: fixture should have StatementForms contract with state vars")
 	}
 	if len(c.StateVariables) == 0 {
-		t.Skip("fixture contract has no state variables")
+		t.Fatalf("precondition: fixture contract should have state variables")
 	}
 	for _, sv := range c.StateVariables {
 		if sv.StartLine == 0 {
@@ -81,7 +81,7 @@ func TestCallSiteHasColumn(t *testing.T) {
 		}
 	}
 	if !found {
-		t.Skip("fixture has no resolved call sites")
+		t.Fatalf("precondition: fixture should have resolved call sites")
 	}
 }
 
@@ -115,6 +115,19 @@ func TestLocationSurvivesJSONRoundTrip(t *testing.T) {
 		t.Fatal("precondition: function should have col or byte before round-trip")
 	}
 
+	if fn.AST == nil {
+		t.Fatal("precondition: function should have an AST")
+	}
+	interior := fn.AST.CollectDescendants(func(n *types.ASTNode) bool {
+		return n.StartLine != 0
+	})
+	if len(interior) == 0 {
+		t.Fatal("precondition: function AST should have an interior node with a StartLine")
+	}
+	wantNode := interior[0]
+	wantKind, wantNodeLine := wantNode.Kind, wantNode.StartLine
+	wantNodeCol, wantNodeByte := wantNode.StartCol, wantNode.StartByte
+
 	data, err := json.Marshal(db)
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
@@ -128,5 +141,19 @@ func TestLocationSurvivesJSONRoundTrip(t *testing.T) {
 	lf := funcByName(t, &loaded, "StatementForms", "guardedRevert")
 	if lf.StartCol != wantCol || lf.StartByte != wantByte {
 		t.Errorf("round-trip col/byte = (%d,%d), want (%d,%d)", lf.StartCol, lf.StartByte, wantCol, wantByte)
+	}
+
+	if lf.AST == nil {
+		t.Fatal("loaded function has no AST")
+	}
+	gotMatches := lf.AST.CollectDescendants(func(n *types.ASTNode) bool {
+		return n.Kind == wantKind && n.StartLine == wantNodeLine
+	})
+	if len(gotMatches) == 0 {
+		t.Fatalf("round-trip: no descendant matching kind=%q startLine=%d found", wantKind, wantNodeLine)
+	}
+	got := gotMatches[0]
+	if got.StartCol != wantNodeCol || got.StartByte != wantNodeByte {
+		t.Errorf("interior node round-trip col/byte = (%d,%d), want (%d,%d)", got.StartCol, got.StartByte, wantNodeCol, wantNodeByte)
 	}
 }

@@ -87,9 +87,11 @@ Source-location helpers shared by `ast_builder.go` (v0.4).
   with no location (synthetic).
 - `applySpan(dst *types.ASTNode, src ast.Node)` - copies `spanFields(src)`
   onto `dst`. No-op if either is nil. Preserves an existing `StartLine`/
-  `EndLine` when `src` has no location (does not zero them out), so a
-  chokepoint call on a node built without a direct source counterpart can't
-  regress previously-set fields.
+  `EndLine` when `src` has no location (does not zero them out), but
+  `StartCol`/`EndCol`/`StartByte`/`EndByte` are still overwritten with zero in
+  that case — a chokepoint call on a node built without a direct source
+  counterpart can regress previously-set column/byte fields even though the
+  line fields survive.
 
 Depends on `github.com/th13vn/solast-go` **v0.1.7**, which added `Loc`/`Range`
 accessors to call/member/index postfix expressions — the source of call-site

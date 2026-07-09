@@ -692,6 +692,7 @@ func (b *ASTBuilder) buildTryStatement(stmt *ast.TryStatement) *types.ASTNode {
 	// not pair them (e.g. a CEI sequence that crosses the try/catch boundary).
 	if stmt.Body != nil {
 		bodyNode := types.NewASTNode(types.KindStmtBlock)
+		applySpan(bodyNode, stmt.Body)
 		bodyNode.SetAttribute("try_part", "body")
 		b.buildBlock(bodyNode, stmt.Body)
 		node.AddChild(bodyNode)
@@ -703,6 +704,7 @@ func (b *ASTBuilder) buildTryStatement(stmt *ast.TryStatement) *types.ASTNode {
 			continue
 		}
 		catchNode := types.NewASTNode(types.KindStmtBlock)
+		applySpan(catchNode, clause.Body)
 		catchNode.SetAttribute("try_part", fmt.Sprintf("catch:%d", i))
 		b.buildBlock(catchNode, clause.Body)
 		node.AddChild(catchNode)

@@ -645,9 +645,11 @@ func (e *Engine) buildLocation(trace *matchTrace, verifierFn *types.Function, ve
 			hostName = verifierFn.Name
 		}
 		if hostLine == 0 {
-			// Prefer the primary node's StartLine if set; otherwise fall back
-			// to the host function's StartLine (AST nodes don't track lines
-			// yet — see TODO in pkg/builder/ast_builder.go).
+			// Interior AST nodes now carry precise source spans (v0.4), so
+			// the primary node's StartLine is the normal precise-anchor
+			// path here, not a fallback; only drop to the host function's
+			// StartLine when the primary node genuinely lacks one (e.g. a
+			// synthetic node).
 			if trace.Primary.StartLine > 0 {
 				hostLine = trace.Primary.StartLine
 			} else if len(trace.Chain) > 0 {
@@ -706,12 +708,12 @@ func (e *Engine) enrichFindingFromTrace(f *Finding, trace *matchTrace, verifierF
 				Contract:   fn.ContractName,
 				Function:   fn.Name,
 				Visibility: string(fn.Visibility),
-				// The function's StartLine is today's best anchor — AST nodes
-				// don't currently track per-statement line numbers (TODO in
-				// pkg/builder/ast_builder.go). For the final hop, prefer the
-				// primary node's line when it's non-zero so reports point at
-				// the dangerous statement; for intermediate hops the function
-				// header line is the most useful anchor we can offer.
+				// The function's StartLine is the anchor for intermediate
+				// hops in the chain, where we only have the function-level
+				// context. Interior AST nodes carry precise source spans
+				// (v0.4), so for the final hop we prefer the primary node's
+				// line when it's non-zero so reports point at the dangerous
+				// statement rather than the function header.
 				Line: fn.StartLine,
 			}
 			if i == len(chainFns)-1 && trace.Primary != nil && trace.Primary.StartLine > 0 {
