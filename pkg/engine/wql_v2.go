@@ -2,6 +2,7 @@ package engine
 
 import (
 	"fmt"
+	"reflect"
 	"strconv"
 	"strings"
 
@@ -482,6 +483,9 @@ func lowerKeyValue(key string, val yaml.Node) (*Rule, *Rule, error) {
 		if v1, ok := negatedBarePresetTarget(val); ok {
 			return nil, &Rule{Preset: v1}, nil
 		}
+		if err := rejectMultiKeyNotPreset(val); err != nil {
+			return nil, nil, err
+		}
 		sub, err := lowerToRule(val)
 		if err != nil {
 			return nil, nil, err
@@ -592,6 +596,32 @@ func negatedBarePresetTarget(node yaml.Node) (string, bool) {
 	return v1, true
 }
 
+// rejectMultiKeyNotPreset returns a clear error when node is a multi-key
+// `not:` mapping that includes a `preset:` key alongside other keys (e.g.
+// `not: {preset: access_controlled, base: some-other-rule}`). Only a
+// single-key `{preset: X}` under `not:` has well-defined bare-negation
+// semantics (negatedBarePresetTarget above); a multi-key form falls through
+// to the generic recursive path in the "not" case, which wraps the WHOLE
+// merged sub-rule (preset's own Not from presetToV1's negate=true handling,
+// plus every sibling key) in an outer Not — silently double-negating the
+// preset (Not{Not{Preset}} cancels back to the ORIGINAL "vulnerable" preset
+// instead of "not vulnerable") while also negating the sibling keys, which
+// was never intended. Reject explicitly instead of silently doing the wrong
+// thing.
+func rejectMultiKeyNotPreset(node yaml.Node) error {
+	if node.Kind != yaml.MappingNode {
+		return nil
+	}
+	var probe map[string]yaml.Node
+	if err := node.Decode(&probe); err != nil || len(probe) <= 1 {
+		return nil
+	}
+	if _, ok := probe["preset"]; ok {
+		return fmt.Errorf("where.not: unsupported: not: with a preset must be the only key (got %d keys)", len(probe))
+	}
+	return nil
+}
+
 // lowerToRule decodes a nested matcher value (a single matcher map, or a list
 // of matcher maps to AND) and lowers it to ONE merged Rule. Nested rules
 // (inside has:/in:/arg.N:/sequence elements/all:/any: branches) do not split
@@ -665,26 +695,27 @@ func expandMatcherPairs(node yaml.Node) ([]matcherKV, error) {
 	}
 }
 
-// ruleIsContextOnly reports whether r (and everything reachable through it)
-// carries no AST-level Rule field (per presentRuleFields' classAST tagging —
-// the same classification table validateRulePlacement uses). It backs the
-// "any:"/"all:" branch routing: a branch lowers into Filter (ctx) only if it
-// is entirely made of context-level matchers (e.g. a bare preset), otherwise
-// it lowers into Match (ast). walkRules already recurses through every Rule
-// slot (all/any/not/sequence/contains/inside/left/right/has_guard/args), so
-// this catches AST content nested arbitrarily deep, not just at the top
-// level of the branch.
+// ruleIsContextOnly reports whether r is a context-level matcher (per
+// presentRuleFields' classAST/classContext tagging — the same classification
+// table validateRulePlacement uses). It backs the "any:"/"all:"/"not:" branch
+// routing: a branch lowers into Filter (ctx) only if it is entirely made of
+// context-level matchers (e.g. a bare preset, or a `guarded_by:`), otherwise
+// it lowers into Match (ast).
+//
+// This mirrors ruleHasContextFields/ruleHasASTFields (verify.go) exactly,
+// reusing them directly: they recurse ONLY through All/Any/Not — never into
+// Contains/Inside/HasGuard/Args/Left/Right/Sequence/StatementContains, whose
+// bodies are legitimately AST-shaped even though the field itself (e.g.
+// HasGuard) is a context field. Walking into those bodies (as a generic
+// walkRules-based traversal would) misclassifies a branch like
+// `{guarded_by: {block: modifier}}` as "not context-only", because the
+// nested `block: modifier` sets Kind (classAST) — even though `guarded_by:`
+// itself is the only field present at r's own level and is classContext.
 func ruleIsContextOnly(r *Rule) bool {
-	ctxOnly := true
-	_ = walkRules(r, func(n *Rule) error {
-		for _, f := range presentRuleFields(n) {
-			if f.class == classAST {
-				ctxOnly = false
-			}
-		}
-		return nil
-	})
-	return ctxOnly
+	if r == nil {
+		return true
+	}
+	return ruleHasContextFields(*r) && !ruleHasASTFields(*r)
 }
 
 // mergeRuleInto merges src's fields into dst (both non-nil aggregators; src
@@ -759,7 +790,11 @@ func mergeRuleInto(dst, src *Rule) error {
 		if dst.Attr == nil {
 			dst.Attr = make(map[string]interface{})
 		}
-		if existing, ok := dst.Attr[k]; ok && existing != v {
+		// reflect.DeepEqual instead of `!=`: an attr value decoded from YAML
+		// can be a slice or map (e.g. a list-valued attribute), and comparing
+		// uncomparable types with `!=` panics at runtime instead of erroring
+		// cleanly.
+		if existing, ok := dst.Attr[k]; ok && !reflect.DeepEqual(existing, v) {
 			return fmt.Errorf("where: conflicting attr %q: %v vs %v", k, existing, v)
 		}
 		dst.Attr[k] = v

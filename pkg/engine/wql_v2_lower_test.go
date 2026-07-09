@@ -1,6 +1,9 @@
 package engine
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 // These tests assert lower()'s output field-for-field against the v1 Rule IR
 // shape a hand-written v1 template would produce, for the worked examples in
@@ -140,5 +143,125 @@ func TestLower_BarePresetAssertion(t *testing.T) {
 	// carry no leftover AST content from it.
 	if tmpl.Query.Filter.Preset != "" {
 		t.Errorf("Filter.Preset = %q, want empty (assertion lowers to Not.Preset only)", tmpl.Query.Filter.Preset)
+	}
+}
+
+// Regression test: a `not: { guarded_by: ... }` branch must route entirely
+// into Filter (context), not Match (AST) — even though guarded_by's own body
+// (`block: modifier`) is AST-shaped. Before the ruleIsContextOnly fix, the
+// generic walkRules-based classification recursed INTO HasGuard's sub-rule
+// body, saw the nested Kind field, and wrongly concluded the branch was
+// AST-bearing, routing it into Match — which finalizeTemplate then rejected
+// with "`has_guard` is a context-level field and cannot appear inside
+// `match:`".
+const v2NotGuardedByLowerYAML = `
+meta: { id: v2-not-guarded-by, severity: MEDIUM, title: missing reentrancy guard modifier }
+select: external_call
+from: entry_function
+where:
+  - not: { guarded_by: { block: modifier } }
+`
+
+func TestLower_NotGuardedByRoutesToFilter(t *testing.T) {
+	tv2, err := parseV2([]byte(v2NotGuardedByLowerYAML))
+	if err != nil {
+		t.Fatalf("parseV2: %v", err)
+	}
+	tmpl, err := tv2.lower()
+	if err != nil {
+		t.Fatalf("lower: %v", err)
+	}
+
+	if tmpl.Query.Filter == nil {
+		t.Fatalf("Filter is nil, want Not.HasGuard")
+	}
+	if tmpl.Query.Filter.Not == nil || tmpl.Query.Filter.Not.HasGuard == nil {
+		t.Fatalf("Filter = %+v, want Not.HasGuard set", tmpl.Query.Filter)
+	}
+	wantModifierKind, _ := blockKindToV1("modifier")
+	if tmpl.Query.Filter.Not.HasGuard.Kind != wantModifierKind {
+		t.Errorf("Filter.Not.HasGuard.Kind = %q, want %q", tmpl.Query.Filter.Not.HasGuard.Kind, wantModifierKind)
+	}
+
+	// Match must carry no HasGuard anywhere — it's a context-only field.
+	if tmpl.Query.Match.HasGuard != nil {
+		t.Errorf("Match.HasGuard = %+v, want nil", tmpl.Query.Match.HasGuard)
+	}
+	if tmpl.Query.Match.Contains != nil && tmpl.Query.Match.Contains.HasGuard != nil {
+		t.Errorf("Match.Contains.HasGuard = %+v, want nil", tmpl.Query.Match.Contains.HasGuard)
+	}
+
+	// The lowered template must pass finalizeTemplate — this is what would
+	// have failed with "`has_guard` is a context-level field and cannot
+	// appear inside `match:`" before the fix.
+	if err := finalizeTemplate(tmpl, []byte(v2NotGuardedByLowerYAML), "test"); err != nil {
+		t.Fatalf("finalizeTemplate: %v", err)
+	}
+}
+
+// Companion case: an `any:` branch set mixing `guarded_by:` and `func_name:`
+// — both pure context matchers — must route the whole any: into Filter, not
+// Match.
+const v2AnyGuardedByFuncNameLowerYAML = `
+meta: { id: v2-any-guarded-by-func-name, severity: MEDIUM, title: any of guard/func_name test }
+select: external_call
+from: entry_function
+where:
+  - any:
+      - guarded_by: { block: modifier }
+      - func_name: "^admin"
+`
+
+func TestLower_AnyGuardedByOrFuncNameRoutesToFilter(t *testing.T) {
+	tv2, err := parseV2([]byte(v2AnyGuardedByFuncNameLowerYAML))
+	if err != nil {
+		t.Fatalf("parseV2: %v", err)
+	}
+	tmpl, err := tv2.lower()
+	if err != nil {
+		t.Fatalf("lower: %v", err)
+	}
+
+	if tmpl.Query.Filter == nil || len(tmpl.Query.Filter.Any) != 2 {
+		t.Fatalf("Filter = %+v, want Any with 2 branches", tmpl.Query.Filter)
+	}
+	if tmpl.Query.Filter.Any[0].HasGuard == nil {
+		t.Errorf("Filter.Any[0].HasGuard is nil, want set")
+	}
+	if tmpl.Query.Filter.Any[1].FuncName != "^admin" {
+		t.Errorf("Filter.Any[1].FuncName = %q, want %q", tmpl.Query.Filter.Any[1].FuncName, "^admin")
+	}
+
+	if len(tmpl.Query.Match.Any) != 0 {
+		t.Errorf("Match.Any = %+v, want empty (this any: is entirely context-level)", tmpl.Query.Match.Any)
+	}
+
+	if err := finalizeTemplate(tmpl, []byte(v2AnyGuardedByFuncNameLowerYAML), "test"); err != nil {
+		t.Fatalf("finalizeTemplate: %v", err)
+	}
+}
+
+// Fix 3 regression: a multi-key `not:` mapping that includes `preset:`
+// alongside another key must be rejected with a clear error instead of
+// silently double-negating the preset.
+const v2NotMultiKeyPresetYAML = `
+meta: { id: v2-not-multikey-preset, severity: MEDIUM, title: multi-key not with preset test }
+select: external_call
+from: entry_function
+where:
+  - not: { preset: access_controlled, base: some-other-rule }
+`
+
+func TestLower_NotMultiKeyPresetRejected(t *testing.T) {
+	tv2, err := parseV2([]byte(v2NotMultiKeyPresetYAML))
+	if err != nil {
+		t.Fatalf("parseV2: %v", err)
+	}
+	_, err = tv2.lower()
+	if err == nil {
+		t.Fatalf("lower: expected an error for multi-key not: with a preset key, got nil")
+	}
+	if !strings.Contains(err.Error(), "preset") {
+		t.Errorf("lower error = %q, want it to mention the preset restriction", err.Error())
 	}
 }
