@@ -27,8 +27,6 @@ type NavCaller struct {
 }
 
 // NavInterfaceImpl maps an interface method to its concrete implementation.
-// Populated by the resolver added in a later task; the type is defined here
-// so NavJSON compiles and the field can be wired up incrementally.
 type NavInterfaceImpl struct {
 	Interface      string `json:"interface"`
 	Method         string `json:"method"`
@@ -73,5 +71,71 @@ func BuildNavJSON(db *types.Database) *NavJSON {
 			Site: SrcRange{File: file, StartLine: e.Line, StartCol: e.Col, StartByte: e.Byte},
 		})
 	}
+	nav.InterfaceImpl = resolveInterfaceImpls(db)
 	return nav
+}
+
+// resolveInterfaceImpls materializes interface-method -> concrete-implementation
+// edges. For each interface method, find non-interface contracts that inherit the
+// interface and take the most-derived function with a matching selector.
+func resolveInterfaceImpls(db *types.Database) []*NavInterfaceImpl {
+	var out []*NavInterfaceImpl
+	for _, iface := range db.Contracts {
+		if iface == nil || iface.Kind != types.ContractKindInterface {
+			continue
+		}
+		for _, m := range iface.Functions {
+			if m.Selector == "" {
+				continue
+			}
+			for _, impl := range db.Contracts {
+				if impl == nil || impl.Kind == types.ContractKindInterface {
+					continue
+				}
+				if !inheritsInterface(impl, iface.Name) {
+					continue
+				}
+				if implFn := findImpl(db, impl, m.Selector); implFn != nil {
+					out = append(out, &NavInterfaceImpl{
+						Interface:      iface.ID,
+						Method:         m.Selector,
+						Implementation: types.MakeFunctionID(implFn.contractFile, implFn.contractName, m.Selector),
+					})
+				}
+			}
+		}
+	}
+	return out
+}
+
+func inheritsInterface(c *types.Contract, ifaceName string) bool {
+	for _, b := range c.LinearizedBases {
+		if b == ifaceName {
+			return true
+		}
+	}
+	return false
+}
+
+// implRef is the located concrete function for a selector along an MRO.
+type implRef struct {
+	contractFile string
+	contractName string
+}
+
+// findImpl walks c's MRO derived-first and returns the first non-interface
+// function whose selector matches (most-derived override wins).
+func findImpl(db *types.Database, c *types.Contract, selector string) *implRef {
+	for _, baseName := range c.LinearizedBases {
+		base := db.GetContractByName(baseName)
+		if base == nil || base.Kind == types.ContractKindInterface {
+			continue
+		}
+		for _, fn := range base.Functions {
+			if fn.Selector == selector {
+				return &implRef{contractFile: base.SourceFile, contractName: base.Name}
+			}
+		}
+	}
+	return nil
 }

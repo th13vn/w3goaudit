@@ -2,10 +2,31 @@ package report
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 
+	"github.com/th13vn/w3goaudit/pkg/builder"
+	"github.com/th13vn/w3goaudit/pkg/reader"
 	"github.com/th13vn/w3goaudit/pkg/types"
 )
+
+// buildReportFixture reads a fixture file under test-data/core/build-database
+// and runs the full builder pipeline, returning the resulting database.
+func buildReportFixture(t *testing.T, rel string) *types.Database {
+	t.Helper()
+	sources, err := reader.New().Read(rel)
+	if err != nil {
+		t.Fatalf("read %s: %v", rel, err)
+	}
+	db, err := builder.New().Build(sources)
+	if err != nil {
+		t.Fatalf("build %s: %v", rel, err)
+	}
+	return db
+}
+
+// contains is a tiny substring helper for assertions below.
+func contains(s, sub string) bool { return strings.Contains(s, sub) }
 
 func navFixtureDB() *types.Database {
 	db := types.NewDatabase()
@@ -61,5 +82,20 @@ func TestBuildNavJSON_SymbolsAndCallers(t *testing.T) {
 	b, _ := json.Marshal(nav)
 	if !json.Valid(b) {
 		t.Fatal("invalid JSON")
+	}
+}
+
+func TestBuildNavJSON_InterfaceImpl(t *testing.T) {
+	db := buildReportFixture(t, "../../test-data/core/build-database/10-interface-impl.sol")
+	nav := BuildNavJSON(db)
+	var found bool
+	for _, ii := range nav.InterfaceImpl {
+		if ii.Method == "transfer(address,uint256)" &&
+			contains(ii.Interface, "IToken") && contains(ii.Implementation, "Token.") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected IToken.transfer -> Token.transfer mapping, got %+v", nav.InterfaceImpl)
 	}
 }
