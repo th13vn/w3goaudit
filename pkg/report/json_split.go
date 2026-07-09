@@ -10,7 +10,7 @@ import (
 // SchemaVersion is the version of the JSON output schema. Incremented on
 // any breaking change to OverviewJSON or FindingsJSON. Consumers should
 // check this and refuse to parse on a major-version mismatch.
-const SchemaVersion = "1.0.0"
+const SchemaVersion = "2.0.0"
 
 // OverviewJSON is the schema-stable shape of the overview half of the report.
 // Mirrors the markdown/HTML overview: project stats, contracts, inheritance,

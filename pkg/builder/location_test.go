@@ -1,6 +1,7 @@
 package builder
 
 import (
+	"encoding/json"
 	"testing"
 
 	"github.com/th13vn/solast-go/pkg/ast"
@@ -103,5 +104,29 @@ func TestInteriorNodesHaveSpans(t *testing.T) {
 		if r.StartCol == 0 && r.StartByte == 0 {
 			t.Errorf("check.revert node has neither column nor byte offset")
 		}
+	}
+}
+
+func TestLocationSurvivesJSONRoundTrip(t *testing.T) {
+	db := buildFixture(t, statementsFixture)
+	fn := funcByName(t, db, "StatementForms", "guardedRevert")
+	wantCol, wantByte := fn.StartCol, fn.StartByte
+	if wantCol == 0 && wantByte == 0 {
+		t.Fatal("precondition: function should have col or byte before round-trip")
+	}
+
+	data, err := json.Marshal(db)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var loaded types.Database
+	if err := json.Unmarshal(data, &loaded); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	loaded.RestoreASTParents()
+
+	lf := funcByName(t, &loaded, "StatementForms", "guardedRevert")
+	if lf.StartCol != wantCol || lf.StartByte != wantByte {
+		t.Errorf("round-trip col/byte = (%d,%d), want (%d,%d)", lf.StartCol, lf.StartByte, wantCol, wantByte)
 	}
 }
