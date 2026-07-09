@@ -185,6 +185,10 @@ func LoadTemplate(path string) (*Template, error) {
 		return nil, fmt.Errorf("read file: %w", err)
 	}
 
+	if isV2Source(data) {
+		return loadTemplateV2(data, path)
+	}
+
 	var tmpl Template
 	if err := yaml.Unmarshal(data, &tmpl); err != nil {
 		return nil, fmt.Errorf("parse YAML: %w", err)
@@ -194,6 +198,26 @@ func LoadTemplate(path string) (*Template, error) {
 		return nil, err
 	}
 	return &tmpl, nil
+}
+
+// loadTemplateV2 lowers a WQL v2 document (raw bytes already confirmed to be
+// v2 via isV2Source) into a validated *Template, running it through the exact
+// same finalizeTemplate validate/normalize pipeline the v1 path uses — so a
+// v2 template and its hand-written v1 equivalent are held to identical
+// standards and, once lowered, are evaluated by the same unmodified evaluator.
+func loadTemplateV2(data []byte, source string) (*Template, error) {
+	v2, err := parseV2(data)
+	if err != nil {
+		return nil, err
+	}
+	tmpl, err := v2.lower()
+	if err != nil {
+		return nil, err
+	}
+	if err := finalizeTemplate(tmpl, data, source); err != nil {
+		return nil, err
+	}
+	return tmpl, nil
 }
 
 // validSeverities is the closed set of finding severities. A typo here used to
@@ -724,6 +748,10 @@ func LoadTemplatesWithOptions(dir string, opts TemplateLoadOptions) ([]*Template
 func ParseTemplate(yamlContent string) (*Template, error) {
 	data := []byte(yamlContent)
 
+	if isV2Source(data) {
+		return loadTemplateV2(data, "<inline>")
+	}
+
 	var tmpl Template
 	if err := yaml.Unmarshal(data, &tmpl); err != nil {
 		return nil, err
@@ -760,6 +788,20 @@ func LoadTemplatesFromFS(fsys fs.FS, dir string, opts TemplateLoadOptions) ([]*T
 			}
 			return fmt.Errorf("read template %s: %w", path, readErr)
 		}
+		if isV2Source(data) {
+			tmpl, vErr := loadTemplateV2(data, path)
+			if vErr != nil {
+				if opts.IgnoreInvalid {
+					VerboseLog("⚠️  Skipping invalid template %s: %v", path, vErr)
+					return nil
+				}
+				return fmt.Errorf("invalid template %s: %w", path, vErr)
+			}
+			VerboseLog("✓ Loaded embedded template: %s (%s)", tmpl.Meta.ID, path)
+			templates = append(templates, tmpl)
+			return nil
+		}
+
 		var tmpl Template
 		if uErr := yaml.Unmarshal(data, &tmpl); uErr != nil {
 			if opts.IgnoreInvalid {
