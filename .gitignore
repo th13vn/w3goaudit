@@ -5,6 +5,7 @@
 .cursor/
 .idea/
 .claude/
+.superpowers/
 /w3goaudit
 /scripts/
 /report/
