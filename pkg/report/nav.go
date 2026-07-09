@@ -1,6 +1,10 @@
 package report
 
-import "github.com/th13vn/w3goaudit/pkg/types"
+import (
+	"sort"
+
+	"github.com/th13vn/w3goaudit/pkg/types"
+)
 
 // NavJSON is the semantic navigation index consumed by the VSCode extension.
 type NavJSON struct {
@@ -72,6 +76,25 @@ func BuildNavJSON(db *types.Database) *NavJSON {
 		})
 	}
 	nav.InterfaceImpl = resolveInterfaceImpls(db)
+
+	// Deterministic ordering so the emitted nav.json is stable across runs
+	// (map iteration over db.Contracts is unordered).
+	sort.Slice(nav.Symbols, func(i, j int) bool { return nav.Symbols[i].ID < nav.Symbols[j].ID })
+	sort.Slice(nav.Callers, func(i, j int) bool {
+		if nav.Callers[i].Callee != nav.Callers[j].Callee {
+			return nav.Callers[i].Callee < nav.Callers[j].Callee
+		}
+		if nav.Callers[i].Caller != nav.Callers[j].Caller {
+			return nav.Callers[i].Caller < nav.Callers[j].Caller
+		}
+		return nav.Callers[i].Site.StartLine < nav.Callers[j].Site.StartLine
+	})
+	sort.Slice(nav.InterfaceImpl, func(i, j int) bool {
+		if nav.InterfaceImpl[i].Interface != nav.InterfaceImpl[j].Interface {
+			return nav.InterfaceImpl[i].Interface < nav.InterfaceImpl[j].Interface
+		}
+		return nav.InterfaceImpl[i].Method < nav.InterfaceImpl[j].Method
+	})
 	return nav
 }
 

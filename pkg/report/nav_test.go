@@ -85,6 +85,42 @@ func TestBuildNavJSON_SymbolsAndCallers(t *testing.T) {
 	}
 }
 
+func TestBuildNavJSON_DeterministicSymbolOrder(t *testing.T) {
+	// Two contracts inserted with the higher-sorting ID first; symbols must
+	// come back sorted by ID regardless of map-iteration order.
+	db := types.NewDatabase()
+	for _, spec := range []struct{ id, name, file string }{
+		{"/z.sol#Zeta", "Zeta", "/z.sol"},
+		{"/a.sol#Alpha", "Alpha", "/a.sol"},
+	} {
+		db.Contracts[spec.id] = &types.Contract{
+			ID: spec.id, Name: spec.name, Kind: types.ContractKindContract, SourceFile: spec.file,
+			Functions: []*types.Function{{Name: "f", ContractName: spec.name, Selector: "f()", StartLine: 2}},
+		}
+	}
+	ids := func() []string {
+		var out []string
+		for _, s := range BuildNavJSON(db).Symbols {
+			out = append(out, s.ID)
+		}
+		return out
+	}
+	first, second := ids(), ids()
+	for i := 1; i < len(first); i++ {
+		if first[i-1] > first[i] {
+			t.Errorf("symbols not sorted: %q before %q", first[i-1], first[i])
+		}
+	}
+	if len(first) != len(second) {
+		t.Fatalf("nondeterministic length %d vs %d", len(first), len(second))
+	}
+	for i := range first {
+		if first[i] != second[i] {
+			t.Errorf("nondeterministic order at %d: %q vs %q", i, first[i], second[i])
+		}
+	}
+}
+
 func TestBuildNavJSON_InterfaceImpl(t *testing.T) {
 	db := buildReportFixture(t, "../../test-data/core/build-database/10-interface-impl.sol")
 	nav := BuildNavJSON(db)

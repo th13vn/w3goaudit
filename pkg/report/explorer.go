@@ -1,6 +1,10 @@
 package report
 
-import "github.com/th13vn/w3goaudit/pkg/types"
+import (
+	"sort"
+
+	"github.com/th13vn/w3goaudit/pkg/types"
+)
 
 // SrcRange is a precise source span for the extension: 1-based line/column plus
 // character byte offsets. Shared by explorer.json and nav.json. Zero fields are
@@ -125,5 +129,7 @@ func BuildExplorerJSON(db *types.Database) *ExplorerJSON {
 		}
 		out.Contracts = append(out.Contracts, ec)
 	}
+	// Deterministic ordering (map iteration over db.MainContracts is unordered).
+	sort.Slice(out.Contracts, func(i, j int) bool { return out.Contracts[i].ID < out.Contracts[j].ID })
 	return out
 }
