@@ -60,6 +60,14 @@ type Contract struct {
 	// UsingDirectives for library function resolution
 	// e.g., 'using SafeMath for uint256'
 	UsingDirectives []*UsingDirective `json:"usingDirectives,omitempty"`
+
+	// SourceLocation for debugging / click-to-jump
+	StartLine int `json:"startLine,omitempty"`
+	EndLine   int `json:"endLine,omitempty"`
+	StartCol  int `json:"startCol,omitempty"`
+	EndCol    int `json:"endCol,omitempty"`
+	StartByte int `json:"startByte,omitempty"`
+	EndByte   int `json:"endByte,omitempty"`
 }
 
 // StateVariable represents a contract state variable
@@ -69,12 +77,28 @@ type StateVariable struct {
 	Visibility  string `json:"visibility"`
 	IsConstant  bool   `json:"isConstant,omitempty"`
 	IsImmutable bool   `json:"isImmutable,omitempty"`
+
+	// SourceLocation for debugging / click-to-jump
+	StartLine int `json:"startLine,omitempty"`
+	EndLine   int `json:"endLine,omitempty"`
+	StartCol  int `json:"startCol,omitempty"`
+	EndCol    int `json:"endCol,omitempty"`
+	StartByte int `json:"startByte,omitempty"`
+	EndByte   int `json:"endByte,omitempty"`
 }
 
 // Event represents a Solidity event
 type Event struct {
 	Name       string       `json:"name"`
 	Parameters []*Parameter `json:"parameters,omitempty"`
+
+	// SourceLocation for debugging / click-to-jump
+	StartLine int `json:"startLine,omitempty"`
+	EndLine   int `json:"endLine,omitempty"`
+	StartCol  int `json:"startCol,omitempty"`
+	EndCol    int `json:"endCol,omitempty"`
+	StartByte int `json:"startByte,omitempty"`
+	EndByte   int `json:"endByte,omitempty"`
 }
 
 // Modifier represents a Solidity modifier
@@ -95,6 +119,14 @@ type Modifier struct {
 type Struct struct {
 	Name    string    `json:"name"`
 	Members []*Member `json:"members,omitempty"`
+
+	// SourceLocation for debugging / click-to-jump
+	StartLine int `json:"startLine,omitempty"`
+	EndLine   int `json:"endLine,omitempty"`
+	StartCol  int `json:"startCol,omitempty"`
+	EndCol    int `json:"endCol,omitempty"`
+	StartByte int `json:"startByte,omitempty"`
+	EndByte   int `json:"endByte,omitempty"`
 }
 
 // Member represents a struct member
@@ -107,6 +139,14 @@ type Member struct {
 type Enum struct {
 	Name   string   `json:"name"`
 	Values []string `json:"values,omitempty"`
+
+	// SourceLocation for debugging / click-to-jump
+	StartLine int `json:"startLine,omitempty"`
+	EndLine   int `json:"endLine,omitempty"`
+	StartCol  int `json:"startCol,omitempty"`
+	EndCol    int `json:"endCol,omitempty"`
+	StartByte int `json:"startByte,omitempty"`
+	EndByte   int `json:"endByte,omitempty"`
 }
 
 // UsingDirective represents a 'using Library for Type' directive

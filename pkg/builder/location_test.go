@@ -48,6 +48,22 @@ func TestFunctionHasColumnAndByte(t *testing.T) {
 	}
 }
 
+func TestStateVariableHasLocation(t *testing.T) {
+	db := buildFixture(t, statementsFixture)
+	c := db.GetContractByName("StatementForms")
+	if c == nil {
+		t.Skip("fixture has no StatementForms contract with state vars")
+	}
+	if len(c.StateVariables) == 0 {
+		t.Skip("fixture contract has no state variables")
+	}
+	for _, sv := range c.StateVariables {
+		if sv.StartLine == 0 {
+			t.Errorf("state variable %q missing StartLine", sv.Name)
+		}
+	}
+}
+
 func TestInteriorNodesHaveSpans(t *testing.T) {
 	db := buildFixture(t, statementsFixture) // "../../test-data/core/build-database/09-statements.sol"
 	fn := funcByName(t, db, "StatementForms", "guardedRevert")

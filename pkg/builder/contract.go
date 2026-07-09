@@ -86,6 +86,8 @@ func (ce *ContractExtractor) visitContract(node *ast.ContractDefinition) {
 		}
 	}
 
+	contract.StartLine, contract.EndLine, contract.StartCol, contract.EndCol, contract.StartByte, contract.EndByte = spanFields(node)
+
 	ce.contracts = append(ce.contracts, contract)
 	ce.currentContract = nil
 }
@@ -165,23 +167,27 @@ func (ce *ContractExtractor) extractFunction(node *ast.FunctionDefinition) *type
 func (ce *ContractExtractor) extractParameter(node *ast.VariableDeclaration) *types.Parameter {
 	typeName := getTypeName(node.TypeName)
 
-	return &types.Parameter{
+	p := &types.Parameter{
 		Name:     node.Name,
 		TypeName: typeName,
 	}
+	p.StartLine, p.EndLine, p.StartCol, p.EndCol, p.StartByte, p.EndByte = spanFields(node)
+	return p
 }
 
 // extractStateVariable extracts a state variable from AST
 func (ce *ContractExtractor) extractStateVariable(node *ast.VariableDeclaration) *types.StateVariable {
 	typeName := getTypeName(node.TypeName)
 
-	return &types.StateVariable{
+	sv := &types.StateVariable{
 		Name:        node.Name,
 		TypeName:    typeName,
 		Visibility:  node.Visibility,
 		IsConstant:  node.IsDeclaredConst,
 		IsImmutable: node.IsImmutable,
 	}
+	sv.StartLine, sv.EndLine, sv.StartCol, sv.EndCol, sv.StartByte, sv.EndByte = spanFields(node)
+	return sv
 }
 
 // extractEvent extracts an event from AST
@@ -195,6 +201,8 @@ func (ce *ContractExtractor) extractEvent(node *ast.EventDefinition) *types.Even
 		p.Indexed = param.IsIndexed
 		ev.Parameters = append(ev.Parameters, p)
 	}
+
+	ev.StartLine, ev.EndLine, ev.StartCol, ev.EndCol, ev.StartByte, ev.EndByte = spanFields(node)
 
 	return ev
 }
@@ -229,6 +237,8 @@ func (ce *ContractExtractor) extractStruct(node *ast.StructDefinition) *types.St
 		})
 	}
 
+	st.StartLine, st.EndLine, st.StartCol, st.EndCol, st.StartByte, st.EndByte = spanFields(node)
+
 	return st
 }
 
@@ -241,6 +251,8 @@ func (ce *ContractExtractor) extractEnum(node *ast.EnumDefinition) *types.Enum {
 	for _, value := range node.Members {
 		en.Values = append(en.Values, value.Name)
 	}
+
+	en.StartLine, en.EndLine, en.StartCol, en.EndCol, en.StartByte, en.EndByte = spanFields(node)
 
 	return en
 }

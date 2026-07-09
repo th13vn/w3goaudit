@@ -105,6 +105,14 @@ type Parameter struct {
 	Name     string `json:"name,omitempty"`
 	TypeName string `json:"typeName"`
 	Indexed  bool   `json:"indexed,omitempty"` // For event parameters
+
+	// SourceLocation for debugging / click-to-jump
+	StartLine int `json:"startLine,omitempty"`
+	EndLine   int `json:"endLine,omitempty"`
+	StartCol  int `json:"startCol,omitempty"`
+	EndCol    int `json:"endCol,omitempty"`
+	StartByte int `json:"startByte,omitempty"`
+	EndByte   int `json:"endByte,omitempty"`
 }
 
 // FunctionCall represents a call to another function
