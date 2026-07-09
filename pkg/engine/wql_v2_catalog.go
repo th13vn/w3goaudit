@@ -107,20 +107,16 @@ func blockKindToV1(v2 string) (string, bool) {
 // node-attribute key (the string key read via types.ASTNode.GetAttribute /
 // GetAttributeString / GetAttributeBool).
 //
-// `visibility`, `mutability`, and `tainted` are deliberately NOT in this
-// table. In v1 those are inline `Rule` fields (Rule.Visibility,
+// `name`, `visibility`, `mutability`, and `tainted` are deliberately NOT in
+// this table. In v1 those are inline `Rule` fields (Rule.Name, Rule.Visibility,
 // Rule.Mutability, Rule.TaintedFrom), not entries in the free-form Attr map,
 // so they have no "attribute key" to alias — the v2 lowering step (Task A3)
 // must route them straight onto those Rule fields instead of through
-// attrNameToV1. Callers of attrNameToV1 must special-case these three names
+// attrNameToV1. Callers of attrNameToV1 must special-case these four names
 // before consulting the table (attrNameToV1 returns ok=false for them, which
 // is the correct "not an attr-map entry" signal, not an unknown-name error).
 var attrNameToV1Table = map[string]string{
 	// Core (§7)
-	"name": "name", // identity; v1 Rule.Name is a top-level field, not an Attr key —
-	// included here only so the v2 attribute namespace has an entry for
-	// `name`; A3 lowering routes it to Rule.Name directly like visibility/
-	// mutability/tainted, not through the Attr map.
 	"receiver":     "call_receiver", // bool marker on the receiver child of a member call
 	"signature":    "called_signature",
 	"has_value":    "has_value",
@@ -144,9 +140,9 @@ var attrNameToV1Table = map[string]string{
 }
 
 // attrNameToV1 resolves a WQL v2 attribute name (§7) to the v1 node-attribute
-// key. ok is false both for unknown v2 names AND for the three
-// Rule-field-backed names (`visibility`, `mutability`, `tainted`) that
-// lowering must handle separately — see attrNameToV1Table's doc comment.
+// key. ok is false both for unknown v2 names AND for the four
+// Rule-field-backed names (`name`, `visibility`, `mutability`, `tainted`)
+// that lowering must handle separately — see attrNameToV1Table's doc comment.
 func attrNameToV1(v2 string) (string, bool) {
 	v1, ok := attrNameToV1Table[v2]
 	return v1, ok

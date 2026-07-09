@@ -134,10 +134,10 @@ func TestAttrNameToV1(t *testing.T) {
 }
 
 // TestAttrNameToV1_RuleFieldBackedNamesNotInMap documents (and locks in) that
-// visibility/mutability/tainted are handled by lowering as inline Rule
+// name/visibility/mutability/tainted are handled by lowering as inline Rule
 // fields, NOT via attrNameToV1 — see the doc comment on attrNameToV1Table.
 func TestAttrNameToV1_RuleFieldBackedNamesNotInMap(t *testing.T) {
-	for _, v2 := range []string{"visibility", "mutability", "tainted"} {
+	for _, v2 := range []string{"name", "visibility", "mutability", "tainted"} {
 		if _, ok := attrNameToV1(v2); ok {
 			t.Fatalf("attrNameToV1(%q) ok = true, want false (Rule-field-backed, not an Attr-map entry)", v2)
 		}
