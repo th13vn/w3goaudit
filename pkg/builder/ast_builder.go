@@ -3,6 +3,7 @@ package builder
 import (
 	"fmt"
 	"sort"
+	"strings"
 
 	"github.com/th13vn/solast-go/pkg/ast"
 	"github.com/th13vn/w3goaudit/pkg/types"
@@ -38,6 +39,7 @@ func BuildFunctionAST(fndef *ast.FunctionDefinition, fn *types.Function, contrac
 
 	// Create function root node
 	root := types.NewASTNode(types.KindDeclFunction)
+	applySpan(root, fndef)
 	root.Name = fn.Name
 	root.SetAttribute("visibility", string(fn.Visibility))
 	root.SetAttribute("mutability", string(fn.StateMutability))
@@ -71,6 +73,7 @@ func BuildModifierAST(moddef *ast.ModifierDefinition) *types.ASTNode {
 
 	// Create modifier root node
 	root := types.NewASTNode(types.KindDeclModifier)
+	applySpan(root, moddef)
 	root.Name = moddef.Name
 
 	// Build AST from modifier body
@@ -122,8 +125,16 @@ func (b *ASTBuilder) buildBlock(parent *types.ASTNode, block *ast.Block) {
 	}
 }
 
-// buildStatement builds AST node for a statement
+// buildStatement dispatches to buildStatementInner and stamps source location
+// onto the produced node. Central chokepoint so every statement node is located.
 func (b *ASTBuilder) buildStatement(stmt ast.Node) *types.ASTNode {
+	node := b.buildStatementInner(stmt)
+	applySpan(node, stmt)
+	return node
+}
+
+// buildStatementInner builds AST node for a statement
+func (b *ASTBuilder) buildStatementInner(stmt ast.Node) *types.ASTNode {
 	if stmt == nil {
 		return nil
 	}
@@ -184,6 +195,7 @@ func (b *ASTBuilder) buildStatement(stmt ast.Node) *types.ASTNode {
 // buildInlineAssembly builds AST for inline assembly block
 func (b *ASTBuilder) buildInlineAssembly(asm *ast.InlineAssembly) *types.ASTNode {
 	node := types.NewASTNode(types.KindAsmBlock)
+	applySpan(node, asm)
 
 	if asm.Language != "" {
 		node.SetAttribute("language", asm.Language)
@@ -211,8 +223,16 @@ func (b *ASTBuilder) buildAssemblyBlock(parent *types.ASTNode, block *ast.Assemb
 	}
 }
 
-// buildAssemblyOperation builds AST node for an assembly operation
+// buildAssemblyOperation dispatches to buildAssemblyOperationInner and stamps
+// source location onto the produced node.
 func (b *ASTBuilder) buildAssemblyOperation(op ast.Node) *types.ASTNode {
+	node := b.buildAssemblyOperationInner(op)
+	applySpan(node, op)
+	return node
+}
+
+// buildAssemblyOperationInner builds AST node for an assembly operation
+func (b *ASTBuilder) buildAssemblyOperationInner(op ast.Node) *types.ASTNode {
 	if op == nil {
 		return nil
 	}
@@ -299,8 +319,16 @@ func (b *ASTBuilder) buildAssemblyOperation(op ast.Node) *types.ASTNode {
 	}
 }
 
-// buildAssemblyCall builds AST for an assembly function call (e.g., call, delegatecall, staticcall)
+// buildAssemblyCall dispatches to buildAssemblyCallInner and stamps source
+// location onto the produced node.
 func (b *ASTBuilder) buildAssemblyCall(call *ast.AssemblyCall) *types.ASTNode {
+	node := b.buildAssemblyCallInner(call)
+	applySpan(node, call)
+	return node
+}
+
+// buildAssemblyCallInner builds AST for an assembly function call (e.g., call, delegatecall, staticcall)
+func (b *ASTBuilder) buildAssemblyCallInner(call *ast.AssemblyCall) *types.ASTNode {
 	// Classify the assembly call based on the function name
 	callType := b.classifyAssemblyCall(call.FunctionName)
 
@@ -683,8 +711,17 @@ func (b *ASTBuilder) buildTryStatement(stmt *ast.TryStatement) *types.ASTNode {
 	return node
 }
 
-// buildExpression builds AST node for an expression
+// buildExpression dispatches to buildExpressionInner and stamps source
+// location onto the produced node. Central chokepoint so every expression
+// node is located.
 func (b *ASTBuilder) buildExpression(expr ast.Node) *types.ASTNode {
+	node := b.buildExpressionInner(expr)
+	applySpan(node, expr)
+	return node
+}
+
+// buildExpressionInner builds AST node for an expression
+func (b *ASTBuilder) buildExpressionInner(expr ast.Node) *types.ASTNode {
 	if expr == nil {
 		return nil
 	}
@@ -1306,7 +1343,15 @@ func (b *ASTBuilder) buildLiteral(lit ast.Node) *types.ASTNode {
 	switch l := lit.(type) {
 	case *ast.NumberLiteral:
 		node.Value = l.Number
-		node.SetAttribute("subtype", "number")
+		// A `0x…` number literal is a hex literal semantically (a bitmask/address
+		// constant), even though the grammar calls it NumberLiteral. Tag it `hex`
+		// so value-vs-bitmask templates (e.g. incorrect-exp) can tell `10 ^ 18`
+		// (decimal, likely `**` typo) from `x ^ 0xFF` (mask).
+		if strings.HasPrefix(strings.TrimSpace(l.Number), "0x") || strings.HasPrefix(strings.TrimSpace(l.Number), "0X") {
+			node.SetAttribute("subtype", "hex")
+		} else {
+			node.SetAttribute("subtype", "number")
+		}
 	case *ast.StringLiteral:
 		node.Value = l.Value
 		node.SetAttribute("subtype", "string")

@@ -33,3 +33,25 @@ func TestSpanFieldsNilSafe(t *testing.T) {
 	}
 	applySpan(nil, nil) // must not panic
 }
+
+func TestInteriorNodesHaveSpans(t *testing.T) {
+	db := buildFixture(t, statementsFixture) // "../../test-data/core/build-database/09-statements.sol"
+	fn := funcByName(t, db, "StatementForms", "guardedRevert")
+	if fn.AST == nil {
+		t.Fatal("guardedRevert has no AST")
+	}
+	reverts := fn.AST.CollectDescendants(func(n *types.ASTNode) bool {
+		return n.Kind == types.KindCheckRevert
+	})
+	if len(reverts) == 0 {
+		t.Fatal("no check.revert nodes")
+	}
+	for _, r := range reverts {
+		if r.StartLine == 0 {
+			t.Errorf("check.revert node missing StartLine (interior nodes should be located)")
+		}
+		if r.StartCol == 0 && r.StartByte == 0 {
+			t.Errorf("check.revert node has neither column nor byte offset")
+		}
+	}
+}
