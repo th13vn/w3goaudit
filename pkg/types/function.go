@@ -94,6 +94,10 @@ type Function struct {
 	// SourceLocation for debugging
 	StartLine int `json:"startLine,omitempty"`
 	EndLine   int `json:"endLine,omitempty"`
+	StartCol  int `json:"startCol,omitempty"`
+	EndCol    int `json:"endCol,omitempty"`
+	StartByte int `json:"startByte,omitempty"`
+	EndByte   int `json:"endByte,omitempty"`
 }
 
 // Parameter represents a function parameter or return value

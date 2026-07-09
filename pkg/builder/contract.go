@@ -152,11 +152,8 @@ func (ce *ContractExtractor) extractFunction(node *ast.FunctionDefinition) *type
 		}
 	}
 
-	// Extract location info
-	if node.Loc != nil {
-		fn.StartLine = node.Loc.Start.Line
-		fn.EndLine = node.Loc.End.Line
-	}
+	// Extract full source location (line + column + byte offset)
+	fn.StartLine, fn.EndLine, fn.StartCol, fn.EndCol, fn.StartByte, fn.EndByte = spanFields(node)
 
 	// Note: Selector and signature are calculated in a separate phase
 	// after all structs are extracted (see builder.calculateFunctionSelectors)
@@ -212,11 +209,8 @@ func (ce *ContractExtractor) extractModifier(node *ast.ModifierDefinition) *type
 		mod.Parameters = append(mod.Parameters, ce.extractParameter(param))
 	}
 
-	// Extract location info
-	if node.Loc != nil {
-		mod.StartLine = node.Loc.Start.Line
-		mod.EndLine = node.Loc.End.Line
-	}
+	// Extract full source location (line + column + byte offset)
+	mod.StartLine, mod.EndLine, mod.StartCol, mod.EndCol, mod.StartByte, mod.EndByte = spanFields(node)
 
 	return mod
 }

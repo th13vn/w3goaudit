@@ -85,6 +85,10 @@ type Modifier struct {
 	Calls      []*FunctionCall `json:"calls,omitempty"`     // Calls made within modifier
 	StartLine  int             `json:"startLine,omitempty"` // Source location
 	EndLine    int             `json:"endLine,omitempty"`   // Source location
+	StartCol   int             `json:"startCol,omitempty"`
+	EndCol     int             `json:"endCol,omitempty"`
+	StartByte  int             `json:"startByte,omitempty"`
+	EndByte    int             `json:"endByte,omitempty"`
 }
 
 // Struct represents a Solidity struct

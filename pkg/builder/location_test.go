@@ -34,6 +34,20 @@ func TestSpanFieldsNilSafe(t *testing.T) {
 	applySpan(nil, nil) // must not panic
 }
 
+func TestFunctionHasColumnAndByte(t *testing.T) {
+	db := buildFixture(t, statementsFixture)
+	fn := funcByName(t, db, "StatementForms", "guardedRevert")
+	if fn.StartLine == 0 {
+		t.Fatal("precondition: function should have StartLine")
+	}
+	if fn.StartCol == 0 && fn.StartByte == 0 {
+		t.Errorf("function missing both column and byte offset (col=%d byte=%d)", fn.StartCol, fn.StartByte)
+	}
+	if fn.EndByte != 0 && fn.EndByte < fn.StartByte {
+		t.Errorf("EndByte %d < StartByte %d", fn.EndByte, fn.StartByte)
+	}
+}
+
 func TestInteriorNodesHaveSpans(t *testing.T) {
 	db := buildFixture(t, statementsFixture) // "../../test-data/core/build-database/09-statements.sol"
 	fn := funcByName(t, db, "StatementForms", "guardedRevert")
