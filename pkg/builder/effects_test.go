@@ -67,6 +67,46 @@ contract Vault {
 	}
 }
 
+func TestStateWriteAndGuardHaveLines(t *testing.T) {
+	src := `// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.0;
+contract Vault {
+    address owner;
+    mapping(address => uint256) balances;
+
+    function setOwner(address o) external {
+        require(msg.sender == owner, "not owner");
+        owner = o;
+    }
+
+    function deposit() external payable {
+        balances[msg.sender] += msg.value;
+    }
+}`
+	db := buildFromSource(t, src)
+
+	fe := effectsOf(db, "Vault", "setOwner(address)")
+	if fe == nil {
+		t.Fatal("no effects for setOwner")
+	}
+	if len(fe.StateWrites) == 0 {
+		t.Fatal("expected setOwner to have state writes")
+	}
+	for _, w := range fe.StateWrites {
+		if w.Line == 0 {
+			t.Errorf("state write %q has Line == 0 (should be populated now)", w.Var)
+		}
+	}
+	if len(fe.Guards) == 0 {
+		t.Fatal("expected setOwner to have guards")
+	}
+	for _, g := range fe.Guards {
+		if g.Line == 0 {
+			t.Errorf("guard %q has Line == 0", g.Expr)
+		}
+	}
+}
+
 func hasWrite(fe *types.FunctionEffects, v string) bool {
 	for _, w := range fe.StateWrites {
 		if w.Var == v {

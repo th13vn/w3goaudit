@@ -40,7 +40,7 @@ func analyzeFunctionEffects(fn *types.Function) *types.FunctionEffects {
 				if isStateVarAssign(n) {
 					if name := lhsStateVar(n); name != "" {
 						fe.StateWrites = append(fe.StateWrites, types.StateWrite{
-							Var: name, Kind: assignKind(n),
+							Var: name, Kind: assignKind(n), Line: n.StartLine,
 						})
 					}
 				}
@@ -48,22 +48,22 @@ func analyzeFunctionEffects(fn *types.Function) *types.FunctionEffects {
 				if op, _ := n.Attributes["operator"].(string); op == "delete" {
 					if name := firstStateVar(n); name != "" {
 						fe.StateWrites = append(fe.StateWrites, types.StateWrite{
-							Var: name, Kind: "delete",
+							Var: name, Kind: "delete", Line: n.StartLine,
 						})
 					}
 				}
 			case types.KindAsmSstore:
 				fe.StateWrites = append(fe.StateWrites, types.StateWrite{
-					Var: "<assembly sstore>", Kind: "sstore",
+					Var: "<assembly sstore>", Kind: "sstore", Line: n.StartLine,
 				})
 			case types.KindCheckRequire:
-				fe.Guards = append(fe.Guards, types.Guard{Kind: "require", Expr: conditionText(n)})
+				fe.Guards = append(fe.Guards, types.Guard{Kind: "require", Expr: conditionText(n), Line: n.StartLine})
 			case types.KindCheckAssert:
-				fe.Guards = append(fe.Guards, types.Guard{Kind: "assert", Expr: conditionText(n)})
+				fe.Guards = append(fe.Guards, types.Guard{Kind: "assert", Expr: conditionText(n), Line: n.StartLine})
 			case types.KindCheckRevert:
-				fe.Guards = append(fe.Guards, types.Guard{Kind: "revert", Expr: conditionText(n)})
+				fe.Guards = append(fe.Guards, types.Guard{Kind: "revert", Expr: conditionText(n), Line: n.StartLine})
 			case types.KindStmtIf:
-				fe.Guards = append(fe.Guards, types.Guard{Kind: "if", Expr: conditionText(n)})
+				fe.Guards = append(fe.Guards, types.Guard{Kind: "if", Expr: conditionText(n), Line: n.StartLine})
 			}
 		})
 	}
