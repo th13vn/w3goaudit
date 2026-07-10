@@ -12,19 +12,16 @@ meta:
     Always check the return value: (bool success, ) = addr.call{value: x}("");
     require(success, "call failed"). Or use transfer() for simple ETH sends.
 
-query:
-  scope: function
-
-  # `stmt.assign` covers the idiomatic destructuring
-  # `(bool success, ) = addr.call(...); require(success, ...)` — the call's
-  # return is captured, then checked downstream, so it shouldn't fire.
-  match:
-    contains:
-      kind: call.lowlevel.call
-      not:
-        inside:
-          any:
-            - kind: check.require
-            - kind: check.assert
-            - kind: stmt.if
-            - kind: stmt.assign
+# `stmt.assign` covers the idiomatic destructuring
+# `(bool success, ) = addr.call(...); require(success, ...)` — the call's
+# return is captured, then checked downstream, so it shouldn't fire.
+from: function
+select: lowlevel_call
+where:
+  - not:
+      in:
+        any:
+          - block: require
+          - block: assert
+          - block: if
+          - block: assign

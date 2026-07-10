@@ -13,12 +13,9 @@ meta:
     that the sum of all amounts equals msg.value. Do not reuse msg.value per
     iteration.
 
-query:
-  scope: entrypoint
-
-  match:
-    contains:
-      kind: stmt.loop
-      contains:
-        kind: expr.member_access
-        name: "msg\\.value"
+from: entry_function
+select: loop
+where:
+  - has:
+      block: member
+      name: "msg\\.value"

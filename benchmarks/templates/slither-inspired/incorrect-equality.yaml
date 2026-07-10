@@ -13,17 +13,14 @@ meta:
     Use >= or <= comparisons instead of == when checking balances. Never rely
     on this.balance being an exact value.
 
-query:
-  scope: function
-
-  match:
-    contains:
-      kind: expr.binary_op
-      operator: "=="
-      any:
-        - contains:
-            kind: expr.member_access
-            name: (?i)(\.balance$|address\(this\)\.balance)
-        - contains:
-            kind: call.external
-            name: (?i)^balanceOf$
+from: function
+select: binary
+where:
+  - operator: "=="
+  - any:
+      - has:
+          block: member
+          name: (?i)(\.balance$|address\(this\)\.balance)
+      - has:
+          block: external_call
+          name: (?i)^balanceOf$

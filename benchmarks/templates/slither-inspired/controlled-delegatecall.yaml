@@ -14,12 +14,7 @@ meta:
     implementation addresses or an upgradeable proxy pattern with a timelocked
     admin role for changing the implementation.
 
-query:
-  scope: entrypoint
-
-  match:
-    contains:
-      kind: delegatecall
-      contains:
-        kind: expr.identifier
-        tainted_from: parameter
+from: entry_function
+select: delegatecall
+where:
+  - has: { block: identifier, tainted: parameter }

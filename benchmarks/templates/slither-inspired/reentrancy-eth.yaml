@@ -13,20 +13,17 @@ meta:
     BEFORE making external calls. Alternatively, use a ReentrancyGuard modifier
     (e.g., OpenZeppelin's nonReentrant).
 
-query:
-  scope: entrypoint
-
-  filter:
-    # Reentrancy guard detection is centralized in `preset: unLocked`
-    # (pkg/engine/presets.go). The preset already returns true for
-    # unchecked_var functions — no `not:` needed.
-    preset: unLocked
-
-  # The "reentrancy with ETH" signature is: an outbound ETH transfer followed
-  # by a state write. Using `eth_transfer` (transfer/send/call{value:}) here
-  # — instead of `outgoing_call` — distinguishes this detector from
-  # reentrancy-no-eth and removes findings on calls that cannot transfer ETH.
-  match:
-    sequence:
-      - kind: eth_transfer
-      - kind: state_write
+# Reentrancy guard detection is centralized in `preset: reentrancy_guarded`
+# (pkg/engine/presets.go). `not: { preset: reentrancy_guarded }` already
+# returns true for unchecked_var functions — no extra `not:` needed.
+#
+# The "reentrancy with ETH" signature is: an outbound ETH transfer followed
+# by a state write. Using `eth_transfer` (transfer/send/call{value:}) here
+# — instead of `outgoing_call` — distinguishes this detector from
+# reentrancy-no-eth and removes findings on calls that cannot transfer ETH.
+from: entry_function
+where:
+  - not: { preset: reentrancy_guarded }
+  - sequence:
+      - block: eth_transfer
+      - block: state_write

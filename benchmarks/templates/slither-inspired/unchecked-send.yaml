@@ -12,16 +12,13 @@ meta:
     Check the return value: require(addr.send(amount), "send failed"). Or prefer
     .call{value: amount}("") with return value check, or payable(addr).transfer().
 
-query:
-  scope: function
-
-  match:
-    contains:
-      kind: call.builtin.send
-      not:
-        inside:
-          any:
-            - kind: check.require
-            - kind: check.assert
-            - kind: stmt.if
-            - kind: stmt.assign
+from: function
+select: builtin_send
+where:
+  - not:
+      in:
+        any:
+          - block: require
+          - block: assert
+          - block: if
+          - block: assign

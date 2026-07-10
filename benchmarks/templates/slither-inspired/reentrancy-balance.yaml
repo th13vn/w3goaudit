@@ -13,14 +13,10 @@ meta:
     Use transferFrom instead of relying on balance deltas. Add a reentrancy
     guard (nonReentrant) to functions that read balances before external calls.
 
-query:
-  scope: entrypoint
-
-  filter:
-    preset: unLocked
-
-  match:
-    sequence:
-      - kind: call.external
+from: entry_function
+where:
+  - not: { preset: reentrancy_guarded }
+  - sequence:
+      - block: external_call
         name: (?i)balanceOf
-      - kind: outgoing_call
+      - block: outgoing_call

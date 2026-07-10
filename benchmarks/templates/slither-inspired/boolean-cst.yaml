@@ -12,12 +12,7 @@ meta:
     Remove the boolean constant and simplify the expression. If the condition
     is always true/false, the branch can be removed entirely.
 
-query:
-  scope: function
-
-  match:
-    contains:
-      kind: stmt.if
-      contains:
-        kind: expr.literal
-        name: ^(true|false)$
+from: function
+select: if
+where:
+  - has: { block: literal, name: ^(true|false)$ }

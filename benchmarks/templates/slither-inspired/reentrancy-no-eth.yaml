@@ -13,14 +13,10 @@ meta:
     Apply the Checks-Effects-Interactions pattern or use a reentrancy guard
     (e.g. OpenZeppelin nonReentrant).
 
-query:
-  scope: entrypoint
-
-  filter:
-    # Reentrancy guard detection is centralized in `preset: unLocked`.
-    preset: unLocked
-
-  match:
-    sequence:
-      - kind: call.external
-      - kind: state_write
+# Reentrancy guard detection is centralized in `preset: reentrancy_guarded`.
+from: entry_function
+where:
+  - not: { preset: reentrancy_guarded }
+  - sequence:
+      - block: external_call
+      - block: state_write

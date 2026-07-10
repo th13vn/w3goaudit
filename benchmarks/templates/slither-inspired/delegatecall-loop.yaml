@@ -13,11 +13,7 @@ meta:
     Avoid using delegatecall inside loops. If multicall functionality is needed,
     use a carefully audited multicall pattern with proper access control.
 
-query:
-  scope: entrypoint
-
-  match:
-    contains:
-      kind: stmt.loop
-      contains:
-        kind: delegatecall
+from: entry_function
+select: loop
+where:
+  - has: { block: delegatecall }

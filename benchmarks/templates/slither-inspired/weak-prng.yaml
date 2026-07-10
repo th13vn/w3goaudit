@@ -12,13 +12,10 @@ meta:
     Use a commit-reveal scheme or a trusted oracle (e.g., Chainlink VRF) for
     randomness. Do not rely on block variables for security-critical decisions.
 
-query:
-  scope: function
-
-  match:
-    contains:
-      kind: expr.binary_op
-      operator: "%"
-      contains:
-        kind: expr.member_access
-        name: (?i)(block\.timestamp|block\.number|block\.difficulty|blockhash)
+from: function
+select: binary
+where:
+  - operator: "%"
+  - has:
+      block: member
+      name: (?i)(block\.timestamp|block\.number|block\.difficulty|blockhash)

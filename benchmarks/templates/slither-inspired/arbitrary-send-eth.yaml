@@ -11,19 +11,12 @@ meta:
     Add access control modifiers (onlyOwner, onlyRole) to functions that
     transfer ETH, or ensure the recipient and amount are properly validated.
 
-query:
-  scope: entrypoint
-
-  filter:
-    preset: unAuthenticated
-
-  # An unauthenticated function that hard-codes the recipient (e.g. payable
-  # owner) is not arbitrary-send. Require the eth_transfer to consume an
-  # identifier that flows from a function parameter — that's the actual
-  # "user picks where ETH goes" attack surface.
-  match:
-    contains:
-      kind: eth_transfer
-      contains:
-        kind: expr.identifier
-        tainted_from: parameter
+# An unauthenticated function that hard-codes the recipient (e.g. payable
+# owner) is not arbitrary-send. Require the eth_transfer to consume an
+# identifier that flows from a function parameter — that's the actual
+# "user picks where ETH goes" attack surface.
+from: entry_function
+select: eth_transfer
+where:
+  - not: { preset: access_controlled }
+  - has: { block: identifier, tainted: parameter }

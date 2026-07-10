@@ -14,13 +14,8 @@ meta:
     initialize functions. Consider using _disableInitializers() in the
     constructor of implementation contracts.
 
-query:
-  scope: entrypoint
-
-  filter:
-    func_name: (?i)^(initialize|initialise|init)$
-    preset: unAuthenticated
-
-  match:
-    contains:
-      kind: state_write
+from: entry_function
+select: state_write
+where:
+  - func_name: (?i)^(initialize|initialise|init)$
+  - not: { preset: access_controlled }

@@ -12,15 +12,12 @@ meta:
     Use msg.sender as the 'from' parameter in transferFrom, or add proper
     access control (onlyOwner, auth) to restrict who can call the function.
 
-query:
-  scope: entrypoint
-
-  filter:
-    preset: unAuthenticated
-
-  match:
-    contains:
-      kind: token_call
-      name: ^transferFrom$
-      arg.0:
-        tainted_from: parameter
+# `token_call` (v1) is IsTokenCall(kind) == (kind == call.external) — v2 has
+# no dedicated `token_call` block-kind alias, so `external_call` (call.external)
+# + `name:` is behaviorally identical.
+from: entry_function
+select: external_call
+where:
+  - not: { preset: access_controlled }
+  - name: ^transferFrom$
+  - arg.0: { tainted: parameter }

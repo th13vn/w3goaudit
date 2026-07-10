@@ -17,19 +17,16 @@ meta:
     - https://swcregistry.io/docs/SWC-115
     - https://docs.soliditylang.org/en/latest/security-considerations.html#tx-origin
 
-query:
-  scope: function
-
-  match:
-    contains:
-      kind: expr.member_access
-      # Double-escape backslash inside a quoted YAML string so the engine
-      # receives `tx\.origin` as a regex (literal dot). The previous bare
-      # `tx\.origin` (unquoted) only worked by accident — different YAML
-      # parsers handle backslashes inconsistently.
-      name: "tx\\.origin"
-      inside:
-        any:
-          - kind: check.require
-          - kind: check.assert
-          - kind: stmt.if
+# Double-escape backslash inside a quoted YAML string so the engine
+# receives `tx\.origin` as a regex (literal dot). The previous bare
+# `tx\.origin` (unquoted) only worked by accident — different YAML
+# parsers handle backslashes inconsistently.
+from: function
+select: member
+where:
+  - name: "tx\\.origin"
+  - in:
+      any:
+        - block: require
+        - block: assert
+        - block: if

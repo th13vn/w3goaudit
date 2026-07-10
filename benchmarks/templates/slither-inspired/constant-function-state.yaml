@@ -14,12 +14,12 @@ meta:
     modify state. Ensure the function's actual behavior matches its declared
     mutability.
 
-query:
-  scope: function
-
-  filter:
-    mutability: view,pure
-
-  match:
-    contains:
-      kind: state_write
+# `mutability:` used bare at the top of `where` lowers into the AST layer
+# (checked against the state_write node itself, which carries no mutability
+# attribute); wrapped in `all:` it is recognized as context-only and routed
+# to the function-level precondition, matching v1's `filter: mutability:` exactly.
+from: function
+select: state_write
+where:
+  - all:
+      - mutability: view,pure
