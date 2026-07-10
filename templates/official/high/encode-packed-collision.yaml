@@ -18,35 +18,32 @@ meta:
     - https://swcregistry.io/docs/SWC-133
     - https://docs.soliditylang.org/en/latest/abi-spec.html#non-standard-packed-mode
 
-query:
-  scope: function
-  filter:
-    all:
+from: function
+
+where:
+  # Function-scope preconditions (routed to the filter/context layer): a bare
+  # dual field (visibility/regex) nested inside `all:` with no AST-only
+  # sibling classifies as context-only, so this `all:` reproduces v1's
+  # `filter.all: [visibility, regex]` precondition exactly.
+  - all:
       - visibility: public,external
       - regex: '(?s)function\s+\w+\([^)]*(?:bytes|string|address\[\]|uint256\[\])\s+\w+[^)]*(?:bytes|string|address\[\]|uint256\[\])\s+\w+'
-  match:
-    any:
-      - contains:
-          kind: call.internal
+  # No single AST anchor kind (two heterogeneous shapes), so `select:` is
+  # omitted and the whole match lives in this `any:`.
+  - any:
+      - has:
+          block: internal_call
           name: '^keccak256$'
-          contains:
-            kind: call.external
+          has:
+            block: external_call
             name: '^encodePacked$'
-            args:
-              0:
-                tainted_from: parameter
-              1:
-                tainted_from: parameter
+            arg.0: { tainted: parameter }
+            arg.1: { tainted: parameter }
       - sequence:
-          - kind: call.external
+          - block: external_call
             name: '^encodePacked$'
-            args:
-              0:
-                tainted_from: parameter
-              1:
-                tainted_from: parameter
-          - kind: call.internal
+            arg.0: { tainted: parameter }
+            arg.1: { tainted: parameter }
+          - block: internal_call
             name: '^keccak256$'
-            args:
-              0:
-                tainted_from: parameter
+            arg.0: { tainted: parameter }

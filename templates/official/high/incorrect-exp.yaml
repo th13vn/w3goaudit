@@ -23,39 +23,35 @@ meta:
     - https://github.com/crytic/slither/wiki/Detector-Documentation#incorrect-exponentiation
     - https://docs.soliditylang.org/en/latest/types.html#operators
 
-query:
-  scope: function
+from: function
+select: binary
 
-  match:
-    # Flag `^` only when it looks like exponentiation, not bit manipulation:
-    #   1. both operands are simple values — an identifier or a DECIMAL number
-    #      literal (so `(3*d) ^ 2` and `x ^ 0xFF` are excluded), and
-    #   2. the enclosing statement has no other bitwise/shift operator
-    #      (so `(a & b) + (a ^ b) / 2` is excluded).
-    # This catches `base ^ exp`, `2 ^ 8`, `10 ^ 18` while leaving genuine XOR
-    # (OpenZeppelin Math.average / mulDiv, hex masks) alone.
-    contains:
-      kind: expr.binary_op
-      operator: "\\^"
-      left:
+where:
+  # Flag `^` only when it looks like exponentiation, not bit manipulation:
+  #   1. both operands are simple values — an identifier or a DECIMAL number
+  #      literal (so `(3*d) ^ 2` and `x ^ 0xFF` are excluded), and
+  #   2. the enclosing statement has no other bitwise/shift operator
+  #      (so `(a & b) + (a ^ b) / 2` is excluded).
+  # This catches `base ^ exp`, `2 ^ 8`, `10 ^ 18` while leaving genuine XOR
+  # (OpenZeppelin Math.average / mulDiv, hex masks) alone.
+  - operator: "\\^"
+  - left:
+      any:
+        - block: identifier
+        - block: literal
+          literal_kind: number
+  - right:
+      any:
+        - block: identifier
+        - block: literal
+          literal_kind: number
+  # Exclude genuine bit manipulation: if the same statement holds another
+  # bitwise/shift operator (`&`, `|`, `<<`, `>>`, `~`), the `^` is intentional
+  # XOR (e.g. `(a & b) + (a ^ b) / 2`), not an exponentiation typo.
+  - not:
+      statement_has:
         any:
-          - kind: expr.identifier
-          - kind: expr.literal
-            attr:
-              subtype: number
-      right:
-        any:
-          - kind: expr.identifier
-          - kind: expr.literal
-            attr:
-              subtype: number
-      # Exclude genuine bit manipulation: if the same statement holds another
-      # bitwise/shift operator (`&`, `|`, `<<`, `>>`, `~`), the `^` is intentional
-      # XOR (e.g. `(a & b) + (a ^ b) / 2`), not an exponentiation typo.
-      not:
-        statement_contains:
-          any:
-            - kind: expr.binary_op
-              operator: "&|\\||<<|>>"
-            - kind: expr.unary_op
-              operator: "~"
+          - block: binary
+            operator: "&|\\||<<|>>"
+          - block: unary
+            operator: "~"

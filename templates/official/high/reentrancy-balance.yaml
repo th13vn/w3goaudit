@@ -21,24 +21,22 @@ meta:
     - https://github.com/crytic/slither/wiki/Detector-Documentation#reentrancy-vulnerabilities
     - https://blog.openzeppelin.com/reentrancy-after-istanbul
 
-query:
-  scope: entrypoint
+from: entry_function
 
-  filter:
-    # Centralised guard detection — covers nonReentrant, lock, mutex, etc.
-    preset: unLocked
+where:
+  # Centralised guard detection — covers nonReentrant, lock, mutex, etc.
+  - not: { preset: reentrancy_guarded }
 
-  match:
-    # Pre-call balance read, then external call, then post-call balance read.
-    # `sequence:` enforces order on descendants (depth-first).
-    sequence:
-      - kind: call.external
+  # Pre-call balance read, then external call, then post-call balance read.
+  # `sequence:` enforces order on descendants (depth-first). No `select:` —
+  # every step already names its own `block:` kind.
+  - sequence:
+      - block: external_call
         name: ^(balanceOf)$
-      - kind: outgoing_call
-        not:
-          name: ^(balanceOf)$
+      - block: outgoing_call
+        not: { name: ^(balanceOf)$ }
       - any:
-          - kind: call.external
+          - block: external_call
             name: ^(balanceOf)$
-          - kind: expr.member_access
+          - block: member
             name: ^balance$

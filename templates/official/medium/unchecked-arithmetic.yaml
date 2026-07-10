@@ -23,23 +23,25 @@ meta:
     - https://swcregistry.io/docs/SWC-101
     - https://docs.soliditylang.org/en/latest/control-structures.html#checked-or-unchecked-arithmetic
 
-query:
-  scope: function
+from: function
 
-  filter:
-    version: ">=0.8.0"
-    # Overflow only damages persistent state in state-mutating functions.
-    # pure/view library math (SafeMath/Math/Strings) computes bounded local
-    # values and cannot corrupt accounting, so exclude it here. Note: this is
-    # the in-template control; a genuinely vendored dependency tree (lib/,
-    # node_modules/, src/@openzeppelin/) is better excluded by scan scope.
-    mutability: "payable,nonpayable"
+where:
+  - version: ">=0.8.0"
+  # Overflow only damages persistent state in state-mutating functions.
+  # pure/view library math (SafeMath/Math/Strings) computes bounded local
+  # values and cannot corrupt accounting, so exclude it here. Note: this is
+  # the in-template control; a genuinely vendored dependency tree (lib/,
+  # node_modules/, src/@openzeppelin/) is better excluded by scan scope.
+  # Wrapped in `all:` (single item) so the bare `mutability:` — a dual
+  # field with no AST-only sibling — routes to the filter/context layer
+  # (a function precondition) instead of the match/AST layer.
+  - all:
+      - mutability: "payable,nonpayable"
 
-  match:
-    contains:
-      kind: stmt.unchecked
-      contains:
-        kind: expr.binary_op
+  - has:
+      block: unchecked
+      has:
+        block: binary
         operator: "[+\\-*/]"
         # Only flag arithmetic whose operands were NOT bounded by a preceding
         # guard. A range check that references every operand — e.g.

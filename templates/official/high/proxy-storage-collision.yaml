@@ -16,13 +16,27 @@ meta:
   references:
     - https://eips.ethereum.org/EIPS/eip-1967
 
-query:
-  scope: contract
-  filter:
-    extends: '(UpgradeabilityProxy|AdminUpgradeabilityProxy|OwnedUpgradeabilityProxy|TransparentUpgradeableProxy|ERC1967Proxy)'
-  match:
-    all:
-      - regex: '(?m)^\s*[A-Za-z_][A-Za-z0-9_<>,\[\] ]+\s+(?:public|private|internal)?\s*[A-Za-z_][A-Za-z0-9_]*\s*(?:=|;)'
-      - regex: '\bconstructor\s*\('
+# Contract-scope, no single AST anchor (this is a pure text-shape rule), so
+# `select:` is omitted and the whole match lives in `where:`. `base:` aliases
+# v1 `filter.extends`, evaluated as a contract-scope precondition (Filter),
+# exactly like before.
+#
+# The 3-way `all:` (two positive regexes + one negated regex) is wrapped in
+# `has:` per-branch. A bare `regex:` nested under `all:`/`not:` is a "dual"
+# field with no AST-only sibling, so the v2 lowerer classifies it as
+# context-only and would silently route the whole condition into Filter
+# (leaving Match empty -> load error). Wrapping each branch in `has:`
+# (Contains, an AST-only field) forces AST-layer routing, keeping the
+# existential per-branch "some declaration/constructor line matches" behavior
+# equivalent to the original whole-contract-text scan.
+from: contract
+where:
+  - base: '(UpgradeabilityProxy|AdminUpgradeabilityProxy|OwnedUpgradeabilityProxy|TransparentUpgradeableProxy|ERC1967Proxy)'
+  - all:
+      - has:
+          regex: '(?m)^\s*[A-Za-z_][A-Za-z0-9_<>,\[\] ]+\s+(?:public|private|internal)?\s*[A-Za-z_][A-Za-z0-9_]*\s*(?:=|;)'
+      - has:
+          regex: '\bconstructor\s*\('
       - not:
-          regex: '(?m)^\s*[A-Za-z_][A-Za-z0-9_<>,\[\] ]+\s+(?:immutable|constant)\b'
+          has:
+            regex: '(?m)^\s*[A-Za-z_][A-Za-z0-9_<>,\[\] ]+\s+(?:immutable|constant)\b'
