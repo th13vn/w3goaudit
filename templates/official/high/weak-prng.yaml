@@ -18,18 +18,15 @@ meta:
     - https://github.com/crytic/slither/wiki/Detector-Documentation#weak-prng
     - https://swcregistry.io/docs/SWC-120
 
-query:
-  scope: function
-
-  match:
-    # A modulo is the canonical signal — it converts a pseudo-random source
-    # into a bounded range. We walk the modulo's descendants to find ANY
-    # block-context member access, which also catches the popular
-    # `keccak256(abi.encodePacked(block.timestamp, ...)) % N` pattern because
-    # `block.timestamp` is still a descendant of the `%` node.
-    contains:
-      kind: expr.binary_op
-      operator: "%"
-      contains:
-        kind: expr.member_access
-        name: (?i)^block\.(timestamp|number|difficulty|prevrandao|coinbase)$|^blockhash$
+# A modulo is the canonical signal — it converts a pseudo-random source
+# into a bounded range. We walk the modulo's descendants to find ANY
+# block-context member access, which also catches the popular
+# `keccak256(abi.encodePacked(block.timestamp, ...)) % N` pattern because
+# `block.timestamp` is still a descendant of the `%` node.
+from: function
+select: binary
+where:
+  - operator: "%"
+  - has:
+      block: member
+      name: (?i)^block\.(timestamp|number|difficulty|prevrandao|coinbase)$|^blockhash$

@@ -14,18 +14,11 @@ meta:
     call. Restrict the target to a vetted allow-list, add access control, or
     replace the generic dispatcher with explicit, typed functions.
 
-query:
-  scope: entrypoint
-  filter:
-    preset: unAuthenticated
-  match:
-    contains:
-      kind: call.lowlevel.call
-      all:
-        - contains:
-            attr:
-              call_receiver: true
-            tainted_from: parameter
-        - args:
-            0:
-              tainted_from: parameter
+from: entry_function
+select: lowlevel_call
+where:
+  - not: { preset: access_controlled }
+  - has:
+      receiver: true
+      tainted: parameter
+  - arg.0: { tainted: parameter }

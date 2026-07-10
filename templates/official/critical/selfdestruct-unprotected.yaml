@@ -15,17 +15,12 @@ meta:
     - https://swcregistry.io/docs/SWC-106
     - https://blog.openzeppelin.com/parity-wallet-hack-reloaded
 
-query:
-  scope: entrypoint
-
-  # `unAuthenticated` preset performs real access-control detection: auth-named
-  # modifiers (validated against decoys), inline msg.sender/role guards, and
-  # recursive internal auth helpers. This replaces the old modifier-name regex,
-  # which both missed inline `require(msg.sender == owner)` guards (false
-  # positive) and any auth modifier outside its hard-coded name list.
-  filter:
-    preset: unAuthenticated
-
-  match:
-    contains:
-      kind: selfdestruct
+# `access_controlled` preset performs real access-control detection: auth-named
+# modifiers (validated against decoys), inline msg.sender/role guards, and
+# recursive internal auth helpers. This replaces the old modifier-name regex,
+# which both missed inline `require(msg.sender == owner)` guards (false
+# positive) and any auth modifier outside its hard-coded name list.
+from: entry_function
+select: selfdestruct
+where:
+  - not: { preset: access_controlled }

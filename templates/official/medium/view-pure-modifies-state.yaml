@@ -22,16 +22,15 @@ meta:
     - https://github.com/crytic/slither/wiki/Detector-Documentation#constant-functions-changing-the-state
     - https://docs.soliditylang.org/en/latest/contracts.html#view-functions
 
-query:
-  scope: function
-
-  filter:
-    mutability: view,pure
-
-  match:
-    # `state_write` is the semantic group for both `stmt.assign` (with
-    # is_state_var=true) and `asm.sstore` — covers both the high-level
-    # "x = ...;" pattern AND the assembly bypass pattern, which is the
-    # interesting (and silently dangerous) one.
-    contains:
-      kind: state_write
+# `state_write` is the semantic group for both `stmt.assign` (with
+# is_state_var=true) and `asm.sstore` — covers both the high-level
+# "x = ...;" pattern AND the assembly bypass pattern, which is the
+# interesting (and silently dangerous) one.
+#
+# `mutability: view,pure` is wrapped in `all:` so it routes to the
+# function-level precondition layer (see delegatecall-in-loop.yaml).
+from: function
+select: state_write
+where:
+  - all:
+      - mutability: view,pure

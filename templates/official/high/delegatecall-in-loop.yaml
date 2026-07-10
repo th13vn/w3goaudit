@@ -18,17 +18,19 @@ meta:
     - https://github.com/crytic/slither/wiki/Detector-Documentation#payable-functions-using-delegatecall-inside-a-loop
     - https://forum.openzeppelin.com/t/poc-multicall-with-msg-value-reuses-eth/14467
 
-query:
-  scope: entrypoint
-  filter:
-    mutability: payable
-  match:
-    # `kind: delegatecall` is the semantic group covering both
-    # call.lowlevel.delegatecall and asm.delegatecall. Wrapping it in
-    # `inside: stmt.loop` lets us assert "delegatecall whose ancestor is a
-    # loop" — surviving non-adjacent layout (helper var assignment between
-    # the loop header and the call).
-    contains:
-      kind: delegatecall
-      inside:
-        kind: stmt.loop
+# `delegatecall` is the semantic group covering both call.lowlevel.delegatecall
+# and asm.delegatecall. `in: {block: loop}` asserts "delegatecall whose
+# ancestor is a loop" — surviving non-adjacent layout (helper var assignment
+# between the loop header and the call).
+#
+# `mutability: payable` must be wrapped in `all:` — used bare at the top of
+# `where` it lowers into the AST layer (checked against the delegatecall node
+# itself, which carries no mutability attribute); wrapped in `all:` it is
+# recognized as context-only and routed to the function-level precondition,
+# matching v1's `filter: mutability: payable` exactly.
+from: entry_function
+select: delegatecall
+where:
+  - all:
+      - mutability: payable
+  - in: { block: loop }

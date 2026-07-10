@@ -16,20 +16,21 @@ meta:
     - https://github.com/crytic/slither/wiki/Detector-Documentation#msg-value-inside-a-loop
     - https://forum.openzeppelin.com/t/poc-multicall-with-msg-value-reuses-eth/14467
 
-query:
-  scope: entrypoint
-
-  filter:
-    # Only payable entries can receive ETH — non-payable functions cannot
-    # exhibit this bug because msg.value is always 0. Restricting here cuts
-    # the FP surface dramatically.
-    mutability: payable
-
-  match:
-    contains:
-      kind: stmt.loop
-      contains:
-        kind: expr.member_access
-        name: ^value$
-        left:
-          name: ^msg$
+# Only payable entries can receive ETH — non-payable functions cannot exhibit
+# this bug because msg.value is always 0. Restricting here cuts the FP surface
+# dramatically. `mutability: payable` is wrapped in `all:` so it routes to the
+# function-level precondition (see delegatecall-in-loop.yaml for why bare
+# `mutability:` at the top of `where` would be wrong here).
+#
+# `left: {name: ^msg$}` (v1) is a bare-name check on a member_access's parent
+# expression, which the engine reads off the node's `parent` attribute — the
+# same value the v2 `parent:` attribute (§7 advanced) exposes directly.
+from: entry_function
+select: loop
+where:
+  - all:
+      - mutability: payable
+  - has:
+      block: member
+      name: ^value$
+      parent: ^msg$

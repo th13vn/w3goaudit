@@ -16,17 +16,11 @@ meta:
     - https://swcregistry.io/docs/SWC-112
     - https://consensys.github.io/smart-contract-best-practices/attacks/delegatecall/
 
-query:
-  scope: entrypoint
-
-  filter:
-    preset: unAuthenticated
-
-  match:
-    contains:
-      kind: delegatecall
-      contains:
-        kind: expr.identifier
-        attr:
-          call_receiver: true
-        tainted_from: parameter
+from: entry_function
+select: delegatecall
+where:
+  - not: { preset: access_controlled }
+  - has:
+      block: identifier
+      receiver: true
+      tainted: parameter

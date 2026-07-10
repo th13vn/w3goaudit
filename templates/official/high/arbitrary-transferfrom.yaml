@@ -9,22 +9,17 @@ meta:
     - https://swcregistry.io/docs/SWC-105
     - https://github.com/crytic/slither/wiki/Detector-Documentation#arbitrary-send-erc20
 
-query:
-  scope: entrypoint
-
-  filter:
-    # Function must neither be privileged-gated (owner/admin/role modifiers or
-    # auth helpers) NOR self-scope the caller (require(from == msg.sender)).
-    # Self-scoping is the canonical mitigation here — you can only move your own
-    # tokens — so it is treated as safe even though it is not access control.
-    preset: unCheckedSender
-
-  match:
-    # External transferFrom where the `from` argument is controlled by a caller
-    # parameter. This includes indexed parameters such as from[i].
-    contains:
-      kind: token_call
-      name: ^transferFrom$
-      args:
-        0:
-          tainted_from: parameter
+# Function must neither be privileged-gated (owner/admin/role modifiers or
+# auth helpers) NOR self-scope the caller (require(from == msg.sender)).
+# Self-scoping is the canonical mitigation here — you can only move your own
+# tokens — so it is treated as safe even though it is not access control.
+#
+# `token_call` (v1) is IsTokenCall(kind) == (kind == call.external) — name
+# filtering for ERC20/ERC721 methods is a separate check either way, so
+# `external_call` + `name:` is behaviorally identical.
+from: entry_function
+select: external_call
+where:
+  - not: { preset: caller_checked }
+  - name: ^transferFrom$
+  - arg.0: { tainted: parameter }

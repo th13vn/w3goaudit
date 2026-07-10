@@ -18,21 +18,24 @@ meta:
     - https://github.com/crytic/slither/wiki/Detector-Documentation#unchecked-send
     - https://swcregistry.io/docs/SWC-104
 
-query:
-  scope: function
-
-  match:
-    contains:
-      kind: call.builtin.send
-      # If the call is inside a guard, branch, assign, or return, the return
-      # value is presumed handled. `stmt.assign` covers
-      # `bool ok = to.send(amt);` — checking of `ok` is left to a downstream
-      # rule and is not in scope here.
-      not:
-        inside:
-          any:
-            - kind: check.require
-            - kind: check.assert
-            - kind: stmt.if
-            - kind: stmt.assign
-            - kind: stmt.return
+# `call.builtin.send` has no dedicated v2 block-kind alias — only the broader
+# `eth_transfer` semantic group (transfer/send/lowlevel .call/asm.call). Since
+# only `.send(...)` calls carry the node name "send" among that group,
+# `select: eth_transfer` + `name: ^send$` narrows to exactly the same nodes.
+#
+# If the call is inside a guard, branch, assign, or return, the return
+# value is presumed handled. `stmt.assign` covers
+# `bool ok = to.send(amt);` — checking of `ok` is left to a downstream
+# rule and is not in scope here.
+from: function
+select: eth_transfer
+where:
+  - name: ^send$
+  - not:
+      in:
+        any:
+          - block: require
+          - block: assert
+          - block: if
+          - block: assign
+          - block: return

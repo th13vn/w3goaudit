@@ -16,27 +16,24 @@ meta:
     - https://swcregistry.io/docs/SWC-115
     - https://docs.soliditylang.org/en/latest/security-considerations.html#tx-origin
 
-query:
-  scope: function
-
-  # Whitelist the legitimate anti-contract idiom `require(msg.sender ==
-  # tx.origin)` / `tx.origin == msg.sender`, which asserts the caller is an EOA
-  # rather than authenticating. Slither excludes the same form.
-  filter:
-    not:
-      regex: "(msg\\.sender\\s*==\\s*tx\\.origin|tx\\.origin\\s*==\\s*msg\\.sender)"
-
-  match:
-    # `tx.origin` inside ANY guard or branch (require / assert / revert /
-    # if / conditional) — all are auth-shaped uses. The previous version
-    # only matched `stmt.if`, missing the very common `require(tx.origin ==
-    # owner, ...)` form (the single most-popular tx.origin auth pattern).
-    contains:
-      kind: expr.member_access
-      name: "tx\\.origin"
-      inside:
-        any:
-          - kind: check.require
-          - kind: check.assert
-          - kind: stmt.if
-          - kind: expr.conditional
+# Whitelist the legitimate anti-contract idiom `require(msg.sender ==
+# tx.origin)` / `tx.origin == msg.sender`, which asserts the caller is an EOA
+# rather than authenticating. Slither excludes the same form. `not: {regex:}`
+# here is function-source-scoped (routes to the context/filter layer via
+# ruleIsContextOnly), matching v1's `filter: not: {regex: ...}` exactly.
+#
+# `tx.origin` inside ANY guard or branch (require / assert / revert /
+# if / conditional) — all are auth-shaped uses. The previous version
+# only matched `stmt.if`, missing the very common `require(tx.origin ==
+# owner, ...)` form (the single most-popular tx.origin auth pattern).
+from: function
+select: member
+where:
+  - not: { regex: "(msg\\.sender\\s*==\\s*tx\\.origin|tx\\.origin\\s*==\\s*msg\\.sender)" }
+  - name: "tx\\.origin"
+  - in:
+      any:
+        - block: require
+        - block: assert
+        - block: if
+        - block: ternary
