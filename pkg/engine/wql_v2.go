@@ -236,7 +236,16 @@ func buildMatch(scope Scope, selectKinds []string, astAgg *Rule) (*Rule, error) 
 	}
 
 	if len(selectKinds) == 0 {
-		return nil, fmt.Errorf("select: required for scope %q", scope)
+		// No select: the merged AST where-matchers become the Match directly
+		// (no Contains wrap) — e.g. `from: contract` + `where: [regex: ...]`
+		// applies the regex at the contract-scope root, matching v1's
+		// `scope: contract` pure-regex form, or `where: [any: [...]]` defining
+		// the whole match on its own. There must be something to match on.
+		if astAgg.IsEmpty() {
+			return nil, fmt.Errorf("select: required for scope %q unless where contains AST-level matchers", scope)
+		}
+		result := *astAgg
+		return &result, nil
 	}
 
 	if len(selectKinds) > 1 {
@@ -393,6 +402,41 @@ func lowerKeyValue(key string, val yaml.Node) (*Rule, *Rule, error) {
 			ast.Attr[v1k] = decoded
 		}
 		return ast, nil, nil
+
+	case "left":
+		sub, err := lowerToRule(val)
+		if err != nil {
+			return nil, nil, err
+		}
+		return &Rule{Left: sub}, nil, nil
+
+	case "right":
+		sub, err := lowerToRule(val)
+		if err != nil {
+			return nil, nil, err
+		}
+		return &Rule{Right: sub}, nil, nil
+
+	case "statement_has":
+		sub, err := lowerToRule(val)
+		if err != nil {
+			return nil, nil, err
+		}
+		return &Rule{StatementContains: sub}, nil, nil
+
+	case "unchecked_var":
+		var v bool
+		if err := val.Decode(&v); err != nil {
+			return nil, nil, fmt.Errorf("where.unchecked_var: %w", err)
+		}
+		return &Rule{UncheckedVar: v}, nil, nil
+
+	case "modifier":
+		var v string
+		if err := val.Decode(&v); err != nil {
+			return nil, nil, fmt.Errorf("where.modifier: %w", err)
+		}
+		return nil, &Rule{Modifier: v}, nil
 
 	case "has":
 		sub, err := lowerToRule(val)

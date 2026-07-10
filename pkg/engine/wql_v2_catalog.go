@@ -30,15 +30,19 @@ package engine
 // This is a known, documented coverage gap — see the report.
 var blockKindToV1Table = map[string]string{
 	// Calls
-	"call":          "any_call",                 // any internal/external/low-level call
-	"external_call": "call.external",            // exact kind
-	"internal_call": "call.internal",            // exact kind
-	"delegatecall":  "delegatecall",             // semantic group: call.lowlevel.delegatecall + asm.delegatecall
-	"staticcall":    "call.lowlevel.staticcall", // exact kind only; no merged group with asm.staticcall today
-	"lowlevel_call": "call.lowlevel.call",       // exact kind
-	"create":        "call.create",              // exact kind only; no merged group with asm.create/asm.create2 today
-	"eth_transfer":  "eth_transfer",             // semantic group: .transfer/.send/call{value:}
-	"selfdestruct":  "selfdestruct",             // semantic group: call.builtin.selfdestruct + asm.selfdestruct
+	"call":                 "any_call",                  // any internal/external/low-level call
+	"outgoing_call":        "outgoing_call",             // semantic group: any call this function makes outward
+	"external_call":        "call.external",             // exact kind
+	"internal_call":        "call.internal",             // exact kind
+	"delegatecall":         "delegatecall",              // semantic group: call.lowlevel.delegatecall + asm.delegatecall
+	"staticcall":           "call.lowlevel.staticcall",  // exact kind only; no merged group with asm.staticcall today
+	"lowlevel_call":        "call.lowlevel.call",        // exact kind
+	"create":               "call.create",               // exact kind only; no merged group with asm.create/asm.create2 today
+	"eth_transfer":         "eth_transfer",              // semantic group: .transfer/.send/call{value:}
+	"selfdestruct":         "selfdestruct",              // semantic group: call.builtin.selfdestruct + asm.selfdestruct
+	"builtin_transfer":     "call.builtin.transfer",     // exact kind: address.transfer(...)
+	"builtin_send":         "call.builtin.send",         // exact kind: address.send(...)
+	"builtin_selfdestruct": "call.builtin.selfdestruct", // exact kind (Solidity-level only; use "selfdestruct" for +asm)
 
 	// Guards / checks
 	"guard":   "check",         // semantic group: any require/assert/revert
@@ -121,6 +125,7 @@ var attrNameToV1Table = map[string]string{
 	"signature":    "called_signature",
 	"has_value":    "has_value",
 	"has_gas":      "has_gas",
+	"call_option":  "call_option", // "value" or "gas" marker on a call-option child (verify.go reads it alongside call_receiver)
 	"operator":     "operator",
 	"type":         "type",
 	"type_kind":    "type_kind",

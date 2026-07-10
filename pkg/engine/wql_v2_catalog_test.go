@@ -18,6 +18,10 @@ func TestBlockKindToV1(t *testing.T) {
 		{"create", "call.create", true},
 		{"eth_transfer", "eth_transfer", true},
 		{"selfdestruct", "selfdestruct", true},
+		{"outgoing_call", "outgoing_call", true},
+		{"builtin_transfer", "call.builtin.transfer", true},
+		{"builtin_send", "call.builtin.send", true},
+		{"builtin_selfdestruct", "call.builtin.selfdestruct", true},
 
 		// Guards / checks
 		{"guard", "check", true},
@@ -99,6 +103,7 @@ func TestAttrNameToV1(t *testing.T) {
 		{"literal_kind", "subtype", true},
 		{"has_value", "has_value", true},
 		{"has_gas", "has_gas", true},
+		{"call_option", "call_option", true},
 		{"operator", "operator", true},
 		{"type", "type", true},
 		{"type_kind", "type_kind", true},

@@ -265,3 +265,191 @@ func TestLower_NotMultiKeyPresetRejected(t *testing.T) {
 		t.Errorf("lower error = %q, want it to mention the preset restriction", err.Error())
 	}
 }
+
+// --- left / right ------------------------------------------------------
+
+const v2LeftRightLowerYAML = `
+meta: { id: v2-left-right, severity: MEDIUM, title: left/right operand test }
+select: binary
+from: entry_function
+where:
+  - left: { name: "^msg$" }
+  - right: { tainted: parameter }
+`
+
+func TestLower_LeftRight(t *testing.T) {
+	tv2, err := parseV2([]byte(v2LeftRightLowerYAML))
+	if err != nil {
+		t.Fatalf("parseV2: %v", err)
+	}
+	tmpl, err := tv2.lower()
+	if err != nil {
+		t.Fatalf("lower: %v", err)
+	}
+
+	if tmpl.Query.Match.Contains == nil {
+		t.Fatalf("Match.Contains is nil")
+	}
+	if tmpl.Query.Match.Contains.Left == nil || tmpl.Query.Match.Contains.Left.Name != "^msg$" {
+		t.Errorf("Match.Contains.Left = %+v, want Name=%q", tmpl.Query.Match.Contains.Left, "^msg$")
+	}
+	if tmpl.Query.Match.Contains.Right == nil || tmpl.Query.Match.Contains.Right.TaintedFrom != "parameter" {
+		t.Errorf("Match.Contains.Right = %+v, want TaintedFrom=%q", tmpl.Query.Match.Contains.Right, "parameter")
+	}
+
+	if err := finalizeTemplate(tmpl, []byte(v2LeftRightLowerYAML), "test"); err != nil {
+		t.Fatalf("finalizeTemplate: %v", err)
+	}
+}
+
+// --- statement_has -------------------------------------------------------
+
+const v2StatementHasLowerYAML = `
+meta: { id: v2-statement-has, severity: MEDIUM, title: statement_has test }
+select: external_call
+from: entry_function
+where:
+  - statement_has: { block: require }
+`
+
+func TestLower_StatementHas(t *testing.T) {
+	tv2, err := parseV2([]byte(v2StatementHasLowerYAML))
+	if err != nil {
+		t.Fatalf("parseV2: %v", err)
+	}
+	tmpl, err := tv2.lower()
+	if err != nil {
+		t.Fatalf("lower: %v", err)
+	}
+
+	wantKind, _ := blockKindToV1("require")
+	if tmpl.Query.Match.Contains == nil || tmpl.Query.Match.Contains.StatementContains == nil {
+		t.Fatalf("Match.Contains.StatementContains is nil")
+	}
+	if tmpl.Query.Match.Contains.StatementContains.Kind != wantKind {
+		t.Errorf("StatementContains.Kind = %q, want %q", tmpl.Query.Match.Contains.StatementContains.Kind, wantKind)
+	}
+
+	if err := finalizeTemplate(tmpl, []byte(v2StatementHasLowerYAML), "test"); err != nil {
+		t.Fatalf("finalizeTemplate: %v", err)
+	}
+}
+
+// --- unchecked_var -------------------------------------------------------
+
+const v2UncheckedVarLowerYAML = `
+meta: { id: v2-unchecked-var, severity: MEDIUM, title: unchecked_var test }
+select: binary
+from: entry_function
+where:
+  - unchecked_var: true
+`
+
+func TestLower_UncheckedVar(t *testing.T) {
+	tv2, err := parseV2([]byte(v2UncheckedVarLowerYAML))
+	if err != nil {
+		t.Fatalf("parseV2: %v", err)
+	}
+	tmpl, err := tv2.lower()
+	if err != nil {
+		t.Fatalf("lower: %v", err)
+	}
+
+	if tmpl.Query.Match.Contains == nil || !tmpl.Query.Match.Contains.UncheckedVar {
+		t.Fatalf("Match.Contains.UncheckedVar = %+v, want true", tmpl.Query.Match.Contains)
+	}
+
+	if err := finalizeTemplate(tmpl, []byte(v2UncheckedVarLowerYAML), "test"); err != nil {
+		t.Fatalf("finalizeTemplate: %v", err)
+	}
+}
+
+// --- modifier (context layer, filter-only) -------------------------------
+
+const v2ModifierLowerYAML = `
+meta: { id: v2-modifier, severity: MEDIUM, title: modifier filter test }
+select: external_call
+from: entry_function
+where:
+  - modifier: "(?i)initializer"
+`
+
+func TestLower_ModifierRoutesToFilter(t *testing.T) {
+	tv2, err := parseV2([]byte(v2ModifierLowerYAML))
+	if err != nil {
+		t.Fatalf("parseV2: %v", err)
+	}
+	tmpl, err := tv2.lower()
+	if err != nil {
+		t.Fatalf("lower: %v", err)
+	}
+
+	if tmpl.Query.Filter == nil || tmpl.Query.Filter.Modifier != "(?i)initializer" {
+		t.Fatalf("Filter.Modifier = %+v, want %q", tmpl.Query.Filter, "(?i)initializer")
+	}
+	// Modifier is context-only: it must not leak into Match anywhere.
+	if tmpl.Query.Match.Modifier != "" {
+		t.Errorf("Match.Modifier = %q, want empty", tmpl.Query.Match.Modifier)
+	}
+	if tmpl.Query.Match.Contains != nil && tmpl.Query.Match.Contains.Modifier != "" {
+		t.Errorf("Match.Contains.Modifier = %q, want empty", tmpl.Query.Match.Contains.Modifier)
+	}
+
+	if err := finalizeTemplate(tmpl, []byte(v2ModifierLowerYAML), "test"); err != nil {
+		t.Fatalf("finalizeTemplate: %v", err)
+	}
+}
+
+// --- select-absent (structural fix) --------------------------------------
+
+const v2SelectAbsentLowerYAML = `
+meta: { id: v2-select-absent, severity: MEDIUM, title: select-absent regex-at-root test }
+from: contract
+where:
+  - regex: "slot"
+`
+
+func TestLower_SelectAbsentAppliesRegexAtRoot(t *testing.T) {
+	tv2, err := parseV2([]byte(v2SelectAbsentLowerYAML))
+	if err != nil {
+		t.Fatalf("parseV2: %v", err)
+	}
+	tmpl, err := tv2.lower()
+	if err != nil {
+		t.Fatalf("lower: %v", err)
+	}
+
+	if tmpl.Query.Scope != ScopeContract {
+		t.Errorf("Scope = %q, want %q", tmpl.Query.Scope, ScopeContract)
+	}
+	if tmpl.Query.Match.Regex != "slot" {
+		t.Errorf("Match.Regex = %q, want %q", tmpl.Query.Match.Regex, "slot")
+	}
+	if tmpl.Query.Match.Contains != nil {
+		t.Errorf("Match.Contains = %+v, want nil (no select => no Contains wrap)", tmpl.Query.Match.Contains)
+	}
+
+	if err := finalizeTemplate(tmpl, []byte(v2SelectAbsentLowerYAML), "test"); err != nil {
+		t.Fatalf("finalizeTemplate: %v", err)
+	}
+}
+
+// TestLower_SelectAbsentNoASTMattersErrors documents that a select-absent
+// template with no AST-level where matchers (and scope != source) is
+// rejected — there is nothing to match on.
+func TestLower_SelectAbsentNoASTMattersErrors(t *testing.T) {
+	const yamlSrc = `
+meta: { id: v2-select-absent-empty, severity: MEDIUM, title: select-absent with no AST matcher }
+from: contract
+where:
+  - modifier: "(?i)initializer"
+`
+	tv2, err := parseV2([]byte(yamlSrc))
+	if err != nil {
+		t.Fatalf("parseV2: %v", err)
+	}
+	_, err = tv2.lower()
+	if err == nil {
+		t.Fatalf("lower: expected an error (no select, no AST where-matchers), got nil")
+	}
+}
