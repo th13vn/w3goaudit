@@ -28,7 +28,9 @@ go test ./...
 A WQL detector is a YAML file with metadata + a query. Example: flag
 `block.timestamp` used inside a `require` (a weak time guard).
 
-1. **Write the template** — `templates/official/timestamp-guard.yaml`:
+1. **Write the template** — `templates/official/timestamp-guard.yaml`, in
+   **WQL v2** (`select`/`from`/`where` — the syntax used by all 106
+   official/benchmark/feature-test templates as of v0.4):
 
    ```yaml
    meta:
@@ -41,18 +43,19 @@ A WQL detector is a YAML file with metadata + a query. Example: flag
        be gamed within a ~15s window.
      recommendation: Avoid timestamp-based guards for security-critical checks.
 
-   query:
-     scope: function
-     match:
-       contains:
-         kind: expr.member_access
-         name: "block\\.timestamp"
-         inside:
-           kind: check.require
+   select: member          # expr.member_access
+   from: function
+   where:
+     - name: "block\\.timestamp"
+     - in: { block: require }   # nested inside a require(...) guard
    ```
 
-   See `docs/wql-syntax.md` for the full operator/kind/attribute reference, and
-   the existing `templates/official/*.yaml` for idiomatic examples.
+   See `docs/wql-syntax.md` for the full `select`/`from`/`where` reference
+   (block-kind, attribute, and preset catalogs), and the existing
+   `templates/official/*.yaml` for idiomatic examples. The legacy v1
+   `query:`/`scope:`/`match:` syntax still loads (auto-detected per file,
+   see `docs/wql-syntax.md#migrating-from-v1`), but new templates should use
+   v2.
 
 2. **Write fixtures** — `test-data/security/timestamp-guard.sol` with a
    `Vulnerable*` contract that should match and a `Safe*` contract that must
@@ -67,8 +70,8 @@ A WQL detector is a YAML file with metadata + a query. Example: flag
    ```
 
    Confirm only the `Vulnerable*` contract is flagged. Bad templates fail fast
-   at load with an actionable message (unknown kind/preset/scope, AST field in
-   `filter:`, invalid regex, etc.).
+   at load with an actionable message (unknown block kind/preset/attribute,
+   `select` omitted with no AST-level matcher in `where`, invalid regex, etc.).
 
 4. **Document** — add the detector to `templates/INDEX.md`.
 

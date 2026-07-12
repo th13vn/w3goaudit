@@ -14,11 +14,16 @@ graph LR
     Reader --> Builder[pkg/builder]
     Builder --> Types[pkg/types Database]
     Types --> Engine[pkg/engine]
-    Templates[templates/] --> Engine
+    Templates[templates/ WQL v2/v1] --> Engine
     Engine --> Report[pkg/report]
+    Report --> Nav[data/nav.json + data/explorer.json]
 ```
 
-Canonical pipeline: `Reader -> Builder -> Database -> Engine -> Report`.
+Canonical pipeline: `Reader -> Builder -> Database -> Engine -> Report`. Source
+locations (line/col/byte, from solast-go) are threaded from the builder onto
+AST nodes and declarations all the way through to `Report`, which also derives
+the extension-facing `nav.json`/`explorer.json` navigation artifacts from the
+finished `Database`/`Findings`, independent of the WQL template surface.
 
 ## Package Map
 
@@ -31,14 +36,16 @@ Canonical pipeline: `Reader -> Builder -> Database -> Engine -> Report`.
 | `pkg/engine/` | WQL template loading, validation, execution, taint/reachability, finding construction | `pkg/engine/INDEX.md` |
 | `pkg/report/` | Markdown/HTML/SARIF/JSON output, result folder, state matrix, workflow files, source excerpts | `pkg/report/INDEX.md` |
 | `pkg/home/` | `~/.w3goaudit` config/template-home management and release download | `pkg/home/INDEX.md` |
-| `templates/` | Official embedded WQL detector pack and WQL feature-test templates | `templates/INDEX.md` |
+| `templates/` | Official embedded WQL detector pack (v2), legacy v1 seed templates (`templates/security/`), and WQL feature-test templates | `templates/INDEX.md` |
 
 ## Core Invariants
 
 - The root command is the scan: `w3goaudit <path>`. There is no `scan` subcommand.
-- A normal scan writes one result folder containing `README.md`, `summary.md`, `overview.md`, `findings.md`, `results.sarif`, `run.log`, `data/` (with `manifest.json` index), and a `contracts/` tree (per-main-contract folders mirroring source paths, each with its own `README.md`).
+- A normal scan writes one result folder containing `README.md`, `summary.md`, `overview.md`, `findings.md`, `results.sarif`, `run.log`, `data/` (with `manifest.json` index, plus `nav.json` and `explorer.json`), and a `contracts/` tree (per-main-contract folders mirroring source paths, each with its own `README.md`).
+- AST nodes and declarations (`Function`/`Modifier`/`Contract`/`StateVariable`/`Event`/`Struct`/`Enum`/`Parameter`) carry `StartCol`/`EndCol`/`StartByte`/`EndByte` alongside `StartLine`/`EndLine` (1-based columns, 0-based byte offsets; zero/omitted for synthetic nodes). `FunctionCall`/`CallEdge` carry `Col`/`Byte` too. Output schema is `2.0.0`; this requires solast-go v0.1.7+.
+- Templates are written in **WQL v2** (`select`/`from`/`where`); the loader auto-detects v1 (`query:`) vs v2 per file and lowers v2 into the existing v1 `Rule` IR (`TemplateV2.lower()` in `pkg/engine/wql_v2.go`), so the evaluator (taint/reachability/matching) is unchanged between versions.
 - Template loading is fail-closed by default. Lenient loading is explicit via `--ignore-invalid-templates` or `TemplateLoadOptions{IgnoreInvalid:true}`.
-- `filter:` is for context-level preconditions; `match:` is for AST/source matching. `validateRulePlacement` enforces this.
+- In the underlying v1 `Rule` IR (what v2 lowers to), `filter:` is for context-level preconditions and `match:` is for AST/source matching; `validateRulePlacement` enforces this. v2 templates don't write `filter:`/`match:` directly — `from` supplies scope, `where` supplies matchers.
 - Contract scopes (`main_contract`, `all_contract`, `contract`, `library`, `abstract`) evaluate `match:` against a synthetic `decl.contract` AST containing resolved functions from the linearized inheritance chain.
 - Findings may include `reachability`, `entryPoint`, `primaryAst`, and `related` matched sites. These fields are additive JSON/SARIF/report context.
 - Contract and function IDs use absolute paths: `absPath#ContractName` and `absPath#ContractName.selector(argTypes)`.
@@ -52,7 +59,8 @@ Canonical pipeline: `Reader -> Builder -> Database -> Engine -> Report`.
 | `README.md` | User-facing quick start, feature overview, result-folder shape |
 | `docs/project-overview.md` | Architecture and package-level system design |
 | `docs/workflows.md` | Scan/build/report execution workflows |
-| `docs/wql-syntax.md` | WQL language reference for templates |
+| `docs/wql-syntax.md` | WQL v2 language reference for templates (v1 `query:` migration appendix included) |
+| `docs/extension-output.md` | `data/nav.json` + `data/explorer.json` schema for the future VSCode extension |
 | `docs/usage.md` | Full CLI usage, flags, result artifacts |
 | `docs/sdk.md` | Go SDK package/type/function reference |
 
@@ -67,6 +75,15 @@ Canonical pipeline: `Reader -> Builder -> Database -> Engine -> Report`.
   labels live in the template, not the engine.
 - `Finding.Location` is still the primary anchor; `Finding.Related` is for the
   complete contributing context.
+- Templates use WQL v2 (`select`/`from`/`where`) with intuitive-polarity presets
+  (`access_controlled`, `caller_checked`, `reentrancy_guarded`, `user_controlled`);
+  all 106 official + benchmark + feature-test templates are migrated. `select`
+  is optional in v2 when the rule's own matched node is the intended anchor.
+- `data/nav.json` is a flat symbol-level navigation index (definitions, caller
+  edges, interface→implementation map); `data/explorer.json` is a
+  per-main-contract model (ordered constants/storage, entry-callable functions,
+  view getters). Both are built in `pkg/report` (`nav.go`/`explorer.go`),
+  manifest-indexed, and share the same `schemaVersion` as `overview.json`/`findings.json`.
 
 ## Change Checklist
 

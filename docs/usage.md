@@ -810,8 +810,8 @@ dangerous statement. `entryPoint` is the auditor-actionable fix-here pointer.
 `related[]` lists every source site that contributed to a multi-condition
 finding, such as each payable `msg.value` function and the inherited multicall
 function in a contract-scope combination rule. Each entry's `label` is taken
-from the matched `match.all` branch's `label:` field in the template (falling
-back to `condition N` when the branch has none).
+from the matched `where`-level `all:` branch's `label:` field in the template
+(falling back to `condition N` when the branch has none).
 
 ### HTML (`--html/-H`) — Accessible
 

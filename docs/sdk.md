@@ -144,6 +144,13 @@ directory loader and backs the binary's embedded default pack
 (`github.com/th13vn/w3goaudit/templates`.`Official`). `ParseTemplate` is the
 inline equivalent of `LoadTemplate` for SDK consumers that hold YAML in memory.
 
+> **WQL v2:** All 106 official/benchmark/feature-test templates shipped in
+> this repo are written in **WQL v2** (`select`/`from`/`where` — see
+> [`docs/wql-syntax.md`](./wql-syntax.md)) as of v0.4. `LoadTemplate` /
+> `LoadTemplates` / `ParseTemplate` auto-detect v1 `query:` vs v2 per
+> document — no version flag or opt-in needed. `templates/security/` still
+> holds legacy v1 seed templates, which continue to load unchanged.
+
 **What It Does:**
 - Load YAML templates
 - Parse WQL syntax
@@ -277,6 +284,7 @@ func MakeFunctionID(filePath, contractName, funcName string) string
 - `SummaryReport` - Project summary
 - `BundleOptions` - Result-folder options (`HTML bool`)
 - `ToolMeta` - Tool name/version metadata stamped into reports
+- `NavJSON` / `ExplorerJSON` - extension data-layer models (v0.4, see below)
 
 **Exported Functions:**
 ```go
@@ -287,11 +295,18 @@ func FormatFindingsAsHTML(findings []*engine.Finding, db *types.Database) string
 func FormatFindingsAsSARIF(findings []*engine.Finding, tool ToolMeta, projectRoot string) (string, error)
 
 // WriteBundle renders the complete scan result folder (overview.md, findings.md,
-// results.sarif, data/{database,findings,overview}.json, and one folder per
-// main contract with state-changes.md + workflows/<entryFn>.md). run.log is
-// written separately by the CLI; HTML mirrors are added when opts.HTML is set.
+// results.sarif, data/{database,findings,overview,nav,explorer}.json, and one
+// folder per main contract with state-changes.md + workflows/<entryFn>.md).
+// run.log is written separately by the CLI; HTML mirrors are added when
+// opts.HTML is set.
 func WriteBundle(dir string, db *types.Database, summary *SummaryReport,
     findings []*engine.Finding, tool ToolMeta, opts BundleOptions) error
+
+// BuildNavJSON/BuildExplorerJSON produce the two extension data-layer models
+// (see below); WriteBundle calls both internally to emit data/nav.json and
+// data/explorer.json.
+func BuildNavJSON(db *types.Database) *NavJSON
+func BuildExplorerJSON(db *types.Database) *ExplorerJSON
 
 // Severity helpers — the single source of truth shared by the formatters and
 // the CLI's --severity / --min-severity filters.
@@ -305,8 +320,71 @@ func IsKnownSeverity(s string) bool
 - Format findings as Markdown/HTML/SARIF/JSON
 - Generate project summaries
 - Write the complete scan result folder (`WriteBundle`)
+- Build the extension data layer (`BuildNavJSON`/`BuildExplorerJSON`)
 - Create call graph visualizations
 - Extract code snippets
+
+> **v0.4 — extension data layer:** `BuildNavJSON` and `BuildExplorerJSON`
+> (`pkg/report/nav.go`, `pkg/report/explorer.go`) build the two JSON models
+> the VSCode extension consumes (`data/nav.json` / `data/explorer.json`;
+> `WriteBundle` calls both automatically). Both share `SrcRange`, a compact
+> 1-based line/column span with character byte offsets and omitted zero
+> fields:
+>
+> ```go
+> type SrcRange struct {
+>     File                                  string
+>     StartLine, StartCol, EndLine, EndCol  int
+>     StartByte, EndByte                    int
+> }
+>
+> // NavJSON is the semantic navigation index: definitions, reverse call
+> // edges, and interface -> implementation mappings.
+> type NavJSON struct {
+>     SchemaVersion string
+>     Symbols       []*NavSymbol        // contract/function/stateVar declarations
+>     Callers       []*NavCaller        // reverse call edges: callee <- caller @ site
+>     InterfaceImpl []*NavInterfaceImpl // interface method -> most-derived override
+> }
+> type NavSymbol struct {
+>     ID, Kind, Name, Selector string // Kind: "contract" | "function" | "stateVar"
+>     Range                    SrcRange
+> }
+> type NavCaller struct {
+>     Callee, Caller string // function IDs
+>     Site           SrcRange
+> }
+> type NavInterfaceImpl struct { Interface, Method, Implementation string }
+>
+> // ExplorerJSON is the explorer-tab model: one entry per deployable (main)
+> // contract, with constants/storage/entry-functions/getters resolved
+> // through the C3-linearized inheritance chain.
+> type ExplorerJSON struct {
+>     SchemaVersion string
+>     Contracts     []*ExplorerContract
+> }
+> type ExplorerContract struct {
+>     ID, Name, Kind string
+>     Range          SrcRange
+>     Constants      []*ExplorerStateVar // constant + immutable
+>     Storage        []*ExplorerStateVar // mutable storage, slot order (base-first MRO)
+>     EntryFunctions []*ExplorerFunc     // state-mutating public/external
+>     Getters        []*ExplorerFunc     // public/external view/pure
+> }
+> type ExplorerStateVar struct {
+>     Name, TypeName, Visibility string
+>     Constant, Immutable        bool
+>     Range                      SrcRange
+> }
+> type ExplorerFunc struct {
+>     Name, Selector, Signature, Visibility, Mutability string
+>     Modifiers                                         []string
+>     Range                                              SrcRange
+> }
+> ```
+>
+> See [`docs/extension-output.md`](./extension-output.md) for the full
+> `nav.json` / `explorer.json` schema and worked examples.
 
 ---
 
@@ -800,7 +878,7 @@ type Finding struct {
 }
 
 type RelatedLocation struct {
-    Label    string // from the matched `match.all` branch's `label:` field; falls back to "condition N"
+    Label    string // from the matched `where`-level `all:` branch's `label:` field; falls back to "condition N"
     File     string
     Contract string
     Function string
@@ -1181,16 +1259,17 @@ mu.RUnlock()
 
 **Problem:**
 ```yaml
-# Invalid template - missing required fields
-query:
-  match:
-    kind: external_call
-# Missing 'scope'!
+# Invalid v2 template - missing required metadata
+select: external_call
+from: entry_function
+where:
+  - preset: user_controlled
+# Missing 'meta.severity'!
 ```
 
 **Error on Load:**
 ```
-template validation error: missing required field 'scope'
+template <path>: missing meta.severity
 ```
 
 **Correct Handling:**

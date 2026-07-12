@@ -5,13 +5,16 @@
 **W3GoAudit** is a Go-based static analysis engine for Solidity smart contracts. It combines AST parsing, inheritance resolution, call graph analysis, and a powerful query language (WQL) to detect security vulnerabilities and code quality issues.
 
 **Key Features:**
-- AST-based Solidity parsing via [solast-go](https://github.com/th13vn/solast-go)
+- AST-based Solidity parsing via [solast-go](https://github.com/th13vn/solast-go), with precise source
+  locations (line/column/byte) on both AST nodes and declarations
 - Recursive import resolution with remapping support
 - C3 linearization for proper inheritance resolution
 - Comprehensive call graph with recursive tracing
 - Per-function effects analysis (state writes, guards, access control)
-- WQL template-based vulnerability detection
-- Result-folder output: `overview.md`, `findings.md`, `results.sarif`, `run.log`, a machine-readable `data/`, and per-main-contract workflow files + a state-change matrix; opt-in HTML mirror
+- WQL v2 template-based vulnerability detection (`select`/`from`/`where`, auto-detected against legacy v1)
+- Result-folder output: `overview.md`, `findings.md`, `results.sarif`, `run.log`, a machine-readable `data/`
+  (including extension-facing `nav.json`/`explorer.json`), and per-main-contract workflow files + a
+  state-change matrix; opt-in HTML mirror
 - Self-provisioning template home (`~/.w3goaudit`) with release download + embedded fallback
 - Project framework detection (Foundry, Hardhat, Truffle)
 
@@ -29,17 +32,21 @@
 - Identifies main contracts and entry points
 
 **2. Security Analysis**
-- Executes user-defined WQL templates against the database
+- Executes user-defined WQL v2 templates against the database (`select`/`from`/`where`;
+  legacy v1 `query:` templates still load, auto-detected)
 - Detects patterns like reentrancy, access control issues, dangerous calls
 - Supports taint analysis for tracking user-controlled input, including
   context-sensitive propagation through internal helper calls
 - Recursively traces internal call chains from entry points to security sinks
-- Generates findings with severity and confidence levels
+- Generates findings with severity and confidence levels, anchored to precise
+  file/line/column/byte locations
 
 **3. Reporting**
 - A single opinionated **result folder** per scan (overview, findings, SARIF, run.log, JSON data/)
 - Per-entry-function workflow files (signature, auth, guards, branch conditions, state effects, call workflow)
 - A per-contract state-change matrix (state var → writers → reaching entry points)
+- An extension-facing data layer — `data/nav.json` (symbol navigation index) and
+  `data/explorer.json` (per-contract explorer model) — for a future VSCode Solidity extension
 - Console output with color-coded severity and reachability traces
 - Opt-in HTML mirror with interactive visualizations
 
@@ -100,7 +107,9 @@ w3goaudit/
 │   │
 │   ├── engine/             # Template execution
 │   │   ├── engine.go       # Query execution engine
-│   │   ├── template.go     # Template loading, parsing, normalization
+│   │   ├── template.go     # Template loading, parsing, normalization (auto-detects v1/v2)
+│   │   ├── wql_v2.go       # WQL v2 parser + lowering to the v1 Rule IR
+│   │   ├── wql_v2_catalog.go # v2 block-kind/attribute/preset name tables
 │   │   ├── verify.go       # WQL rule verification (recursive Verify)
 │   │   └── presets.go      # Built-in presets (unAuthenticated, unCheckedSender, unLocked)
 │   │
@@ -118,6 +127,8 @@ w3goaudit/
 │   │
 │   ├── report/             # Output formatting
 │   │   ├── bundle.go       # Result-folder writer (overview/findings/SARIF/data, per-contract dirs)
+│   │   ├── nav.go          # data/nav.json: symbol navigation index (defs, callers, interface→impl)
+│   │   ├── explorer.go     # data/explorer.json: per-main-contract explorer model
 │   │   ├── state_matrix.go # State-change matrix (writers + reachable entry points)
 │   │   ├── generator.go    # Summary report generation (with git detection)
 │   │   ├── markdown.go     # Markdown formatter (git URL links)
@@ -130,13 +141,15 @@ w3goaudit/
 │   └── types/              # Core data structures (see above)
 │
 ├── templates/              # WQL detection templates (embed.go embeds official/)
-│   ├── official/              # Curated pack, embedded as the default
+│   ├── official/              # Curated pack (WQL v2), embedded as the default
+│   ├── security/               # Legacy v1 `query:` seed templates, still shipped
 │   └── test/                  # Engine feature-exercise templates
 ├── test-data/              # Test contracts (core/, security/)
 └── docs/                   # Documentation
     ├── workflows.md        # Internal workflow details
     ├── usage.md            # CLI and SDK usage
-    ├── wql-syntax.md       # Template language reference
+    ├── wql-syntax.md       # WQL v2 template language reference (v1 migration appendix)
+    ├── extension-output.md # data/nav.json + data/explorer.json schema
     └── project-overview.md # This file
 ```
 
@@ -217,7 +230,13 @@ interface/contract methods with the same names.
 **Responsibility:** Execute WQL templates to find vulnerabilities.
 
 **Capabilities:**
-- Load YAML templates with full load-time validation:
+- Load YAML templates in either syntax, auto-detected per file: **WQL v2**
+  (`select`/`from`/`where` — the primary authoring surface as of v0.4; all 106
+  official/benchmark/feature-test templates are v2) or legacy v1 (`query:` with
+  `filter:`/`match:`, still used by `templates/security/`). `TemplateV2.lower()`
+  (`pkg/engine/wql_v2.go`) parses v2 and lowers it into the same v1 `Rule` IR, so
+  the rest of the engine — matching, taint, reachability — never sees a v2/v1
+  distinction; only the front-end differs. Full load-time validation:
   required metadata, rule-placement (`filter:` vs `match:`), regex validity,
   known presets, known kinds. Directory loading fails closed by default; use
   `--ignore-invalid-templates` only for ad-hoc mixed rule folders.
@@ -316,8 +335,19 @@ type Function struct {
     Calls           []*FunctionCall
     StartLine       int
     EndLine         int
+    StartCol        int  // 1-based; also on Modifier/Contract/StateVariable/Event/Struct/Enum/Parameter
+    EndCol          int
+    StartByte       int  // 0-based; zero for synthetic/compiler-injected nodes
+    EndByte         int
 }
 ```
+
+Precise locations flow end-to-end: solast-go (v0.1.7+) attaches column/byte
+spans to every parsed node, the builder carries them onto `ASTNode`s and
+declarations (interior statements/expressions are now located, not just
+functions), `FunctionCall`/`CallEdge` add `Col`/`Byte`, and `pkg/report`
+surfaces them in findings, SARIF, and the `nav.json`/`explorer.json`
+navigation artifacts. Output schema bumped to `2.0.0` to reflect the added fields.
 
 **Code:** [pkg/types/](../pkg/types)
 
@@ -332,6 +362,14 @@ type Function struct {
 - `results.sarif` — SARIF 2.1.0 (always)
 - `data/{database.json,findings.json,overview.json}` — machine-readable; the
   canonical database lives only here (reusable via `--db`)
+- `data/nav.json`, `data/explorer.json` — extension-facing data layer for a
+  future VSCode Solidity extension: a flat symbol navigation index (defs,
+  caller edges, interface→implementation) and a per-main-contract explorer
+  model (ordered constants/storage, entry-callable functions, view getters),
+  built by [pkg/report/nav.go](../pkg/report/nav.go) and
+  [pkg/report/explorer.go](../pkg/report/explorer.go); both manifest-indexed
+  and schema-versioned like the rest of `data/` (see
+  [docs/extension-output.md](./extension-output.md))
 - `<MainContract>/state-changes.md` — per-contract state-change matrix built by
   [pkg/report/state_matrix.go](../pkg/report/state_matrix.go): each state variable,
   the functions that write it, and the entry points that reach a writer (reverse
@@ -499,16 +537,21 @@ function _processWithdraw() internal {
 - Call graph construction
 - Entry point identification
 
-**WQL Query Language**
-- Query structure: `filter:` (function/contract-level preconditions) + `match:` (AST pattern)
+**WQL Query Language (v2, primary as of v0.4)**
+- Query structure: `select` (what to find) + `from` (scope) + `where` (flat matcher list, implicit AND);
+  `select` is optional for contract-scope pure-regex detectors
+- The loader auto-detects legacy v1 (`filter:`/`match:`) per file and lowers v2 into the same v1 `Rule` IR,
+  so the underlying evaluator is unchanged
 - Logic operators: all, any, not, sequence
 - Traversal: contains (descendants), inside (ancestors)
-- Atomic matchers: kind, regex name, attr
+- Atomic matchers: `block:` (kind), `name:` (regex), bare attribute keys, `preset:`, `regex:`
 - Filter helpers: modifier, extends, func_name, visibility, mutability, has_guard, version, has_param
-- Taint analysis: parameter/state_var/local_var source tracking
+- Taint analysis: `tainted: parameter|state_var|local_var|sender` source tracking
 - Call-specific: `args: {0: ...}` or flat `arg.N:` keys
 - Semantic groups: outgoing_call, eth_transfer, delegatecall, check/guard, token_call, state_write/state_read, selfdestruct
-- Presets: unAuthenticated, unCheckedSender, unLocked
+- Presets (v2 names, intuitive polarity): `access_controlled`, `caller_checked`, `reentrancy_guarded`,
+  `user_controlled` (map to the unchanged v1 `unAuthenticated`/`unCheckedSender`/`unLocked` internals via
+  `presetToV1`, which also flips polarity)
 
 **Extract Subcommands (11 total)**
 - Canonical order widest→narrowest: `main`, `entry`, `inheritance`, `statevar`, `selector`, `involve`, `workflow`, `bundle`, `context`, `source`, `diff`
@@ -778,5 +821,6 @@ MIT License
 - [Internals](./internals.md) - Technical deep-dive: functions, workflows, algorithms, edge cases
 - [Workflows](./workflows.md) - Detailed internal workflows
 - [Usage Guide](./usage.md) - CLI and SDK usage
-- [WQL Syntax](./wql-syntax.md) - Template language reference
+- [WQL Syntax](./wql-syntax.md) - WQL v2 template language reference (with v1 migration appendix)
+- [Extension Output](./extension-output.md) - `data/nav.json` + `data/explorer.json` schema
 - [README](../README.md) - Quick start guide

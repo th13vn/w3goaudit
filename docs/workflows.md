@@ -18,7 +18,8 @@ All workflows share a common foundation: **Reader → Builder → Database**.
 
 **Command:** `w3goaudit <path> [--template <template-path>]`
 
-**Purpose:** Scan Solidity contracts for vulnerabilities using WQL templates.
+**Purpose:** Scan Solidity contracts for vulnerabilities using WQL templates
+(v2 `select`/`from`/`where`, auto-detected against legacy v1 `query:`).
 Omitting `--template` uses `~/.w3goaudit/templates/` when populated, else the
 embedded official pack (see §3 for the full flag set and filtering).
 
@@ -130,14 +131,21 @@ graph TD
    `th13vn/w3goaudit-templates` (zipball download, nuclei-style), falling back to
    the embedded pack when offline.
 2. **Load template file(s)** from YAML
-3. **Parse template structure**: meta + query
-4. **Validate template syntax**
-5. **Fail closed on invalid template directories** — by default, one invalid
+3. **Auto-detect syntax version per file**: a document with a top-level
+   `select`/`from` (no top-level `query`) is WQL v2; otherwise it's legacy v1
+   `query:`. All shipped templates are v2 except the legacy seed pack in
+   `templates/security/`.
+4. **Parse template structure**: v2 `select`/`from`/`where`, or v1 `meta` + `query`
+5. **Lower v2 to the v1 `Rule` IR** (`TemplateV2.lower()` in
+   [wql_v2.go](../pkg/engine/wql_v2.go)) so both syntaxes feed the same
+   validation and evaluator
+6. **Validate template syntax**
+7. **Fail closed on invalid template directories** — by default, one invalid
    template or zero valid templates aborts the scan; `--ignore-invalid-templates`
    is the explicit ad-hoc escape hatch
-6. **Store in engine**
+8. **Store in engine**
 
-**Code:** [template.go](../pkg/engine/template.go)
+**Code:** [template.go](../pkg/engine/template.go), [wql_v2.go](../pkg/engine/wql_v2.go)
 
 #### Phase 4: Query Execution
 **Component:** [`pkg/engine`](../pkg/engine)
@@ -204,7 +212,7 @@ graph TD
     A[Findings + Database + Summary] --> B[WriteBundle]
     B --> C[overview.md / findings.md]
     B --> D[results.sarif]
-    B --> E[data/ database.json, findings.json, overview.json]
+    B --> E[data/ database.json, findings.json, overview.json, nav.json, explorer.json]
     B --> F["per-contract: state-changes.md + workflows/&lt;entryFn&gt;.md"]
     B -->|--html| G[overview.html / findings.html]
     H[CLI] --> I[run.log: full verbose detail, always]
@@ -218,6 +226,13 @@ graph TD
 - `results.sarif` — SARIF 2.1.0 (always)
 - `data/{database.json,findings.json,overview.json}` — machine-readable mirror;
   the canonical database lives only here and is reusable via `--db`
+- `data/nav.json` — symbol-level navigation index (definitions, reverse call
+  graph, interface→implementation), built by
+  [nav.go](../pkg/report/nav.go); `data/explorer.json` — per-main-contract
+  model (ordered constants/storage, entry-callable functions, view getters),
+  built by [explorer.go](../pkg/report/explorer.go). Both are manifest-indexed
+  and feed a future VSCode Solidity extension (see
+  [docs/extension-output.md](./extension-output.md))
 - `run.log` — full verbose detail, always written by the CLI regardless of `--verbose`
 
 **Per-main-contract folders** (built using the Phase-7 effects):
@@ -466,20 +481,21 @@ graph TD
 
 **Purpose:** Track where identifiers originate from
 
-**Sources tracked** (the four values `tainted_from` accepts):
+**Sources tracked** (the four values `tainted:` accepts in WQL v2; `tainted_from:`
+in legacy v1):
 - `parameter` - Function parameters (user input)
 - `state_var` - Contract state variables
 - `local_var` - Local variables
-- `sender` - Caller identity (`msg.sender` / `tx.origin`)
+- `sender` - Caller identity (`msg.sender` / `tx.origin` / `_msgSender()`)
 
 **Use case example:**
-Detect when a user-controlled parameter is passed to a dangerous function. The
-WQL key is `tainted_from` and `args` is indexed by argument position:
+Detect when a user-controlled parameter is passed to a dangerous function. In
+WQL v2, `arg.N:` addresses a call argument by position and `tainted:` names the
+source:
 
 ```yaml
-args:
-  0:
-    tainted_from: parameter  # First argument comes from user input
+where:
+  - arg.0: { tainted: parameter }  # First argument comes from user input
 ```
 
 ---
@@ -567,5 +583,6 @@ w3goaudit ./contracts/ \
 ## Related Documentation
 
 - [Usage Guide](./usage.md) - CLI commands and SDK usage
-- [WQL Syntax](./wql-syntax.md) - Template writing guide
+- [WQL Syntax](./wql-syntax.md) - WQL v2 template writing guide (v1 migration appendix)
+- [Extension Output](./extension-output.md) - `data/nav.json` + `data/explorer.json` schema
 - [Project Overview](./project-overview.md) - Architecture and design
