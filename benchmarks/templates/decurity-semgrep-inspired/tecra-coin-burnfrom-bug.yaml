@@ -12,20 +12,17 @@ meta:
   references:
     - https://github.com/Decurity/semgrep-smart-contracts/tree/master/solidity/security
 
-query:
-  scope: function
-  filter:
-    all:
+from: function
+where:
+  - all:
       - func_name: '.*burnFrom.*'
       - regex: '(?:_allowances|allowance)\s*(?:\[|\()'
-  match:
-    sequence:
-      - kind: check.require
-        contains:
-          kind: expr.identifier
+  - sequence:
+      - block: require
+        has:
+          block: identifier
           name: '^from$'
-      - kind: call.internal
+      - block: internal_call
         name: '^_burn$'
-        args:
-          0:
-            name: '^from$'
+        arg.0:
+          name: '^from$'

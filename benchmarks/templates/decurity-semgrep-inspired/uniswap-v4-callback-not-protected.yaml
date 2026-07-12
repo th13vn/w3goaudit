@@ -12,13 +12,12 @@ meta:
   references:
     - https://github.com/Decurity/semgrep-smart-contracts/tree/master/solidity/security
 
-query:
-  scope: entrypoint
-  filter:
-    all:
-      - func_name: '^(beforeInitialize|afterInitialize|beforeAddLiquidity|afterAddLiquidity|beforeRemoveLiquidity|afterRemoveLiquidity|beforeSwap|afterSwap|beforeDonate|afterDonate)$'
+from: entry_function
+where:
+  - func_name: '^(beforeInitialize|afterInitialize|beforeAddLiquidity|afterAddLiquidity|beforeRemoveLiquidity|afterRemoveLiquidity|beforeSwap|afterSwap|beforeDonate|afterDonate)$'
+  - all:
       - visibility: external
-      - preset: unAuthenticated
-      - not:
-          modifier: '(?i)onlyPoolManager'
-  match: {}
+  - not: { preset: access_controlled }
+  - not:
+      modifier: '(?i)onlyPoolManager'
+  - block: function

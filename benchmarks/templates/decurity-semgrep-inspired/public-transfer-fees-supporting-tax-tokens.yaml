@@ -12,10 +12,14 @@ meta:
   references:
     - https://github.com/Decurity/semgrep-smart-contracts/tree/master/solidity/security
 
-query:
-  scope: entrypoint
-  filter:
-    all:
-      - func_name: '^_transferFeesSupportingTaxTokens$'
-      - preset: unAuthenticated
-  match: {}
+# v1 `match: {}` (filter-only, function itself is the finding) has no direct
+# `select:` equivalent (select always wraps in Contains, which searches
+# descendants rather than matching the scope root). Idiom: no select; add a
+# bare `block: function` where item, which sets Rule.Kind directly with no
+# select and no Contains wrapper, so buildMatch's no-select path returns it
+# as-is and Verify(root, {Kind: decl.function}) trivially matches the root.
+from: entry_function
+where:
+  - func_name: '^_transferFeesSupportingTaxTokens$'
+  - not: { preset: access_controlled }
+  - block: function

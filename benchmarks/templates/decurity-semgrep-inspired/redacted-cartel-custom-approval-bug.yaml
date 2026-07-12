@@ -12,23 +12,18 @@ meta:
   references:
     - https://github.com/Decurity/semgrep-smart-contracts/tree/master/solidity/security
 
-query:
-  scope: function
-  filter:
-    func_name: '^transferFrom$'
-  match:
-    contains:
-      kind: call.internal
-      name: '^_approve$'
-      args:
-        2:
-          kind: call.external
-          name: '^sub$'
-          contains:
-            kind: call.internal
-            name: '^allowance$'
-            args:
-              0:
-                name: '^sender$'
-              1:
-                name: '^recipient$'
+from: function
+select: internal_call
+where:
+  - func_name: '^transferFrom$'
+  - name: '^_approve$'
+  - arg.2:
+      block: external_call
+      name: '^sub$'
+      has:
+        block: internal_call
+        name: '^allowance$'
+        arg.0:
+          name: '^sender$'
+        arg.1:
+          name: '^recipient$'

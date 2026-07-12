@@ -12,16 +12,12 @@ meta:
   references:
     - https://github.com/Decurity/semgrep-smart-contracts/tree/master/solidity/security
 
-query:
-  scope: entrypoint
-  filter:
-    all:
-      - func_name: '^transferOwnership$'
-      - preset: unAuthenticated
-  match:
-    contains:
-      kind: state_write
-      left:
-        name: '(?i)owner'
-      right:
-        tainted_from: parameter
+from: entry_function
+select: state_write
+where:
+  - func_name: '^transferOwnership$'
+  - not: { preset: access_controlled }
+  - left:
+      name: '(?i)owner'
+  - right:
+      tainted: parameter

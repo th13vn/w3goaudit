@@ -12,12 +12,10 @@ meta:
   references:
     - https://github.com/Decurity/semgrep-smart-contracts/tree/master/solidity/security
 
-query:
-  scope: entrypoint
-  filter:
-    all:
-      - func_name: '^(uniswapV2Call|uniswapV3SwapCallback|uniswapV3FlashCallback|uniswapV3MintCallback)$'
-      - preset: unAuthenticated
-      - not:
-          regex: '(\.verifyCallback\s*\(|\b_?verifyCallback\s*\(|\bisCallback\b)'
-  match: {}
+from: entry_function
+where:
+  - func_name: '^(uniswapV2Call|uniswapV3SwapCallback|uniswapV3FlashCallback|uniswapV3MintCallback)$'
+  - not: { preset: access_controlled }
+  - not:
+      regex: '(\.verifyCallback\s*\(|\b_?verifyCallback\s*\(|\bisCallback\b)'
+  - block: function
