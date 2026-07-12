@@ -12,17 +12,15 @@ meta:
   references:
     - https://github.com/Decurity/semgrep-smart-contracts/tree/master/solidity/security
 
-query:
-  scope: function
-  match:
-    contains:
-      kind: check
-      contains:
-        kind: expr.binary_op
-        operator: '=='
-        contains:
-          any:
-            - kind: call.external
-              name: '^balanceOf$'
-            - kind: expr.member_access
-              name: '^balance$'
+from: function
+select: guard
+where:
+  - has:
+      block: binary
+      operator: '=='
+      has:
+        any:
+          - block: external_call
+            name: '^balanceOf$'
+          - block: member
+            name: '^balance$'

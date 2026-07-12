@@ -12,13 +12,9 @@ meta:
   references:
     - https://github.com/Decurity/semgrep-smart-contracts/tree/master/solidity/security
 
-query:
-  scope: entrypoint
-  filter:
-    all:
-      - func_name: '^transfer$'
-      - preset: unLocked
-  match:
-    contains:
-      kind: call.internal
-      name: '^callAfterTransfer$'
+from: entry_function
+select: internal_call
+where:
+  - func_name: '^transfer$'
+  - not: { preset: reentrancy_guarded }
+  - name: '^callAfterTransfer$'

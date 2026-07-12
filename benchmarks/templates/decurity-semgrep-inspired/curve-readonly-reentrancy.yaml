@@ -12,15 +12,12 @@ meta:
   references:
     - https://github.com/Decurity/semgrep-smart-contracts/tree/master/solidity/security
 
-query:
-  scope: function
-  filter:
-    all:
+from: function
+select: external_call
+where:
+  - name: '^get_virtual_price$'
+  - all:
       - not:
           regex: 'remove_liquidity\s*\('
       - not:
           regex: 'claim_admin_fees\s*\('
-  match:
-    contains:
-      kind: call.external
-      name: '^get_virtual_price$'

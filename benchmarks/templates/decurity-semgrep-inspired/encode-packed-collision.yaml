@@ -12,35 +12,25 @@ meta:
   references:
     - https://github.com/Decurity/semgrep-smart-contracts/tree/master/solidity/security
 
-query:
-  scope: function
-  filter:
-    all:
+from: function
+where:
+  - all:
       - visibility: public,external
       - regex: '(?s)function\s+\w+\([^)]*(?:bytes|string|address\[\]|uint256\[\])\s+\w+[^)]*(?:bytes|string|address\[\]|uint256\[\])\s+\w+'
-  match:
-    any:
-      - contains:
-          kind: call.internal
+  - any:
+      - has:
+          block: internal_call
           name: '^keccak256$'
-          contains:
-            kind: call.external
+          has:
+            block: external_call
             name: '^encodePacked$'
-            args:
-              0:
-                tainted_from: parameter
-              1:
-                tainted_from: parameter
+            arg.0: { tainted: parameter }
+            arg.1: { tainted: parameter }
       - sequence:
-          - kind: call.external
+          - block: external_call
             name: '^encodePacked$'
-            args:
-              0:
-                tainted_from: parameter
-              1:
-                tainted_from: parameter
-          - kind: call.internal
+            arg.0: { tainted: parameter }
+            arg.1: { tainted: parameter }
+          - block: internal_call
             name: '^keccak256$'
-            args:
-              0:
-                tainted_from: parameter
+            arg.0: { tainted: parameter }
