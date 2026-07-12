@@ -4,6 +4,34 @@
 
 Executes WQL templates against the contract database to find security vulnerabilities.
 
+## WQL v2 (template surface, v0.4+)
+
+**WQL v2 (`select`/`from`/`where`) is now the primary template syntax** — see
+[`docs/wql-syntax.md`](../../docs/wql-syntax.md) for the full language
+reference. All 106 official/benchmark/feature-test templates in this repo are
+written in v2.
+
+- `wql_v2.go` — parses a v2 document (`TemplateV2`) and **lowers** it to the
+  exact same v1 `Template`/`Rule` IR below (`TemplateV2.lower()`). v2 is a
+  pure authoring-surface change; it does not touch the evaluator
+  (`verify.go`) at all — every v2 template runs through `checkRule`/`Verify`/
+  `finalizeTemplate` exactly like a hand-written v1 template.
+- `wql_v2_catalog.go` — the exact name tables the lowering step consults:
+  `blockKindToV1` (§5 block-kind aliases → `types.KindXxx`/semantic groups),
+  `attrNameToV1` (§7 attribute aliases → node-attribute keys), `presetToV1`
+  (§8 preset renames, including the polarity flip since v1 presets are
+  "true = vulnerable" and v2 presets name the safety property instead).
+- **Loader auto-detection:** `LoadTemplate`/`ParseTemplate` sniff each
+  document via `isV2Source` — a top-level `select` and/or `from` key (and no
+  top-level `query`) is parsed as v2; anything else falls back to the v1
+  `query: { scope, filter, match }` loader below. **v1 `query:` syntax still
+  loads** (legacy) — `templates/security/*.yaml` are v1 seeds kept for
+  reference; no removal planned.
+- Both paths converge on the same `finalizeTemplate`/`validateRulePlacement`/
+  `validateKinds`/`validatePresets` validation pipeline, so a malformed v2
+  template fails load with the same precise errors a malformed v1 template
+  would.
+
 ## Key Files
 
 ### engine.go
@@ -171,8 +199,50 @@ Debug logging infrastructure.
 
 ---
 
+### wql_v2.go
+WQL v2 (`select`/`from`/`where`) parser + lowering to the v1 `Rule` IR. See
+"WQL v2" section above and [`docs/wql-syntax.md`](../../docs/wql-syntax.md).
+
+**Exports / key pieces:**
+- `TemplateV2`, `MatcherV2` - v2 document shape (decoded via raw `yaml.Node`
+  so `select`/matcher values can be scalar, map, or list)
+- `isV2Source(raw)` - format sniff used by the loader (see `template.go`)
+- `parseV2(raw)` - unmarshal into `TemplateV2`
+- `(*TemplateV2).lower()` - the v2 → v1 algorithm: resolves `from` to a
+  `Scope`, resolves `select` block kind(s) via `blockKindToV1`, lowers every
+  `where` matcher into an AST-layer (`Match`) and/or context-layer
+  (`Filter`) `Rule` fragment and merges them (`mergeRuleInto`), then
+  assembles the final `Match` (`buildMatch`) — combo `select` → `Rule.All`
+  with per-branch labels feeding `Finding.Related`; single `select` wraps
+  `where` in `Contains` unless `where` centers on `sequence:`, which stays
+  top-level; `scope: source` requires a bare top-level `regex:`.
+- `lowerKeyValue(key, val)` - single dispatch point for every matcher key
+  (`block`, `name`, `regex`, `tainted`, `visibility`, `mutability`,
+  `operator`, `attr`, `left`, `right`, `statement_has`, `unchecked_var`,
+  `modifier`, `has`, `in`, `guarded_by`, `sequence`, `any`, `all`, `not`,
+  `preset`, `base`, `func_name`, `version`, `has_param`, `arg.N`)
+
+### wql_v2_catalog.go
+The v2 name tables — every name here is verified against the underlying
+engine (`types.KindXxx`/`KnownSemanticGroups`, node-attribute keys,
+`presets.go`'s `BuiltinPresets`), so v2 introduces **zero new engine
+semantics**, only aliases.
+
+**Exports:**
+- `blockKindToV1(v2) (string, bool)` - §5 block-kind catalog
+- `attrNameToV1(v2) (string, bool)` - §7 attribute catalog (excludes
+  `name`/`visibility`/`mutability`/`tainted`, which are dedicated `Rule`
+  fields, not `Attr` map entries)
+- `presetToV1(v2) (v1 string, negate bool, ok bool)` - §8 preset renames;
+  `negate=true` for `access_controlled`/`caller_checked`/`reentrancy_guarded`
+  (v1 counterpart is inverted-polarity); `user_controlled` has no v1 preset
+  and is lowered as a taint match instead (`ok=false`)
+
+---
+
 ### template.go
-WQL template loading and parsing.
+WQL template loading and parsing (v1 IR; v2 documents are lowered into this
+shape by `wql_v2.go` before reaching this pipeline).
 
 **Exports:**
 - `Template` struct - Parsed template structure
@@ -181,11 +251,12 @@ WQL template loading and parsing.
 - `QueryBlock` struct - Query definition (scope, filter, match)
 - `Rule` struct - WQL rule (recursive structure)
 - `Scope` type - Scope constants
-- `LoadTemplate(path)` - Load single YAML file
+- `LoadTemplate(path)` - Load single YAML file; sniffs v1 vs v2 via
+  `isV2Source` and routes accordingly before validation
 - `LoadTemplates(dir)` - Load all templates from directory recursively, fail-closed on invalid/incomplete templates or zero valid templates
 - `LoadTemplatesWithOptions(dir, opts)` - Optional lenient loading (`IgnoreInvalid: true`)
 - `LoadTemplatesLenient(dir)` - Convenience wrapper for old skip-invalid behavior in ad-hoc tooling
-- `ParseTemplate(yaml)` - Parse template from string
+- `ParseTemplate(yaml)` - Parse template from string (same v1/v2 auto-detection)
 - `MatchesRegex(pattern, value)` - Regex helper
 
 **Template Structure:**

@@ -1,823 +1,493 @@
 # WQL Syntax Guide
 
-Complete reference for writing security templates using the W3GoAudit Query Language (WQL).
+Complete reference for writing security templates using the W3GoAudit Query
+Language (WQL) **v2** — the primary template syntax as of v0.4. All 106
+official, benchmark, and feature-test templates shipped in this repository
+are written in v2. The legacy v1 `query:` syntax is still accepted by the
+loader (auto-detected) and documented in the [migration appendix](#migrating-from-v1)
+for anyone maintaining old templates, but new templates should use v2.
+
+This reference is accurate to the **implementation** —
+[`pkg/engine/wql_v2.go`](../pkg/engine/wql_v2.go) (parser + lowering to the v1
+`Rule` IR) and [`pkg/engine/wql_v2_catalog.go`](../pkg/engine/wql_v2_catalog.go)
+(the exact block-kind / attribute / preset name tables) — not just the design
+spec. Where the two ever disagree, the code wins.
 
 ---
 
 ## Table of Contents
 
-- [Template Structure](#template-structure)
-- [Query Scopes](#query-scopes)
-- [Filter Block](#filter-block)
-- [Match Block](#match-block)
-- [Logic Operators](#logic-operators)
-- [Atomic Matchers](#atomic-matchers)
-- [Node Kinds](#node-kinds)
-- [Semantic Groups](#semantic-groups)
-- [Traversal Operators](#traversal-operators)
-- [Taint Analysis](#taint-analysis)
-- [Call-Specific Matching](#call-specific-matching)
-- [Complete Examples](#complete-examples)
+- [1. Template Shape](#1-template-shape)
+- [2. `select` — What to Find](#2-select--what-to-find)
+- [3. `from` — Scope Table](#3-from--scope-to-search)
+- [4. `where` — The Matcher Grammar](#4-where--the-matcher-grammar)
+- [5. Block-Kind Catalog](#5-block-kind-catalog)
+- [6. Attribute Catalog](#6-attribute-catalog)
+- [7. Presets](#7-presets)
+- [8. Taint](#8-taint)
+- [9. Worked Examples](#9-worked-examples)
+- [Migrating from v1](#migrating-from-v1)
 
 ---
 
-## Template Structure
+## 1. Template Shape
 
-A WQL template is a YAML file with two top-level blocks: `meta` and `query`.
+A WQL v2 template is a YAML file with `meta` (unchanged from v1) plus three
+top-level query keys: `select`, `from`, `where`. There is no `filter:`/`match:`
+split — `from` picks the scope to search, `where` is a flat list of matchers
+(implicit AND) that constrain it. The engine still runs the same v1 evaluator
+underneath; v2 is purely a friendlier authoring surface that the loader lowers
+into the v1 `Template`/`Rule` IR (`TemplateV2.lower()` in `wql_v2.go`).
 
 ```yaml
 meta:
-  id: SEC-REEN-001
-  title: "Reentrancy via External Call"
-  severity: HIGH
-  confidence: MEDIUM
-  description: "..."
-  recommendation: "..."
-
-  # Optional metadata. All formatters surface these; SARIF output passes
-  references:
-    - https://swcregistry.io/docs/SWC-107
-    - https://consensys.github.io/smart-contract-best-practices/attacks/reentrancy/
-  fix: "Apply Checks-Effects-Interactions, or use a reentrancy guard."
-
-query:
-  scope: entrypoint
-
-  # Layer 1: Function/contract-level preconditions
-  filter:
-    not:
-      modifier: (?i)(nonReentrant|lock)
-
-  # Layer 2: AST pattern matching
-  match:
-    sequence:
-      - kind: outgoing_call
-      - kind: state_write
-```
-
-The engine validates that `filter:` contains only filter-level fields and `match:` contains only AST-level fields. Putting AST fields like `kind:` inside `filter:` (or vice versa) returns a precise error at load time. `regex` is the exception: it is scope-aware and may be used in either block.
-
----
-
-## Query Scopes
-
-| Scope           | Description                                                                                           |
-| --------------- | ----------------------------------------------------------------------------------------------------- |
-| `entrypoint`    | Public/external functions of main contracts (most common)                                             |
-| `function`      | All functions in all contracts                                                                        |
-| `main_contract` | Only deployable main contracts; `match:` runs on a synthetic contract AST containing resolved functions from the linearized inheritance chain |
-| `all_contract`  | Every contract/interface/library; `match:` runs on a synthetic contract AST containing resolved functions from the linearized inheritance chain |
-| `contract`      | Contract-type definitions only; `match:` runs on a synthetic contract AST containing resolved functions from the linearized inheritance chain |
-| `library`       | Library-type definitions only; `match:` runs on a synthetic contract AST containing resolved functions from the linearized inheritance chain |
-| `abstract`      | Abstract contract definitions only; `match:` runs on a synthetic contract AST containing resolved functions from the linearized inheritance chain |
-| `source`        | Raw source-file text. Useful for file-level `regex` checks such as Unicode control characters. |
-
-Contract scopes (`main_contract`, `all_contract`, `contract`, `library`, and
-`abstract`) can use both contract context predicates (`extends`, contract
-`name`) and AST traversal (`contains`, `all`, `any`, `not`, function
-`mutability`/`visibility`, call kinds, etc.). The root node is
-`decl.contract`; its children are `decl.function` nodes from the contract's
-linearized inheritance chain. This is useful for same-contract combination
-rules such as "has a payable `msg.value` entrypoint and also inherits an
-OpenZeppelin `Multicall.multicall` loop".
-
-```yaml
-query:
-  scope: main_contract
-  match:
-    all:
-      - label: "payable msg.value entrypoint"
-        contains:
-          kind: decl.function
-          mutability: payable
-          contains:
-            kind: expr.member_access
-            name: value
-            left:
-              name: msg
-      - label: "batch delegatecall entrypoint"
-        contains:
-          kind: decl.function
-          name: multicall
-          contains:
-            kind: stmt.loop
-            contains:
-              kind: delegatecall
-```
-
-For contract-scope `match.all` combination rules, reports can include every
-contributing matched site in `Finding.Related` and the Markdown `All matched
-sites` block, not only the first location selected as the finding anchor. Each
-`all` branch may carry an optional `label:` — a human-readable name with no
-matching semantics — that names its matched sites in that list. Branches
-without a `label:` fall back to a positional `condition N`. Labels live in the
-template; the engine holds no per-detector naming.
-
----
-
-## Filter Block
-
-The `filter:` block defines function/contract-level **preconditions**. Matching against `match:` is only attempted on items that pass all filter checks.
-
-```yaml
-filter:
-  modifier: (?i)(onlyOwner|auth)          # function HAS this modifier (regex)
-  extends: ERC20                           # contract extends ERC20 (regex)
-  version: ">=0.8.0"                       # Solidity version constraint
-  has_param: from                          # function has parameter named 'from'
-  regex: "msg\\.value"              # scoped raw source check
-  func_name: ^(withdraw|deposit)$          # function name matches regex
-  visibility: public,external       # comma-separated visibility list
-  mutability: payable               # comma-separated mutability list
-  has_guard:                               # function body has a guard matching this rule
-    contains:
-      kind: expr.member_access
-      name: msg\.sender
-
-  not:
-    modifier: (?i)(nonReentrant|lock)      # function does NOT have this modifier
-```
-
-### Filter Field Reference
-
-| Field               | Description                                                                                                                                                                          |
-| ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `modifier`          | Regex match against `fn.Modifiers[]`                                                                                                                                                 |
-| `extends`           | Regex match against `contract.LinearizedBases[]`                                                                                                                                     |
-| `version`           | Solidity pragma version constraint (`>=`, `<=`, `>`, `<`, `==`)                                                                                                                      |
-| `has_param`         | Exact parameter name match in `fn.Parameters[]`                                                                                                                                      |
-| `regex`      | Regex match against the current function or contract source snippet                                                                                                                  |
-| `func_name`         | Regex match against function name                                                                                                                                                    |
-| `visibility` | Comma-separated: `public`, `external`, `internal`, `private`                                                                                                                         |
-| `mutability` | Comma-separated: `payable`, `view`, `pure`, `nonpayable`                                                                                                                             |
-| `has_guard`         | Rule — function body must contain a matching `check.*` node                                                                                                                          |
-| `preset`            | Built-in preset (returns true for the *vulnerable* case — use WITHOUT `not:` to scan vulnerable functions). Known names: `unAuthenticated` (no privileged access control), `unCheckedSender` (no privileged access control AND no caller self-scoping like `require(from == msg.sender)`), `unLocked` (no reentrancy guard). Unknown names error at load. |
-| `not`               | Negate all conditions inside                                                                                                                                                         |
-
----
-
-## Match Block
-
-The `match:` block describes what code patterns to find in the function/contract body.
-
-> **Default logic is AND.** When multiple fields are set in the same rule, ALL must match. You don't need to wrap them in `all:` explicitly.
-
-```yaml
-# These two are equivalent:
-match:
-  kind: call.external
-  name: ^transferFrom$
-
-match:
-  all:
-    - kind: call.external
-    - name: ^transferFrom$
-```
-
-### Core Operators
-
-| Operator       | Purpose                                    |
-| -------------- | ------------------------------------------ |
-| `kind`         | Match node type                            |
-| `name`         | Match node name (regex)                    |
-| `regex` | Match raw source text for the active scope |
-| `contains`     | Search descendants                         |
-| `inside`       | Search ancestors                           |
-| `sequence`     | Ordered pattern                            |
-| `all`          | AND logic (explicit)                       |
-| `any`          | OR logic                                   |
-| `not`          | Negation                                   |
-
----
-
-## Logic Operators
-
-**AND is implicit.** Sibling fields in the same rule are already AND-ed, so most
-rules need no operator at all — just list the conditions:
-
-```yaml
-match:
-  contains:
-    kind: call.external      # AND
-    name: ^transferFrom$     # AND  (both must hold)
-```
-
-Use the explicit operators below only when implicit AND cannot express the
-shape: `any` for OR, `not` for negation, `sequence` for ordering, and `all`
-**only** to group a list of sub-rules where a bare mapping can't (e.g. as a
-branch inside `any:`/`not:`, or to AND two `contains:` that would otherwise
-collide as duplicate keys).
-
-### `all` — explicit AND (grouping)
-
-```yaml
-all:
-  - contains: { kind: outgoing_call }
-  - contains: { kind: state_write }
-```
-
-### `any` — OR
-
-```yaml
-any:
-  - contains: { kind: call.builtin.transfer }
-  - contains: { kind: call.builtin.send }
-```
-
-### `not` — Negation
-
-```yaml
-not:
-  contains:
-    kind: check.require
-```
-
-### `sequence` — Ordered (non-contiguous)
-
-```yaml
-sequence:
-  - kind: outgoing_call
-  - kind: state_write
-```
-
-> `sequence` collects all descendants depth-first and finds the pattern in source order. Does not require adjacency.
->
-> **Control-flow aware:** consecutive matches must be able to co-execute on a
-> single path. Two matches that fall into mutually-exclusive arms of the same
-> control structure do **not** form a sequence:
->
-> - the `then` vs `else` of an `if` — `if (c) { extCall(); } else { state = x; }`
->   does not match `sequence: [outgoing_call, state_write]`;
-> - the two arms of a ternary (`cond ? a : b`);
-> - the success body vs a `catch` clause of a `try/catch`, and two distinct
->   `catch` clauses — a call in the try body never sequences with a write in a
->   catch. (The try expression itself runs on every path, so it still sequences
->   with code in either arm.)
->
-> This is a branch-arm check, **not a full CFG**: loops are still treated as
-> straight-line, and there is no dominance reasoning — a `return`/`revert`
-> sitting between two matches does not break the sequence.
-
----
-
-## Atomic Matchers
-
-### `kind` — Node Type
-
-Supports exact match, prefix match, and semantic groups:
-
-```yaml
-kind: call.external              # Exact kind
-kind: call                       # Prefix: matches all call.* kinds
-kind: outgoing_call              # Semantic group
-kind: guard                      # Alias for check
-kind: guard.require              # Alias for check.require
-kind: token_call                 # call.external for ERC20/ERC721 (pair with name:)
-```
-
-### `name` — Name/Value Match (regex)
-
-```yaml
-name: ^transferFrom$             # Exact name
-name: (?i)(transfer|approve)     # Case-insensitive regex
-name: "tx\\.origin"              # Escaped dot — quoted, doubled backslash
-```
-
-**Regex escaping (canonical form):** always use a **quoted string with
-doubled backslashes** when the pattern contains regex metacharacters. The
-bare `tx\.origin` (unquoted) works on some YAML parsers and silently
-breaks on others — quoting + double-escape is portable.
-
-Invalid regex patterns are rejected at template load, with an error naming the
-offending field and the bad pattern. The previous silent fallback to
-case-insensitive substring matching is gone.
-
-### Inline Attributes
-
-```yaml
-# Inline attributes (flat). operator is anchored: this matches exactly "=", not "==".
-kind: stmt.assign
-is_state_var: true
-operator: "="
-
-# Nested attr (also works)
-kind: stmt.assign
-attr:
-  is_state_var: true
-```
-
-**Common node attributes** (match via inline keys or `attr:`). String attribute
-values are matched as **anchored** regexes — the pattern must describe the whole
-value, so `operator: "="` matches exactly `=` and never `==`/`!=`/`>=`. (Only the
-`name:` field is substring-matched.) Boolean values accept either a YAML bool
-(`conditional_part: true`) or the quoted string form (`conditional_part: 'true'`).
-
-| Attribute                              | Set on                                  | Values                                                       | Example use                                |
-| -------------------------------------- | --------------------------------------- | ------------------------------------------------------------ | ------------------------------------------ |
-| `operator`                             | `expr.binary_op`, `stmt.assign`         | `==`, `!=`, `&&`, `\|\|`, `+`, `=`, …                        | `operator: '==\|!='` (anchored)            |
-| `subtype`                              | `expr.literal`                          | `number` (decimal), `string`, `bool`, `hex` (incl. `0x…` number literals like `0xFF`) | `attr: { subtype: number }`     |
-| `call_receiver`                        | the receiver child of a member call     | `true` on the `x` in `x.transfer(...)` / `x.call(...)`       | `attr: { call_receiver: true }`            |
-| `has_value`                            | call nodes                              | `true` when the call sends ETH (`.call{value:…}`)            | `attr: { has_value: true }`                |
-| `has_gas`                              | call nodes                              | `true` when the call sets `{gas:…}`                          | `attr: { has_gas: true }`                  |
-| `has_salt`                             | `call.create`                           | `true` on `new X{salt:…}(…)` (CREATE2)                       | `attr: { has_salt: true }`                 |
-| `call_option`                          | the value/gas expr child of a call      | `value`, `gas`                                              | `attr: { call_option: value }`             |
-| `called_signature`                     | call nodes                              | the called selector text, when resolvable                    | `attr: { called_signature: 'transfer(address,uint256)' }` |
-| `parent`                               | `expr.member_access`                    | the base identifier (`msg` in `msg.sender`)                  | `attr: { parent: msg }` (or use `left:`)   |
-| `cond_role`                            | condition of `if`/`while`/`for`/ternary | `if`, `loop`, `ternary`                                      | `attr: { cond_role: 'if\|ternary' }`       |
-| `conditional_part`                     | children of `expr.conditional`          | `condition`, `true`, `false`                                | `attr: { conditional_part: true }`         |
-| `try_part`                             | children of `stmt.try_catch`            | `expr`, `body`, `catch:N`                                   | `attr: { try_part: body }`                 |
-| `loop_type`                            | `stmt.loop`                             | `for`, `while`, `do_while`                                   | `attr: { loop_type: while }`               |
-| `is_state_var`                         | assignment target                       | `true`/`false`                                               | `is_state_var: true`                       |
-| `visibility` / `mutability`            | `decl.function`                         | `public`/`external`/…; `payable`/`view`/`pure`/`nonpayable`  | `mutability: payable` (also a filter precondition) |
-| `type` / `type_kind`                   | typed expressions                       | `address`, `IERC20`; `primitive`, `interface`, `contract`, … | `attr: { type_kind: interface }`           |
-| `receiver_type` / `receiver_type_kind` | member-call nodes                       | inferred receiver type and kind                              | `attr: { receiver_type_kind: interface }`  |
-| `receiver_type_is_address`             | member-call nodes                       | `true` on primitive-address receivers                        | `attr: { receiver_type_is_address: true }` |
-
-`cond_role` marks the *test expression* of a control structure, so you can match
-a boolean literal that is genuinely a condition (`if (true)`) without also
-matching one in the branch body (`if (c) return true;`) — the recursive
-`contains` operator alone cannot make that distinction. Pair it with
-`left`/`right` to require a literal be a *direct* operand of an operator:
-
-```yaml
-# Boolean-constant misuse: `x == true`, `a && false`, or `if (true)`
-match:
-  contains:
-    any:
-      - kind: expr.binary_op           # x == true / a && false
-        operator: '^(==|!=|&&|\|\|)$'
-        any:
-          - left:  { kind: expr.literal, attr: { subtype: bool } }
-          - right: { kind: expr.literal, attr: { subtype: bool } }
-      - kind: expr.literal             # if (true) / true ? a : b
-        attr: { subtype: bool, cond_role: '^(if|ternary)$' }
-```
-
-Semantic type attributes come from the database semantic layer. They are
-best-effort facts for parameters, state variables, locals, casts, builtin address
-expressions, and member-call receivers. Unknown receiver types fall back to the
-older syntax/arity heuristics, so templates should prefer semantic groups such
-as `token_call` and use these attributes only when the type distinction matters.
-
-### `unchecked_var` — Operand Not Range-Checked Before
-
-`unchecked_var: true` on an arithmetic `expr.binary_op` matches **only** when the
-operation's operands were NOT bounded by a preceding guard. A guard is a
-`require` / `assert` / `if` condition, earlier in the same function (document
-order), that (a) references **every** operand identifier of the operation **and**
-(b) uses an **ordering** comparison (`<`, `<=`, `>`, `>=`). Equality checks
-(`==` / `!=`) do not bound an arithmetic operation, so `require(a != b); … a - b`
-is still flagged. It separates a deliberately range-checked `unchecked` block
-from a genuinely unprotected one:
-
-```yaml
-match:
-  contains:
-    kind: stmt.unchecked
-    contains:
-      kind: expr.binary_op
-      operator: "[+\\-*/]"
-      unchecked_var: true        # skip `require(a >= b); … a - b;`
-```
-
-- Excluded (ordering guard over both operands): `require(oldAllowance >= value); … oldAllowance - value;` (OpenZeppelin `SafeERC20.safeDecreaseAllowance`), `require(b <= a); … a - b;` (`SafeMath.sub`), and `if (a >= b) { … a - b … }`.
-- Still matched: arithmetic with no preceding guard; a guard that bounds only **one** operand (`require(amount <= 100); balances[user] + amount;` — the sum can still overflow); or a non-ordering guard (`require(a != b); … a - b;`). Requiring *all* operands and an ordering relation keeps it conservative (errs toward flagging).
-
-### `statement_contains` — Statement-Scoped Sibling Search
-
-`statement_contains: <rule>` matches when the node's **nearest enclosing
-statement** (the closest `stmt.*` / `check.*` / `decl.variable` ancestor) has a
-descendant matching `<rule>`. It sits between `contains` (this node's own
-descendants) and `inside` (any ancestor): the search is scoped to a single
-statement, so a match in a *sibling* statement does not count. The match
-vocabulary lives entirely in the sub-rule — the engine carries no operator
-knowledge. Pair it with `not:` to require the *absence* of a related node in the
-same statement.
-
-Example — flag `^` that looks like exponentiation, not bit manipulation (the
-operator set is supplied by the template):
-
-```yaml
-contains:
-  kind: expr.binary_op
-  operator: "\\^"
-  left:  { any: [ {kind: expr.identifier}, {kind: expr.literal, attr: {subtype: number}} ] }
-  right: { any: [ {kind: expr.identifier}, {kind: expr.literal, attr: {subtype: number}} ] }
-  not:
-    statement_contains:
-      any:
-        - { kind: expr.binary_op, operator: "&|\\||<<|>>" }
-        - { kind: expr.unary_op, operator: "~" }
-```
-
-- Matched: `base ^ exp`, `2 ^ 8`, `10 ^ 18` — simple operands, no bitwise sibling in the statement.
-- Excluded: `(a & b) + (a ^ b) / 2` (a `&` in the same statement), `(3 * d) ^ 2` (complex left operand fails the `left` shape), `x ^ 0xFF` (hex literal — `subtype: hex`, not `number`).
-
-> The search is scoped to the *nearest* statement, so `x = a & b; y = base ^ exp;` still flags `y` — the `&` is in a different statement.
-
-### `regex` — Scoped Raw Source Text
-
-Use this when a rule needs exact source syntax that is not cleanly represented
-in the Solidity AST. It is scope-aware:
-
-- `scope: source` scans each whole source file and reports the matching line.
-- `scope: contract`, `all_contract`, or `main_contract` checks the current contract source.
-- `scope: function` or `entrypoint` checks the current function source.
-- Inside an AST match, it first checks the current node's line range when available, then falls back to the current function/contract/file.
-
-```yaml
-query:
-  scope: source
-  match:
-    regex: "(?i)import \".*ERC2771.*\\.sol\""
-```
-
-```yaml
-query:
-  scope: function
-  filter:
-    visibility: public,external
-    regex: "msg\\.value"
-  match:
-    kind: call.external
-```
-
-Prefer AST/context fields when they express the vulnerability. For example, a
-Thirdweb-style ERC2771Context + Multicall rule should use inherited-base
-context, not import text:
-
-```yaml
-query:
-  scope: contract
-  filter:
-    all:
-      - extends: (?i)^ERC2771Context$
-      - extends: (?i)^Multicall$
-  match: {}
-```
-
----
-
-## Node Kinds
-
-### Call Kinds
-
-| Kind                         | Solidity Example                         |
-| ---------------------------- | ---------------------------------------- |
-| `call.internal`              | `_mint(to, amt)`, `super.foo()`          |
-| `call.external`              | `token.transfer(to, amt)`, `pool.swap()` |
-| `call.lowlevel.call`         | `addr.call{value:x}(data)`               |
-| `call.lowlevel.delegatecall` | `addr.delegatecall(data)`                |
-| `call.lowlevel.staticcall`   | `addr.staticcall(data)`                  |
-| `call.builtin.transfer`      | `payable(addr).transfer(x)`              |
-| `call.builtin.send`          | `payable(addr).send(x)`                  |
-| `call.builtin.selfdestruct`  | `selfdestruct(addr)`, `suicide(addr)`    |
-| `call.create`                | `new Token(args)`                        |
-
-> Prefix matching: `call` matches every `call.*`, `call.lowlevel` matches every
-> `call.lowlevel.*`. Prefer the [semantic groups](#semantic-groups)
-> (`outgoing_call`, `eth_transfer`, `delegatecall`, …) over exact kinds.
-
-### Check Kinds
-
-| Kind            | Solidity Example                        |
-| --------------- | --------------------------------------- |
-| `check.require` | `require(cond, "msg")`                  |
-| `check.assert`  | `assert(invariant)`                     |
-| `check.revert`  | `revert("msg")`, `revert CustomError()` |
-
-### Statement Kinds
-
-| Kind             | Solidity Example     |
-| ---------------- | -------------------- |
-| `stmt.assign`    | `balance = 0`        |
-| `stmt.if`        | `if (cond) { ... }`  |
-| `stmt.loop`      | `for/while/do-while` |
-| `stmt.return`    | `return value`       |
-| `stmt.emit`      | `emit Transfer(...)` |
-| `stmt.try_catch` | `try ... catch ...`  |
-| `stmt.block`     | `{ ... }`            |
-| `stmt.unchecked` | `unchecked { ... }`  |
-
-### Expression Kinds
-
-| Kind                 | Solidity Example              |
-| -------------------- | ----------------------------- |
-| `expr.identifier`    | `balance`, `owner`            |
-| `expr.literal`       | `100`, `"hello"`, `true`      |
-| `expr.binary_op`     | `a + b`, `x == y`             |
-| `expr.unary_op`      | `!flag`, `i++`                |
-| `expr.member_access` | `msg.sender`, `token.balance` |
-| `expr.index_access`  | `balances[addr]`              |
-| `expr.conditional`   | `cond ? a : b`                |
-| `expr.tuple`         | `(a, b)` in `(a, b) = (b, a)` |
-
-### Declaration Kinds
-
-Used mainly at contract scope, where the synthetic AST root is `decl.contract`
-and its children are `decl.function` nodes from the linearized inheritance chain.
-
-| Kind             | Solidity Example                  |
-| ---------------- | --------------------------------- |
-| `decl.contract`  | `contract Vault { ... }`          |
-| `decl.function`  | `function withdraw() external`    |
-| `decl.modifier`  | `modifier onlyOwner() { ... }`    |
-| `decl.variable`  | `uint256 total = 0;`              |
-| `decl.parameter` | `address from` in a function sig  |
-
-### Assembly Kinds
-
-| Kind               | Solidity Example             |
-| ------------------ | ---------------------------- |
-| `asm.block`        | `assembly { ... }`           |
-| `asm.call`         | `call(gas, to, val, ...)`    |
-| `asm.delegatecall` | `delegatecall(gas, to, ...)` |
-| `asm.staticcall`   | `staticcall(gas, to, ...)`   |
-| `asm.sstore`       | `sstore(slot, val)`          |
-| `asm.sload`        | `sload(slot)`                |
-| `asm.selfdestruct` | `selfdestruct(addr)`         |
-| `asm.create`       | `create(v, p, n)`            |
-| `asm.create2`      | `create2(v, p, n, salt)`     |
-| `asm.log0`–`asm.log4` | `log0(p, s)` … `log4(p, s, t1..t4)` |
-| `asm.return`       | `return(p, s)`               |
-| `asm.revert`       | `revert(p, s)`               |
-| `asm.operation`    | any other opcode — `mload`, `mstore`, `add`, … |
-
----
-
-## Semantic Groups
-
-Semantic groups match multiple kinds based on security concern:
-
-| Group           | Matches                                  | Use Case                              |
-| --------------- | ---------------------------------------- | ------------------------------------- |
-| `outgoing_call` | All calls to external code               | Reentrancy detection                  |
-| `eth_transfer`  | `.transfer()`, `.send()`, `.call{value}` | ETH drain detection                   |
-| `delegatecall`  | `.delegatecall()`, `asm delegatecall`    | Arbitrary execution                   |
-| `check`         | `require()`, `assert()`, `revert()`      | Guard detection                       |
-| `guard`         | Same as `check`                          | Alias — `kind: guard` = `kind: check` |
-| `guard.require` | `check.require`                          | Alias                                 |
-| `guard.assert`  | `check.assert`                           | Alias                                 |
-| `guard.revert`  | `check.revert`                           | Alias                                 |
-| `token_call`    | `call.external`                          | ERC20/ERC721 calls; pair with `name:` |
-| `state_write`   | Assignment to state var + `asm sstore`   | State modification                    |
-| `state_read`    | State var read + `asm sload`             | Storage reads                         |
-| `any_call`      | All call types including internal        | Call graph analysis                   |
-| `selfdestruct`  | `selfdestruct()` + `asm selfdestruct`    | Destruction detection                 |
-
-### Prefix Matching
-
-The dot-notation enables prefix matching:
-
-```yaml
-kind: call              # Matches all call.* (internal, external, lowlevel, builtin)
-kind: call.lowlevel     # Matches call.lowlevel.call, .delegatecall, .staticcall
-kind: check             # Matches check.require, check.assert, check.revert
-kind: guard             # Alias: matches guard.require, guard.assert, guard.revert
-kind: asm               # Matches all asm.* operations
-kind: stmt              # Matches all stmt.* statements
-kind: expr              # Matches all expr.* expressions
-```
-
-### token_call Usage
-
-`token_call` matches any `call.external` node. Always combine with `name:` to restrict to specific ERC20/ERC721 methods:
-
-```yaml
-contains:
-  kind: token_call
-  name: ^(transfer|transferFrom|approve|safeTransfer|safeTransferFrom)$
-```
-
----
-
-## Traversal Operators
-
-### `contains` — Descendant Search
-
-```yaml
-contains:
-  kind: outgoing_call
-  name: ^transfer$
-```
-
-Searches recursively through all descendants. Nesting `contains` is supported:
-
-```yaml
-# Find a delegatecall with user-controlled target
-contains:
-  kind: delegatecall
-  args:
-    0:
-      kind: expr.identifier
-      tainted_from: parameter
-```
-
-### `inside` — Ancestor Search
-
-```yaml
-contains:
-  kind: expr.member_access
-  name: tx\.origin
-  inside:
-    kind: stmt.if
-```
-
-Checks if the matched node is inside an ancestor of the specified kind.
-
----
-
-## Taint Analysis
-
-### `tainted_from`
-
-```yaml
-tainted_from: parameter      # Value comes from function parameter, including expressions like from[i]
-tainted_from: state_var       # Value comes from state variable
-tainted_from: local_var       # Value comes from local variable
-tainted_from: sender          # Value derives from msg.sender / tx.origin (caller identity)
-```
-
-`tainted_from` accepts only those four values; any other value is rejected at
-template load (it would otherwise silently match nothing at scan time).
-
-> **Interprocedural caveat:** at `entrypoint` scope, structural `sequence:` rules
-> are evaluated over the inlined call-graph view, but `contains:`/`all:`/`not:`
-> predicates are applied **per function** (the entrypoint and each internal
-> callee independently). A `not: { contains: guard }` therefore does not let a
-> guard in the entrypoint suppress a match in a helper, and an `all:` cannot
-> straddle entrypoint + helper except via `sequence:`. Use `sequence:` when you
-> need a cross-function ordering.
-
-For `entrypoint` scans, taint is context-sensitive across internal helper
-calls. If an external function calls `_deposit(from, amount)`, the callee's
-`from` parameter remains `parameter`-tainted. If it calls
-`_deposit(msg.sender, amount)`, the callee's `from` parameter is treated as
-sender identity and does not match `tainted_from: parameter`.
-
-Simple local aliases are propagated before internal calls:
-
-```solidity
-address payer = from;        // payer is parameter-tainted
-_deposit(payer, amount);
-
-address payer = msg.sender;  // payer is sender identity, not arbitrary input
-_deposit(payer, amount);
-```
-
-Member-call receivers are also available to taint-aware templates as a tagged
-child with `attr.call_receiver = true`. This lets a detector distinguish the
-receiver in `target.delegatecall(data)` from the calldata argument `data`:
-
-```yaml
-contains:
-  kind: delegatecall
-  contains:
-    attr:
-      call_receiver: true
-    tainted_from: parameter
-```
-
----
-
-## Call-Specific Matching
-
-### `args` — Argument Matching
-
-Two equivalent notations are accepted:
-
-```yaml
-# Nested map (numeric keys)
-args:
-  0:                           # First argument
-    kind: expr.identifier
-    tainted_from: parameter
-
-# Flat arg.N keys (equivalent)
-arg.0:
-  kind: expr.identifier
-  tainted_from: parameter
-```
-
-> **Common mistake:** Do NOT write `args: [{kind: ...}]` (list syntax). Only map syntax works.
-
-`args.N` indexes Solidity arguments only. Metadata children such as
-`call_receiver` and `{value:}` call-option expressions are skipped, so `args.0`
-continues to mean the first source-level argument even for
-`target.call{value: amount}(data)`.
-
----
-
-## Complete Examples
-
-### Reentrancy Detection
-
-```yaml
-meta:
-  id: HIGH-REENTRANCY-PATTERN
-  title: Potential Reentrancy
-  severity: HIGH
-  confidence: MEDIUM
-
-query:
-  scope: entrypoint
-
-  filter:
-    not:
-      modifier: (?i)(nonReentrant|lock|guard)
-
-  match:
-    sequence:
-      - kind: outgoing_call
-      - kind: state_write
-```
-
-### Arbitrary transferFrom
-
-```yaml
-meta:
-  id: HIGH-ARBITRARY-TRANSFERFROM
-  title: Arbitrary transferFrom Call
-  severity: HIGH
-  confidence: MEDIUM
-
-query:
-  scope: entrypoint
-
-  filter:
-    preset: unAuthenticated
-
-  match:
-    contains:
-      kind: token_call
-      name: ^transferFrom$
-      args:
-        0:
-          tainted_from: parameter
-```
-
-### tx.origin Authentication
-
-```yaml
-meta:
-  id: MEDIUM-TX-ORIGIN-AUTH
-  title: tx.origin Used for Authentication
-  severity: MEDIUM
-  confidence: HIGH
-
-query:
-  scope: function
-
-  match:
-    contains:
-      kind: expr.member_access
-      name: tx\.origin
-      inside:
-        kind: stmt.if
-```
-
-### Unprotected selfdestruct
-
-```yaml
-meta:
-  id: CRITICAL-SELFDESTRUCT-UNPROTECTED
-  title: Unprotected selfdestruct
+  id: delegatecall-user-input
+  title: Delegatecall to user-controlled target
   severity: CRITICAL
   confidence: HIGH
+  description: >
+    ...
+  recommendation: >
+    ...
+  references:               # optional
+    - https://swcregistry.io/docs/SWC-112
+  fix: "..."                # optional
 
-query:
-  scope: entrypoint
-
-  filter:
-    not:
-      modifier: (?i)(onlyOwner|onlyAdmin|onlyRole|requiresAuth|auth|admin)
-
-  match:
-    contains:
-      kind: selfdestruct
+select: delegatecall        # WHAT to find & report (a block kind)
+from: entry_function        # WHERE to search (a scope)
+where:                      # list of matchers, implicit AND
+  - arg.0: { tainted: parameter }
+  - not: { preset: access_controlled }
 ```
 
-### Payable Functions Without Event
+`meta` fields are unchanged: `id` and `severity` are required at load time;
+`severity` must be one of `CRITICAL`/`HIGH`/`MEDIUM`/`LOW`/`INFO`.
+
+The loader auto-detects v1 vs v2 per file: a document with a top-level
+`select` and/or `from` (and no top-level `query`) is parsed as v2
+(`isV2Source` in `wql_v2.go`); anything else falls back to the v1 `query:`
+loader. You never declare which version a file uses — it's inferred from
+its shape.
+
+---
+
+## 2. `select` — What to Find
+
+`select` names the block kind(s) (§5) whose matches become the finding's
+anchor node(s).
+
+- **Scalar** — one block kind, e.g. `select: delegatecall`. The matched node
+  of that kind is the finding's `PrimaryAST`.
+- **List (combo)** — `select: [kind_a, kind_b]` finds a `from`-scope that
+  contains **all** listed kinds; every matched site is attached to the
+  finding via the multi-site `Finding.Related` mechanism (each branch gets a
+  positional label like `site 1`/`site 2` unless overridden with `label:` in
+  a nested `all:` branch — see §4). `where` matchers merge onto the
+  **first** listed kind only; use labeled `all:` branches inside `where` for
+  per-kind constraints (worked example in the language spec §11.C).
+- **Optional** — `select` may be omitted entirely. When it is, `where` must
+  fully define the match on its own — there is no implicit "find a node of
+  this kind" step. This is used for **contract-scope pure-regex** detectors
+  that have no single AST anchor: `from: contract` plus a `where:` built out
+  of `has: { regex: ... }` / `all:` / `not:` branches evaluates directly at
+  the scope root (see `templates/official/high/proxy-storage-collision.yaml`
+  for a real example). Omitting `select` with nothing usable in `where`
+  is a load-time error (`buildMatch`: *"select: required for scope ... unless
+  where contains AST-level matchers"*).
+
+---
+
+## 3. `from` — Scope to Search
+
+| `from` | Meaning |
+|---|---|
+| `entry_function` | Public/external state-mutating functions of main (deployable) contracts; follows internal callees. **Default** when `from` is omitted. |
+| `function` | Every function everywhere. |
+| `contract` | Contract-kind-filtered contract scope (contracts only). |
+| `library` | Library-kind-filtered contract scope. |
+| `abstract` | Abstract-contract-kind-filtered contract scope. |
+| `main_contract` | Deployable contracts only, evaluated against a synthetic `decl.contract` AST built from the contract's linearized inheritance chain (so a rule can span local and inherited functions in one contract context). |
+| `any_contract` | Every contract/interface/library. |
+| `source` | Raw source-file text — regex-only (`where` may contain nothing but a top-level `regex:` matcher). |
+
+Contract scopes (`contract`, `library`, `abstract`, `main_contract`,
+`any_contract`) run `where` against the synthetic contract AST; each
+top-level `all:` branch may carry a `label:` used to name its matched site in
+`Finding.Related`.
+
+---
+
+## 4. `where` — The Matcher Grammar
+
+`where` is a list; sibling items are implicit **AND** — there is no `and:`
+keyword. Every item is a one-key matcher map. Matchers nest uniformly: a
+matcher's value can itself be a matcher map, and the same matcher forms are
+legal at any nesting depth (inside `has:`, `in:`, `arg.N:`, `sequence:`
+elements, `any:`/`all:` branches, and `not:`).
+
+### Leaf matchers
+
+| Matcher | Meaning |
+|---|---|
+| `block: <kind>` | Node is of the given block kind (§5). |
+| `name: <regex>` | Identifier / call / function name matches (unanchored regex). |
+| `<attribute>: <value>` | A semantic attribute (§6) — bare key form, e.g. `visibility: public,external`. |
+| `preset: <name>` | A named property (§7), e.g. `preset: access_controlled`. |
+| `regex: <pattern>` | Raw-text match, **line-scoped to the enclosing selected block** (falls back to function → contract → file when a node has no range). |
+| `tainted: <source>` | Value traces to `parameter`\|`state_var`\|`local_var`\|`sender` (§8). |
+
+### Structural matchers
+
+| Matcher | Meaning |
+|---|---|
+| `arg.N: <matcher>` | The Nth call argument (0-based) matches. List form is invalid — one matcher per `arg.N` key. |
+| `has: <matcher>` | Some **descendant** of the node matches. |
+| `in: <matcher>` | Some **ancestor** of the node matches. |
+| `guarded_by: <matcher>` | A guard/modifier in the function's guard context matches. |
+| `sequence: [<matcher>, ...]` | Ordered, same-execution-path occurrence of each matcher in turn (reentrancy / CEI patterns). Rejects pairs that first diverge into mutually exclusive branch arms (`if`/`else`, ternary arms, `try`/`catch` arms). |
+| `left: <matcher>` | Left operand of a binary/assignment/member-access node matches. |
+| `right: <matcher>` | Right operand matches. |
+| `statement_has: <matcher>` | Sub-rule matched against the node's nearest enclosing statement (narrower than `in:`, wider than `has:`) — e.g. "no other bitwise operator in this same statement". |
+| `unchecked_var: true` | On an arithmetic `binary` node, true when no preceding guard in the same function bounds every operand with an ordering comparison before an `unchecked { ... }` use. |
+| `modifier: <regex>` | Function has a modifier whose name matches. |
+| `base: <regex>` | Contract-scope: the contract (or an ancestor in its inheritance chain) matches (v1 `extends:`). |
+| `func_name: <regex>` | Function name matches (function-level precondition, independent of the AST node's own `name:`). |
+| `version: <constraint>` | Solidity pragma version constraint, e.g. `">=0.8.0"`. |
+| `has_param: <name>` | Function has a parameter with this name. |
+
+### Logic
+
+| Matcher | Meaning |
+|---|---|
+| `any: [<matcher>, ...]` | OR. |
+| `not: <matcher>` | Negation. |
+| `all: [<matcher>, ...]` | Explicit AND grouping — used to group a branch inside `any:`/`not:`, or to carry a `label:` for combo-`select` multi-site naming. Each branch may also set `label:` as a sibling key alongside its own matchers. |
+
+Every structural/logic matcher recurses uniformly:
 
 ```yaml
-meta:
-  id: SEC-EVENT-PAYABLE-001
-  title: Payable Function Missing Event
-  severity: LOW
-  confidence: HIGH
-
-query:
-  scope: function
-
-  filter:
-    visibility: public,external
-    mutability: payable
-
-  match:
-    all:
-      - contains:
-          kind: state_write
-      - not:
-          contains:
-            kind: stmt.emit
+- not:
+    has:
+      block: require
+      regex: "msg\\.sender"
 ```
+
+### `attr:` wrapper form
+
+Attributes can also be grouped under a single `attr:` map when several apply
+to the same node:
+
+```yaml
+- attr:
+    has_value: true
+    has_gas: true
+```
+
+This is equivalent to two bare-key matchers (`has_value: true`, `has_gas:
+true`) ANDed together.
+
+---
+
+## 5. Block-Kind Catalog
+
+Every name below is resolved by `blockKindToV1` (`wql_v2_catalog.go`) — usable
+in `select:` and as `block: <kind>` in `where`.
+
+**Calls**
+
+| v2 name | Underlying v1 kind |
+|---|---|
+| `call` | `any_call` — any internal/external/low-level call |
+| `outgoing_call` | `outgoing_call` — any call this function makes outward |
+| `external_call` | `call.external` |
+| `internal_call` | `call.internal` |
+| `delegatecall` | `delegatecall` group — `call.lowlevel.delegatecall` + `asm.delegatecall` |
+| `staticcall` | `call.lowlevel.staticcall` (Solidity-level only; no merged asm group yet) |
+| `lowlevel_call` | `call.lowlevel.call` |
+| `create` | `call.create` (Solidity-level only; no merged asm group yet) |
+| `eth_transfer` | `eth_transfer` group — `.transfer`/`.send`/`call{value:}` |
+| `selfdestruct` | `selfdestruct` group — `call.builtin.selfdestruct` + `asm.selfdestruct` |
+| `builtin_transfer` | `call.builtin.transfer` — `address.transfer(...)` |
+| `builtin_send` | `call.builtin.send` — `address.send(...)` |
+| `builtin_selfdestruct` | `call.builtin.selfdestruct` (Solidity-level only; use `selfdestruct` for the +asm alias) |
+
+**Guards / checks**
+
+| v2 name | Underlying v1 kind |
+|---|---|
+| `guard` | `check` — any require/assert/revert |
+| `require` | `check.require` |
+| `assert` | `check.assert` |
+| `revert` | `check.revert` |
+
+**State**
+
+| v2 name | Underlying v1 kind |
+|---|---|
+| `state_write` | `state_write` — `stmt.assign` on a state var, or `asm.sstore` |
+| `state_read` | `state_read` — state-var identifier read, or `asm.sload` |
+
+**Statements**
+
+| v2 name | v1 kind | v2 name | v1 kind |
+|---|---|---|---|
+| `assign` | `stmt.assign` | `return` | `stmt.return` |
+| `if` | `stmt.if` | `emit` | `stmt.emit` |
+| `loop` | `stmt.loop` | `try_catch` | `stmt.try_catch` |
+| `unchecked` | `stmt.unchecked` | `block` | `stmt.block` |
+
+**Expressions**
+
+| v2 name | v1 kind | v2 name | v1 kind |
+|---|---|---|---|
+| `identifier` | `expr.identifier` | `member` | `expr.member_access` |
+| `literal` | `expr.literal` | `index` | `expr.index_access` |
+| `binary` | `expr.binary_op` | `ternary` | `expr.conditional` |
+| `unary` | `expr.unary_op` | `tuple` | `expr.tuple` |
+
+**Declarations**
+
+| v2 name | v1 kind | v2 name | v1 kind |
+|---|---|---|---|
+| `function` | `decl.function` | `variable` | `decl.variable` |
+| `contract` | `decl.contract` | `parameter` | `decl.parameter` |
+| `modifier` | `decl.modifier` | | |
+
+**Assembly**
+
+| v2 name | v1 kind | v2 name | v1 kind |
+|---|---|---|---|
+| `asm` | `asm.block` | `asm_staticcall` | `asm.staticcall` |
+| `asm_sstore` | `asm.sstore` | `asm_create` | `asm.create` |
+| `asm_sload` | `asm.sload` | `asm_selfdestruct` | `asm.selfdestruct` |
+| `asm_delegatecall` | `asm.delegatecall` | `asm_revert` | `asm.revert` |
+| `asm_call` | `asm.call` | `asm_return` | `asm.return` |
+
+> `asm_log` is **not** implemented (no single v1 kind covers all
+> `asm.log0`..`asm.log4` arities); it is documented in the design spec but
+> intentionally absent from `blockKindToV1Table` — using it errors at load
+> with "unknown block kind".
+
+---
+
+## 6. Attribute Catalog
+
+Resolved by `attrNameToV1` (`wql_v2_catalog.go`). `name`, `visibility`,
+`mutability`, and `tainted` are handled directly as their own matcher forms
+(§4), not through this table.
+
+**Core**
+
+| v2 attribute | Meaning | Underlying v1 key |
+|---|---|---|
+| `receiver` | bool — node is the receiver child of a member call | `call_receiver` |
+| `signature` | anchored regex on the called function signature | `called_signature` |
+| `has_value` | bool — call carries `{value: ...}` | `has_value` |
+| `has_gas` | bool — call carries `{gas: ...}` | `has_gas` |
+| `call_option` | `"value"` or `"gas"` marker on a call-option child | `call_option` |
+| `operator` | anchored regex, e.g. `"=="`, `"/"`, `"\\*"` | `operator` |
+| `type` | anchored regex on the resolved type | `type` |
+| `type_kind` | anchored regex on the type kind | `type_kind` |
+| `literal_kind` | `number`/`string`/`bool`/`hex` | `subtype` |
+| `is_state_var` | bool | `is_state_var` |
+
+**Advanced**
+
+| v2 attribute | Meaning | Underlying v1 key |
+|---|---|---|
+| `has_salt` | bool — `create2`-style salt present | `has_salt` |
+| `parent` | parent-node marker | `parent` |
+| `cond_role` | `if`/`loop`/`ternary` | `cond_role` |
+| `conditional_part` | `condition`/`true`/`false` | `conditional_part` |
+| `try_part` | `expr`/`body`/`catch:N` | `try_part` |
+| `loop_type` | `for`/`while`/`do_while` | `loop_type` |
+| `receiver_type` | resolved receiver type | `receiver_type` |
+| `receiver_type_kind` | resolved receiver type kind | `receiver_type_kind` |
+| `receiver_type_is_address` | bool | `receiver_type_is_address` |
+
+String-valued attributes and `signature` are **anchored** regex (must match
+the whole value); `name`/`regex`/`func_name`/`modifier`/`base` are
+**unanchored**. `visibility`/`mutability` are comma-separated "one of" lists
+(`visibility: public,external`), matching v1.
+
+---
+
+## 7. Presets
+
+v1 presets all returned `true` for the **vulnerable** case (a documented
+footgun — the property's *absence*). v2 presets are renamed to describe the
+safety **property** itself, so they read naturally either asserted or
+negated. Semantics are preserved exactly (`presetToV1` in
+`wql_v2_catalog.go` does the polarity flip during lowering).
+
+| v2 preset (property = true) | Property | Vulnerable expression |
+|---|---|---|
+| `access_controlled` | Privileged access control is present — owner/admin/role modifier, an internal auth-helper call, or a `msg.sender`/`tx.origin` guard against a hardcoded/storage owner, checked recursively through internal/inherited calls. | `not: { preset: access_controlled }` |
+| `caller_checked` | Either the function is access-controlled, OR it self-scopes the caller — binds a sensitive argument to `msg.sender` (`require(from == msg.sender)`), including the **item-ownership** form `ownerOf(tokenId) == msg.sender` (and its interprocedural forwarded equivalents). | `not: { preset: caller_checked }` |
+| `reentrancy_guarded` | A reentrancy-guard modifier (`nonReentrant`/`lock`/`mutex`/etc.) is present. | `not: { preset: reentrancy_guarded }` |
+| `user_controlled` | Reachable from external/tainted input (parameter or `msg.sender`). No v1 preset counterpart — lowered as `tainted: parameter` on the matched node. | `preset: user_controlled` (asserted directly, not negated) |
+
+**Item-ownership vs. access control:** `caller_checked` deliberately keeps
+these distinct. `ownerOf(tokenId) == msg.sender` satisfies `caller_checked`
+(the caller can only act on a resource they own — a valid mitigation for
+detectors like arbitrary `transferFrom`/arbitrary-send-ETH) but does **not**
+satisfy `access_controlled` (it is not privileged/role-based access control).
+Pick `access_controlled` when only a privileged role should be allowed to
+call at all; pick `caller_checked` when self-scoping the caller to their own
+resource is an acceptable mitigation.
+
+Presets compose anywhere in `where`, including under `any:`/`not:`.
+
+---
+
+## 8. Taint
+
+`tainted: <source>` matches a value that traces back to one of:
+
+- `parameter` — a function parameter
+- `state_var` — a state variable
+- `local_var` — a local variable
+- `sender` — `msg.sender`/`tx.origin`/`_msgSender()` identity
+
+The engine performs the propagation (unchanged from v1): flow-sensitive
+intra-function dataflow (a bounded fixpoint over straight-line code and
+loops), interprocedural tracing through internal helper calls (with
+context-sensitive argument binding — `_deposit(from, amount)` vs.
+`_deposit(msg.sender, amount)` are distinguished), and simple local-alias
+propagation. It is **not** path-sensitive and does not track taint flowing
+out through a callee's return value.
+
+Express a source→sink check with `tainted:` on the sink node, typically
+nested under `arg.N:` or `has:`:
+
+```yaml
+- arg.0: { tainted: parameter }
+```
+
+```yaml
+- has:
+    block: identifier
+    receiver: true
+    tainted: parameter
+```
+
+---
+
+## 9. Worked Examples
+
+### A. Delegatecall to a user-controlled target
+
+`templates/official/critical/delegatecall-user-input.yaml`
+
+```yaml
+from: entry_function
+select: delegatecall
+where:
+  - not: { preset: access_controlled }
+  - has:
+      block: identifier
+      receiver: true
+      tainted: parameter
+```
+
+Finds a `delegatecall` whose call receiver traces to a function parameter, on
+a function with no privileged access control.
+
+### B. Reentrancy — external call before state write, no guard
+
+`templates/official/high/reentrancy-pattern.yaml`
+
+```yaml
+from: entry_function
+select: state_write
+where:
+  - not: { preset: reentrancy_guarded }
+  - sequence:
+      - any:
+          - block: eth_transfer
+          - block: delegatecall
+      - block: state_write
+```
+
+Anchors on a `state_write`, requires the function to lack a reentrancy guard,
+and requires an ETH-bearing/low-level call or `delegatecall` to occur
+earlier on the same execution path (CEI violation).
+
+### C. Unprotected initializer
+
+`templates/official/high/unprotected-initializer.yaml`
+
+```yaml
+from: entry_function
+where:
+  - func_name: (?i)^(initialize|initialise|init|__init|setup)$
+  - not: { preset: access_controlled }
+  - not: { modifier: "(?i)(initializer|reinitializer)" }
+  - has: { block: state_write }
+  - not:
+      has:
+        block: guard
+        has:
+          block: identifier
+          name: ^_initializersDisabled$
+```
+
+No `select:` — the whole match is expressed in `where` against the
+`entry_function` scope root: a function named like an initializer, with no
+access control and no `initializer`/`reinitializer` modifier, that writes
+state and isn't gated behind an `_initializersDisabled()` guard.
+
+### D. Arbitrary `transferFrom` — item-ownership vs. access control
+
+`templates/official/high/arbitrary-transferfrom.yaml`
+
+```yaml
+from: entry_function
+select: external_call
+where:
+  - not: { preset: caller_checked }
+  - name: ^transferFrom$
+  - arg.0: { tainted: parameter }
+```
+
+Uses `arg.0:` to require the `from` argument be parameter-tainted, and
+`caller_checked` (not `access_controlled`) so that `require(from ==
+msg.sender)` is correctly treated as a valid mitigation here.
+
+---
+
+## Migrating from v1
+
+The v1 `query: { scope, filter, match }` syntax still loads (the loader
+auto-detects it) but new templates should use v2. Key mapping:
+
+| v1 | v2 |
+|---|---|
+| `query.scope` | `from` |
+| `query.filter` + `query.match` | collapsed into `from` + `where` (no layer split — the loader derives the filter/AST split automatically) |
+| `kind:` | `block:` (renamed values — see §5) |
+| `name:` | `name:` (unchanged) |
+| `contains:` | `has:` |
+| `inside:` | `in:` |
+| `statement_contains:` | `statement_has:` |
+| `args: {N: ...}` / `arg.N:` | `arg.N:` (unchanged) |
+| `tainted_from:` | `tainted:` |
+| `has_guard:` | `guarded_by:` |
+| `modifier:` | `modifier:` (unchanged) |
+| `extends:` | `base:` |
+| `func_name:` | `func_name:` (unchanged) |
+| `version:` | `version:` (unchanged) |
+| `left:` / `right:` | `left:` / `right:` (unchanged) |
+| `unchecked_var:` | `unchecked_var:` (unchanged) |
+| `preset: unAuthenticated` (bare) | `not: { preset: access_controlled }` |
+| `preset: unCheckedSender` (bare) | `not: { preset: caller_checked }` |
+| `preset: unLocked` (bare) | `not: { preset: reentrancy_guarded }` |
+| `all:` / `any:` / `not:` / `sequence:` | unchanged |
+| `label:` | unchanged (sibling key on an `all:` branch) |
+| `regex:` | unchanged, but now block-line-scoped instead of whole-function/contract-scoped |
+| `visibility:` / `mutability:` | unchanged (comma-separated attribute matchers) |
+
+See `templates/security/*.yaml` for real v1 examples still shipped as legacy
+seeds, and the language spec
+(`.vscode/specs/2026-07-09-wql-v2-language-spec.md`) §10 for the full
+rationale behind each rename.

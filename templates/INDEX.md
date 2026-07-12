@@ -6,6 +6,27 @@ WQL templates for smart-contract security scanning. Each `.yaml` file is a
 self-contained detector. The `official/` pack is embedded in the binary
 (`//go:embed`) and serves as the always-available offline fallback.
 
+## Template Language: WQL v2
+
+**All templates under `official/` and `test/` (this directory), plus every
+benchmark template under `../benchmarks/templates/` (slither-inspired,
+decurity-semgrep-inspired, 4naly3er-inspired) — 106 templates total — are
+written in WQL v2** (`select`/`from`/`where`). See
+[`../docs/wql-syntax.md`](../docs/wql-syntax.md) for the full language
+reference.
+
+`security/` (this directory) holds the original v1 `query: { scope, filter,
+match }` templates as **legacy seeds** — kept for reference, not curated or
+maintained as the production pack (that's `official/`), and not part of the
+v2 migration. The v1 `query:` syntax still loads (the engine auto-detects
+v1 vs v2 per file), so these remain runnable, but new templates should be
+written in v2.
+
+The code blocks further down this file under "Template Structure" and "WQL
+Features Demonstrated" show the **v1** `query:` shape for historical
+context (they predate the v2 migration) — for the current v2 syntax, see
+`../docs/wql-syntax.md`.
+
 ### Template precedence (v0.3)
 
 A scan resolves templates in this order (see `cmd/w3goaudit/scan_filters.go`):
@@ -35,9 +56,14 @@ legitimate pattern) are also out.
 
 ```
 templates/
-├── official/   # Curated official detector pack (25) — embedded; run THIS to audit
-└── test/       # WQL feature-test templates (NOT production detectors)
+├── official/   # Curated official detector pack (25, WQL v2) — embedded; run THIS to audit
+├── test/       # WQL feature-test templates (5, WQL v2; NOT production detectors)
+└── security/   # Legacy WQL v1 `query:` seeds (19) — reference only, not curated/shipped
 ```
+
+(Benchmark templates — decurity/slither/4naly3er-inspired, also WQL v2 — live
+under `../benchmarks/templates/`, outside this directory; see
+[`../benchmarks/benchmarking.md`](../benchmarks/benchmarking.md).)
 
 > **`official/` is the pack you scan with.** It is the curated, best-of-breed
 > set of hand-written W3GoAudit-native detectors. It is embedded in the binary,
@@ -298,7 +324,9 @@ to substring matching.
    - `official/` — curated, audit-grade patterns with optional `references`.
    - `test/` — low-confidence feature-exercise templates for WQL operators
      (paired with `../test-data/core/engine-features/`), NOT production detectors.
-2. Follow WQL syntax (see [../docs/wql-syntax.md](../docs/wql-syntax.md)).
+   - `security/` is a legacy v1 seed set, not a target for new templates.
+2. Write it in **WQL v2** (`select`/`from`/`where`) — see
+   [../docs/wql-syntax.md](../docs/wql-syntax.md).
 3. Test against fixtures in [`../test-data/security/`](../test-data/security/):
    add a `Vulnerable_*` / `Safe_*` pair named after the detector.
 4. Verify the `Vulnerable_*` cases trigger and the `Safe_*` cases do not.

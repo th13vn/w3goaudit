@@ -34,6 +34,12 @@ edits):
   the precise `SrcRange` locations above. `data/manifest.json` indexes them
   under `files.data.nav` / `files.data.explorer`. See
   [`docs/extension-output.md`](docs/extension-output.md) for the schema.
+- **WQL v2 query language** (`select`/`from`/`where`, uniform matchers,
+  renamed intuitive-polarity presets) is now the primary template syntax;
+  all 106 official/benchmark/feature-test templates migrated to it,
+  behavior-preserving. The v1 `query:` syntax is still supported (legacy) —
+  the loader auto-detects which one a file uses. See
+  [`docs/wql-syntax.md`](docs/wql-syntax.md) for the full reference.
 
 ## Unreleased — Standardized result-folder layout (output tree)
 

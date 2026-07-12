@@ -293,20 +293,19 @@ meta:
   description: External call before state variable update
   recommendation: Apply Check-Effects-Interactions pattern
 
-query:
-  scope: entrypoint  # Public/external functions only
-  filter:
-    not:
-      modifier: (?i)(nonReentrant|lock|guard)
-  match:
-    # Find: external call → state modification
-    contains:
-      sequence:
-        - kind: outgoing_call
-        - kind: state_write
+from: entry_function       # public/external functions of main contracts
+select: state_write
+where:
+  - not: { preset: reentrancy_guarded }
+  - sequence:
+      - block: outgoing_call
+      - block: state_write
 ```
 
-For complete WQL syntax, see [WQL Syntax Guide](./docs/wql-syntax.md).
+This is **WQL v2** — the primary template syntax (all 106 official/
+benchmark/feature-test templates ship in v2). The legacy v1 `query: {
+scope, filter, match }` syntax is still supported. For the complete WQL
+syntax, see [WQL Syntax Guide](./docs/wql-syntax.md).
 
 ---
 
