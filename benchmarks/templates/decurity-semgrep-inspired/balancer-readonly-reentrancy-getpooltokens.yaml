@@ -12,15 +12,12 @@ meta:
   references:
     - https://github.com/Decurity/semgrep-smart-contracts/tree/master/solidity/security
 
-query:
-  scope: function
-  filter:
-    all:
+from: function
+select: external_call
+where:
+  - name: '^getPoolTokens$'
+  - all:
       - not:
           regex: 'VaultReentrancyLib\.ensureNotInVaultContext\s*\('
       - not:
           regex: '\.manageUserBalance\s*\('
-  match:
-    contains:
-      kind: call.external
-      name: '^getPoolTokens$'
