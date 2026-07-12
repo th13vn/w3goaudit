@@ -30,8 +30,10 @@ where:
   # access_controlled covers: no auth modifier, no inline msg.sender guard,
   # no recursive auth in callees. The explicit `not:` below skips OZ-style
   # initializer/reinitializer modifiers.
-  - not: { preset: access_controlled }
-  - not: { modifier: (?i)(initializer|reinitializer) }
+  - not:
+      preset: access_controlled
+  - not:
+      modifier: "(?i)(initializer|reinitializer)"
   # Require at least one state write — otherwise it's a pure helper named
   # `init()` and not an actual initializer (= no privilege to steal).
   - has:
