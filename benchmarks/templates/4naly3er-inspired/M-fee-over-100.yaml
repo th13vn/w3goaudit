@@ -12,24 +12,18 @@ meta:
     Add a require() check: require(newFee <= MAX_FEE, "Fee too high").
     Where MAX_FEE is at most 10000 for BPS (100%).
 
-query:
-  scope: entrypoint
-
-  filter:
-    modifier: (?i)(onlyOwner|onlyAdmin|onlyRole|onlyGov|onlyGovernance)
-
-  # Restrict to state writes whose LHS identifier looks like a rate variable
-  # (fee/tax/rate/bps/commission/percent). Without this restriction the
-  # template flagged every owner-only setter that didn't have a guard, which
-  # is far too broad to be useful.
-  match:
-    all:
-      - contains:
-          kind: stmt.assign
-          is_state_var: true
-          left:
-            kind: expr.identifier
-            name: (?i)(fee|tax|rate|bps|commission|percent|royalty)
-      - not:
-          contains:
-            kind: check
+# Restrict to state writes whose LHS identifier looks like a rate variable
+# (fee/tax/rate/bps/commission/percent). Without this restriction the
+# template flagged every owner-only setter that didn't have a guard, which
+# is far too broad to be useful.
+from: entry_function
+where:
+  - modifier: (?i)(onlyOwner|onlyAdmin|onlyRole|onlyGov|onlyGovernance)
+  - has:
+      block: assign
+      is_state_var: true
+      left:
+        name: (?i)(fee|tax|rate|bps|commission|percent|royalty)
+  - not:
+      has:
+        block: guard

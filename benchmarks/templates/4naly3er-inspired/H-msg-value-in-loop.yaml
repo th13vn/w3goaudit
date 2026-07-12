@@ -15,12 +15,9 @@ meta:
     Never use msg.value inside a loop. Instead, accept an explicit array of
     amounts and verify their sum equals msg.value before the loop.
 
-query:
-  scope: function
-
-  match:
-    contains:
-      kind: stmt.loop
-      contains:
-        kind: expr.member_access
-        name: "msg\\.value"
+from: function
+select: loop
+where:
+  - has:
+      block: member
+      name: "msg\\.value"

@@ -15,15 +15,12 @@ meta:
     safely be used to distinguish EOA callers from contract callers (not for
     auth), e.g., require(tx.origin == msg.sender).
 
-query:
-  scope: function
-
-  match:
-    contains:
-      kind: expr.member_access
-      name: "tx\\.origin"
-      inside:
-        any:
-          - kind: check.require
-          - kind: check.assert
-          - kind: stmt.if
+from: function
+select: member
+where:
+  - name: "tx\\.origin"
+  - in:
+      any:
+        - block: require
+        - block: assert
+        - block: if

@@ -16,17 +16,14 @@ meta:
     on L2. If L2 block numbers are needed, use the network-specific block
     number opcode or APIs.
 
-query:
-  scope: function
-
-  match:
-    contains:
-      kind: expr.member_access
-      name: "block\\.number"
-      inside:
-        any:
-          - kind: stmt.if
-          - kind: check.require
-          - kind: check.assert
-          - kind: stmt.return
-          - kind: expr.binary_op
+from: function
+select: member
+where:
+  - name: "block\\.number"
+  - in:
+      any:
+        - block: if
+        - block: require
+        - block: assert
+        - block: return
+        - block: binary

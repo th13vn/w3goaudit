@@ -12,19 +12,17 @@ meta:
   recommendation: >
     Use safeTransferFrom() instead of transferFrom() for ERC721 transfers.
 
-query:
-  scope: function
-
-  # ERC20 and ERC721 transferFrom share the same 3-arg shape, so the AST
-  # alone can't distinguish them. Restrict to contracts that inherit ERC721
-  # to keep the detector usable; without this filter every ERC20
-  # transferFrom call gets flagged.
-  filter:
-    extends: (?i)(ERC721|IERC721|ERC721Upgradeable)
-
-  match:
-    contains:
-      kind: token_call
-      name: ^transferFrom$
-      arg.2:
-        kind: expr.identifier
+# ERC20 and ERC721 transferFrom share the same 3-arg shape, so the AST
+# alone can't distinguish them. Restrict to contracts that inherit ERC721
+# to keep the detector usable; without this filter every ERC20
+# transferFrom call gets flagged.
+# `token_call` (v1) is IsTokenCall(kind) == (kind == call.external) — v2 has
+# no dedicated `token_call` block-kind alias, so `external_call` (call.external)
+# + `name:` is behaviorally identical.
+from: function
+select: external_call
+where:
+  - base: (?i)(ERC721|IERC721|ERC721Upgradeable)
+  - name: ^transferFrom$
+  - arg.2:
+      block: identifier

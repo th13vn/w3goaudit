@@ -14,17 +14,14 @@ meta:
     conversions, and consult a trustworthy ETH/stETH price feed if you need
     ETH-denominated wstETH pricing.
 
-query:
-  scope: function
-
-  match:
-    contains:
-      kind: expr.binary_op
-      operator: "\\*"
-      all:
-        - contains:
-            kind: expr.identifier
-            name: (?i)price
-        - contains:
-            kind: call.external
-            name: stEthPerToken
+from: function
+select: binary
+where:
+  - operator: "\\*"
+  - all:
+      - has:
+          block: identifier
+          name: (?i)price
+      - has:
+          block: external_call
+          name: stEthPerToken

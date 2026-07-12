@@ -13,12 +13,7 @@ meta:
     Use multisig or DAO governance for privileged actions. Implement timelocks.
     Use Ownable2Step for safer ownership transfer. Document all trust assumptions.
 
-query:
-  scope: entrypoint
-
-  filter:
-    modifier: (?i)^(onlyOwner|onlyAdmin|onlyRole|requiresAuth|onlyGovernance|onlyGov|onlyDAO|onlyManager)$
-
-  match:
-    contains:
-      kind: outgoing_call
+from: entry_function
+select: outgoing_call
+where:
+  - modifier: (?i)^(onlyOwner|onlyAdmin|onlyRole|requiresAuth|onlyGovernance|onlyGov|onlyDAO|onlyManager)$

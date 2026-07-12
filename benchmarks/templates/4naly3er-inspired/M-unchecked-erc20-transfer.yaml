@@ -14,17 +14,17 @@ meta:
     Use OpenZeppelin's SafeERC20 library (safeTransfer / safeTransferFrom)
     which wraps the call and reverts on false returns or missing return values.
 
-query:
-  scope: function
-
-  match:
-    contains:
-      kind: token_call
-      name: ^(transfer|transferFrom)$
-      not:
-        inside:
-          any:
-            - kind: check.require
-            - kind: check.assert
-            - kind: stmt.if
-            - kind: stmt.assign
+# `token_call` (v1) is IsTokenCall(kind) == (kind == call.external) — v2 has
+# no dedicated `token_call` block-kind alias, so `external_call` (call.external)
+# + `name:` is behaviorally identical.
+from: function
+select: external_call
+where:
+  - name: ^(transfer|transferFrom)$
+  - not:
+      in:
+        any:
+          - block: require
+          - block: assert
+          - block: if
+          - block: assign

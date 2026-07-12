@@ -14,23 +14,20 @@ meta:
     Wrap comparisons in require(), assert(), or if() statements. Never use
     a standalone comparison as a statement.
 
-query:
-  scope: function
-
-  # A comparison is "outside a condition" only when no enclosing construct
-  # consumes its result. Treat require/assert/if/return as consuming, plus
-  # stmt.loop (for/while condition), and expr.binary_op so chained logical
-  # comparisons (`a == b && c == d`) don't each trigger.
-  match:
-    contains:
-      kind: expr.binary_op
-      operator: (==|!=|<|>|<=|>=)
-      not:
-        inside:
-          any:
-            - kind: check.require
-            - kind: check.assert
-            - kind: stmt.if
-            - kind: stmt.loop
-            - kind: stmt.return
-            - kind: expr.binary_op
+# A comparison is "outside a condition" only when no enclosing construct
+# consumes its result. Treat require/assert/if/return as consuming, plus
+# loop (for/while condition), and binary so chained logical comparisons
+# (`a == b && c == d`) don't each trigger.
+from: function
+select: binary
+where:
+  - operator: (==|!=|<|>|<=|>=)
+  - not:
+      in:
+        any:
+          - block: require
+          - block: assert
+          - block: if
+          - block: loop
+          - block: return
+          - block: binary

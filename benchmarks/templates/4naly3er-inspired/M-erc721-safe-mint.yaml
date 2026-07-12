@@ -13,15 +13,10 @@ meta:
     Replace _mint() with _safeMint() for ERC721 tokens to ensure the
     recipient can handle ERC721 tokens.
 
-query:
-  scope: function
-
-  # `_mint` exists in both ERC20 and ERC721. Restrict to contracts that
-  # inherit ERC721 so we don't flag ERC20 mints as missing safe-mint.
-  filter:
-    extends: (?i)(ERC721|IERC721|ERC721Upgradeable)
-
-  match:
-    contains:
-      kind: call.internal
-      name: ^_mint$
+# `_mint` exists in both ERC20 and ERC721. Restrict to contracts that
+# inherit ERC721 so we don't flag ERC20 mints as missing safe-mint.
+from: function
+select: internal_call
+where:
+  - base: (?i)(ERC721|IERC721|ERC721Upgradeable)
+  - name: ^_mint$
