@@ -11,10 +11,9 @@ meta:
   recommendation: >
     This is a feature-test template, not a production detector.
 
-query:
-  scope: entrypoint
-
-  match:
-    sequence:
-      - kind: outgoing_call
-      - kind: state_write
+select: outgoing_call
+from: entry_function
+where:
+  - sequence:
+      - { block: outgoing_call }
+      - { block: state_write }

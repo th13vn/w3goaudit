@@ -12,9 +12,5 @@ meta:
   recommendation: >
     This is a feature-test template, not a production detector.
 
-query:
-  scope: function
-
-  match:
-    contains:
-      kind: eth_transfer
+select: eth_transfer
+from: function

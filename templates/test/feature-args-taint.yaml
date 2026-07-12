@@ -12,13 +12,12 @@ meta:
   recommendation: >
     This is a feature-test template, not a production detector.
 
-query:
-  scope: function
-
-  match:
-    contains:
-      kind: token_call
-      name: "^transferFrom$"
-      args:
-        0:
-          tainted_from: parameter
+# `token_call` (v1) is IsTokenCall(kind) == (kind == call.external) — name
+# filtering for ERC20/ERC721 methods is a separate check either way, so
+# `external_call` + `name:` is behaviorally identical (see
+# templates/official/high/arbitrary-transferfrom.yaml).
+select: external_call
+from: function
+where:
+  - name: "^transferFrom$"
+  - arg.0: { tainted: parameter }

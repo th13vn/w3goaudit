@@ -11,16 +11,13 @@ meta:
   recommendation: >
     This is a feature-test template, not a production detector.
 
-query:
-  scope: function
-
-  match:
-    contains:
-      kind: expr.member_access
-      name: "tx\\.origin"
-      inside:
-        any:
-          - kind: check.require
-          - kind: check.assert
-          - kind: stmt.if
-          - kind: expr.conditional
+select: member
+from: function
+where:
+  - name: "tx\\.origin"
+  - in:
+      any:
+        - { block: require }
+        - { block: assert }
+        - { block: if }
+        - { block: ternary }
