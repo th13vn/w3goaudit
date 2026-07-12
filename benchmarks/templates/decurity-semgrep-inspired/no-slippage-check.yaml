@@ -11,25 +11,22 @@ meta:
   references:
     - https://github.com/Decurity/semgrep-smart-contracts/tree/master/solidity/security
 
-query:
-  scope: entrypoint
-  match:
-    any:
-      - contains:
-          kind: call.external
+from: entry_function
+where:
+  - any:
+      - has:
+          block: external_call
           name: '^(swapExactETHForTokens|swapExactETHForTokensSupportingFeeOnTransferTokens)$'
-          args:
-            0:
-              any:
-                - kind: expr.literal
-                  name: '^0$'
-                - name: '^(type|uint256|max)$'
-      - contains:
-          kind: call.external
+          arg.0:
+            any:
+              - block: literal
+                name: '^0$'
+              - name: '^(type|uint256|max)$'
+      - has:
+          block: external_call
           name: '^(swapExactTokensForTokens|swapExactTokensForTokensSupportingFeeOnTransferTokens|swapExactTokensForETH|swapExactTokensForETHSupportingFeeOnTransferTokens|swapTokensForExactTokens|swapTokensForExactETH|swap)$'
-          args:
-            1:
-              any:
-                - kind: expr.literal
-                  name: '^0$'
-                - name: '^(type|uint256|max)$'
+          arg.1:
+            any:
+              - block: literal
+                name: '^0$'
+              - name: '^(type|uint256|max)$'

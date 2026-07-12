@@ -12,18 +12,16 @@ meta:
   references:
     - https://github.com/Decurity/semgrep-smart-contracts/tree/master/solidity/security
 
-query:
-  scope: entrypoint
-  match:
-    sequence:
-      - kind: call.external
+from: entry_function
+where:
+  - sequence:
+      - block: external_call
         name: '^recover$'
-        contains:
-          attr:
-            call_receiver: true
+        has:
+          receiver: true
           name: '^ECDSA$'
-      - kind: state_write
+      - block: state_write
         left:
-          kind: expr.index_access
-          contains:
-            tainted_from: parameter
+          block: index
+          has:
+            tainted: parameter
