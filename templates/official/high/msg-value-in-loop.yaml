@@ -25,12 +25,13 @@ meta:
 # `left: {name: ^msg$}` (v1) is a bare-name check on a member_access's parent
 # expression, which the engine reads off the node's `parent` attribute — the
 # same value the v2 `parent:` attribute (§7 advanced) exposes directly.
-from: entry_function
-select: loop
-where:
-  - all:
-      - mutability: payable
-  - has:
-      block: member
-      name: ^value$
-      parent: ^msg$
+query:
+  from: entry_function
+  select: loop
+  where:
+    - all:
+        - mutability: payable
+    - has:
+        block: member
+        name: ^value$
+        parent: ^msg$

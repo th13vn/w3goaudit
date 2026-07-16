@@ -15,13 +15,15 @@ meta:
 # `stmt.assign` covers the idiomatic destructuring
 # `(bool success, ) = addr.call(...); require(success, ...)` — the call's
 # return is captured, then checked downstream, so it shouldn't fire.
-from: function
-select: lowlevel_call
-where:
-  - not:
-      in:
-        any:
-          - block: require
-          - block: assert
-          - block: if
-          - block: assign
+query:
+  from: function
+  select: lowlevel_call
+  where:
+    - not:
+        in:
+          any:
+            - block: require
+            - block: assert
+            - block: if
+            - block: assign
+            - block: return

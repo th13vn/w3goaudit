@@ -2,10 +2,10 @@ package engine
 
 import "testing"
 
-func TestBlockKindToV1(t *testing.T) {
+func TestBlockKindToIR(t *testing.T) {
 	cases := []struct {
 		v2     string
-		wantV1 string
+		wantIR string
 		wantOk bool
 	}{
 		// The 9 call kinds (§5 "Calls" table).
@@ -80,21 +80,21 @@ func TestBlockKindToV1(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.v2, func(t *testing.T) {
-			gotV1, gotOk := blockKindToV1(tc.v2)
+			gotIR, gotOk := blockKindToIR(tc.v2)
 			if gotOk != tc.wantOk {
-				t.Fatalf("blockKindToV1(%q) ok = %v, want %v", tc.v2, gotOk, tc.wantOk)
+				t.Fatalf("blockKindToIR(%q) ok = %v, want %v", tc.v2, gotOk, tc.wantOk)
 			}
-			if gotOk && gotV1 != tc.wantV1 {
-				t.Fatalf("blockKindToV1(%q) = %q, want %q", tc.v2, gotV1, tc.wantV1)
+			if gotOk && gotIR != tc.wantIR {
+				t.Fatalf("blockKindToIR(%q) = %q, want %q", tc.v2, gotIR, tc.wantIR)
 			}
 		})
 	}
 }
 
-func TestAttrNameToV1(t *testing.T) {
+func TestAttrNameToIR(t *testing.T) {
 	cases := []struct {
 		v2     string
-		wantV1 string
+		wantIR string
 		wantOk bool
 	}{
 		// Core (§7)
@@ -127,57 +127,56 @@ func TestAttrNameToV1(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.v2, func(t *testing.T) {
-			gotV1, gotOk := attrNameToV1(tc.v2)
+			gotIR, gotOk := attrNameToIR(tc.v2)
 			if gotOk != tc.wantOk {
-				t.Fatalf("attrNameToV1(%q) ok = %v, want %v", tc.v2, gotOk, tc.wantOk)
+				t.Fatalf("attrNameToIR(%q) ok = %v, want %v", tc.v2, gotOk, tc.wantOk)
 			}
-			if gotOk && gotV1 != tc.wantV1 {
-				t.Fatalf("attrNameToV1(%q) = %q, want %q", tc.v2, gotV1, tc.wantV1)
+			if gotOk && gotIR != tc.wantIR {
+				t.Fatalf("attrNameToIR(%q) = %q, want %q", tc.v2, gotIR, tc.wantIR)
 			}
 		})
 	}
 }
 
-// TestAttrNameToV1_RuleFieldBackedNamesNotInMap documents (and locks in) that
+// TestAttrNameToIR_RuleFieldBackedNamesNotInMap documents (and locks in) that
 // name/visibility/mutability/tainted are handled by lowering as inline Rule
-// fields, NOT via attrNameToV1 — see the doc comment on attrNameToV1Table.
-func TestAttrNameToV1_RuleFieldBackedNamesNotInMap(t *testing.T) {
+// fields, NOT via attrNameToIR — see the doc comment on attrNameToIRTable.
+func TestAttrNameToIR_RuleFieldBackedNamesNotInMap(t *testing.T) {
 	for _, v2 := range []string{"name", "visibility", "mutability", "tainted"} {
-		if _, ok := attrNameToV1(v2); ok {
-			t.Fatalf("attrNameToV1(%q) ok = true, want false (Rule-field-backed, not an Attr-map entry)", v2)
+		if _, ok := attrNameToIR(v2); ok {
+			t.Fatalf("attrNameToIR(%q) ok = true, want false (Rule-field-backed, not an Attr-map entry)", v2)
 		}
 	}
 }
 
-func TestPresetToV1(t *testing.T) {
+func TestPresetToIR(t *testing.T) {
 	cases := []struct {
 		v2         string
-		wantV1     string
+		wantIR     string
 		wantNegate bool
 		wantOk     bool
 	}{
 		{"access_controlled", "unAuthenticated", true, true},
 		{"caller_checked", "unCheckedSender", true, true},
 		{"reentrancy_guarded", "unLocked", true, true},
-		{"user_controlled", "", false, false},
 		{"not-a-real-preset", "", false, false},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.v2, func(t *testing.T) {
-			gotV1, gotNegate, gotOk := presetToV1(tc.v2)
+			gotIR, gotNegate, gotOk := presetToIR(tc.v2)
 			if gotOk != tc.wantOk {
-				t.Fatalf("presetToV1(%q) ok = %v, want %v", tc.v2, gotOk, tc.wantOk)
+				t.Fatalf("presetToIR(%q) ok = %v, want %v", tc.v2, gotOk, tc.wantOk)
 			}
 			if gotOk {
-				if gotV1 != tc.wantV1 {
-					t.Fatalf("presetToV1(%q) v1 = %q, want %q", tc.v2, gotV1, tc.wantV1)
+				if gotIR != tc.wantIR {
+					t.Fatalf("presetToIR(%q) IR = %q, want %q", tc.v2, gotIR, tc.wantIR)
 				}
 				if gotNegate != tc.wantNegate {
-					t.Fatalf("presetToV1(%q) negate = %v, want %v", tc.v2, gotNegate, tc.wantNegate)
+					t.Fatalf("presetToIR(%q) negate = %v, want %v", tc.v2, gotNegate, tc.wantNegate)
 				}
-				if !IsKnownPreset(gotV1) {
-					t.Fatalf("presetToV1(%q) resolved to unregistered v1 preset %q", tc.v2, gotV1)
+				if !IsKnownPreset(gotIR) {
+					t.Fatalf("presetToIR(%q) resolved to unregistered evaluator preset %q", tc.v2, gotIR)
 				}
 			}
 		})

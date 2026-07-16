@@ -26,14 +26,15 @@ meta:
 # if / conditional) — all are auth-shaped uses. The previous version
 # only matched `stmt.if`, missing the very common `require(tx.origin ==
 # owner, ...)` form (the single most-popular tx.origin auth pattern).
-from: function
-select: member
-where:
-  - not: { regex: "(msg\\.sender\\s*==\\s*tx\\.origin|tx\\.origin\\s*==\\s*msg\\.sender)" }
-  - name: "tx\\.origin"
-  - in:
-      any:
-        - block: require
-        - block: assert
-        - block: if
-        - block: ternary
+query:
+  from: function
+  select: member
+  where:
+    - not: { regex: "(msg\\.sender\\s*==\\s*tx\\.origin|tx\\.origin\\s*==\\s*msg\\.sender)" }
+    - name: "tx\\.origin"
+    - in:
+        any:
+          - block: require
+          - block: assert
+          - block: if
+          - block: ternary

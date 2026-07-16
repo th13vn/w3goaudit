@@ -15,10 +15,11 @@ meta:
 # `token_call` (v1) is call.external + name filtering — v2 has no dedicated
 # `token_call` block-kind alias, so `external_call` (call.external) + `name:`
 # is behaviorally identical (see slither-inspired/arbitrary-send-erc20.yaml).
-from: entry_function
-select: external_call
-where:
-  - not: { preset: access_controlled }
-  - name: '^(transferFrom|safeTransferFrom)$'
-  - arg.0: { tainted: parameter }
-  - arg.1: { tainted: parameter }
+query:
+  from: entry_function
+  select: external_call
+  where:
+    - not: { preset: access_controlled }
+    - name: '^(transferFrom|safeTransferFrom)$'
+    - arg.0: { tainted: parameter }
+    - arg.1: { tainted: parameter }

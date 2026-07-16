@@ -14,9 +14,10 @@ meta:
     (e.g. OpenZeppelin nonReentrant).
 
 # Reentrancy guard detection is centralized in `preset: reentrancy_guarded`.
-from: entry_function
-where:
-  - not: { preset: reentrancy_guarded }
-  - sequence:
-      - block: external_call
-      - block: state_write
+query:
+  from: entry_function
+  where:
+    - not: { preset: reentrancy_guarded }
+    - sequence:
+        - block: external_call
+        - block: state_write

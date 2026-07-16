@@ -8,13 +8,18 @@ with a YAML-based detection language (WQL). The most valuable contributions are
 
 - Discuss non-trivial changes in an issue first.
 - Every code change must keep `go build ./...`, `go test ./...`, `go vet ./...`,
-  and `gofmt -l ./cmd ./pkg ./templates` (empty output) green. CI enforces this.
+  and `gofmt -l ./cmd ./pkg ./templates` (empty output) green.
 - Update the relevant `INDEX.md` and `docs/` when you change behavior — each
   `pkg/*` and top-level folder with an `INDEX.md` documents its own change
   checklist; see `docs/project-overview.md` for the overall architecture.
 - New detectors **and** engine changes need tests (vulnerable + safe fixtures).
 
 ## Dev setup
+
+Use the Go version declared by `go.mod` (currently Go 1.26.5); local and
+external automation should read the same file rather than maintaining a second
+version string. This is a security-driven minimum: the standard-library fixes
+required by govulncheck need Go >=1.25.12.
 
 ```bash
 git clone https://github.com/th13vn/w3goaudit
@@ -23,39 +28,62 @@ go build -o w3goaudit ./cmd/w3goaudit
 go test ./...
 ```
 
+## Release gates
+
+Before opening a PR or cutting a release, run the gates relevant to your change
+locally or in user-owned external automation: `gofmt`, `go mod tidy -diff`,
+`go vet`, staticcheck v0.6.1 and gocyclo v0.6.0 (`-over 35 cmd pkg` must be
+empty), Markdown link validation plus its unit tests, normal/race/shuffled Go
+tests, host and Linux ARM64 builds, govulncheck v1.1.4, an official-template
+scan with manifest/JSON/SARIF/offline-HTML artifact validation, and the Docker
+Compose competitive benchmark.
+
+```bash
+docker compose -f benchmarks/compose.yaml run --rm benchmark
+```
+
+Docker Compose is the only supported benchmark host entry point; the image
+contains the pinned scanners and derives and verifies its Go version directly
+from `go.mod`. The gate recomputes metrics from raw counts and requires
+precision at least 0.65, recall at least 0.95, and zero failed cases. The
+Dockerfile also verifies the reviewed generated-lock hash for its pinned
+4naly3er commit.
+
 ## Write your first detector in 5 minutes
 
 A WQL detector is a YAML file with metadata + a query. Example: flag
 `block.timestamp` used inside a `require` (a weak time guard).
 
-1. **Write the template** — `templates/official/timestamp-guard.yaml`, in
-   **WQL v2** (`select`/`from`/`where` — the syntax used by all 106
-   official/benchmark/feature-test templates as of v0.4):
+1. **Write the template** — `templates/official/medium/timestamp-guard.yaml`
+   (official templates live under a `critical/`, `high/`, or `medium/` severity
+   subdirectory), in
+   **WQL** (`select`/`from`/`where` — the syntax used by all 106
+   official/benchmark/feature-test templates):
 
    ```yaml
    meta:
      id: SEC-TIME-001
      title: block.timestamp used in a require guard
-     severity: LOW
+     severity: MEDIUM
      confidence: MEDIUM
      description: >
        block.timestamp is miner-influenceable; using it directly in a guard can
        be gamed within a ~15s window.
      recommendation: Avoid timestamp-based guards for security-critical checks.
 
-   select: member          # expr.member_access
-   from: function
-   where:
-     - name: "block\\.timestamp"
-     - in: { block: require }   # nested inside a require(...) guard
+   query:
+     select: member        # expr.member_access
+     from: function
+     where:
+       - name: "block\\.timestamp"
+       - in: { block: require }   # nested inside a require(...) guard
    ```
 
    See `docs/wql-syntax.md` for the full `select`/`from`/`where` reference
-   (block-kind, attribute, and preset catalogs), and the existing
-   `templates/official/*.yaml` for idiomatic examples. The legacy v1
-   `query:`/`scope:`/`match:` syntax still loads (auto-detected per file,
-   see `docs/wql-syntax.md#migrating-from-v1`), but new templates should use
-   v2.
+   (block-kind, attribute, and preset catalogs, plus query-level `and:`/`or:`
+   composition), and the existing `templates/official/` tree for idiomatic
+   examples. WQL (`meta` plus `query:`) is the only accepted public YAML
+   schema; unknown keys are rejected at load.
 
 2. **Write fixtures** — `test-data/security/timestamp-guard.sol` with a
    `Vulnerable*` contract that should match and a `Safe*` contract that must
@@ -66,7 +94,7 @@ A WQL detector is a YAML file with metadata + a query. Example: flag
    ```bash
    go build -o w3goaudit ./cmd/w3goaudit
    ./w3goaudit test-data/security/timestamp-guard.sol \
-     --template templates/official/timestamp-guard.yaml
+     --template templates/official/medium/timestamp-guard.yaml
    ```
 
    Confirm only the `Vulnerable*` contract is flagged. Bad templates fail fast
@@ -87,8 +115,10 @@ one). Common entry points:
 - Report formats — `pkg/report/`
 - CLI flags — `cmd/w3goaudit/`
 
-Keep `filter:` (function/contract preconditions) and `match:` (AST patterns)
-cleanly separated — the loader enforces it.
+Public template YAML contains only `meta`/`select`/`from`/`where`. Internally,
+lowering compiles that source into evaluator `Template`/`QueryBlock`/`Rule` IR;
+when changing that IR, keep its context `filter` and AST `match` layers cleanly
+separated because validation and execution depend on the distinction.
 
 ## Reporting bugs
 

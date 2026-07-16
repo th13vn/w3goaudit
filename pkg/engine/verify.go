@@ -34,7 +34,7 @@ func (e *Engine) Verify(node *types.ASTNode, r Rule) (matched bool) {
 		e.recursionDepth--
 	}()
 	if e.recursionDepth > MaxRuleRecursionDepth {
-		VerboseLog("Verify: recursion depth %d exceeded (max %d) — aborting branch", e.recursionDepth, MaxRuleRecursionDepth)
+		e.logf("Verify: recursion depth %d exceeded (max %d) — aborting branch", e.recursionDepth, MaxRuleRecursionDepth)
 		return false
 	}
 
@@ -66,6 +66,13 @@ func (e *Engine) Verify(node *types.ASTNode, r Rule) (matched bool) {
 	// Check arguments (for call nodes)
 	if len(r.Args) > 0 {
 		if !e.matchArgs(node, r.Args) {
+			return false
+		}
+	}
+
+	// arg.any: some positional argument must match the sub-rule.
+	if r.ArgAny != nil {
+		if !e.matchArgAny(node, *r.ArgAny) {
 			return false
 		}
 	}
@@ -301,7 +308,17 @@ func areExclusiveArms(parent, c1, c2 *types.ASTNode) bool {
 	}
 }
 
+// isConditionExpr reports whether n is the test expression of an if-statement
+// (as opposed to a then/else arm). The builder tags the condition node with
+// cond_role="if" regardless of its kind, so a call used as a condition
+// (`if (target.call(...))`) is recognized here. The kind-prefix check is only a
+// fallback for nodes that predate the cond_role tag; relying on it alone missed
+// call/tuple conditions and wrongly treated a condition + body as exclusive
+// arms, dropping CEI/reentrancy sequence findings.
 func isConditionExpr(n *types.ASTNode) bool {
+	if n.GetAttributeString("cond_role") == "if" {
+		return true
+	}
 	return strings.HasPrefix(n.Kind, "expr.")
 }
 
@@ -476,9 +493,13 @@ func (e *Engine) matchMemberAccessLeftRight(node *types.ASTNode, r Rule) bool {
 	if r.Left != nil {
 		parentName := node.GetAttributeString("parent")
 
-		// If Left rule has Kind, check the child expression
+		// If Left rule carries any structural/semantic predicate, verify it
+		// against the child expression node. attr/tainted_from/not are included
+		// here — omitting them made a `left:` using only those predicates match
+		// neither branch and pass vacuously (silent over-match).
 		if r.Left.Kind != "" || r.Left.Contains != nil || r.Left.Inside != nil ||
-			len(r.Left.All) > 0 || len(r.Left.Any) > 0 {
+			len(r.Left.All) > 0 || len(r.Left.Any) > 0 || r.Left.Not != nil ||
+			len(r.Left.Attr) > 0 || r.Left.TaintedFrom != "" {
 			// Check against the child node (parent expression)
 			if len(node.Children) > 0 {
 				if !e.Verify(node.Children[0], *r.Left) {
@@ -613,23 +634,14 @@ func (e *Engine) matchKind(node *types.ASTNode, kind string) bool {
 
 	// 2b. Prefix matching for dot-notation (e.g., "call" matches "call.internal")
 	if strings.Contains(kind, ".") {
-		// Exact kind like "call.external" or prefix like "call.lowlevel"
-		if node.Kind == kind {
-			return true
-		}
-		// Prefix match: "call.lowlevel" matches "call.lowlevel.call"
-		if strings.HasPrefix(node.Kind, kind+".") {
-			return true
-		}
-		return false
+		// Exact kind ("call.external") or a dot-prefix ("call.lowlevel" matches
+		// "call.lowlevel.call").
+		return node.Kind == kind || strings.HasPrefix(node.Kind, kind+".")
 	}
 
 	// Short prefix without dot: "call", "check", "asm", "stmt", "expr", "decl"
 	if kind == "call" || kind == "check" || kind == "asm" || kind == "stmt" || kind == "expr" || kind == "decl" {
-		if strings.HasPrefix(node.Kind, kind+".") {
-			return true
-		}
-		return false
+		return strings.HasPrefix(node.Kind, kind+".")
 	}
 
 	// 3. Exact match for all other kinds
@@ -687,20 +699,41 @@ func (e *Engine) matchAttributeValue(node *types.ASTNode, key string, expectedVa
 	}
 }
 
-// matchArgs checks call arguments against rules
-func (e *Engine) matchArgs(node *types.ASTNode, args map[int]Rule) bool {
-	// Node must be a call-like node whose children are positional arguments.
-	// This includes require/assert/revert (their condition/args are children)
-	// and selfdestruct, so `args:` can constrain e.g. a revert's error args or
-	// selfdestruct's recipient.
+// isArgumentBearingNode reports whether node is a call-like node whose
+// children are positional arguments. This includes require/assert/revert
+// (their condition/args are children) and selfdestruct, so argument matchers
+// can constrain e.g. a revert's error args or selfdestruct's recipient.
+func isArgumentBearingNode(node *types.ASTNode) bool {
 	switch node.Kind {
 	case types.KindCallExternal, types.KindCallInternal,
 		types.KindCallLowlevelCall, types.KindCallLowlevelDelegate, types.KindCallLowlevelStatic,
 		types.KindCallBuiltinTransfer, types.KindCallBuiltinSend, types.KindCallCreate,
 		types.KindCallBuiltinSelfdestruct,
 		types.KindCheckRequire, types.KindCheckAssert, types.KindCheckRevert:
-		// Valid argument-bearing nodes
+		return true
 	default:
+		return false
+	}
+}
+
+// matchArgAny (`arg.any:`) checks whether ANY positional argument of the
+// call matches the sub-rule. Receivers/call options are excluded, exactly as
+// with matchArgs.
+func (e *Engine) matchArgAny(node *types.ASTNode, rule Rule) bool {
+	if !isArgumentBearingNode(node) {
+		return false
+	}
+	for _, arg := range callArgumentChildren(node) {
+		if e.Verify(arg, rule) {
+			return true
+		}
+	}
+	return false
+}
+
+// matchArgs checks call arguments against rules
+func (e *Engine) matchArgs(node *types.ASTNode, args map[int]Rule) bool {
+	if !isArgumentBearingNode(node) {
 		return false
 	}
 
@@ -1172,18 +1205,25 @@ func (e *Engine) resolveInternalCallee(contract *types.Contract, callNode *types
 		return nil, nil
 	}
 
-	baseNames := contract.LinearizedBases
-	if len(baseNames) == 0 {
-		baseNames = []string{contract.Name}
-	}
-	argCount := len(callNode.Children)
-	for _, baseName := range baseNames {
-		// Resolve each base relative to the calling contract's file so a
-		// duplicate contract name picks the in-scope definition, not a global one.
-		candidateContract := e.db.ResolveContractName(baseName, contract.SourceFile)
-		if candidateContract == nil {
-			continue
+	// Explicit non-virtual targets (notably super/library) carry the exact
+	// file#Contract identity from the call-graph builder. Prefer it over any
+	// short-name/MRO inference. Internal/self/inherited calls stay virtual and
+	// are resolved against the deployment contract's exact MRO below.
+	if call := e.recordedCallForNode(callNode); call != nil &&
+		(call.CallType == types.CallTypeSuper || call.CallType == types.CallTypeLibrary) {
+		if targetContract := e.db.GetContractByID(call.ResolvedContractID); targetContract != nil {
+			target := call.ResolvedFunction
+			if target == "" {
+				target = call.Target
+			}
+			if fn := findFunctionBySelectorNameAndArity(targetContract.Functions, target, call.ArgCount); fn != nil {
+				return fn, targetContract
+			}
 		}
+	}
+
+	argCount := len(callNode.Children)
+	for _, candidateContract := range e.db.LinearizedContracts(contract) {
 		if fn := findFunctionByNameAndArity(candidateContract.Functions, callNode.Name, argCount); fn != nil {
 			return fn, candidateContract
 		}
@@ -1192,6 +1232,37 @@ func (e *Engine) resolveInternalCallee(contract *types.Contract, callNode *types
 		return fn, contract
 	}
 	return nil, nil
+}
+
+func (e *Engine) recordedCallForNode(node *types.ASTNode) *types.FunctionCall {
+	if e == nil || e.currentFunction == nil || node == nil {
+		return nil
+	}
+	var lineMatch *types.FunctionCall
+	for _, call := range e.currentFunction.Calls {
+		if call == nil || call.Target != node.Name {
+			continue
+		}
+		if node.StartByte > 0 && call.Byte == node.StartByte {
+			return call
+		}
+		if node.StartLine > 0 && call.Line == node.StartLine && lineMatch == nil {
+			lineMatch = call
+		}
+	}
+	return lineMatch
+}
+
+func findFunctionBySelectorNameAndArity(functions []*types.Function, target string, argCount int) *types.Function {
+	if strings.Contains(target, "(") {
+		for _, fn := range functions {
+			if fn != nil && fn.Selector == target {
+				return fn
+			}
+		}
+		return nil
+	}
+	return findFunctionByNameAndArity(functions, target, argCount)
 }
 
 func findFunctionByNameAndArity(functions []*types.Function, name string, argCount int) *types.Function {
@@ -1255,7 +1326,11 @@ func functionVisitKey(fn *types.Function, env map[string][]string) string {
 		parts = append(parts, name+"="+strings.Join(sources, ","))
 	}
 	sort.Strings(parts)
-	return fn.ContractName + "." + selector + "|" + strings.Join(parts, ";")
+	identity := fn.ContractName + "." + selector
+	if fn.SourceFile != "" {
+		identity = types.MakeFunctionID(fn.SourceFile, fn.ContractName, selector)
+	}
+	return identity + "|" + strings.Join(parts, ";")
 }
 
 // checkFunctionContext checks all function-level context conditions.
@@ -1265,150 +1340,32 @@ func (e *Engine) checkFunctionContext(fn *types.Function, contract *types.Contra
 	if fn == nil {
 		return false
 	}
-
-	// Check modifier presence
-	if r.Modifier != "" {
-		found := false
-		for _, mod := range fn.Modifiers {
-			if MatchesRegex(r.Modifier, mod) {
-				found = true
-				break
-			}
-		}
-		if !found {
-			return false
-		}
+	if !matchesRegexValue(r.Modifier, fn.Modifiers) || !matchesContractBase(r.Extends, contract) {
+		return false
 	}
-
-	// Check inheritance (via contract)
-	if r.Extends != "" && contract != nil {
-		found := false
-		for _, baseName := range contract.LinearizedBases {
-			if MatchesRegex(r.Extends, baseName) {
-				found = true
-				break
-			}
-		}
-		if !found {
-			return false
-		}
+	if r.FuncName != "" && !MatchesRegex(r.FuncName, fn.Name) {
+		return false
 	}
-
-	// Check function name regex (filter.func_name)
-	if r.FuncName != "" {
-		if !MatchesRegex(r.FuncName, fn.Name) {
-			return false
-		}
+	if !matchesCSVValue(r.Visibility, string(fn.Visibility), "") {
+		return false
 	}
-
-	// Check visibility precondition (filter.visibility)
-	// Accepts comma-separated list: "public,external"
-	if r.Visibility != "" {
-		allowed := strings.Split(r.Visibility, ",")
-		matched := false
-		fnVis := strings.ToLower(strings.TrimSpace(string(fn.Visibility)))
-		for _, v := range allowed {
-			if strings.TrimSpace(strings.ToLower(v)) == fnVis {
-				matched = true
-				break
-			}
-		}
-		if !matched {
-			return false
-		}
+	if !matchesCSVValue(r.Mutability, string(fn.StateMutability), "nonpayable") {
+		return false
 	}
-
-	// Check mutability precondition (filter.mutability)
-	// Accepts comma-separated list: "payable,nonpayable"
-	if r.Mutability != "" {
-		allowed := strings.Split(r.Mutability, ",")
-		matched := false
-		fnMut := strings.ToLower(strings.TrimSpace(string(fn.StateMutability)))
-		if fnMut == "" {
-			fnMut = "nonpayable" // empty state mutability is the (default) nonpayable
-		}
-		for _, v := range allowed {
-			if strings.TrimSpace(strings.ToLower(v)) == fnMut {
-				matched = true
-				break
-			}
-		}
-		if !matched {
-			return false
-		}
+	if r.Regex != "" && !sourceRegexMatches(r.Regex, e.functionSource(fn, contract)) {
+		return false
 	}
-
-	if r.Regex != "" {
-		if !sourceRegexMatches(r.Regex, e.functionSource(fn, contract)) {
-			return false
-		}
+	if r.Version != "" && !e.checkVersion(r.Version) {
+		return false
 	}
-
-	if r.Version != "" {
-		if !e.checkVersion(r.Version) {
-			return false
-		}
+	if r.Preset != "" && !e.checkPreset(fn, contract, r.Preset) {
+		return false
 	}
-
-	if r.Preset != "" {
-		if !e.checkPreset(fn, contract, r.Preset) {
-			return false
-		}
+	if !hasNamedParameter(fn, r.HasParam) || !e.hasMatchingGuard(fn, r.HasGuard) {
+		return false
 	}
-
-	if r.HasParam != "" {
-		found := false
-		for _, param := range fn.Parameters {
-			if param != nil && param.Name == r.HasParam {
-				found = true
-				break
-			}
-		}
-		if !found {
-			return false
-		}
-	}
-
-	// Check has_guard: function body contains a guard (require/assert/revert) matching sub-rule
-	if r.HasGuard != nil && fn.AST != nil {
-		// Look for a guard node in the AST that matches the sub-rule
-		foundGuard := false
-		fn.AST.WalkDescendants(func(n *types.ASTNode) bool {
-			if types.IsCheck(n.Kind) {
-				if e.Verify(n, *r.HasGuard) {
-					foundGuard = true
-					return false // stop
-				}
-			}
-			return true
-		})
-		if !foundGuard {
-			return false
-		}
-	}
-
-	for _, subRule := range r.All {
-		if ruleHasContextFields(subRule) && !e.checkFunctionContext(fn, contract, subRule) {
-			return false
-		}
-	}
-
-	if len(r.Any) > 0 {
-		seenContextRule := false
-		matched := false
-		for _, subRule := range r.Any {
-			if !ruleHasContextFields(subRule) {
-				continue
-			}
-			seenContextRule = true
-			if e.checkFunctionContext(fn, contract, subRule) {
-				matched = true
-				break
-			}
-		}
-		if seenContextRule && !matched {
-			return false
-		}
+	if !e.matchesAllContextRules(fn, contract, r.All) || !e.matchesAnyContextRule(fn, contract, r.Any) {
+		return false
 	}
 
 	// Handle NOT — negate context conditions inside.
@@ -1417,6 +1374,93 @@ func (e *Engine) checkFunctionContext(fn *types.Function, contract *types.Contra
 	}
 
 	return true
+}
+
+func matchesRegexValue(pattern string, values []string) bool {
+	if pattern == "" {
+		return true
+	}
+	for _, value := range values {
+		if MatchesRegex(pattern, value) {
+			return true
+		}
+	}
+	return false
+}
+
+func matchesContractBase(pattern string, contract *types.Contract) bool {
+	if pattern == "" || contract == nil {
+		return true
+	}
+	// Extends is a display-name regex, not an identity dereference. Keep the
+	// serialized name slice for SDK/manual and legacy inputs without base objects.
+	return matchesRegexValue(pattern, contract.LinearizedBases)
+}
+
+func matchesCSVValue(filter, value, emptyDefault string) bool {
+	if filter == "" {
+		return true
+	}
+	value = strings.ToLower(strings.TrimSpace(value))
+	if value == "" {
+		value = emptyDefault
+	}
+	for _, allowed := range strings.Split(filter, ",") {
+		if strings.TrimSpace(strings.ToLower(allowed)) == value {
+			return true
+		}
+	}
+	return false
+}
+
+func hasNamedParameter(fn *types.Function, name string) bool {
+	if name == "" {
+		return true
+	}
+	for _, param := range fn.Parameters {
+		if param != nil && param.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
+func (e *Engine) hasMatchingGuard(fn *types.Function, rule *Rule) bool {
+	if rule == nil || fn.AST == nil {
+		return true
+	}
+	found := false
+	fn.AST.WalkDescendants(func(node *types.ASTNode) bool {
+		if types.IsCheck(node.Kind) && e.Verify(node, *rule) {
+			found = true
+			return false
+		}
+		return true
+	})
+	return found
+}
+
+func (e *Engine) matchesAllContextRules(fn *types.Function, contract *types.Contract, rules []Rule) bool {
+	for _, rule := range rules {
+		if ruleHasContextFields(rule) && !e.checkFunctionContext(fn, contract, rule) {
+			return false
+		}
+	}
+	return true
+}
+
+func (e *Engine) matchesAnyContextRule(fn *types.Function, contract *types.Contract, rules []Rule) bool {
+	seenContextRule := false
+	for _, rule := range rules {
+		if !ruleHasContextFields(rule) {
+			continue
+		}
+		seenContextRule = true
+		if e.checkFunctionContext(fn, contract, rule) {
+			return true
+		}
+	}
+	return !seenContextRule
 }
 
 // IsContextOnly returns true if rule only contains context-level checks
@@ -1562,6 +1606,8 @@ func (e *Engine) verifyAtContract(contract *types.Contract, r Rule) bool {
 
 	if r.Extends != "" {
 		found := false
+		// Name matching is intentionally compatible with display-only SDK values;
+		// it does not resolve or consume a contract identity.
 		for _, baseName := range contract.LinearizedBases {
 			if MatchesRegex(r.Extends, baseName) {
 				found = true
@@ -1641,24 +1687,12 @@ func (e *Engine) buildContractAST(contract *types.Contract) *types.ASTNode {
 		root.StartLine, root.EndLine = sourceContractRange(content, contract.Name)
 	}
 
-	for _, baseName := range contract.LinearizedBases {
-		base := e.db.ResolveContractName(baseName, contract.SourceFile)
-		if base == nil {
-			continue
-		}
+	for _, base := range e.db.LinearizedContracts(contract) {
 		for _, fn := range base.Functions {
 			if fn == nil || fn.AST == nil {
 				continue
 			}
 			root.AddChild(cloneFunctionAST(fn, base.SourceFile))
-		}
-	}
-	if len(contract.LinearizedBases) == 0 {
-		for _, fn := range contract.Functions {
-			if fn == nil || fn.AST == nil {
-				continue
-			}
-			root.AddChild(cloneFunctionAST(fn, contract.SourceFile))
 		}
 	}
 	return root
@@ -1945,11 +1979,13 @@ func (e *Engine) hostFunctionFor(node *types.ASTNode) (hostName, hostContract, h
 			// Resolve contract via the matched node's chain map (populated
 			// by the interprocedural walker) or from the verifier context.
 			if path, ok := e.ipChains[node]; ok && len(path.Functions) > 0 {
-				last := path.Functions[len(path.Functions)-1]
+				lastIdx := len(path.Functions) - 1
+				last := path.Functions[lastIdx]
 				if last != nil {
 					hostContract = last.ContractName
-					if c := e.db.GetContractByName(last.ContractName); c != nil {
-						hostFile = c.SourceFile
+					hostFile = last.SourceFile
+					if hostFile == "" && lastIdx < len(path.Contracts) && path.Contracts[lastIdx] != nil {
+						hostFile = path.Contracts[lastIdx].SourceFile
 					}
 				}
 				return
@@ -1961,8 +1997,9 @@ func (e *Engine) hostFunctionFor(node *types.ASTNode) (hostName, hostContract, h
 				hostFile = e.currentContract.SourceFile
 			} else if e.currentFunction != nil && hostContract == "" {
 				hostContract = e.currentFunction.ContractName
-				if c := e.db.GetContractByName(e.currentFunction.ContractName); c != nil {
-					hostFile = c.SourceFile
+				hostFile = e.currentFunction.SourceFile
+				if hostFile == "" && e.currentContract != nil {
+					hostFile = e.currentContract.SourceFile
 				}
 			}
 			return
@@ -1972,8 +2009,9 @@ func (e *Engine) hostFunctionFor(node *types.ASTNode) (hostName, hostContract, h
 	if e.currentFunction != nil {
 		hostName = e.currentFunction.Name
 		hostContract = e.currentFunction.ContractName
-		if c := e.db.GetContractByName(hostContract); c != nil {
-			hostFile = c.SourceFile
+		hostFile = e.currentFunction.SourceFile
+		if hostFile == "" && e.currentContract != nil {
+			hostFile = e.currentContract.SourceFile
 		}
 	}
 	return

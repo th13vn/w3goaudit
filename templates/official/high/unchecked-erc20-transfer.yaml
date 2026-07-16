@@ -21,20 +21,21 @@ meta:
 # (1 arg → call.builtin.transfer, always reverts on failure — no check
 # needed) from ERC20 .transfer(to, amt) (2 args → call.external). So we
 # match only call.external (`external_call`) here.
-from: entry_function
-select: external_call
-where:
-  - name: ^(transfer|transferFrom)$
-  # The return is consumed if the call sits inside any of these:
-  #   - require / assert : `require(token.transfer(...), ...)`
-  #   - if                : `if (!token.transferFrom(...)) revert();`
-  #   - assign            : `bool ok = token.transfer(...);`
-  #   - return            : `return token.transfer(...);`
-  - not:
-      in:
-        any:
-          - block: require
-          - block: assert
-          - block: if
-          - block: assign
-          - block: return
+query:
+  from: entry_function
+  select: external_call
+  where:
+    - name: ^(transfer|transferFrom)$
+    # The return is consumed if the call sits inside any of these:
+    #   - require / assert : `require(token.transfer(...), ...)`
+    #   - if                : `if (!token.transferFrom(...)) revert();`
+    #   - assign            : `bool ok = token.transfer(...);`
+    #   - return            : `return token.transfer(...);`
+    - not:
+        in:
+          any:
+            - block: require
+            - block: assert
+            - block: if
+            - block: assign
+            - block: return

@@ -20,7 +20,8 @@ meta:
 # recursive internal auth helpers. This replaces the old modifier-name regex,
 # which both missed inline `require(msg.sender == owner)` guards (false
 # positive) and any auth modifier outside its hard-coded name list.
-from: entry_function
-select: selfdestruct
-where:
-  - not: { preset: access_controlled }
+query:
+  from: entry_function
+  select: selfdestruct
+  where:
+    - not: { preset: access_controlled }

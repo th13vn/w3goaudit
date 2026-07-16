@@ -28,9 +28,10 @@ meta:
 # itself, which carries no mutability attribute); wrapped in `all:` it is
 # recognized as context-only and routed to the function-level precondition,
 # matching v1's `filter: mutability: payable` exactly.
-from: entry_function
-select: delegatecall
-where:
-  - all:
-      - mutability: payable
-  - in: { block: loop }
+query:
+  from: entry_function
+  select: delegatecall
+  where:
+    - all:
+        - mutability: payable
+    - in: { block: loop }

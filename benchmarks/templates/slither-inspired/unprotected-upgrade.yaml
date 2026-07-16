@@ -14,8 +14,14 @@ meta:
     initialize functions. Consider using _disableInitializers() in the
     constructor of implementation contracts.
 
-from: entry_function
-select: state_write
-where:
-  - func_name: (?i)^(initialize|initialise|init)$
-  - not: { preset: access_controlled }
+query:
+  from: entry_function
+  where:
+    - func_name: (?i)^(initialize|initialise|init|__init|setup)$
+    - not: { preset: access_controlled }
+    - not: { modifier: "(?i)(initializer|reinitializer)" }
+    - has: { block: state_write }
+    - not:
+        has:
+          block: guard
+          has: { block: identifier, name: ^_initializersDisabled$ }

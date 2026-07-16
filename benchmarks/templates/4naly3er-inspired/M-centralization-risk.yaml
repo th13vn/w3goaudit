@@ -13,7 +13,10 @@ meta:
     Use multisig or DAO governance for privileged actions. Implement timelocks.
     Use Ownable2Step for safer ownership transfer. Document all trust assumptions.
 
-from: entry_function
-select: outgoing_call
-where:
-  - modifier: (?i)^(onlyOwner|onlyAdmin|onlyRole|requiresAuth|onlyGovernance|onlyGov|onlyDAO|onlyManager)$
+query:
+  from: entry_function
+  where:
+    - modifier: (?i)^(onlyOwner|onlyAdmin|onlyRole|requiresAuth|onlyGovernance|onlyGov|onlyDAO|onlyManager)$
+    - any:
+        - has: { block: state_write }
+        - has: { block: outgoing_call }

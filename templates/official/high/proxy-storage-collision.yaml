@@ -29,14 +29,15 @@ meta:
 # (Contains, an AST-only field) forces AST-layer routing, keeping the
 # existential per-branch "some declaration/constructor line matches" behavior
 # equivalent to the original whole-contract-text scan.
-from: contract
-where:
-  - base: '(UpgradeabilityProxy|AdminUpgradeabilityProxy|OwnedUpgradeabilityProxy|TransparentUpgradeableProxy|ERC1967Proxy)'
-  - all:
-      - has:
-          regex: '(?m)^\s*[A-Za-z_][A-Za-z0-9_<>,\[\] ]+\s+(?:public|private|internal)?\s*[A-Za-z_][A-Za-z0-9_]*\s*(?:=|;)'
-      - has:
-          regex: '\bconstructor\s*\('
-      - not:
-          has:
-            regex: '(?m)^\s*[A-Za-z_][A-Za-z0-9_<>,\[\] ]+\s+(?:immutable|constant)\b'
+query:
+  from: contract
+  where:
+    - base: '(UpgradeabilityProxy|AdminUpgradeabilityProxy|OwnedUpgradeabilityProxy|TransparentUpgradeableProxy|ERC1967Proxy)'
+    - all:
+        - has:
+            regex: '(?m)^\s*[A-Za-z_][A-Za-z0-9_<>,\[\] ]+\s+(?:public|private|internal)?\s*[A-Za-z_][A-Za-z0-9_]*\s*(?:=|;)'
+        - has:
+            regex: '\bconstructor\s*\('
+        - not:
+            has:
+              regex: '(?m)^\s*[A-Za-z_][A-Za-z0-9_<>,\[\] ]+\s+(?:immutable|constant)\b'

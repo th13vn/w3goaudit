@@ -14,7 +14,8 @@ meta:
     Migrate to latestRoundData() and always validate: answer > 0,
     updatedAt > block.timestamp - stalePeriod, answeredInRound >= roundId.
 
-from: function
-select: external_call
-where:
-  - name: ^latestAnswer$
+query:
+  from: function
+  select: external_call
+  where:
+    - name: ^latestAnswer$

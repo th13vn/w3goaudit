@@ -14,10 +14,11 @@ meta:
     Use OpenZeppelin's forceApprove() or explicitly: token.approve(spender, 0);
     token.approve(spender, amount);
 
-from: function
-select: external_call
-where:
-  - name: ^approve$
-  - arg.1:
-      block: identifier
-      tainted: parameter
+query:
+  from: function
+  select: external_call
+  where:
+    - name: ^approve$
+    - arg.1:
+        block: identifier
+        tainted: parameter

@@ -1,6 +1,8 @@
 package engine
 
 import (
+	"sort"
+
 	"github.com/th13vn/w3goaudit/pkg/types"
 )
 
@@ -25,7 +27,7 @@ func checkBuiltinPreset(fn *types.Function, contract *types.Contract, e *Engine,
 	if checkFn, exists := BuiltinPresets[preset]; exists {
 		return checkFn(fn, contract, e)
 	}
-	VerboseLog("checkBuiltinPreset: unknown preset %q — returning false (template should have been rejected at load)", preset)
+	e.logf("checkBuiltinPreset: unknown preset %q — returning false (template should have been rejected at load)", preset)
 	return false
 }
 
@@ -34,6 +36,17 @@ func checkBuiltinPreset(fn *types.Function, contract *types.Contract, e *Engine,
 func IsKnownPreset(name string) bool {
 	_, ok := BuiltinPresets[name]
 	return ok
+}
+
+// KnownPresetNames returns the registered evaluator preset names, sorted,
+// for use in error messages so the list never drifts from BuiltinPresets.
+func KnownPresetNames() []string {
+	names := make([]string, 0, len(BuiltinPresets))
+	for name := range BuiltinPresets {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
 }
 
 // checkUnAuthenticated checks if a function does NOT have authentication

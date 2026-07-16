@@ -11,9 +11,9 @@ meta:
   recommendation: >
     This is a feature-test template, not a production detector.
 
-select: outgoing_call
-from: entry_function
-where:
-  - sequence:
-      - { block: outgoing_call }
-      - { block: state_write }
+query:
+  from: entry_function
+  where:
+    - sequence:
+        - { block: outgoing_call }
+        - { block: state_write }

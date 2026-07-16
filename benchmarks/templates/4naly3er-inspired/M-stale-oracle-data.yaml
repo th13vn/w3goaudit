@@ -15,11 +15,12 @@ meta:
       require(updatedAt >= block.timestamp - STALE_PERIOD, "Stale price");
       require(answeredInRound >= roundId, "Stale round");
 
-from: function
-where:
-  - has:
-      block: external_call
-      name: ^latestRoundData$
-  - not:
-      has:
-        block: guard
+query:
+  from: function
+  where:
+    - has:
+        block: external_call
+        name: ^latestRoundData$
+    - not:
+        has:
+          block: guard

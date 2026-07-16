@@ -12,5 +12,6 @@ meta:
   recommendation: >
     This is a feature-test template, not a production detector.
 
-select: eth_transfer
-from: function
+query:
+  select: eth_transfer
+  from: function

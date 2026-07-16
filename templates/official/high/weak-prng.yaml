@@ -23,10 +23,11 @@ meta:
 # block-context member access, which also catches the popular
 # `keccak256(abi.encodePacked(block.timestamp, ...)) % N` pattern because
 # `block.timestamp` is still a descendant of the `%` node.
-from: function
-select: binary
-where:
-  - operator: "%"
-  - has:
-      block: member
-      name: (?i)^block\.(timestamp|number|difficulty|prevrandao|coinbase)$|^blockhash$
+query:
+  from: function
+  select: binary
+  where:
+    - operator: "%"
+    - has:
+        block: member
+        name: (?i)^block\.(timestamp|number|difficulty|prevrandao|coinbase)$|^blockhash$

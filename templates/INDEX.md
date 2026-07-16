@@ -6,26 +6,14 @@ WQL templates for smart-contract security scanning. Each `.yaml` file is a
 self-contained detector. The `official/` pack is embedded in the binary
 (`//go:embed`) and serves as the always-available offline fallback.
 
-## Template Language: WQL v2
+## Template Language: WQL
 
 **All templates under `official/` and `test/` (this directory), plus every
 benchmark template under `../benchmarks/templates/` (slither-inspired,
 decurity-semgrep-inspired, 4naly3er-inspired) — 106 templates total — are
-written in WQL v2** (`select`/`from`/`where`). See
+written in WQL** (`select`/`from`/`where`). See
 [`../docs/wql-syntax.md`](../docs/wql-syntax.md) for the full language
 reference.
-
-`security/` (this directory) holds the original v1 `query: { scope, filter,
-match }` templates as **legacy seeds** — kept for reference, not curated or
-maintained as the production pack (that's `official/`), and not part of the
-v2 migration. The v1 `query:` syntax still loads (the engine auto-detects
-v1 vs v2 per file), so these remain runnable, but new templates should be
-written in v2.
-
-The code blocks further down this file under "Template Structure" and "WQL
-Features Demonstrated" show the **v1** `query:` shape for historical
-context (they predate the v2 migration) — for the current v2 syntax, see
-`../docs/wql-syntax.md`.
 
 ### Template precedence (v0.3)
 
@@ -56,14 +44,13 @@ legitimate pattern) are also out.
 
 ```
 templates/
-├── official/   # Curated official detector pack (25, WQL v2) — embedded; run THIS to audit
-├── test/       # WQL feature-test templates (5, WQL v2; NOT production detectors)
-└── security/   # Legacy WQL v1 `query:` seeds (19) — reference only, not curated/shipped
+├── official/   # Curated official detector pack (25) — embedded; run THIS to audit
+└── test/       # WQL feature-test templates (5; NOT production detectors)
 ```
 
-(Benchmark templates — decurity/slither/4naly3er-inspired, also WQL v2 — live
-under `../benchmarks/templates/`, outside this directory; see
-[`../benchmarks/benchmarking.md`](../benchmarks/benchmarking.md).)
+(The 76 benchmark templates — Decurity/Slither/4naly3er-inspired — live under
+`../benchmarks/templates/`, outside this directory; see
+[`../benchmarks/README.md`](../benchmarks/README.md).)
 
 > **`official/` is the pack you scan with.** It is the curated, best-of-breed
 > set of hand-written W3GoAudit-native detectors. It is embedded in the binary,
@@ -76,9 +63,9 @@ under `../benchmarks/templates/`, outside this directory; see
 > [`../test-data/core/engine-features/`](../test-data/core/engine-features/) to
 > smoke-test WQL engine operators. The five templates are:
 > `feature-sequence.yaml` (`sequence` operator), `feature-inside.yaml`
-> (`contains` + `inside` ancestor traversal), `feature-eth-transfer.yaml`
-> (`eth_transfer` semantic group), `feature-args-taint.yaml` (`args` +
-> `tainted_from`), and `taint-probe-parameter.yaml` (`TEST-TAINT-PARAM`, an
+> (`has` + `in` ancestor traversal), `feature-eth-transfer.yaml`
+> (`eth_transfer` semantic group), `feature-args-taint.yaml` (`arg.N` +
+> `tainted`), and `taint-probe-parameter.yaml` (`TEST-TAINT-PARAM`, an
 > INFO probe that isolates pure parameter-taint reachability into
 > `transferFrom` arg0 with **no** access-control filter — used for taint stress
 > testing). Run them with
@@ -105,10 +92,10 @@ template/category rather than by name prefix alone.
 
 | ID | Severity | File | Detects |
 |---|---|---|---|
-| `CRITICAL-SELFDESTRUCT-UNPROTECTED` | CRITICAL | `critical/selfdestruct-unprotected.yaml` | `selfdestruct(...)` (Solidity-level OR assembly opcode) reachable from an unauthenticated entrypoint (`preset: unAuthenticated` — modifiers, inline sender guards, and recursive auth helpers) |
+| `CRITICAL-SELFDESTRUCT-UNPROTECTED` | CRITICAL | `critical/selfdestruct-unprotected.yaml` | `selfdestruct(...)` (Solidity-level OR assembly opcode) reachable from an entrypoint without the `access_controlled` safety property (modifiers, inline sender/role guards, and recursive auth helpers) |
 | `CRITICAL-DELEGATECALL-USER-INPUT` | CRITICAL | `critical/delegatecall-user-input.yaml` | `delegatecall` whose target flows from a function parameter |
-| `HIGH-ARBITRARY-SEND-ETH` | HIGH | `high/arbitrary-send-eth.yaml` | Unprotected ETH withdrawal via `.transfer` / `.send` / `.call{value:}`. Uses `preset: unCheckedSender` — clears functions that self-scope the caller to a resource they own (NFT-vault `_withdraw(msg.sender,…)` + `ownerOf(id) == caller`), the ETH analogue of `require(from == msg.sender)`. Item-ownership is treated as self-scoping, NOT privileged access control, so the SpiceFiNFT4626 false positive is gone without mis-marking `deposit`/`mint` |
-| `HIGH-ARBITRARY-TRANSFERFROM` | HIGH | `high/arbitrary-transferfrom.yaml` | `transferFrom(from, ...)` where `from` is user-controlled across entrypoint/helper flows and the function neither has privileged access control nor self-scopes the caller (`preset: unCheckedSender` — `require(from == msg.sender)` is treated as safe) |
+| `HIGH-ARBITRARY-SEND-ETH` | HIGH | `high/arbitrary-send-eth.yaml` | Unprotected ETH withdrawal via `.transfer` / `.send` / `.call{value:}`. Negates the `caller_checked` safety property, so functions that self-scope the caller to a resource they own are cleared without misclassifying item ownership as privileged access control |
+| `HIGH-ARBITRARY-TRANSFERFROM` | HIGH | `high/arbitrary-transferfrom.yaml` | `transferFrom(from, ...)` where `from` is user-controlled across entrypoint/helper flows and the function neither has privileged access control nor self-scopes the caller (`not: { preset: caller_checked }`; `require(from == msg.sender)` is safe) |
 | `HIGH-UNCHECKED-ERC20-TRANSFER` | HIGH | `high/unchecked-erc20-transfer.yaml` | ERC20 `transfer` / `transferFrom` whose bool return is discarded |
 | `HIGH-REENTRANCY-PATTERN` | HIGH | `high/reentrancy-pattern.yaml` | CEI violation — ETH-bearing call / raw low-level `.call` / `delegatecall` followed by a state write, on a function lacking a reentrancy guard |
 | `HIGH-REENTRANCY-BALANCE` | HIGH | `high/reentrancy-balance.yaml` | `balanceOf` → external-call → balance-read pattern without a reentrancy guard (delta-snapshot exploit) |
@@ -116,7 +103,7 @@ template/category rather than by name prefix alone.
 | `HIGH-UNPROTECTED-INITIALIZER` | HIGH | `high/unprotected-initializer.yaml` | `initialize/init/setup` entrypoint that writes state with no access control or `initializer` guard |
 | `HIGH-WEAK-PRNG` | HIGH | `high/weak-prng.yaml` | Modulo over `block.timestamp` / `block.number` / `block.prevrandao` / `blockhash` |
 | `HIGH-MSG-VALUE-IN-LOOP` | HIGH | `high/msg-value-in-loop.yaml` | `msg.value` referenced inside a loop body in a `payable` entrypoint (multicall ETH reuse) |
-| `HIGH-INCORRECT-EXP` | HIGH | `high/incorrect-exp.yaml` | `^` (bitwise XOR) used where `**` was meant. Flags `base ^ exp`, `2 ^ 8`, `10 ^ 18` — both operands simple (identifier/decimal) AND `not: { statement_contains: <bitwise> }`. Excludes genuine XOR: `(a & b) + (a ^ b)/2` (`&` sibling), `(3*x) ^ 2` (complex left), `x ^ 0xFF` (hex) — no OpenZeppelin `Math.average`/`mulDiv` false positives |
+| `HIGH-INCORRECT-EXP` | HIGH | `high/incorrect-exp.yaml` | `^` (bitwise XOR) used where `**` was meant. Flags `base ^ exp`, `2 ^ 8`, `10 ^ 18` — both operands simple (identifier/decimal) and no other bitwise operator in the same statement (`statement_has`). Excludes genuine XOR in OpenZeppelin-style math and hex masks |
 | `HIGH-ENCODE-PACKED-COLLISION` | HIGH | `high/encode-packed-collision.yaml` | `keccak256(abi.encodePacked(...))` over ≥2 user-controlled dynamic args (ambiguous packing → collision) |
 | `HIGH-PROXY-STORAGE-COLLISION` | HIGH | `high/proxy-storage-collision.yaml` | Proxy subclass declares plain mutable storage alongside a constructor (implementation slot collision) |
 | `HIGH-ECDSA-RECOVER-MALLEABLE` | HIGH | `high/ecdsa-recover-malleable.yaml` | `ECDSA.recover` result keyed by the raw `signature` bytes (malleability replay) |
@@ -153,30 +140,22 @@ meta:
   fix: STRING                   # optional suggested fix snippet
 
 query:
-  scope: SCOPE                  # entrypoint|function|main_contract|all_contract|contract|library|abstract|source
-
-  filter:                       # Function/contract-level preconditions (optional)
-    modifier: REGEX             # function HAS this modifier
-    func_name: REGEX            # function name matches regex
-    visibility: a,b      # comma-separated: public,external,internal,private
-    mutability: a,b      # comma-separated: payable,view,pure,nonpayable
-    has_guard:                  # function body must contain a guard matching this rule
-      contains:
-        kind: expr.identifier
-        name: PATTERN
-    not:                        # Negate filter conditions
-      modifier: REGEX
-
-  match:                        # AST pattern matching
-    # Default logic is AND — all fields must match
-    # Rules: contains, name, sequence, tainted_from, kind, etc.
-    sequence:
-      - kind: outgoing_call
-      - kind: state_write
+  select: BLOCK_KIND            # optional scalar; omit only with a complete root/sequence matcher
+  from: SCOPE                   # entry_function|function|main_contract|any_contract|contract|library|abstract|source
+  where:                        # matcher list; siblings are implicit AND
+    - func_name: ^withdraw$
+    - not: { preset: access_controlled }
+    - has:
+        block: eth_transfer
 ```
 
-At contract scopes (`main_contract`, `all_contract`, `contract`, `library`,
-`abstract`), `match:` runs on a synthetic `decl.contract` AST whose children are
+`query:` may instead hold a one-level `and:` (multi-site join on a shared
+`from:` scope, branch `label:`s surfacing in `Finding.Related`) or `or:`
+(union of branch queries under one meta, deduplicated by location) — see
+[`../docs/wql-syntax.md`](../docs/wql-syntax.md#query-composition-and--or).
+
+At contract scopes (`main_contract`, `any_contract`, `contract`, `library`,
+`abstract`), `where:` runs on a synthetic `decl.contract` AST whose children are
 resolved function ASTs from the contract's C3 linearized inheritance chain. Use
 this for same-contract combination detectors that need multiple conditions in one
 contract context, such as payable `msg.value` entrypoints plus inherited
@@ -186,120 +165,94 @@ contract context, such as payable `msg.value` entrypoints plus inherited
 
 ## WQL Features Demonstrated
 
-### Semantic Groups
+### Structural and semantic matching
 
 ```yaml
-# guard (= check): detect require/assert/revert
-contains:
-  kind: guard.require
-
-# token_call: detect ERC20/ERC721 external calls
-contains:
-  kind: token_call
-  name: ^(transfer|transferFrom|approve|safeTransfer|safeTransferFrom)$
+query:
+  select: external_call
+  from: entry_function
+  where:
+    - name: ^transferFrom$
+    - arg.0: { tainted: parameter }
+    - not: { preset: caller_checked }
 ```
 
-### Filter Predicates
+Use `has:` for descendant matching, `in:` for ancestor matching, and semantic
+block kinds such as `eth_transfer`, `delegatecall`, `state_write`, and `guard`.
+
+### Sequence matching
 
 ```yaml
-filter:
-  # Match only functions named withdraw or deposit
-  func_name: ^(withdraw|deposit)$
-
-  # Match only public or external functions
-  visibility: public,external
-
-  # Match only payable functions
-  mutability: payable
-
-  # Match only functions that have a msg.sender guard
-  has_guard:
-    contains:
-      kind: expr.member_access
-      name: msg\.sender
+query:
+  from: entry_function
+  where:
+    - not: { preset: reentrancy_guarded }
+    - sequence:
+        - block: eth_transfer
+        - block: state_write
 ```
+
+The first sequence step is the anchor. If `select` is present, it must match
+that step's `block` (or fill a simple unkinded first step); conflicting or
+composite anchors are rejected. A fully specified sequence can omit `select`.
 
 ### Presets
 
-Every built-in preset returns `true` for the **vulnerable** case, so use
-them WITHOUT a `not:` wrapper in `filter:`. The filter passes only for the
-functions you actually want to scan further.
-
-```yaml
-filter:
-  preset: unAuthenticated    # scan only entry points lacking PRIVILEGED access
-                             # control. require(from == msg.sender) is NOT
-                             # privileged auth, so it does NOT clear this preset.
-```
-
-```yaml
-filter:
-  preset: unCheckedSender     # like unAuthenticated, but ALSO clears functions
-                             # that self-scope the caller (require(from ==
-                             # msg.sender)). Use where binding a sensitive arg to
-                             # the caller is a valid mitigation (arbitrary transferFrom).
-```
-
-```yaml
-filter:
-  preset: unLocked           # scan only functions lacking a reentrancy guard
-```
-
-Unknown preset names are rejected at template load with the list of
-known presets, so typos like `preset: unAuthenticatd` fail fast.
+WQL presets name safety properties: `access_controlled`, `caller_checked`,
+and `reentrancy_guarded`. Vulnerability detectors normally negate the property,
+for example `not: { preset: access_controlled }`. Unknown preset names fail at
+template load.
 
 ### Taint Analysis
+
 ```yaml
-tainted_from: parameter  # or state_var, local_var; entrypoint scans propagate through internal helper calls
+- arg.0: { tainted: parameter }  # also state_var, local_var, sender
 ```
 
 Member-call receivers are preserved as tagged children, so receiver-tainted
 sinks can be expressed without confusing calldata arguments:
 
 ```yaml
-contains:
-  kind: delegatecall
-  contains:
-    attr:
-      call_receiver: true
-    tainted_from: parameter
+query:
+  select: delegatecall
+  where:
+    - has:
+        block: identifier
+        receiver: true
+        tainted: parameter
 ```
 
 ### Argument Matching
 
-Two equivalent notations:
-
 ```yaml
-# Nested map
-args:
-  0:
-    kind: expr.identifier
-    tainted_from: parameter
-
-# Flat keys
-arg.0:
-  kind: expr.identifier
-  tainted_from: parameter
+query:
+  where:
+    - arg.0:
+        block: identifier
+        tainted: parameter
 ```
 
 ### Version Checking
+
 ```yaml
-filter:
-  version: ">=0.8.0"  # or <0.8.0, >0.7.0, etc.
+query:
+  where:
+    - version: ">=0.8.0"  # or <0.8.0, >0.7.0, etc.
 ```
 
 ### Left/Right Matching
+
 ```yaml
-kind: expr.member_access
-left:
-  name: tx
-right:
-  name: origin
+query:
+  select: member
+  where:
+    - left: { name: ^tx$ }
+    - right: { name: ^origin$ }
 ```
 
 ### Regex Escaping
 
-`name:`, `modifier:`, `extends:`, `func_name:` and string-valued
+`name:`, `modifier:`, `base:`, `func_name:` and string-valued
 attributes are all interpreted as Go regular expressions. Escape regex
 metacharacters using **quoted strings with doubled backslashes** so the
 YAML parser preserves the backslash:
@@ -324,13 +277,31 @@ to substring matching.
    - `official/` — curated, audit-grade patterns with optional `references`.
    - `test/` — low-confidence feature-exercise templates for WQL operators
      (paired with `../test-data/core/engine-features/`), NOT production detectors.
-   - `security/` is a legacy v1 seed set, not a target for new templates.
-2. Write it in **WQL v2** (`select`/`from`/`where`) — see
+2. Write it in **WQL** (`meta` plus `query:` — `select`/`from`/`where`, or a
+   query-level `and:`/`or:` composition) — see
    [../docs/wql-syntax.md](../docs/wql-syntax.md).
 3. Test against fixtures in [`../test-data/security/`](../test-data/security/):
    add a `Vulnerable_*` / `Safe_*` pair named after the detector.
 4. Verify the `Vulnerable_*` cases trigger and the `Safe_*` cases do not.
 5. Add the template to the table in this INDEX.md.
+
+## Competitive quality gate
+
+Detector changes must preserve both vulnerable and safe controls. The W3GoAudit
+competitive suite is accepted only with precision >= 0.65, recall >= 0.95, and
+zero failed cases; the threshold tool recomputes metrics from TP/FP/FN instead
+of trusting rounded report fields.
+
+```bash
+FOURNALY3ER_LOCK_SHA256=<reviewed hash> \
+  docker compose -f benchmarks/compose.yaml run --rm benchmark
+```
+
+Docker Compose is the only supported benchmark host entry point. Its Dockerfile
+derives and verifies Go directly from `go.mod`; scanners are pinned inside the
+image and output is confined to `benchmarks/results/`. The reviewed hash is
+still an external blocker, so this checkout does not claim a fresh image or
+competitive run.
 
 ---
 

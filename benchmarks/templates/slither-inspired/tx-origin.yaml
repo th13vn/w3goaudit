@@ -21,12 +21,13 @@ meta:
 # receives `tx\.origin` as a regex (literal dot). The previous bare
 # `tx\.origin` (unquoted) only worked by accident — different YAML
 # parsers handle backslashes inconsistently.
-from: function
-select: member
-where:
-  - name: "tx\\.origin"
-  - in:
-      any:
-        - block: require
-        - block: assert
-        - block: if
+query:
+  from: function
+  select: member
+  where:
+    - name: "tx\\.origin"
+    - in:
+        any:
+          - block: require
+          - block: assert
+          - block: if

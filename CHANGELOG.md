@@ -1,6 +1,87 @@
 # Changelog
 
-## Unreleased — v0.4: Precise source locations (breaking output schema)
+## Unreleased — `query:` composition (breaking template syntax)
+
+Templates are now `meta:` plus one `query:` container — the former top-level
+`select`/`from`/`where` triple moved under `query:` (all 106 repository
+templates migrated; finding output verified byte-identical on the security
+corpus, and the competitive benchmark gate passes: precision 65.27%,
+detection 100%, zero failed cases).
+
+- **`query.or:`** — one detector, several alternative shapes: a list of
+  complete branch queries under one `meta`. Each branch anchors its own
+  finding (own `select`, `where`, optional `from`; a query-level `from` is
+  the shared default, and cross-scope branches are allowed). Lowered to one
+  `QueryBlock` per branch (new `Template.Queries` IR field, additive JSON);
+  the engine executes every block and unions the findings, deduplicating
+  identical matched locations.
+- **`query.and:`** — multi-site joined findings: a query-level `from:` names
+  the join scope (contract scopes join per contract via the synthetic
+  inheritance-aware AST; function scopes per function), and every branch
+  (own `select`/`where`/`label:`) must match in the same scope instance.
+  Branch sites surface in `Finding.Related` under their labels. Lowered onto
+  the existing contract-scope `all:`-of-branches machinery. Context-level
+  matchers are rejected inside `and:` branches (a filter applies to the
+  whole scope instance).
+- One composition level; `and:`/`or:` cannot mix with each other or with a
+  sibling `select:`/`where:`; malformed shapes fail at load with pointed
+  errors.
+- **`arg.any:`** — matches when SOME positional call argument satisfies the
+  sub-rule (receivers/call options excluded, as with `arg.N`).
+- **`and:` in `where`** — exact alias of `all:` for logic symmetry.
+- Conflicting scalar matchers (two `name:` constraints on one node) now fail
+  with a fix-it error suggesting `all:` branches.
+- SDK: `ParseTemplate`/`LoadTemplate` accept only the new document shape;
+  the exported evaluator IR gains `Template.Queries` and `Rule.ArgAny`.
+
+## Unreleased — Full correctness and release hardening
+
+- Added immutable scan-local logging/options across the reader, builder,
+  database loader, engine, template loader, and report generator. Deprecated
+  package-global verbose wrappers remain only for exported SDK compatibility.
+- Persisted sorted analysis-quality diagnostics through source builds and JSON
+  cache loads. Every bundle writes `data/diagnostics.json`; manifests expose
+  `analysisComplete` and per-severity diagnostic counts. `--strict-imports`
+  applies the same fail-closed import policy to source scans, `--db` scans, and
+  `build`, while the default remains tolerant.
+- Canonicalized internal identities as `absPath#Contract` and
+  `absPath#Contract.selector(types)`. Contracts/main-contract entries now carry
+  exact `LinearizedBaseIDs`; call edges carry exact resolved contract IDs;
+  identity-sensitive lookup rejects unresolved ambiguity instead of guessing.
+- Hardened extract queries: exact contract/function IDs, selectors, 4-byte
+  signatures, and unique names are supported; ambiguous input fails with sorted
+  candidates.
+- Reworked Foundry import resolution with real TOML parsing, active
+  `FOUNDRY_PROFILE`, context-qualified/specificity-ordered remappings, fallback
+  after missing targets, canonical import provenance, and sub-project boundaries.
+- Hardened template archive installation with 64 MiB compressed, 8 MiB per-file,
+  128 MiB decompressed, 4,096 accepted-file, and 8,192 ZIP-entry caps plus a
+  rollback-safe staged directory swap.
+- Corrected manifest scope/count semantics (`projectRoot`, `scanTarget`,
+  compatibility `target`; contracts/interfaces/libraries/declarations) and
+  indexed diagnostics plus optional HTML artifacts.
+- Added fixed-clock report builders. Finding/content ordering is deterministic;
+  real generated timestamps vary unless `GeneratorOptions.Now` /
+  `BundleOptions.Now` supplies a fixed clock.
+- Added reusable release gates for format/tidy/vet/staticcheck/gocyclo,
+  Markdown links, normal/race/shuffled tests, host/ARM64 builds, govulncheck,
+  official scan artifacts, and the competitive benchmark. The project uses
+  `go.mod`'s Go version, raised to 1.26.5 because govulncheck found reachable
+  standard-library advisories in older supported toolchains (fixes require
+  >=1.25.12).
+- Made Docker Compose the only supported competitive-benchmark host workflow.
+  The image derives and verifies Go directly from `go.mod`, requested scanners
+  fail closed, and output is confined to `benchmarks/results/`. The threshold
+  checker enforces precision >= 65%, recall >= 95%, and zero failed cases from
+  recomputed raw counts. A fresh image/competitive run is not currently claimed:
+  verification remains externally blocked until the completed lockfile hash for
+  the pinned 4naly3er commit is recovered and reviewed.
+- Template YAML is strictly `meta` plus `query:`; unknown keys are rejected
+  at every level. The obsolete `templates/security/` lane was deleted; the
+  retained inventory is 25 official + 5 feature-test + 76 benchmark = 106 WQL
+  templates.
+
+## v0.4.0 - 2026-07-13: Precise source locations (breaking output schema)
 
 AST nodes and declarations now carry column and byte-offset ranges, not just
 line numbers, closing the gap between "which line" and "which exact span" for
@@ -9,8 +90,8 @@ edits):
 
 - **`StartCol`/`EndCol`/`StartByte`/`EndByte`** added to `types.ASTNode`,
   `Function`, `Modifier`, `Contract`, `StateVariable`, `Event`, `Struct`,
-  `Enum`, and `Parameter` — 1-based columns, character byte offsets, zero for
-  synthetic nodes with no source counterpart.
+  `Enum`, and `Parameter` — one-based Unicode-code-point columns and zero-based,
+  half-open UTF-8 byte offsets, zero for synthetic nodes with no source counterpart.
 - **Interior AST nodes are now located, not just declaration roots.** Every
   statement/expression/assembly node built by `pkg/builder`'s AST builder
   passes through a dispatch chokepoint (`buildStatement`, `buildExpression`,
@@ -34,12 +115,42 @@ edits):
   the precise `SrcRange` locations above. `data/manifest.json` indexes them
   under `files.data.nav` / `files.data.explorer`. See
   [`docs/extension-output.md`](docs/extension-output.md) for the schema.
-- **WQL v2 query language** (`select`/`from`/`where`, uniform matchers,
-  renamed intuitive-polarity presets) is now the primary template syntax;
-  all 106 official/benchmark/feature-test templates migrated to it,
-  behavior-preserving. The v1 `query:` syntax is still supported (legacy) —
-  the loader auto-detects which one a file uses. See
-  [`docs/wql-syntax.md`](docs/wql-syntax.md) for the full reference.
+- **WQL query language** (`select`/`from`/`where`, uniform matchers,
+  intuitive-polarity presets) is the template syntax; all 106
+  official/benchmark/feature-test templates use it. See
+  [`docs/wql-syntax.md`](docs/wql-syntax.md).
+
+### Fixes (v0.4.0)
+
+- **Deterministic finding output.** `ExecuteAll` now applies a total-order sort
+  (`SortFindings`) before returning, so `findings.json`, `results.sarif`, and
+  the per-group order in `findings.md` are byte-stable across runs. Previously
+  findings were emitted in Go map-iteration order and shuffled every run.
+- **Precise spans reach findings.** `Finding.Location` and `primaryAst` now
+  carry the matched node's `col`/`endLine`/`endCol`/`startByte`/`endByte`, and
+  SARIF declares `columnKind: unicodeCodePoints` and emits
+  `startColumn`/`endColumn`/`endLine`. It deliberately omits
+  `charOffset`/`charLength` because W3GoAudit offsets are UTF-8 bytes, not SARIF
+  character offsets. Reachability steps carry a per-hop `file` so cross-contract
+  SARIF traces point at the right file.
+- **Same-name contract resolution.** Entry-function IDs, main-contract
+  detection, source excerpts, call targets, extraction, and report consumers now
+  carry exact source/contract/function identities. `Function.SourceFile`,
+  `ResolvedContractID`, and `LinearizedBaseIDs` keep a mock and real contract
+  with the same name separate; unresolved ambiguity is not repaired with a
+  lexicographic or same-directory guess.
+- **Reentrancy sequence FN.** A call used as an `if`-condition followed by a
+  state write in the body is now matched by `sequence` rules (the condition and
+  body were wrongly treated as mutually-exclusive arms).
+- **WQL fail-open / dead paths closed.** A mixed context+AST `any:` and a
+  multi-kind (list) `select:` are now rejected at load with actionable errors
+  instead of silently over-matching / never matching.
+- **Round-trip & robustness.** `DataFlowGraph` rebuilds its index after a `--db`
+  round-trip; modifier ASTs are built with contract state-variable context;
+  template download is size-capped and swapped in atomically; unresolved imports
+  are surfaced instead of silently dropped; source excerpts handle block
+  comments and word-boundary function matching; nav.json symbol IDs and ordering
+  are collision-free. `--version` is wired and the CLI version is `0.4.0`.
 
 ## Unreleased — Standardized result-folder layout (output tree)
 
@@ -96,8 +207,9 @@ changes):
 
 ## Unreleased — WQL keyword simplification (breaking template syntax)
 
-Template-facing keyword renames toward a simpler, more uniform WQL. Update
-custom templates accordingly (the official pack is already migrated):
+Historical record. These evaluator-facing YAML keywords are not accepted by
+the current loader; see `docs/wql-syntax.md` for the current syntax. The
+change renamed:
 
 - `source_regex:` → `regex:`
 - `visibility_filter:` → `visibility:` and `mutability_filter:` → `mutability:`
@@ -159,8 +271,9 @@ target (SpiceFiNFT4626) and the competitive benchmark.
 
 ### Benchmark
 
-- Competitive corpus: w3goaudit **105/109 found (96.3% recall), 60.0% precision,
-  F1 73.9%** vs slither 33/109 (30.3% / 44.6% / F1 36.1%).
+- Competitive corpus is now governed by the Unreleased quality gate above; the
+  previous 105/109, 60.0%-precision snapshot is retained only in repository
+  history rather than documented as the current baseline.
 
 ## v0.3.1 - 2026-06-22
 

@@ -13,7 +13,8 @@ meta:
     Avoid using delegatecall inside loops. If multicall functionality is needed,
     use a carefully audited multicall pattern with proper access control.
 
-from: entry_function
-select: loop
-where:
-  - has: { block: delegatecall }
+query:
+  from: entry_function
+  select: loop
+  where:
+    - has: { block: delegatecall }

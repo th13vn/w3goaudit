@@ -19,16 +19,17 @@ meta:
     - https://github.com/crytic/slither/wiki/Detector-Documentation#divide-before-multiply
     - https://docs.soliditylang.org/en/latest/types.html#division
 
-from: function
-select: binary
+query:
+  from: function
+  select: binary
 
-where:
-  # Precise structural pattern: a multiply whose LEFT operand is a divide.
-  # The slither-inspired draft used `sequence: [/, *]`, which scans
-  # descendants in any order and FPs on `a = b/c; ...; d = e*f` (two
-  # unrelated expressions). `left:` directly walks children[0], which is
-  # the canonical AST shape for this bug.
-  - operator: "\\*"
-  - left:
-      block: binary
-      operator: "/"
+  where:
+    # Precise structural pattern: a multiply whose LEFT operand is a divide.
+    # The slither-inspired draft used `sequence: [/, *]`, which scans
+    # descendants in any order and FPs on `a = b/c; ...; d = e*f` (two
+    # unrelated expressions). `left:` directly walks children[0], which is
+    # the canonical AST shape for this bug.
+    - operator: "\\*"
+    - left:
+        block: binary
+        operator: "/"

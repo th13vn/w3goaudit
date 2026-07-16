@@ -18,14 +18,15 @@ meta:
 # so we don't trip on every external method named "transfer".
 # `stmt.assign` is included so `bool ok = token.transfer(...); require(ok);`
 # is correctly recognised as a checked call.
-from: entry_function
-select: external_call
-where:
-  - name: ^(transfer|transferFrom)$
-  - not:
-      in:
-        any:
-          - block: require
-          - block: assert
-          - block: if
-          - block: assign
+query:
+  from: entry_function
+  select: external_call
+  where:
+    - name: ^(transfer|transferFrom)$
+    - not:
+        in:
+          any:
+            - block: require
+            - block: assert
+            - block: if
+            - block: assign

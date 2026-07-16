@@ -86,14 +86,13 @@ meta:
   confidence: MEDIUM
 
 query:
-  scope: entrypoint
-  filter:
-    not:
-      modifier: nonReentrant
-  match:
-    sequence:
-      - kind: outgoing_call
-      - kind: state_write
+  from: entry_function
+  where:
+    - not:
+        modifier: nonReentrant
+    - sequence:
+        - block: outgoing_call
+        - block: state_write
 `
 	tmpl, err := ParseTemplate(yamlCanonical)
 	if err != nil {
@@ -111,24 +110,22 @@ query:
 	}
 }
 
-func TestRegexAcceptedInFilterAndMatch(t *testing.T) {
-	yamlWithScopedRegex := `
-meta:
-  id: TEST-SOURCE-REGEX-SCOPE
-  title: "source regex scope"
-  severity: LOW
-  confidence: HIGH
-
-query:
-  scope: function
-  filter:
-    regex: "onlyFunctionBody"
-  match:
-    regex: "rawSnippetPredicate"
-`
-	tmpl, err := ParseTemplate(yamlWithScopedRegex)
-	if err != nil {
-		t.Fatalf("ParseTemplate should accept regex in filter and match: %v", err)
+func TestEvaluatorIRAcceptsRegexInFilterAndMatch(t *testing.T) {
+	tmpl := &Template{
+		Meta: TemplateMeta{
+			ID:         "TEST-SOURCE-REGEX-SCOPE",
+			Title:      "source regex scope",
+			Severity:   "LOW",
+			Confidence: "HIGH",
+		},
+		Query: QueryBlock{
+			Scope:  ScopeFunction,
+			Filter: &Rule{Regex: "onlyFunctionBody"},
+			Match:  Rule{Regex: "rawSnippetPredicate"},
+		},
+	}
+	if err := finalizeTemplate(tmpl, "filter/match regex evaluator IR test"); err != nil {
+		t.Fatalf("finalizeTemplate should accept regex in filter and match: %v", err)
 	}
 	if tmpl.Query.Filter == nil || tmpl.Query.Filter.Regex == "" {
 		t.Fatal("expected filter.regex to be preserved")
@@ -550,49 +547,6 @@ func TestContextHasGuard(t *testing.T) {
 	})
 }
 
-// ─── arg.N YAML Key Parsing ───────────────────────────────────────────────────
-
-func TestArgNYAMLParsing(t *testing.T) {
-	// arg.N flat-key style
-	yamlArgN := `
-meta:
-  id: TEST-ARG-001
-  title: "arg.N test"
-  severity: HIGH
-  confidence: MEDIUM
-
-query:
-  scope: entrypoint
-  match:
-    contains:
-      kind: call.external
-      name: ^transferFrom$
-      arg.0:
-        kind: expr.identifier
-        tainted_from: parameter
-`
-	tmpl, err := ParseTemplate(yamlArgN)
-	if err != nil {
-		t.Fatalf("ParseTemplate failed: %v", err)
-	}
-
-	// The match contains rule should have Args[0] populated by normalizeArgNKeys
-	// (the whole point of arg.N flat-key parsing).
-	if tmpl.Query.Match.Contains == nil {
-		t.Fatal("Expected match.contains to be set")
-	}
-	argRule, ok := tmpl.Query.Match.Contains.Args[0]
-	if !ok {
-		t.Fatalf("Expected Contains.Args[0] to be populated from `arg.0:`; got Args=%v", tmpl.Query.Match.Contains.Args)
-	}
-	if argRule.Kind != "expr.identifier" {
-		t.Errorf("Contains.Args[0].Kind = %q, want expr.identifier", argRule.Kind)
-	}
-	if argRule.TaintedFrom != "parameter" {
-		t.Errorf("Contains.Args[0].TaintedFrom = %q, want parameter", argRule.TaintedFrom)
-	}
-}
-
 // ─── Template Loading (silent failure fix) ────────────────────────────────────
 
 func TestLoadTemplateValidation(t *testing.T) {
@@ -604,9 +558,8 @@ meta:
   severity: HIGH
   confidence: MEDIUM
 query:
-  scope: entrypoint
-  match:
-    kind: outgoing_call
+  select: outgoing_call
+  from: entry_function
 `
 		tmpl, err := ParseTemplate(yaml)
 		if err != nil {
@@ -639,17 +592,15 @@ meta:
   severity: HIGH
   confidence: MEDIUM
 query:
-  scope: entrypoint
-  match:
-    kind: outgoing_call
+  select: outgoing_call
+  from: entry_function
 `
 	invalid := `
 meta:
   id: INVALID-001
 query:
-  scope: entrypoint
-  match:
-    kind: outgoing_call
+  select: outgoing_call
+  from: entry_function
 `
 	if err := os.WriteFile(filepath.Join(dir, "valid.yaml"), []byte(valid), 0644); err != nil {
 		t.Fatalf("write valid template: %v", err)

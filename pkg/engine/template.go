@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/th13vn/w3goaudit/pkg/logging"
 	"github.com/th13vn/w3goaudit/pkg/types"
 	"gopkg.in/yaml.v3"
 )
@@ -38,10 +39,25 @@ const (
 	ScopeSource Scope = "source"
 )
 
-// Template represents a WQL vulnerability detection template
+// Template is the compiled evaluator IR for one vulnerability detector.
+// Public WQL documents are lowered into this structure before validation
+// and execution. It is intentionally not a YAML decoding target.
 type Template struct {
-	Meta  TemplateMeta `yaml:"meta" json:"meta"`
-	Query QueryBlock   `yaml:"query" json:"query"`
+	Meta  TemplateMeta `json:"meta"`
+	Query QueryBlock   `json:"query"`
+
+	// Queries carries every executable block when the template composes
+	// multiple queries with a query-level or: (Queries[0] == Query). The
+	// engine executes each block and unions the findings under this
+	// template's meta. Empty for single-query templates.
+	Queries []QueryBlock `json:"queries,omitempty"`
+}
+
+// UnmarshalYAML prevents callers from bypassing the WQL loaders by decoding
+// the exported evaluator IR directly from YAML. Programmatic IR construction
+// and JSON serialization remain supported.
+func (*Template) UnmarshalYAML(*yaml.Node) error {
+	return fmt.Errorf("the evaluator IR is not a YAML template schema; use ParseTemplate or LoadTemplate")
 }
 
 // TemplateMeta contains template metadata
@@ -62,20 +78,31 @@ type TemplateLoadOptions struct {
 	// malformed or incomplete. The default is fail-closed: any invalid template
 	// aborts loading so security scans do not silently run with missing rules.
 	IgnoreInvalid bool
+
+	// Logger receives template-loading diagnostics for this scan. Nil preserves
+	// the legacy package-global verbose configuration.
+	Logger *logging.Logger
 }
 
-// QueryBlock defines the query scope, optional filter, and matching rules.
-//
-// WQL syntax:
+func templateLogf(logger *logging.Logger, format string, args ...any) {
+	if logger == nil {
+		VerboseLog(format, args...)
+		return
+	}
+	logger.Printf(format, args...)
+}
+
+// QueryBlock defines the evaluator scope, optional filter, and matching rules.
+// Its two rule layers are:
 //   - filter: function/contract-level preconditions
 //   - match:  AST pattern matching rules
 type QueryBlock struct {
-	Scope  Scope `yaml:"scope" json:"scope"`
-	Filter *Rule `yaml:"filter,omitempty" json:"filter,omitempty"`
-	Match  Rule  `yaml:"match" json:"match"`
+	Scope  Scope `json:"scope"`
+	Filter *Rule `json:"filter,omitempty"`
+	Match  Rule  `json:"match"`
 }
 
-// Rule represents a WQL matching rule with recursive structure.
+// Rule represents one recursive evaluator IR matching rule.
 // Default logic: ALL fields must match (AND semantics).
 // Aliases are normalized to internal fields during loading.
 type Rule struct {
@@ -84,24 +111,24 @@ type Rule struct {
 	// matching semantics; it is surfaced in a finding's related-site list so
 	// contract-scope combination rules can name each matched site (e.g.
 	// "payable msg.value entrypoint"). Optional.
-	Label string `yaml:"label,omitempty" json:"label,omitempty"`
+	Label string `json:"label,omitempty"`
 
 	// ========== LOGIC OPERATORS ==========
-	All []Rule `yaml:"all,omitempty" json:"all,omitempty"`
-	Any []Rule `yaml:"any,omitempty" json:"any,omitempty"`
-	Not *Rule  `yaml:"not,omitempty" json:"not,omitempty"`
+	All []Rule `json:"all,omitempty"`
+	Any []Rule `json:"any,omitempty"`
+	Not *Rule  `json:"not,omitempty"`
 
 	// Sequence: ordered matching of descendants
-	Sequence []Rule `yaml:"sequence,omitempty" json:"sequence,omitempty"`
+	Sequence []Rule `json:"sequence,omitempty"`
 
 	// ========== ATOMIC MATCHERS ==========
-	Kind string `yaml:"kind,omitempty" json:"kind,omitempty"`
-	Name string `yaml:"name,omitempty" json:"name,omitempty"`
+	Kind string `json:"kind,omitempty"`
+	Name string `json:"name,omitempty"`
 
 	// Regex (`regex:`) matches raw source text for the active scope. With
 	// query.scope=source it scans the whole file; in contract/function/AST
 	// contexts it checks the scoped source snippet.
-	Regex string `yaml:"regex,omitempty" json:"regex,omitempty"`
+	Regex string `json:"regex,omitempty"`
 
 	// StatementContains matches when the node's nearest enclosing statement
 	// (the closest `stmt.*` / `check.*` / `decl.variable` ancestor) has a
@@ -111,47 +138,47 @@ type Rule struct {
 	// related node in the same statement, e.g. an exponentiation-typo `^` whose
 	// statement holds no other bitwise/shift operator. The operator vocabulary
 	// lives in the template, not the engine.
-	StatementContains *Rule `yaml:"statement_contains,omitempty" json:"statement_contains,omitempty"`
+	StatementContains *Rule `json:"statement_contains,omitempty"`
 
 	// UncheckedVar, on an arithmetic binary_op, matches only when the operation's
 	// operands were NOT bounded by a preceding guard (require/assert/if condition
 	// that references every operand identifier) earlier in the same function. It
 	// separates a deliberate, range-checked `unchecked` block — e.g.
 	// `require(a >= b); … a - b;` — from a genuinely unchecked one.
-	UncheckedVar bool `yaml:"unchecked_var,omitempty" json:"unchecked_var,omitempty"`
+	UncheckedVar bool `json:"unchecked_var,omitempty"`
 
 	// ========== ATTRIBUTES ==========
-	Attr map[string]interface{} `yaml:"attr,omitempty" json:"attr,omitempty"`
+	Attr map[string]interface{} `json:"attr,omitempty"`
 
 	// Inline attributes (promoted into Attr during normalization)
-	IsStateVar interface{} `yaml:"is_state_var,omitempty" json:"is_state_var,omitempty"`
-	Operator   string      `yaml:"operator,omitempty" json:"operator,omitempty"`
+	IsStateVar interface{} `json:"is_state_var,omitempty"`
+	Operator   string      `json:"operator,omitempty"`
 
 	// Visibility / Mutability accept a comma-separated "is one of" list
 	// (`public,external`, `payable,nonpayable`). In a filter: block they are a
 	// function-level precondition; in a match: block they match a node's
 	// visibility/mutability attribute (e.g. a `decl.function` at contract scope).
 	// One keyword, routed by layer — no `_filter` variant.
-	Visibility string `yaml:"visibility,omitempty" json:"visibility,omitempty"`
-	Mutability string `yaml:"mutability,omitempty" json:"mutability,omitempty"`
+	Visibility string `json:"visibility,omitempty"`
+	Mutability string `json:"mutability,omitempty"`
 
 	// ========== CONTEXT HELPERS (function-level filters) ==========
-	Extends  string `yaml:"extends,omitempty" json:"extends,omitempty"`
-	Modifier string `yaml:"modifier,omitempty" json:"modifier,omitempty"`
+	Extends  string `json:"extends,omitempty"`
+	Modifier string `json:"modifier,omitempty"`
 
 	// FuncName filters by function name regex (filter-level, not AST name).
 	// Use this in filter blocks to restrict which functions are checked.
 	// Named FuncName to avoid collision with AST `name`.
-	FuncName string `yaml:"func_name,omitempty" json:"func_name,omitempty"`
+	FuncName string `json:"func_name,omitempty"`
 
 	// HasGuard checks if the function body contains a require/assert guard
 	// with a specific pattern. Used in filter blocks.
 	// Example: has_guard: { contains: { pattern: msg.sender } }
-	HasGuard *Rule `yaml:"has_guard,omitempty" json:"has_guard,omitempty"`
+	HasGuard *Rule `json:"has_guard,omitempty"`
 
 	// ========== TRAVERSAL ==========
-	Contains *Rule `yaml:"contains,omitempty" json:"contains,omitempty"`
-	Inside   *Rule `yaml:"inside,omitempty" json:"inside,omitempty"`
+	Contains *Rule `json:"contains,omitempty"`
+	Inside   *Rule `json:"inside,omitempty"`
 
 	// ========== CALL-SPECIFIC ==========
 	// Args matches call arguments by 0-based index.
@@ -159,62 +186,53 @@ type Rule struct {
 	//   args: { 0: ..., 1: ... }
 	//   arg.0: ...
 	//   arg.1: ...
-	Args map[int]Rule `yaml:"args,omitempty" json:"args,omitempty"`
+	Args map[int]Rule `json:"args,omitempty"`
+
+	// ArgAny (`arg.any:`) matches when SOME positional argument of the call
+	// matches the sub-rule. Receivers and call options (value/gas) are not
+	// arguments, exactly as with Args.
+	ArgAny *Rule `json:"arg_any,omitempty"`
 
 	// ========== TAINT ANALYSIS ==========
-	TaintedFrom string `yaml:"tainted_from,omitempty" json:"tainted_from,omitempty"`
+	TaintedFrom string `json:"tainted_from,omitempty"`
 
 	// ========== VERSION CHECKING ==========
-	Version string `yaml:"version,omitempty" json:"version,omitempty"`
+	Version string `json:"version,omitempty"`
 
 	// ========== PRESETS ==========
-	Preset string `yaml:"preset,omitempty" json:"preset,omitempty"`
+	Preset string `json:"preset,omitempty"`
 
 	// ========== LEFT/RIGHT MATCHING ==========
-	Left  *Rule `yaml:"left,omitempty" json:"left,omitempty"`
-	Right *Rule `yaml:"right,omitempty" json:"right,omitempty"`
+	Left  *Rule `json:"left,omitempty"`
+	Right *Rule `json:"right,omitempty"`
 
 	// ========== FILTER-SPECIFIC ==========
-	HasParam string `yaml:"has_param,omitempty" json:"has_param,omitempty"` // check function has param named X
+	HasParam string `json:"has_param,omitempty"` // check function has param named X
 }
 
 // LoadTemplate loads a template from a YAML file.
 func LoadTemplate(path string) (*Template, error) {
+	return loadTemplateWithLogger(path, nil)
+}
+
+func loadTemplateWithLogger(path string, logger *logging.Logger) (*Template, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("read file: %w", err)
 	}
-
-	if isV2Source(data) {
-		return loadTemplateV2(data, path)
-	}
-
-	var tmpl Template
-	if err := yaml.Unmarshal(data, &tmpl); err != nil {
-		return nil, fmt.Errorf("parse YAML: %w", err)
-	}
-
-	if err := finalizeTemplate(&tmpl, data, path); err != nil {
-		return nil, err
-	}
-	return &tmpl, nil
+	return parseTemplateDocument(data, path, logger)
 }
 
-// loadTemplateV2 lowers a WQL v2 document (raw bytes already confirmed to be
-// v2 via isV2Source) into a validated *Template, running it through the exact
-// same finalizeTemplate validate/normalize pipeline the v1 path uses — so a
-// v2 template and its hand-written v1 equivalent are held to identical
-// standards and, once lowered, are evaluated by the same unmodified evaluator.
-func loadTemplateV2(data []byte, source string) (*Template, error) {
-	v2, err := parseV2(data)
+func parseTemplateDocument(data []byte, source string, logger *logging.Logger) (*Template, error) {
+	doc, err := parseV2(data)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("template %s: %w", source, err)
 	}
-	tmpl, err := v2.lower()
+	tmpl, err := doc.lower()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("template %s: %w", source, err)
 	}
-	if err := finalizeTemplate(tmpl, data, source); err != nil {
+	if err := finalizeTemplateWithLogger(tmpl, source, logger); err != nil {
 		return nil, err
 	}
 	return tmpl, nil
@@ -229,46 +247,65 @@ var validSeverities = map[string]bool{
 
 // finalizeTemplate runs the full validate+normalize pipeline shared by the file
 // loader (LoadTemplate) and the inline loader (ParseTemplate), so both behave
-// identically. `data` is the raw YAML (for arg.N key recovery) and `source`
-// names the origin for error messages.
-func finalizeTemplate(tmpl *Template, data []byte, source string) error {
+// identically. `source` names the origin for error messages.
+func finalizeTemplate(tmpl *Template, source string) error {
+	return finalizeTemplateWithLogger(tmpl, source, nil)
+}
+
+func finalizeTemplateWithLogger(tmpl *Template, source string, logger *logging.Logger) error {
 	if err := validateTemplateMeta(tmpl, source); err != nil {
 		return err
 	}
 	if !validSeverities[strings.ToUpper(tmpl.Meta.Severity)] {
 		return fmt.Errorf("template %s: invalid severity %q — must be one of CRITICAL, HIGH, MEDIUM, LOW, INFO", source, tmpl.Meta.Severity)
 	}
-	if err := validateScope(tmpl.Query.Scope); err != nil {
+
+	// Validate/normalize every executable block: the primary Query plus every
+	// or:-composed block in Queries (Queries[0] is kept equal to Query; the
+	// normalization pipeline is deterministic, so finalizing both preserves
+	// that equality).
+	blocks := []*QueryBlock{&tmpl.Query}
+	for i := range tmpl.Queries {
+		blocks = append(blocks, &tmpl.Queries[i])
+	}
+	for _, q := range blocks {
+		if err := finalizeQueryBlock(q, source); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// finalizeQueryBlock runs the per-block validate+normalize pipeline: scope,
+// rule placement, source-scope shape, inline-attr normalization, and
+// regex/preset/kind/value validation.
+func finalizeQueryBlock(q *QueryBlock, source string) error {
+	if err := validateScope(q.Scope); err != nil {
 		return fmt.Errorf("template %s: %w", source, err)
 	}
 
 	// Validate that filter/match rules sit at the right layer.
-	if err := validateRulePlacement(&tmpl.Query); err != nil {
+	if err := validateRulePlacement(q); err != nil {
 		return err
 	}
 
 	// Source scope is regex-only and reads only a top-level match.regex;
 	// a filter or nested regex would silently do nothing.
-	if tmpl.Query.Scope == ScopeSource {
-		if tmpl.Query.Filter != nil {
+	if q.Scope == ScopeSource {
+		if q.Filter != nil {
 			return fmt.Errorf("template %s: scope: source does not support filter: — use a top-level match.regex", source)
 		}
-		if tmpl.Query.Match.Regex == "" {
+		if q.Match.Regex == "" {
 			return fmt.Errorf("template %s: scope: source requires a top-level match.regex", source)
 		}
 	}
 
 	// Promote inline attrs into Attr maps so the matcher can read them uniformly.
-	normalizeQueryBlock(&tmpl.Query)
-
-	// Post-process: scan raw YAML for arg.N flat keys (non-fatal).
-	if err := normalizeArgNKeys(data, tmpl); err != nil {
-		VerboseLog("Warning: arg.N normalization failed for %s: %v", source, err)
-	}
+	normalizeQueryBlock(q)
 
 	// Surface bad regexes, presets, kinds, and out-of-vocabulary values as load
 	// errors instead of silently rewriting/skipping rule semantics at scan time.
-	for label, rule := range map[string]*Rule{"match": &tmpl.Query.Match, "filter": tmpl.Query.Filter} {
+	for label, rule := range map[string]*Rule{"match": &q.Match, "filter": q.Filter} {
 		if err := validateRegexes(rule); err != nil {
 			return fmt.Errorf("%s: %w", label, err)
 		}
@@ -338,162 +375,11 @@ func normalizeRule(r *Rule) {
 	normalizeRule(r.Right)
 	normalizeRule(r.HasGuard)
 	normalizeRule(r.StatementContains)
+	normalizeRule(r.ArgAny)
 	for k, v := range r.Args {
 		vCopy := v
 		normalizeRule(&vCopy)
 		r.Args[k] = vCopy
-	}
-}
-
-// argNPattern matches the flat key `arg.N` used to constrain a specific
-// call argument. Compiled once at package init.
-var argNPattern = regexp.MustCompile(`^arg\.(\d+)$`)
-
-// normalizeArgNKeys scans raw YAML for "arg.N" style keys and populates
-// the Args map on the matching parsed Rule. Unlike the previous version
-// (which only walked the document root and silently lost nested `arg.N`),
-// this walks the parsed Rule tree in lockstep with the raw YAML mapping,
-// so `arg.N` constraints inside `contains:`, `sequence:`, `all:`, `any:`,
-// `not:`, and nested args all get applied.
-//
-// Example that previously failed silently:
-//
-//	match:
-//	  contains:
-//	    kind: call.external
-//	    name: transferFrom
-//	    arg.0: { tainted_from: parameter }   <-- now correctly applied
-func normalizeArgNKeys(data []byte, tmpl *Template) error {
-	var rawDoc yaml.Node
-	if err := yaml.Unmarshal(data, &rawDoc); err != nil {
-		return err
-	}
-	if rawDoc.Kind != yaml.DocumentNode || len(rawDoc.Content) == 0 {
-		return nil
-	}
-	root := rawDoc.Content[0]
-	if root.Kind != yaml.MappingNode {
-		return nil
-	}
-
-	// Locate the `query:` mapping and walk its `match:` / `filter:` children.
-	for i := 0; i+1 < len(root.Content); i += 2 {
-		if root.Content[i].Value != "query" {
-			continue
-		}
-		queryNode := root.Content[i+1]
-		if queryNode.Kind != yaml.MappingNode {
-			continue
-		}
-		for j := 0; j+1 < len(queryNode.Content); j += 2 {
-			key := queryNode.Content[j].Value
-			child := queryNode.Content[j+1]
-			switch key {
-			case "match":
-				mergeArgsFromYAML(&tmpl.Query.Match, child)
-			case "filter":
-				if tmpl.Query.Filter != nil {
-					mergeArgsFromYAML(tmpl.Query.Filter, child)
-				}
-			}
-		}
-	}
-	return nil
-}
-
-// mergeArgsFromYAML walks (rule, yamlNode) in lockstep. At each level it
-// extracts `arg.N` flat keys into rule.Args, then recurses into every nested
-// rule slot the parser exposes (not, contains, inside, left, right,
-// has_guard, all/any/sequence list elements, args map values).
-func mergeArgsFromYAML(rule *Rule, node *yaml.Node) {
-	if rule == nil || node == nil || node.Kind != yaml.MappingNode {
-		return
-	}
-
-	// 1. Apply arg.N flat keys at THIS level.
-	for i := 0; i+1 < len(node.Content); i += 2 {
-		key := node.Content[i].Value
-		valNode := node.Content[i+1]
-		if m := argNPattern.FindStringSubmatch(key); len(m) == 2 {
-			idx := 0
-			fmt.Sscanf(m[1], "%d", &idx)
-			var argRule Rule
-			if err := valNode.Decode(&argRule); err != nil {
-				continue
-			}
-			normalizeRule(&argRule)
-			if rule.Args == nil {
-				rule.Args = make(map[int]Rule)
-			}
-			rule.Args[idx] = argRule
-		}
-	}
-
-	// 2. Helper: look up a child node by key name.
-	childByKey := func(name string) *yaml.Node {
-		for i := 0; i+1 < len(node.Content); i += 2 {
-			if node.Content[i].Value == name {
-				return node.Content[i+1]
-			}
-		}
-		return nil
-	}
-
-	// 3. Recurse into single-rule fields.
-	mergeArgsFromYAML(rule.Not, childByKey("not"))
-	mergeArgsFromYAML(rule.Contains, childByKey("contains"))
-	mergeArgsFromYAML(rule.Inside, childByKey("inside"))
-	mergeArgsFromYAML(rule.Left, childByKey("left"))
-	mergeArgsFromYAML(rule.Right, childByKey("right"))
-	mergeArgsFromYAML(rule.HasGuard, childByKey("has_guard"))
-
-	// 4. Recurse into list-of-rule fields (in source order).
-	if n := childByKey("all"); n != nil && n.Kind == yaml.SequenceNode {
-		for i, item := range n.Content {
-			if i < len(rule.All) {
-				mergeArgsFromYAML(&rule.All[i], item)
-			}
-		}
-	}
-	if n := childByKey("any"); n != nil && n.Kind == yaml.SequenceNode {
-		for i, item := range n.Content {
-			if i < len(rule.Any) {
-				mergeArgsFromYAML(&rule.Any[i], item)
-			}
-		}
-	}
-	if n := childByKey("sequence"); n != nil && n.Kind == yaml.SequenceNode {
-		for i, item := range n.Content {
-			if i < len(rule.Sequence) {
-				mergeArgsFromYAML(&rule.Sequence[i], item)
-			}
-		}
-	}
-
-	// 5. Recurse into the explicit `args:` map (nested form). Also recurse
-	// into rules introduced by `arg.N` flat keys so nested arg.N within an
-	// argument constraint keeps working.
-	if n := childByKey("args"); n != nil && n.Kind == yaml.MappingNode {
-		for i := 0; i+1 < len(n.Content); i += 2 {
-			idx := 0
-			if _, err := fmt.Sscanf(n.Content[i].Value, "%d", &idx); err == nil {
-				if argRule, ok := rule.Args[idx]; ok {
-					mergeArgsFromYAML(&argRule, n.Content[i+1])
-					rule.Args[idx] = argRule
-				}
-			}
-		}
-	}
-	for i := 0; i+1 < len(node.Content); i += 2 {
-		key := node.Content[i].Value
-		if m := argNPattern.FindStringSubmatch(key); len(m) == 2 {
-			idx := 0
-			fmt.Sscanf(m[1], "%d", &idx)
-			if argRule, ok := rule.Args[idx]; ok {
-				mergeArgsFromYAML(&argRule, node.Content[i+1])
-				rule.Args[idx] = argRule
-			}
-		}
 	}
 }
 
@@ -561,6 +447,7 @@ func presentRuleFields(r *Rule) []ruleField {
 	add(r.Inside != nil, "inside", classAST)
 	add(len(r.Sequence) > 0, "sequence", classAST)
 	add(len(r.Args) > 0, "args", classAST)
+	add(r.ArgAny != nil, "arg.any", classAST)
 	add(r.TaintedFrom != "", "tainted_from", classAST)
 	add(r.Left != nil, "left", classAST)
 	add(r.Right != nil, "right", classAST)
@@ -648,6 +535,9 @@ func checkRule(r *Rule, where string, inMatch bool) error {
 			return err
 		}
 	}
+	if err := checkRule(r.ArgAny, where, inMatch); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -701,10 +591,10 @@ func LoadTemplatesWithOptions(dir string, opts TemplateLoadOptions) ([]*Template
 		}
 
 		// Load template — log errors instead of silently swallowing them
-		tmpl, err := LoadTemplate(path)
+		tmpl, err := loadTemplateWithLogger(path, opts.Logger)
 		if err != nil {
 			if opts.IgnoreInvalid {
-				VerboseLog("⚠️  Skipping invalid template %s: %v", path, err)
+				templateLogf(opts.Logger, "⚠️  Skipping invalid template %s: %v", path, err)
 				return nil
 			}
 			return fmt.Errorf("invalid template %s: %w", path, err)
@@ -712,7 +602,7 @@ func LoadTemplatesWithOptions(dir string, opts TemplateLoadOptions) ([]*Template
 
 		if err := validateTemplateMeta(tmpl, path); err != nil {
 			if opts.IgnoreInvalid {
-				VerboseLog("⚠️  Skipping template %s: %v", path, err)
+				templateLogf(opts.Logger, "⚠️  Skipping template %s: %v", path, err)
 				return nil
 			}
 			return err
@@ -722,13 +612,13 @@ func LoadTemplatesWithOptions(dir string, opts TemplateLoadOptions) ([]*Template
 		// as a defensive guard for future loader changes.
 		if tmpl.Meta.ID == "" || tmpl.Meta.Severity == "" {
 			if opts.IgnoreInvalid {
-				VerboseLog("⚠️  Skipping incomplete template %s", path)
+				templateLogf(opts.Logger, "⚠️  Skipping incomplete template %s", path)
 				return nil
 			}
 			return fmt.Errorf("template %s: missing required metadata", path)
 		}
 
-		VerboseLog("✓ Loaded template: %s (%s)", tmpl.Meta.ID, path)
+		templateLogf(opts.Logger, "✓ Loaded template: %s (%s)", tmpl.Meta.ID, path)
 		templates = append(templates, tmpl)
 		return nil
 	})
@@ -746,20 +636,7 @@ func LoadTemplatesWithOptions(dir string, opts TemplateLoadOptions) ([]*Template
 // ParseTemplate parses a template from a YAML string. Mirrors LoadTemplate's
 // validation pipeline so SDK consumers and the file loader behave identically.
 func ParseTemplate(yamlContent string) (*Template, error) {
-	data := []byte(yamlContent)
-
-	if isV2Source(data) {
-		return loadTemplateV2(data, "<inline>")
-	}
-
-	var tmpl Template
-	if err := yaml.Unmarshal(data, &tmpl); err != nil {
-		return nil, err
-	}
-	if err := finalizeTemplate(&tmpl, data, "<inline>"); err != nil {
-		return nil, err
-	}
-	return &tmpl, nil
+	return parseTemplateDocument([]byte(yamlContent), "<inline>", nil)
 }
 
 // LoadTemplatesFromFS loads all .yaml/.yml templates from an fs.FS subtree,
@@ -783,42 +660,21 @@ func LoadTemplatesFromFS(fsys fs.FS, dir string, opts TemplateLoadOptions) ([]*T
 		data, readErr := fs.ReadFile(fsys, path)
 		if readErr != nil {
 			if opts.IgnoreInvalid {
-				VerboseLog("⚠️  Skipping unreadable template %s: %v", path, readErr)
+				templateLogf(opts.Logger, "⚠️  Skipping unreadable template %s: %v", path, readErr)
 				return nil
 			}
 			return fmt.Errorf("read template %s: %w", path, readErr)
 		}
-		if isV2Source(data) {
-			tmpl, vErr := loadTemplateV2(data, path)
-			if vErr != nil {
-				if opts.IgnoreInvalid {
-					VerboseLog("⚠️  Skipping invalid template %s: %v", path, vErr)
-					return nil
-				}
-				return fmt.Errorf("invalid template %s: %w", path, vErr)
-			}
-			VerboseLog("✓ Loaded embedded template: %s (%s)", tmpl.Meta.ID, path)
-			templates = append(templates, tmpl)
-			return nil
-		}
-
-		var tmpl Template
-		if uErr := yaml.Unmarshal(data, &tmpl); uErr != nil {
+		tmpl, parseErr := parseTemplateDocument(data, path, opts.Logger)
+		if parseErr != nil {
 			if opts.IgnoreInvalid {
-				VerboseLog("⚠️  Skipping invalid template %s: %v", path, uErr)
+				templateLogf(opts.Logger, "⚠️  Skipping invalid template %s: %v", path, parseErr)
 				return nil
 			}
-			return fmt.Errorf("invalid template %s: %w", path, uErr)
+			return fmt.Errorf("invalid template %s: %w", path, parseErr)
 		}
-		if fErr := finalizeTemplate(&tmpl, data, path); fErr != nil {
-			if opts.IgnoreInvalid {
-				VerboseLog("⚠️  Skipping invalid template %s: %v", path, fErr)
-				return nil
-			}
-			return fmt.Errorf("invalid template %s: %w", path, fErr)
-		}
-		VerboseLog("✓ Loaded embedded template: %s (%s)", tmpl.Meta.ID, path)
-		templates = append(templates, &tmpl)
+		templateLogf(opts.Logger, "✓ Loaded embedded template: %s (%s)", tmpl.Meta.ID, path)
+		templates = append(templates, tmpl)
 		return nil
 	})
 	if err != nil {
@@ -835,7 +691,7 @@ func (r *Rule) IsEmpty() bool {
 	return len(r.All) == 0 && len(r.Any) == 0 && len(r.Sequence) == 0 &&
 		r.Not == nil && r.Contains == nil && r.Inside == nil &&
 		r.Kind == "" && r.Name == "" && len(r.Attr) == 0 &&
-		r.Regex == "" &&
+		r.Regex == "" && r.ArgAny == nil &&
 		r.Extends == "" && r.Modifier == "" && len(r.Args) == 0 &&
 		r.TaintedFrom == "" && r.Version == "" && r.Preset == "" &&
 		r.Left == nil && r.Right == nil && r.HasParam == "" &&
@@ -945,6 +801,9 @@ func walkRules(r *Rule, visit func(*Rule) error) error {
 	if err := walkRules(r.StatementContains, visit); err != nil {
 		return err
 	}
+	if err := walkRules(r.ArgAny, visit); err != nil {
+		return err
+	}
 	// Visit args in sorted key order so error reporting is deterministic.
 	if len(r.Args) > 0 {
 		keys := make([]int, 0, len(r.Args))
@@ -993,7 +852,7 @@ func validateKinds(r *Rule) error {
 func validatePresets(r *Rule) error {
 	return walkRules(r, func(n *Rule) error {
 		if n.Preset != "" && !IsKnownPreset(n.Preset) {
-			return fmt.Errorf("unknown preset %q — known presets: unAuthenticated, unLocked", n.Preset)
+			return fmt.Errorf("unknown preset %q — known presets: %s", n.Preset, strings.Join(KnownPresetNames(), ", "))
 		}
 		return nil
 	})

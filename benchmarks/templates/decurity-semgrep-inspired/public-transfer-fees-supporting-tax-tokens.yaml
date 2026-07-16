@@ -18,8 +18,9 @@ meta:
 # bare `block: function` where item, which sets Rule.Kind directly with no
 # select and no Contains wrapper, so buildMatch's no-select path returns it
 # as-is and Verify(root, {Kind: decl.function}) trivially matches the root.
-from: entry_function
-where:
-  - func_name: '^_transferFeesSupportingTaxTokens$'
-  - not: { preset: access_controlled }
-  - block: function
+query:
+  from: entry_function
+  where:
+    - func_name: '^_transferFeesSupportingTaxTokens$'
+    - not: { preset: access_controlled }
+    - block: function

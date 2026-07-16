@@ -303,26 +303,10 @@ contract TryCatchSeq {
     }
 }
 `
-	tmpl := `meta:
-  id: TEST-TRYCATCH-SEQ
-  title: try/catch sequence arm test
-  severity: LOW
-  confidence: LOW
-query:
-  scope: function
-  match:
-    sequence:
-      - kind: state_write
-      - kind: outgoing_call
-`
 	dir := t.TempDir()
 	solPath := filepath.Join(dir, "trycatch_seq.sol")
-	tmplPath := filepath.Join(dir, "seq.yaml")
 	if err := os.WriteFile(solPath, []byte(src), 0o644); err != nil {
 		t.Fatalf("write fixture: %v", err)
-	}
-	if err := os.WriteFile(tmplPath, []byte(tmpl), 0o644); err != nil {
-		t.Fatalf("write template: %v", err)
 	}
 	sources, err := reader.New().Read(solPath)
 	if err != nil {
@@ -332,9 +316,23 @@ query:
 	if err != nil {
 		t.Fatalf("build db: %v", err)
 	}
-	loaded, err := LoadTemplate(tmplPath)
-	if err != nil {
-		t.Fatalf("load template: %v", err)
+	loaded := &Template{
+		Meta: TemplateMeta{
+			ID:         "TEST-TRYCATCH-SEQ",
+			Title:      "try/catch sequence arm test",
+			Severity:   "LOW",
+			Confidence: "LOW",
+		},
+		Query: QueryBlock{
+			Scope: ScopeFunction,
+			Match: Rule{Sequence: []Rule{
+				{Kind: "state_write"},
+				{Kind: "outgoing_call"},
+			}},
+		},
+	}
+	if err := finalizeTemplate(loaded, "try/catch evaluator IR test"); err != nil {
+		t.Fatalf("finalize evaluator IR: %v", err)
 	}
 	findings := New(db).Execute(loaded)
 	hit := map[string]bool{}

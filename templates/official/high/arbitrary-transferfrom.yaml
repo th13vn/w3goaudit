@@ -17,9 +17,10 @@ meta:
 # `token_call` (v1) is IsTokenCall(kind) == (kind == call.external) — name
 # filtering for ERC20/ERC721 methods is a separate check either way, so
 # `external_call` + `name:` is behaviorally identical.
-from: entry_function
-select: external_call
-where:
-  - not: { preset: caller_checked }
-  - name: ^transferFrom$
-  - arg.0: { tainted: parameter }
+query:
+  from: entry_function
+  select: external_call
+  where:
+    - not: { preset: caller_checked }
+    - name: ^transferFrom$
+    - arg.0: { tainted: parameter }

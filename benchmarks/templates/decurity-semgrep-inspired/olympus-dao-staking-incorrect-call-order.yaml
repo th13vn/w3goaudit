@@ -11,11 +11,12 @@ meta:
   references:
     - https://github.com/Decurity/semgrep-smart-contracts/tree/master/solidity/security
 
-from: function
-where:
-  - func_name: '^stake$'
-  - sequence:
-      - block: external_call
-        name: '^(transferFrom|safeTransferFrom)$'
-      - block: internal_call
-        name: '^rebase$'
+query:
+  from: function
+  where:
+    - func_name: '^stake$'
+    - sequence:
+        - block: external_call
+          name: '^(transferFrom|safeTransferFrom)$'
+        - block: internal_call
+          name: '^rebase$'

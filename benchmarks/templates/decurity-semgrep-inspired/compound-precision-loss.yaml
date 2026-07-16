@@ -12,13 +12,14 @@ meta:
   references:
     - https://github.com/Decurity/semgrep-smart-contracts/tree/master/solidity/security
 
-from: function
-select: assign
-where:
-  - func_name: '^redeemFresh$'
-  - all:
-      - visibility: internal
-  - left:
-      name: '^redeemAmount$'
-  - right:
-      name: '^redeemAmountIn$'
+query:
+  from: function
+  select: assign
+  where:
+    - func_name: '^redeemFresh$'
+    - all:
+        - visibility: internal
+    - left:
+        name: '^redeemAmount$'
+    - right:
+        name: '^redeemAmountIn$'

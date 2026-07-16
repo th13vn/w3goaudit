@@ -12,25 +12,26 @@ meta:
   references:
     - https://github.com/Decurity/semgrep-smart-contracts/tree/master/solidity/security
 
-from: function
-where:
-  - all:
-      - visibility: public,external
-      - regex: '(?s)function\s+\w+\([^)]*(?:bytes|string|address\[\]|uint256\[\])\s+\w+[^)]*(?:bytes|string|address\[\]|uint256\[\])\s+\w+'
-  - any:
-      - has:
-          block: internal_call
-          name: '^keccak256$'
-          has:
-            block: external_call
-            name: '^encodePacked$'
-            arg.0: { tainted: parameter }
-            arg.1: { tainted: parameter }
-      - sequence:
-          - block: external_call
-            name: '^encodePacked$'
-            arg.0: { tainted: parameter }
-            arg.1: { tainted: parameter }
-          - block: internal_call
+query:
+  from: function
+  where:
+    - all:
+        - visibility: public,external
+        - regex: '(?s)function\s+\w+\([^)]*(?:bytes|string|address\[\]|uint256\[\])\s+\w+[^)]*(?:bytes|string|address\[\]|uint256\[\])\s+\w+'
+    - any:
+        - has:
+            block: internal_call
             name: '^keccak256$'
-            arg.0: { tainted: parameter }
+            has:
+              block: external_call
+              name: '^encodePacked$'
+              arg.0: { tainted: parameter }
+              arg.1: { tainted: parameter }
+        - sequence:
+            - block: external_call
+              name: '^encodePacked$'
+              arg.0: { tainted: parameter }
+              arg.1: { tainted: parameter }
+            - block: internal_call
+              name: '^keccak256$'
+              arg.0: { tainted: parameter }

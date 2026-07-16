@@ -4,33 +4,42 @@
 
 Executes WQL templates against the contract database to find security vulnerabilities.
 
-## WQL v2 (template surface, v0.4+)
+## WQL (template surface)
 
-**WQL v2 (`select`/`from`/`where`) is now the primary template syntax** — see
-[`docs/wql-syntax.md`](../../docs/wql-syntax.md) for the full language
-reference. All 106 official/benchmark/feature-test templates in this repo are
-written in v2.
+**WQL (`meta` plus `query:`) is the only public template syntax** — one
+`query:` holds `select`/`from`/`where` or a one-level `and:`/`or:` query
+composition; see [`docs/wql-syntax.md`](../../docs/wql-syntax.md) for the
+full language reference. All 106 official/benchmark/feature-test templates in
+this repo use it.
 
-- `wql_v2.go` — parses a v2 document (`TemplateV2`) and **lowers** it to the
-  exact same v1 `Template`/`Rule` IR below (`TemplateV2.lower()`). v2 is a
-  pure authoring-surface change; it does not touch the evaluator
-  (`verify.go`) at all — every v2 template runs through `checkRule`/`Verify`/
-  `finalizeTemplate` exactly like a hand-written v1 template.
+- `wql_v2.go` — parses a WQL document (`TemplateDoc`) and **lowers** it to
+  the evaluator `Template`/`Rule` IR below (`TemplateDoc.lower()`): simple
+  queries via `TemplateV2.lower()`; `and:` via `lowerAnd` (one QueryBlock
+  whose match is an `all:` of labeled branch rules at the join scope —
+  context matchers are rejected inside branches); `or:` via `lowerOr` (one
+  QueryBlock per branch in `Template.Queries`, per-branch filters preserved,
+  cross-scope branches allowed). The authoring surface never touches the
+  evaluator (`verify.go`) — every template runs through
+  `checkRule`/`Verify`/`finalizeTemplate` as compiled evaluator IR.
 - `wql_v2_catalog.go` — the exact name tables the lowering step consults:
-  `blockKindToV1` (§5 block-kind aliases → `types.KindXxx`/semantic groups),
-  `attrNameToV1` (§7 attribute aliases → node-attribute keys), `presetToV1`
-  (§8 preset renames, including the polarity flip since v1 presets are
-  "true = vulnerable" and v2 presets name the safety property instead).
-- **Loader auto-detection:** `LoadTemplate`/`ParseTemplate` sniff each
-  document via `isV2Source` — a top-level `select` and/or `from` key (and no
-  top-level `query`) is parsed as v2; anything else falls back to the v1
-  `query: { scope, filter, match }` loader below. **v1 `query:` syntax still
-  loads** (legacy) — `templates/security/*.yaml` are v1 seeds kept for
-  reference; no removal planned.
-- Both paths converge on the same `finalizeTemplate`/`validateRulePlacement`/
-  `validateKinds`/`validatePresets` validation pipeline, so a malformed v2
-  template fails load with the same precise errors a malformed v1 template
-  would.
+  `blockKindToIR` (§5 block-kind aliases → `types.KindXxx`/semantic groups),
+  `attrNameToIR` (§7 attribute aliases → node-attribute keys), `presetToIR`
+  (§8 preset mappings, including the polarity flip since evaluator presets are
+  "true = vulnerable" and WQL presets name the safety property instead).
+- **Single strict loader:** `LoadTemplate`/`ParseTemplate`/
+  `LoadTemplatesFromFS` all route through `parseTemplateDocument`. Unknown
+  keys at every level (document, query, branch) are rejected by
+  `yaml.Decoder.KnownFields(true)`; a missing `query:` fails with a pointed
+  error, and nested composition is rejected structurally (branches carry no
+  and:/or: fields).
+- The exported `Template`/`QueryBlock`/`Rule` evaluator IR is not a YAML input
+  schema. Direct `yaml.Unmarshal` into `Template` rejects with guidance to use
+  `ParseTemplate`/`LoadTemplate`, preventing SDK callers from bypassing the
+  strict loaders; programmatic IR construction and JSON behavior remain
+  available.
+- Parsed documents lower into the existing `Template`/`QueryBlock`/`Rule`
+  evaluator IR, then run through the unchanged `finalizeTemplate`/
+  `validateRulePlacement`/`validateKinds`/`validatePresets` pipeline.
 
 ## Key Files
 
@@ -39,12 +48,23 @@ Main query execution engine.
 
 **Exports:**
 - `Engine` struct - Holds database reference
-- `New(db)` - Create engine with database
-- `Execute(template)` - Run single template
-- `ExecuteAll(templates)` - Run multiple templates
+- `New(db)` - Create an engine using deprecated package-global verbose logging
+- `NewWithOptions(db, Options{Logger})` - Create a scan-local engine; a nil logger is disabled
+- `Execute(template)` - Run one template. Single-query templates execute
+  their one QueryBlock; or:-composed templates (`len(Queries) > 1`) execute
+  every block via `executeQuery` and union the findings, deduplicating
+  identical matched locations (`findingIdentityKey`: file/contract/function
+  plus the full span) in deterministic branch order
+- `ExecuteAll(templates)` - Run multiple templates, then `SortFindings` for a
+  deterministic total order (findings are otherwise collected in map-iteration
+  order, which shuffled `findings.json`/`results.sarif` across runs)
+- `SortFindings(findings)` - Total-order sort (file, line, col, primaryAst
+  start, template, contract, function, …) making output byte-stable
 - `Finding` struct - Vulnerability finding result (now carries optional
   `Reachability`, `PrimaryAST`, `EntryPoint`, and `Related` matched sites)
-- `Location` struct - Finding location info
+- `Location` struct - Finding location info; carries the matched node's precise
+  span (`Col`/`EndLine`/`EndCol`/`StartByte`/`EndByte`) when Line anchors on
+  that node. `ReachStep` carries a per-hop `File`.
 - `RelatedLocation` struct - Additional matched source site for multi-condition
   findings, including label, file/contract/function/line, and matched node kind/name
 - `ReachabilityPath`, `ReachStep` - Call chain from entry to host of the
@@ -163,6 +183,14 @@ The switch is opt-in:
   the optional fields. `hostFunctionFor` walks the matched node's parent
   chain to resolve `decl.function` / `decl.modifier` ancestors and their
   contract.
+- Interprocedural visit keys, host source lookup, synthetic contract ASTs, and
+  internal-callee MRO scans use `Function.SourceFile` plus
+  `Database.LinearizedContracts`. A qualified function ID that misses never
+  falls back to another same-named contract; name-only lookup remains only for
+  legacy unqualified IDs/caches.
+- `extends` remains a regex over `Contract.LinearizedBases` display names. It
+  does not dereference identities, so standalone SDK/manual values and legacy
+  caches without materialized base objects continue to work.
 - `buildContractLocation` and `enrichContractRelatedLocations` handle
   contract-scope findings. They build a primary location from the synthetic AST
   and collect every matching function-level site for top-level `match.all`
@@ -177,12 +205,17 @@ The switch is opt-in:
   node of the shared tree.
 
 ### verbose.go
-Debug logging infrastructure.
+Deprecated compatibility logging infrastructure.
 
 **Exports:**
 - `VerboseEnabled` - Global flag to enable/disable verbose logging
 - `VerboseLog(format, args...)` - Conditional verbose logging function
 - `SetVerboseWriter(w io.Writer)` - Set custom output writer for verbose logs (default: os.Stdout)
+
+Engine execution uses its object-local logger, including verifier recursion and
+preset diagnostics. Directory and embedded template loading use
+`TemplateLoadOptions.Logger`; nil retains the legacy logging behavior for old
+callers. The compatibility writer is mutex-serialized.
 
 **Output Prefix:** None (clean output)
 
@@ -200,66 +233,83 @@ Debug logging infrastructure.
 ---
 
 ### wql_v2.go
-WQL v2 (`select`/`from`/`where`) parser + lowering to the v1 `Rule` IR. See
-"WQL v2" section above and [`docs/wql-syntax.md`](../../docs/wql-syntax.md).
+WQL (`meta` + `query:`) parser + lowering to evaluator `Rule` IR. See
+"WQL (template surface)" section above and
+[`docs/wql-syntax.md`](../../docs/wql-syntax.md).
 
 **Exports / key pieces:**
-- `TemplateV2`, `MatcherV2` - v2 document shape (decoded via raw `yaml.Node`
-  so `select`/matcher values can be scalar, map, or list)
-- `isV2Source(raw)` - format sniff used by the loader (see `template.go`)
-- `parseV2(raw)` - unmarshal into `TemplateV2`
-- `(*TemplateV2).lower()` - the v2 → v1 algorithm: resolves `from` to a
-  `Scope`, resolves `select` block kind(s) via `blockKindToV1`, lowers every
+- `TemplateDoc`, `QueryDoc`, `QueryBranch` - the document shape: meta plus a
+  `query:` that is a simple select/from/where map or a one-level `and:`/`or:`
+  list of branches
+- `MatcherV2` - one `where` matcher; values retain raw `yaml.Node` for
+  recursive forms
+- `TemplateV2` - internal simple-query lowering unit (no longer a YAML target)
+- `parseV2(raw)` - strictly decode into `TemplateDoc`, rejecting unknown
+  fields at every struct level while matcher maps remain dynamically validated
+- `(*TemplateDoc).lower()` - dispatches simple/`and:`/`or:` lowering with the
+  shape rules (exclusive forms, ≥2 branches, and: needs a structural join
+  `from:`, or: branches reject `label:`)
+- `lowerAnd`/`lowerBranchRule` - and: branches lower to labeled `Contains`
+  rules ANDed at the join scope; context-level matchers inside a branch are a
+  load error
+- `lowerOr` - or: branches lower to one QueryBlock each (`Template.Queries`)
+- `(*TemplateV2).lower()` - the simple-query → evaluator-IR algorithm: resolves `from` to a
+  `Scope`, resolves the scalar `select` block kind via `blockKindToIR`, lowers every
   `where` matcher into an AST-layer (`Match`) and/or context-layer
   (`Filter`) `Rule` fragment and merges them (`mergeRuleInto`), then
-  assembles the final `Match` (`buildMatch`) — combo `select` → `Rule.All`
-  with per-branch labels feeding `Finding.Related`; single `select` wraps
-  `where` in `Contains` unless `where` centers on `sequence:`, which stays
-  top-level; `scope: source` requires a bare top-level `regex:`.
-- `lowerKeyValue(key, val)` - single dispatch point for every matcher key
-  (`block`, `name`, `regex`, `tainted`, `visibility`, `mutability`,
-  `operator`, `attr`, `left`, `right`, `statement_has`, `unchecked_var`,
-  `modifier`, `has`, `in`, `guarded_by`, `sequence`, `any`, `all`, `not`,
-  `preset`, `base`, `func_name`, `version`, `has_param`, `arg.N`)
+  assembles the final `Match` (`buildMatch`) — a list `select` is rejected while
+  decoding; a scalar `select` wraps `where` in `Contains` unless `where` centers
+  on `sequence:`, which stays top-level and must use the same first-step anchor;
+  `scope: source` requires a bare top-level `regex:`.
+- `lowerKeyValue(key, val)` - thin grouped dispatch point for every matcher key.
+  Private helpers lower string, attribute, nested-rule, list (`and:` is an
+  exact alias of `all:`), negation, preset, and dynamic (`arg.N`/`arg.any`/
+  bare attribute) categories independently, keeping the WQL surface and error
+  messages unchanged while avoiding one monolithic switch.
 
 ### wql_v2_catalog.go
-The v2 name tables — every name here is verified against the underlying
+The WQL name tables — every name here is verified against the underlying
 engine (`types.KindXxx`/`KnownSemanticGroups`, node-attribute keys,
-`presets.go`'s `BuiltinPresets`), so v2 introduces **zero new engine
-semantics**, only aliases.
+`presets.go`'s `BuiltinPresets`), so the authoring surface introduces **zero
+new engine semantics**, only aliases.
 
 **Exports:**
-- `blockKindToV1(v2) (string, bool)` - §5 block-kind catalog
-- `attrNameToV1(v2) (string, bool)` - §7 attribute catalog (excludes
+- `blockKindToIR(name) (string, bool)` - §5 block-kind catalog
+- `attrNameToIR(name) (string, bool)` - §7 attribute catalog (excludes
   `name`/`visibility`/`mutability`/`tainted`, which are dedicated `Rule`
   fields, not `Attr` map entries)
-- `presetToV1(v2) (v1 string, negate bool, ok bool)` - §8 preset renames;
+- `presetToIR(name) (ir string, negate bool, ok bool)` - §8 preset mappings;
   `negate=true` for `access_controlled`/`caller_checked`/`reentrancy_guarded`
-  (v1 counterpart is inverted-polarity); `user_controlled` has no v1 preset
-  and is lowered as a taint match instead (`ok=false`)
+  because the evaluator counterpart uses inverted polarity. Explicit taint
+  matching remains available through `tainted: parameter`.
 
 ---
 
 ### template.go
-WQL template loading and parsing (v1 IR; v2 documents are lowered into this
-shape by `wql_v2.go` before reaching this pipeline).
+WQL template loading plus the evaluator IR that documents lower into.
+`Template.Queries []QueryBlock` (additive JSON `queries`) carries every
+executable block of an or:-composed template (`Queries[0] == Query`; empty
+for single-query templates); `finalizeTemplateWithLogger` validates/
+normalizes every block via `finalizeQueryBlock`.
 
 **Exports:**
-- `Template` struct - Parsed template structure
+- `Template` struct - Compiled evaluator IR returned by the loader; not a public YAML schema
 - `TemplateMeta` struct - Template metadata
-- `TemplateLoadOptions` - Directory loading policy (`IgnoreInvalid`)
-- `QueryBlock` struct - Query definition (scope, filter, match)
-- `Rule` struct - WQL rule (recursive structure)
+- `TemplateLoadOptions` - Directory loading policy (`IgnoreInvalid`) plus a scan-local `Logger`
+- `QueryBlock` struct - Evaluator scope/filter/match IR produced by lowering
+- `Rule` struct - Recursive evaluator IR; public YAML authors use WQL matchers instead
 - `Scope` type - Scope constants
-- `LoadTemplate(path)` - Load single YAML file; sniffs v1 vs v2 via
-  `isV2Source` and routes accordingly before validation
+- `parseTemplateDocument(data, source, logger)` - Single strict loader path;
+  parses the WQL document (unknown top-level keys rejected), lowers to IR, and
+  finalizes validation/normalization
+- `LoadTemplate(path)` - Load one WQL YAML file through the shared path
 - `LoadTemplates(dir)` - Load all templates from directory recursively, fail-closed on invalid/incomplete templates or zero valid templates
 - `LoadTemplatesWithOptions(dir, opts)` - Optional lenient loading (`IgnoreInvalid: true`)
 - `LoadTemplatesLenient(dir)` - Convenience wrapper for old skip-invalid behavior in ad-hoc tooling
-- `ParseTemplate(yaml)` - Parse template from string (same v1/v2 auto-detection)
+- `ParseTemplate(yaml)` - Parse WQL from a string through the shared path
 - `MatchesRegex(pattern, value)` - Regex helper
 
-**Template Structure:**
+**Evaluator IR structure (not accepted as public YAML):**
 ```yaml
 meta:
   id, title, severity, confidence, description, recommendation
@@ -286,7 +336,9 @@ query:
   - `version` — Solidity version constraint
   - `preset` — built-in preset check
   - `has_param` — function has parameter by name
-- **Call:** `args: {N: Rule}` or `arg.N:` flat keys (equivalent)
+- **Call:** `args: {N: Rule}` or `arg.N:` flat keys (equivalent); `arg_any`
+  (`arg.any:`) matches when SOME positional argument satisfies the sub-rule
+  (receivers/call options excluded, evaluated by `matchArgAny` in verify.go)
 - **Taint:** `tainted_from`
 - **Binary:** `left`, `right`
 
@@ -337,12 +389,8 @@ query:
 - `normalizeQueryBlock()` — recurses into filter/match and normalizes rules
 - `normalizeRule()` — promotes inline attrs (is_state_var, operator, visibility,
   mutability) into the Attr map so the matcher reads them uniformly
-- `normalizeArgNKeys()` / `mergeArgsFromYAML()` —
-  walks the parsed Rule tree in lockstep with the raw YAML so `arg.N` flat
-  keys nested inside `contains:`, `sequence:`, `all:`, `any:`, `not:` and
-  inside `args:` map values all populate the correct `Rule.Args`.
-  Previously only the top-level `match:` / `filter:` mapping was scanned
-  and any nested `arg.N` was silently dropped.
+- WQL's matcher-node lowering compiles dynamic `arg.N` keys directly into
+  `Rule.Args` at every nesting level; finalization no longer traverses raw YAML.
 
 **Regex performance & safety:**
 - `compileRegexCached(pattern)` memoizes compiled regexes in a process-wide
@@ -423,6 +471,9 @@ WQL rule verification logic (THE CORE).
 
 **Filter Helpers:**
 - `checkFunctionContext()` - Check modifiers, inheritance, func_name, visibility, mutability, has_guard
+- Context predicates are decomposed into private helpers for regex-list,
+  comma-separated enum, parameter, guard, `all`, and `any` matching. The public
+  verification flow and context/AST split are unchanged.
 - `VerifyAtFunction()` - Entry point for function-scope verification (auto-separates filter vs AST checks)
 - `VerifyAtFunctionWithCallees()` - Entry-point match helper that follows internal calls with context-sensitive argument taint
 - `VerifyAtContract()` - Entry point for contract-scope verification
@@ -541,23 +592,31 @@ filter:
 
 ---
 
-### verify_test.go
-Original test suite for verification logic.
+## Test Inventory
 
-### wql_improvements_test.go
-Extended test suite for engine features.
-
-**Tests:**
-- `TestMatchKindGuardAlias` — guard/guard.* alias resolution
-- `TestMatchKindTokenCall` — token_call semantic group
-- `TestCanonicalSyntaxAccepted` — `filter:` + `match:` parses correctly
-- `TestContextFuncNameFilter` — func_name regex matching
-- `TestContextVisibilityFilter` — visibility comma-separated matching
-- `TestContextMutabilityFilter` — mutability matching
-- `TestContextHasGuard` — has_guard sub-rule matching
-- `TestArgNYAMLParsing` — arg.N YAML key parsing
-- `TestLoadTemplateValidation` — invalid YAML returns error (not silence)
-- `TestIsContextOnly` — IsContextOnly covers all filter-level fields
+- `verify_test.go`, `sequence_path_test.go`, `statement_contains_test.go` —
+  atomic/logic/traversal matching, transactional primary-node capture,
+  branch-arm sequence rules, statement-scoped matching, args, taint, and golden
+  evaluator behavior.
+- `validation_test.go`, `public_yaml_test.go`, `template_pack_test.go` — WQL
+  acceptance, unknown-key rejection through both loader and public SDK
+  boundaries, evaluator-IR JSON compatibility, value/regex/version validation,
+  embedded-FS loading, and the 106-template repository inventory.
+- `wql_v2_test.go`, `wql_v2_lower_test.go`, `wql_v2_catalog_test.go`,
+  `wql_v2_execute_test.go` — strict scalar decoding, catalog mappings, lowering
+  into evaluator IR, select-absent root matching, sequence-anchor conflict
+  handling, and end-to-end WQL execution.
+- `wql_improvements_test.go`, `audit_fixes_test.go` — semantic groups, context
+  predicates, contract-scope inherited ASTs, fail-closed directories, mixed-layer
+  rejection, precise locations, and deterministic findings.
+- `interprocedural_taint_test.go`, `arbitrary_send_eth_test.go` — helper-call
+  taint bindings/fixpoints, reentrancy sequences, type-cast exclusions, exact
+  source attribution, and forwarded ownership guards.
+- `benchmark_regression_test.go` — named competitive regressions and duplicate
+  contract identity isolation.
+- `db_roundtrip_test.go`, `source_roundtrip_test.go` — cached-database finding
+  parity and persisted source content.
+- `logging_test.go` — scan-local engine/template-loader logger isolation.
 
 ---
 

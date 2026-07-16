@@ -13,9 +13,10 @@ meta:
     that the sum of all amounts equals msg.value. Do not reuse msg.value per
     iteration.
 
-from: entry_function
-select: loop
-where:
-  - has:
-      block: member
-      name: "msg\\.value"
+query:
+  from: entry_function
+  select: loop
+  where:
+    - has:
+        block: member
+        name: "msg\\.value"

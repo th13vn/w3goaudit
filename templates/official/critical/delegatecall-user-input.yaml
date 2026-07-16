@@ -16,11 +16,12 @@ meta:
     - https://swcregistry.io/docs/SWC-112
     - https://consensys.github.io/smart-contract-best-practices/attacks/delegatecall/
 
-from: entry_function
-select: delegatecall
-where:
-  - not: { preset: access_controlled }
-  - has:
-      block: identifier
-      receiver: true
-      tainted: parameter
+query:
+  from: entry_function
+  select: delegatecall
+  where:
+    - not: { preset: access_controlled }
+    - has:
+        block: identifier
+        receiver: true
+        tainted: parameter

@@ -16,8 +16,9 @@ meta:
 # filtering for ERC20/ERC721 methods is a separate check either way, so
 # `external_call` + `name:` is behaviorally identical (see
 # templates/official/high/arbitrary-transferfrom.yaml).
-select: external_call
-from: function
-where:
-  - name: "^transferFrom$"
-  - arg.0: { tainted: parameter }
+query:
+  select: external_call
+  from: function
+  where:
+    - name: "^transferFrom$"
+    - arg.0: { tainted: parameter }

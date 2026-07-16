@@ -1,7 +1,9 @@
 package engine
 
 import (
+	"bytes"
 	"fmt"
+	"io"
 	"reflect"
 	"strconv"
 	"strings"
@@ -9,17 +11,54 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// TemplateV2 is the WQL v2 template surface: meta (unchanged from v1) plus
-// select/from/where. It is a pure parsing/decoding structure — lowering to
-// the existing Rule IR (Template/QueryBlock) is implemented in a later task.
+// TemplateDoc is the top-level WQL YAML document: meta plus one query.
+// It is a pure parsing/decoding structure that compiles into the evaluator IR
+// represented by Template, QueryBlock, and Rule.
+type TemplateDoc struct {
+	Meta  TemplateMeta `yaml:"meta"`
+	Query *QueryDoc    `yaml:"query"`
+}
+
+// QueryDoc is the `query:` container. It is either a single
+// select/from/where query, or a one-level composition of branch queries:
 //
-// Select accepts either a scalar block kind or a list of block kinds (combo
-// select), so it is decoded as a raw yaml.Node and interpreted by lowering.
+//   - `and:` — every branch must match in the same instance of the join
+//     scope named by the query-level `from:` (one finding per instance;
+//     branch sites surface in Finding.Related with their labels).
+//   - `or:` — the union of the branches' findings under one meta; each
+//     branch is a complete query with its own anchor (`from:` on the query
+//     is the branches' default scope).
+//
+// Exactly one of the three forms may be used; the strict decoder rejects
+// unknown keys, and nested composition (and:/or: inside a branch) is
+// rejected because QueryBranch has no such fields.
+type QueryDoc struct {
+	Select string        `yaml:"select"`
+	From   string        `yaml:"from"`
+	Where  []MatcherV2   `yaml:"where"`
+	And    []QueryBranch `yaml:"and"`
+	Or     []QueryBranch `yaml:"or"`
+}
+
+// QueryBranch is one branch of a query-level and:/or: composition. Branches
+// are simple queries only — one composition level. `label:` names the
+// branch's matched sites in Finding.Related (and: branches only). `from:` is
+// only meaningful for or: branches (and: branches share the join scope).
+type QueryBranch struct {
+	Label  string      `yaml:"label"`
+	Select string      `yaml:"select"`
+	From   string      `yaml:"from"`
+	Where  []MatcherV2 `yaml:"where"`
+}
+
+// TemplateV2 is the simple-query lowering unit (select/from/where). Parsed
+// documents are decomposed into these before lowering; it is no longer a
+// YAML decoding target of its own.
 type TemplateV2 struct {
-	Meta   TemplateMeta `yaml:"meta"`
-	Select yaml.Node    `yaml:"select"`
-	From   string       `yaml:"from"`
-	Where  []MatcherV2  `yaml:"where"`
+	Meta   TemplateMeta
+	Select string
+	From   string
+	Where  []MatcherV2
 }
 
 // MatcherV2 is a single WQL v2 matcher: a one-key map whose key selects the
@@ -39,56 +78,230 @@ func (m MatcherV2) key() (string, yaml.Node, bool) {
 	return "", yaml.Node{}, false
 }
 
-// v2Probe is used only for cheap format detection: does the document look
-// like a v2 template (select/from present) or a v1 template (query present)?
-//
-// Select/Query are plain (non-pointer) yaml.Node fields: yaml.v3 fails to
-// unmarshal a scalar node into a *yaml.Node field (it only special-cases the
-// value type), so presence is instead detected via Kind != 0 (the zero Node
-// has Kind 0, which is not a valid yaml.Kind).
-type v2Probe struct {
-	Select yaml.Node `yaml:"select"`
-	From   *string   `yaml:"from"`
-	Query  yaml.Node `yaml:"query"`
-}
-
-// isV2Source reports whether raw looks like a WQL v2 template document: it
-// has a top-level select and/or from key, and no top-level query key. Any
-// unmarshal error (malformed/non-template YAML) is treated as "not v2".
-func isV2Source(raw []byte) bool {
-	var probe v2Probe
-	if err := yaml.Unmarshal(raw, &probe); err != nil {
-		return false
-	}
-	return (probe.Select.Kind != 0 || probe.From != nil) && probe.Query.Kind == 0
-}
-
-// parseV2 unmarshals raw into a TemplateV2. It returns an error if the
-// document has neither select nor from set, since a v2 document needs at
-// least one of them to identify what/where to search.
-func parseV2(raw []byte) (*TemplateV2, error) {
-	var tmpl TemplateV2
-	if err := yaml.Unmarshal(raw, &tmpl); err != nil {
+// parseV2 unmarshals raw into a TemplateDoc: strict decoding (unknown keys
+// rejected at every struct level), single YAML document, and a present
+// `query:`. Shape/semantic validation of the query itself happens in
+// TemplateDoc.lower().
+func parseV2(raw []byte) (*TemplateDoc, error) {
+	var doc TemplateDoc
+	decoder := yaml.NewDecoder(bytes.NewReader(raw))
+	decoder.KnownFields(true)
+	if err := decoder.Decode(&doc); err != nil {
+		if hasNonScalarQuerySelect(raw) {
+			return nil, fmt.Errorf("parseV2: select must be a scalar block kind")
+		}
 		return nil, fmt.Errorf("parseV2: %w", err)
 	}
-
-	if tmpl.Select.Kind == 0 && tmpl.From == "" {
-		return nil, fmt.Errorf("parseV2: template %q has neither select nor from", tmpl.Meta.ID)
+	var trailing yaml.Node
+	if err := decoder.Decode(&trailing); err != io.EOF {
+		if err != nil {
+			return nil, fmt.Errorf("parseV2: decode trailing YAML document: %w", err)
+		}
+		return nil, fmt.Errorf("parseV2: multiple YAML documents are unsupported")
 	}
 
-	return &tmpl, nil
+	if doc.Query == nil {
+		return nil, fmt.Errorf("parseV2: template %q has no query: — templates are meta: plus query: {select, from, where} (or a query-level and:/or: composition)", doc.Meta.ID)
+	}
+
+	return &doc, nil
+}
+
+// hasNonScalarQuerySelect reports whether raw's query: mapping carries a
+// non-scalar select: value (e.g. a list), so the loader can emit a pointed
+// "select must be a scalar block kind" error instead of a generic YAML
+// type-mismatch message.
+func hasNonScalarQuerySelect(raw []byte) bool {
+	var doc yaml.Node
+	if err := yaml.Unmarshal(raw, &doc); err != nil || doc.Kind != yaml.DocumentNode || len(doc.Content) == 0 {
+		return false
+	}
+	root := doc.Content[0]
+	if root.Kind != yaml.MappingNode {
+		return false
+	}
+	for i := 0; i+1 < len(root.Content); i += 2 {
+		if root.Content[i].Value != "query" {
+			continue
+		}
+		query := root.Content[i+1]
+		if query.Kind != yaml.MappingNode {
+			return false
+		}
+		for j := 0; j+1 < len(query.Content); j += 2 {
+			if query.Content[j].Value == "select" {
+				return query.Content[j+1].Kind != yaml.ScalarNode
+			}
+		}
+	}
+	return false
 }
 
 // ---------------------------------------------------------------------------
-// Lowering: TemplateV2 -> *Template (the v1 Rule IR the evaluator runs).
+// Lowering: TemplateV2 -> *Template (the IR the evaluator runs).
 //
 // The evaluator (Verify/VerifyAtFunctionWithCallees/VerifyAtContract) is NOT
-// changed by v2. lower() only builds a v1 Template value; validation and
-// normalization (finalizeTemplate) are applied by the caller (Task A4's
-// loader wiring), not here.
+// changed by v2. lower() only builds a Template IR value; validation and
+// normalization (finalizeTemplate) are applied by the caller, not here.
 // ---------------------------------------------------------------------------
 
-// lower converts a parsed WQL v2 template into the v1 Rule IR. See
+// lower converts a parsed WQL document into evaluator IR, dispatching on the
+// query's form: a single select/from/where query, an and: join, or an or:
+// union. See .vscode/specs/2026-07-17-wql-query-composition.md for the
+// composition semantics.
+func (t *TemplateDoc) lower() (*Template, error) {
+	q := t.Query
+	if q == nil {
+		return nil, fmt.Errorf("template %q has no query: block", t.Meta.ID)
+	}
+	hasSimple := q.Select != "" || len(q.Where) > 0
+
+	switch {
+	case len(q.And) > 0 && len(q.Or) > 0:
+		return nil, fmt.Errorf("query: cannot combine and: and or: at the same level")
+	case len(q.And) > 0:
+		if hasSimple {
+			return nil, fmt.Errorf("query: and: cannot be combined with select:/where: at the same level — move them into a branch")
+		}
+		return t.lowerAnd()
+	case len(q.Or) > 0:
+		if hasSimple {
+			return nil, fmt.Errorf("query: or: cannot be combined with select:/where: at the same level — move them into a branch")
+		}
+		return t.lowerOr()
+	default:
+		if q.Select == "" && q.From == "" {
+			return nil, fmt.Errorf("template %q has neither select nor from", t.Meta.ID)
+		}
+		simple := &TemplateV2{Meta: t.Meta, Select: q.Select, From: q.From, Where: q.Where}
+		return simple.lower()
+	}
+}
+
+// lowerAnd lowers a query-level and: composition. Every branch must match in
+// the same instance of the join scope (`from:` on the query), so the result
+// is one QueryBlock whose match is an all: of per-branch rules — exactly the
+// contract-scope combination shape the evaluator already executes, with each
+// branch's label carried into Finding.Related site naming.
+func (t *TemplateDoc) lowerAnd() (*Template, error) {
+	q := t.Query
+	if q.From == "" {
+		return nil, fmt.Errorf("query.and: requires a query-level from: naming the join scope shared by all branches")
+	}
+	scope, err := fromToScope(q.From)
+	if err != nil {
+		return nil, err
+	}
+	if scope == ScopeSource {
+		return nil, fmt.Errorf("query.and: from: source is not supported — and: joins structural scopes")
+	}
+	if len(q.And) < 2 {
+		return nil, fmt.Errorf("query.and: needs at least two branches")
+	}
+
+	branches := make([]Rule, 0, len(q.And))
+	for i, b := range q.And {
+		if b.From != "" {
+			return nil, fmt.Errorf("query.and: branch %d: from: is not allowed on and: branches — the query-level from: is the join scope", i+1)
+		}
+		rule, err := lowerBranchRule(scope, b)
+		if err != nil {
+			return nil, fmt.Errorf("query.and: branch %d: %w", i+1, err)
+		}
+		branches = append(branches, *rule)
+	}
+
+	return &Template{
+		Meta:  t.Meta,
+		Query: QueryBlock{Scope: scope, Match: Rule{All: branches}},
+	}, nil
+}
+
+// lowerBranchRule lowers one and: branch (its own select plus AST-level
+// where matchers) into the Rule that becomes one all: conjunct at the join
+// scope. Context-level matchers are rejected: a filter applies to the whole
+// scope instance in the evaluator IR, so attributing one branch's
+// precondition there would silently widen it to every branch.
+func lowerBranchRule(scope Scope, b QueryBranch) (*Rule, error) {
+	resolvedSelect := ""
+	if b.Select != "" {
+		irKind, ok := blockKindToIR(b.Select)
+		if !ok {
+			return nil, fmt.Errorf("select: unknown block kind %q", b.Select)
+		}
+		resolvedSelect = irKind
+	}
+
+	astAgg := &Rule{}
+	ctxAgg := &Rule{}
+	for _, m := range b.Where {
+		astPart, ctxPart, err := lowerMatcher(m)
+		if err != nil {
+			return nil, err
+		}
+		if astPart != nil {
+			if err := mergeRuleInto(astAgg, astPart); err != nil {
+				return nil, err
+			}
+		}
+		if ctxPart != nil {
+			if err := mergeRuleInto(ctxAgg, ctxPart); err != nil {
+				return nil, err
+			}
+		}
+	}
+	if !ctxAgg.IsEmpty() {
+		return nil, fmt.Errorf("context-level matchers (preset/modifier/func_name/version/base/has_param/guarded_by) are not supported inside and: branches — express the condition with AST-level matchers (e.g. has: {block: function, ...})")
+	}
+
+	rule, err := buildMatch(scope, resolvedSelect, astAgg)
+	if err != nil {
+		return nil, err
+	}
+	if b.Label != "" {
+		if rule.Label != "" && rule.Label != b.Label {
+			return nil, fmt.Errorf("conflicting labels %q vs %q", rule.Label, b.Label)
+		}
+		rule.Label = b.Label
+	}
+	return rule, nil
+}
+
+// lowerOr lowers a query-level or: composition into one QueryBlock per
+// branch (Template.Queries). The engine executes every block and unions the
+// findings under this template's meta, deduplicating identical locations.
+// Branches may carry their own from:; a query-level from: is the shared
+// default.
+func (t *TemplateDoc) lowerOr() (*Template, error) {
+	q := t.Query
+	if len(q.Or) < 2 {
+		return nil, fmt.Errorf("query.or: needs at least two branches")
+	}
+
+	blocks := make([]QueryBlock, 0, len(q.Or))
+	for i, b := range q.Or {
+		if b.Label != "" {
+			return nil, fmt.Errorf("query.or: branch %d: label: is only supported on and: branches", i+1)
+		}
+		from := b.From
+		if from == "" {
+			from = q.From
+		}
+		if b.Select == "" && from == "" {
+			return nil, fmt.Errorf("query.or: branch %d has neither select nor from", i+1)
+		}
+		simple := &TemplateV2{Meta: t.Meta, Select: b.Select, From: from, Where: b.Where}
+		bt, err := simple.lower()
+		if err != nil {
+			return nil, fmt.Errorf("query.or: branch %d: %w", i+1, err)
+		}
+		blocks = append(blocks, bt.Query)
+	}
+
+	return &Template{Meta: t.Meta, Query: blocks[0], Queries: blocks}, nil
+}
+
+// lower converts one simple select/from/where query into evaluator IR. See
 // .vscode/plans/2026-07-10-w3goaudit-v0.4-C-wql-v2.md (Task A3) and
 // .vscode/specs/2026-07-09-wql-v2-language-spec.md for the algorithm this
 // implements.
@@ -98,22 +311,18 @@ func (t *TemplateV2) lower() (*Template, error) {
 		return nil, err
 	}
 
-	selectKinds, err := decodeSelectKinds(t.Select)
-	if err != nil {
-		return nil, err
-	}
-	resolvedSelect := make([]string, 0, len(selectKinds))
-	for _, sk := range selectKinds {
-		v1, ok := blockKindToV1(sk)
+	resolvedSelect := ""
+	if t.Select != "" {
+		irKind, ok := blockKindToIR(t.Select)
 		if !ok {
-			return nil, fmt.Errorf("select: unknown block kind %q", sk)
+			return nil, fmt.Errorf("select: unknown block kind %q", t.Select)
 		}
-		resolvedSelect = append(resolvedSelect, v1)
+		resolvedSelect = irKind
 	}
 
 	// Lower every `where` matcher and merge its AST-layer and context-layer
 	// parts into two running aggregates. astAgg feeds Match; ctxAgg feeds
-	// Filter — the same filter/match split the v1 evaluator already expects,
+	// Filter — the same filter/match split the evaluator already expects,
 	// just derived here instead of authored directly.
 	astAgg := &Rule{}
 	ctxAgg := &Rule{}
@@ -154,8 +363,8 @@ func (t *TemplateV2) lower() (*Template, error) {
 	}, nil
 }
 
-// fromToScope maps a v2 `from` scope name to the v1 Scope constant (language
-// spec §4). An empty from defaults to entry_function, matching v1's default.
+// fromToScope maps a v2 `from` scope name to the evaluator Scope constant.
+// An empty from defaults to entry_function.
 func fromToScope(from string) (Scope, error) {
 	switch from {
 	case "", "entry_function":
@@ -179,49 +388,16 @@ func fromToScope(from string) (Scope, error) {
 	}
 }
 
-// decodeSelectKinds decodes TemplateV2.Select, which is either a scalar
-// (single block kind) or a sequence (combo select), into a plain string
-// slice of the raw v2 block-kind names (not yet resolved to v1). A zero Node
-// (select omitted) returns an empty, non-error result — some scopes (notably
-// scope: source) can express a template with no select, relying solely on a
-// where: regex matcher.
-func decodeSelectKinds(node yaml.Node) ([]string, error) {
-	switch node.Kind {
-	case 0:
-		return nil, nil
-	case yaml.ScalarNode:
-		var s string
-		if err := node.Decode(&s); err != nil {
-			return nil, fmt.Errorf("select: %w", err)
-		}
-		return []string{s}, nil
-	case yaml.SequenceNode:
-		var list []string
-		if err := node.Decode(&list); err != nil {
-			return nil, fmt.Errorf("select: %w", err)
-		}
-		return list, nil
-	default:
-		return nil, fmt.Errorf("select: expected a scalar block kind or a list, got node kind %v", node.Kind)
-	}
-}
-
-// buildMatch assembles the v1 Match rule from the resolved select kinds and
-// the aggregated AST-layer where matchers, per language spec §3 and Task A3
-// step 6:
+// buildMatch assembles the evaluator Match rule from the resolved scalar
+// select kind and the aggregated AST-layer where matchers:
 //
 //   - scope: source is regex-only: astAgg must contain nothing but Regex.
-//   - a combo select (len>1) becomes Match.All, one branch per select kind;
-//     the aggregated where-matchers are merged onto the FIRST branch only
-//     (language spec §3: "where matchers constrain the primary selected
-//     node"; per-branch constraints belong in labeled all: branches, which
-//     lower via the "all" matcher case, not here).
 //   - a single select wraps the where-matchers in `contains:` — "found
 //     somewhere inside the from-scope" — UNLESS the where-matchers already
 //     center on a `sequence:`, which is already a "search within" construct
-//     and must stay at the top level of Match instead of being nested inside
-//     another contains:.
-func buildMatch(scope Scope, selectKinds []string, astAgg *Rule) (*Rule, error) {
+//     and must stay at the top level. In that case select supplies or must
+//     agree with the first sequence step, which is the sequence anchor.
+func buildMatch(scope Scope, selectKind string, astAgg *Rule) (*Rule, error) {
 	if scope == ScopeSource {
 		check := *astAgg
 		regex := check.Regex
@@ -235,11 +411,11 @@ func buildMatch(scope Scope, selectKinds []string, astAgg *Rule) (*Rule, error) 
 		return &Rule{Regex: regex}, nil
 	}
 
-	if len(selectKinds) == 0 {
+	if selectKind == "" {
 		// No select: the merged AST where-matchers become the Match directly
 		// (no Contains wrap) — e.g. `from: contract` + `where: [regex: ...]`
-		// applies the regex at the contract-scope root, matching v1's
-		// `scope: contract` pure-regex form, or `where: [any: [...]]` defining
+		// applies the regex at the contract-scope root, or
+		// `where: [any: [...]]` defines
 		// the whole match on its own. There must be something to match on.
 		if astAgg.IsEmpty() {
 			return nil, fmt.Errorf("select: required for scope %q unless where contains AST-level matchers", scope)
@@ -248,36 +424,39 @@ func buildMatch(scope Scope, selectKinds []string, astAgg *Rule) (*Rule, error) 
 		return &result, nil
 	}
 
-	if len(selectKinds) > 1 {
-		branches := make([]Rule, len(selectKinds))
-		for i, k := range selectKinds {
-			branches[i] = Rule{Kind: k, Label: fmt.Sprintf("site %d", i+1)}
-		}
-		if err := mergeRuleInto(&branches[0], astAgg); err != nil {
-			return nil, err
-		}
-		return &Rule{All: branches}, nil
-	}
-
-	selKind := selectKinds[0]
 	if astAgg.Sequence != nil {
-		// A sequence is already a "search within the scope" construct — do
-		// not additionally wrap it in contains:. Fill in the select's kind
-		// on the last, still-unconstrained sequence element only (keeps the
-		// common case — where: already names every step's block: kind, as in
-		// the reentrancy worked example — a no-op).
 		m := *astAgg
-		if n := len(m.Sequence); n > 0 && m.Sequence[n-1].Kind == "" {
-			m.Sequence[n-1].Kind = selKind
+		if len(m.Sequence) == 0 {
+			return nil, fmt.Errorf("select conflicts with sequence: sequence has no anchor step")
+		}
+		anchor := &m.Sequence[0]
+		if anchor.Kind == "" {
+			if ruleSpecifiesKind(anchor) {
+				return nil, fmt.Errorf("select conflicts with sequence anchor: %q cannot constrain a composite kind anchor", selectKind)
+			}
+			anchor.Kind = selectKind
+		} else if anchor.Kind != selectKind {
+			return nil, fmt.Errorf("select conflicts with sequence anchor: %q != %q", selectKind, anchor.Kind)
 		}
 		return &m, nil
 	}
 
-	inner, err := mergeKindInto(astAgg, selKind)
+	inner, err := mergeKindInto(astAgg, selectKind)
 	if err != nil {
 		return nil, err
 	}
 	return &Rule{Contains: inner}, nil
+}
+
+func ruleSpecifiesKind(rule *Rule) bool {
+	found := false
+	_ = walkRules(rule, func(current *Rule) error {
+		if current.Kind != "" {
+			found = true
+		}
+		return nil
+	})
+	return found
 }
 
 // mergeKindInto returns a copy of base with Kind set to kind, erroring if
@@ -295,7 +474,7 @@ func mergeKindInto(base *Rule, kind string) (*Rule, error) {
 
 // lowerMatcher lowers one top-level `where` matcher (a single-key MatcherV2)
 // into its AST-layer part (feeds Match) and/or context-layer part (feeds
-// Filter). Either may be nil. This is the v1 filter/match split, computed
+// Filter). Either may be nil. This is the evaluator's filter/match split, computed
 // from the uniform v2 matcher instead of authored directly by the template.
 func lowerMatcher(m MatcherV2) (*Rule, *Rule, error) {
 	key, val, ok := m.key()
@@ -316,307 +495,260 @@ var argNPatternV2 = "arg."
 // label/block/mutability/has in one map).
 func lowerKeyValue(key string, val yaml.Node) (*Rule, *Rule, error) {
 	switch key {
+	case "block", "name", "regex", "tainted", "visibility", "mutability",
+		"operator", "label", "modifier", "base", "func_name", "version", "has_param":
+		return lowerStringMatcher(key, val)
+	case "attr":
+		return lowerWrappedAttributes(val)
+	case "left", "right", "statement_has", "has", "in", "guarded_by":
+		return lowerNestedRuleMatcher(key, val)
+	case "unchecked_var":
+		return lowerUncheckedVar(val)
+	case "sequence", "any", "all", "and":
+		return lowerListMatcher(key, val)
+	case "not":
+		return lowerNotMatcher(val)
+	case "preset":
+		return lowerPresetMatcher(val)
+	default:
+		return lowerDynamicMatcher(key, val)
+	}
+}
+
+func lowerStringMatcher(key string, val yaml.Node) (*Rule, *Rule, error) {
+	var v string
+	if err := val.Decode(&v); err != nil {
+		return nil, nil, fmt.Errorf("where.%s: %w", key, err)
+	}
+
+	switch key {
 	case "block":
-		var v string
-		if err := val.Decode(&v); err != nil {
-			return nil, nil, fmt.Errorf("where.block: %w", err)
-		}
-		v1, ok := blockKindToV1(v)
+		irKind, ok := blockKindToIR(v)
 		if !ok {
 			return nil, nil, fmt.Errorf("where.block: unknown block kind %q", v)
 		}
-		return &Rule{Kind: v1}, nil, nil
-
+		return &Rule{Kind: irKind}, nil, nil
 	case "name":
-		var v string
-		if err := val.Decode(&v); err != nil {
-			return nil, nil, fmt.Errorf("where.name: %w", err)
-		}
 		return &Rule{Name: v}, nil, nil
-
 	case "regex":
-		var v string
-		if err := val.Decode(&v); err != nil {
-			return nil, nil, fmt.Errorf("where.regex: %w", err)
-		}
 		return &Rule{Regex: v}, nil, nil
-
 	case "tainted":
-		var v string
-		if err := val.Decode(&v); err != nil {
-			return nil, nil, fmt.Errorf("where.tainted: %w", err)
-		}
 		return &Rule{TaintedFrom: v}, nil, nil
-
 	case "visibility":
-		var v string
-		if err := val.Decode(&v); err != nil {
-			return nil, nil, fmt.Errorf("where.visibility: %w", err)
-		}
 		return &Rule{Visibility: v}, nil, nil
-
 	case "mutability":
-		var v string
-		if err := val.Decode(&v); err != nil {
-			return nil, nil, fmt.Errorf("where.mutability: %w", err)
-		}
 		return &Rule{Mutability: v}, nil, nil
-
 	case "operator":
-		var v string
-		if err := val.Decode(&v); err != nil {
-			return nil, nil, fmt.Errorf("where.operator: %w", err)
-		}
 		return &Rule{Operator: v}, nil, nil
-
 	case "label":
-		// `label:` is a sibling key inside an `all:` branch map (§11.C); it
-		// carries no matching semantics (Rule.Label is metadata only).
-		var v string
-		if err := val.Decode(&v); err != nil {
-			return nil, nil, fmt.Errorf("where.label: %w", err)
-		}
 		return &Rule{Label: v}, nil, nil
-
-	case "attr":
-		// Wrapped attribute form used by the §11.B worked example:
-		// `attr: { has_value: true, ... }`. Each inner key resolves through
-		// attrNameToV1 exactly like a bare attribute key would (below).
-		var raw map[string]yaml.Node
-		if err := val.Decode(&raw); err != nil {
-			return nil, nil, fmt.Errorf("where.attr: %w", err)
-		}
-		ast := &Rule{}
-		for ak, av := range raw {
-			v1k, ok := attrNameToV1(ak)
-			if !ok {
-				return nil, nil, fmt.Errorf("where.attr: unknown attribute %q", ak)
-			}
-			var decoded interface{}
-			if err := av.Decode(&decoded); err != nil {
-				return nil, nil, fmt.Errorf("where.attr.%s: %w", ak, err)
-			}
-			if ast.Attr == nil {
-				ast.Attr = make(map[string]interface{})
-			}
-			ast.Attr[v1k] = decoded
-		}
-		return ast, nil, nil
-
-	case "left":
-		sub, err := lowerToRule(val)
-		if err != nil {
-			return nil, nil, err
-		}
-		return &Rule{Left: sub}, nil, nil
-
-	case "right":
-		sub, err := lowerToRule(val)
-		if err != nil {
-			return nil, nil, err
-		}
-		return &Rule{Right: sub}, nil, nil
-
-	case "statement_has":
-		sub, err := lowerToRule(val)
-		if err != nil {
-			return nil, nil, err
-		}
-		return &Rule{StatementContains: sub}, nil, nil
-
-	case "unchecked_var":
-		var v bool
-		if err := val.Decode(&v); err != nil {
-			return nil, nil, fmt.Errorf("where.unchecked_var: %w", err)
-		}
-		return &Rule{UncheckedVar: v}, nil, nil
-
 	case "modifier":
-		var v string
-		if err := val.Decode(&v); err != nil {
-			return nil, nil, fmt.Errorf("where.modifier: %w", err)
-		}
 		return nil, &Rule{Modifier: v}, nil
-
-	case "has":
-		sub, err := lowerToRule(val)
-		if err != nil {
-			return nil, nil, err
-		}
-		return &Rule{Contains: sub}, nil, nil
-
-	case "in":
-		sub, err := lowerToRule(val)
-		if err != nil {
-			return nil, nil, err
-		}
-		return &Rule{Inside: sub}, nil, nil
-
-	case "guarded_by":
-		sub, err := lowerToRule(val)
-		if err != nil {
-			return nil, nil, err
-		}
-		return nil, &Rule{HasGuard: sub}, nil
-
-	case "sequence":
-		if val.Kind != yaml.SequenceNode {
-			return nil, nil, fmt.Errorf("where.sequence: expected a list of matchers")
-		}
-		seq := make([]Rule, 0, len(val.Content))
-		for _, item := range val.Content {
-			r, err := lowerToRule(*item)
-			if err != nil {
-				return nil, nil, err
-			}
-			seq = append(seq, *r)
-		}
-		return &Rule{Sequence: seq}, nil, nil
-
-	case "any":
-		if val.Kind != yaml.SequenceNode {
-			return nil, nil, fmt.Errorf("where.any: expected a list of matchers")
-		}
-		branches := make([]Rule, 0, len(val.Content))
-		allCtxOnly := true
-		for _, item := range val.Content {
-			r, err := lowerToRule(*item)
-			if err != nil {
-				return nil, nil, err
-			}
-			branches = append(branches, *r)
-			if !ruleIsContextOnly(r) {
-				allCtxOnly = false
-			}
-		}
-		if allCtxOnly {
-			return nil, &Rule{Any: branches}, nil
-		}
-		return &Rule{Any: branches}, nil, nil
-
-	case "all":
-		if val.Kind != yaml.SequenceNode {
-			return nil, nil, fmt.Errorf("where.all: expected a list of matchers")
-		}
-		var astBranches, ctxBranches []Rule
-		for _, item := range val.Content {
-			r, err := lowerToRule(*item)
-			if err != nil {
-				return nil, nil, err
-			}
-			if ruleIsContextOnly(r) {
-				ctxBranches = append(ctxBranches, *r)
-			} else {
-				astBranches = append(astBranches, *r)
-			}
-		}
-		var astPart, ctxPart *Rule
-		if len(astBranches) > 0 {
-			astPart = &Rule{All: astBranches}
-		}
-		if len(ctxBranches) > 0 {
-			ctxPart = &Rule{All: ctxBranches}
-		}
-		return astPart, ctxPart, nil
-
-	case "not":
-		// Special-case a bare preset: `not: { preset: <renamed property> }`
-		// means the safety property is ABSENT, i.e. the underlying v1
-		// "vulnerable" preset holds directly (no extra negation) — see
-		// presetToV1's doc comment and language spec §8.
-		if v1, ok := negatedBarePresetTarget(val); ok {
-			return nil, &Rule{Preset: v1}, nil
-		}
-		if err := rejectMultiKeyNotPreset(val); err != nil {
-			return nil, nil, err
-		}
-		sub, err := lowerToRule(val)
-		if err != nil {
-			return nil, nil, err
-		}
-		if ruleIsContextOnly(sub) {
-			return nil, &Rule{Not: sub}, nil
-		}
-		return &Rule{Not: sub}, nil, nil
-
-	case "preset":
-		var p string
-		if err := val.Decode(&p); err != nil {
-			return nil, nil, fmt.Errorf("where.preset: %w", err)
-		}
-		if v1, negate, ok := presetToV1(p); ok && negate {
-			// Bare (no `not:`) assertion that the renamed property holds ->
-			// the property is PRESENT -> NOT vulnerable -> ctx.Not wraps the
-			// v1 "vulnerable" preset.
-			return nil, &Rule{Not: &Rule{Preset: v1}}, nil
-		}
-		if p == "user_controlled" {
-			// Documented approximation (no v1 preset counterpart): treat
-			// "reachable from external/tainted input" as tainted-from-parameter
-			// on the matched AST node.
-			return &Rule{TaintedFrom: "parameter"}, nil, nil
-		}
-		return nil, nil, fmt.Errorf("where.preset: unknown preset %q", p)
-
 	case "base":
-		var v string
-		if err := val.Decode(&v); err != nil {
-			return nil, nil, fmt.Errorf("where.base: %w", err)
-		}
 		return nil, &Rule{Extends: v}, nil
-
 	case "func_name":
-		var v string
-		if err := val.Decode(&v); err != nil {
-			return nil, nil, fmt.Errorf("where.func_name: %w", err)
-		}
 		return nil, &Rule{FuncName: v}, nil
-
 	case "version":
-		var v string
-		if err := val.Decode(&v); err != nil {
-			return nil, nil, fmt.Errorf("where.version: %w", err)
-		}
 		return nil, &Rule{Version: v}, nil
-
 	case "has_param":
-		var v string
-		if err := val.Decode(&v); err != nil {
-			return nil, nil, fmt.Errorf("where.has_param: %w", err)
-		}
 		return nil, &Rule{HasParam: v}, nil
-
 	default:
-		if strings.HasPrefix(key, argNPatternV2) {
-			idx, err := strconv.Atoi(strings.TrimPrefix(key, argNPatternV2))
-			if err != nil {
-				return nil, nil, fmt.Errorf("where: invalid arg index in %q: %w", key, err)
-			}
-			sub, err := lowerToRule(val)
-			if err != nil {
-				return nil, nil, err
-			}
-			return &Rule{Args: map[int]Rule{idx: *sub}}, nil, nil
-		}
-		if v1k, ok := attrNameToV1(key); ok {
-			var decoded interface{}
-			if err := val.Decode(&decoded); err != nil {
-				return nil, nil, fmt.Errorf("where.%s: %w", key, err)
-			}
-			return &Rule{Attr: map[string]interface{}{v1k: decoded}}, nil, nil
-		}
-		return nil, nil, fmt.Errorf("where: unknown matcher key %q", key)
+		return nil, nil, fmt.Errorf("where: unknown string matcher key %q", key)
 	}
+}
+
+func lowerWrappedAttributes(val yaml.Node) (*Rule, *Rule, error) {
+	// Wrapped attribute form used by the §11.B worked example:
+	// `attr: { has_value: true, ... }`. Each inner key resolves through
+	// attrNameToIR exactly like a bare attribute key would.
+	var raw map[string]yaml.Node
+	if err := val.Decode(&raw); err != nil {
+		return nil, nil, fmt.Errorf("where.attr: %w", err)
+	}
+	ast := &Rule{}
+	for key, value := range raw {
+		irKey, ok := attrNameToIR(key)
+		if !ok {
+			return nil, nil, fmt.Errorf("where.attr: unknown attribute %q", key)
+		}
+		var decoded interface{}
+		if err := value.Decode(&decoded); err != nil {
+			return nil, nil, fmt.Errorf("where.attr.%s: %w", key, err)
+		}
+		if ast.Attr == nil {
+			ast.Attr = make(map[string]interface{})
+		}
+		ast.Attr[irKey] = decoded
+	}
+	return ast, nil, nil
+}
+
+func lowerNestedRuleMatcher(key string, val yaml.Node) (*Rule, *Rule, error) {
+	sub, err := lowerToRule(val)
+	if err != nil {
+		return nil, nil, err
+	}
+	switch key {
+	case "left":
+		return &Rule{Left: sub}, nil, nil
+	case "right":
+		return &Rule{Right: sub}, nil, nil
+	case "statement_has":
+		return &Rule{StatementContains: sub}, nil, nil
+	case "has":
+		return &Rule{Contains: sub}, nil, nil
+	case "in":
+		return &Rule{Inside: sub}, nil, nil
+	case "guarded_by":
+		return nil, &Rule{HasGuard: sub}, nil
+	default:
+		return nil, nil, fmt.Errorf("where: unknown nested matcher key %q", key)
+	}
+}
+
+func lowerUncheckedVar(val yaml.Node) (*Rule, *Rule, error) {
+	var v bool
+	if err := val.Decode(&v); err != nil {
+		return nil, nil, fmt.Errorf("where.unchecked_var: %w", err)
+	}
+	return &Rule{UncheckedVar: v}, nil, nil
+}
+
+func lowerListMatcher(key string, val yaml.Node) (*Rule, *Rule, error) {
+	if val.Kind != yaml.SequenceNode {
+		return nil, nil, fmt.Errorf("where.%s: expected a list of matchers", key)
+	}
+	branches, err := lowerRuleList(val)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	switch key {
+	case "sequence":
+		return &Rule{Sequence: branches}, nil, nil
+	case "any":
+		return lowerAnyMatcher(branches)
+	case "all", "and": // and: is an exact alias of all:
+		return lowerAllMatcher(branches)
+	default:
+		return nil, nil, fmt.Errorf("where: unknown list matcher key %q", key)
+	}
+}
+
+func lowerRuleList(val yaml.Node) ([]Rule, error) {
+	branches := make([]Rule, 0, len(val.Content))
+	for _, item := range val.Content {
+		rule, err := lowerToRule(*item)
+		if err != nil {
+			return nil, err
+		}
+		branches = append(branches, *rule)
+	}
+	return branches, nil
+}
+
+func lowerAnyMatcher(branches []Rule) (*Rule, *Rule, error) {
+	anyContext, anyAST := false, false
+	for i := range branches {
+		if ruleIsContextOnly(&branches[i]) {
+			anyContext = true
+		} else {
+			anyAST = true
+		}
+	}
+	if anyContext && anyAST {
+		return nil, nil, fmt.Errorf("where.any: cannot mix context-level matchers " +
+			"(preset/version/modifier/func_name/extends/has_param) with AST-level " +
+			"matchers (block/kind/arg/sequence/...) in the same any: — an any: is " +
+			"evaluated at a single layer, so the context branches would be silently " +
+			"ignored. Split them: put the context condition outside the any:, or use " +
+			"separate templates")
+	}
+	if anyContext {
+		return nil, &Rule{Any: branches}, nil
+	}
+	return &Rule{Any: branches}, nil, nil
+}
+
+func lowerAllMatcher(branches []Rule) (*Rule, *Rule, error) {
+	var astBranches, contextBranches []Rule
+	for i := range branches {
+		if ruleIsContextOnly(&branches[i]) {
+			contextBranches = append(contextBranches, branches[i])
+		} else {
+			astBranches = append(astBranches, branches[i])
+		}
+	}
+	var astPart, contextPart *Rule
+	if len(astBranches) > 0 {
+		astPart = &Rule{All: astBranches}
+	}
+	if len(contextBranches) > 0 {
+		contextPart = &Rule{All: contextBranches}
+	}
+	return astPart, contextPart, nil
+}
+
+func lowerNotMatcher(val yaml.Node) (*Rule, *Rule, error) {
+	if irPreset, ok := negatedBarePresetTarget(val); ok {
+		return nil, &Rule{Preset: irPreset}, nil
+	}
+	if err := rejectMultiKeyNotPreset(val); err != nil {
+		return nil, nil, err
+	}
+	sub, err := lowerToRule(val)
+	if err != nil {
+		return nil, nil, err
+	}
+	if ruleIsContextOnly(sub) {
+		return nil, &Rule{Not: sub}, nil
+	}
+	return &Rule{Not: sub}, nil, nil
+}
+
+func lowerPresetMatcher(val yaml.Node) (*Rule, *Rule, error) {
+	var preset string
+	if err := val.Decode(&preset); err != nil {
+		return nil, nil, fmt.Errorf("where.preset: %w", err)
+	}
+	if irPreset, negate, ok := presetToIR(preset); ok && negate {
+		return nil, &Rule{Not: &Rule{Preset: irPreset}}, nil
+	}
+	return nil, nil, fmt.Errorf("where.preset: unknown preset %q", preset)
+}
+
+func lowerDynamicMatcher(key string, val yaml.Node) (*Rule, *Rule, error) {
+	if strings.HasPrefix(key, argNPatternV2) {
+		rest := strings.TrimPrefix(key, argNPatternV2)
+		sub, err := lowerToRule(val)
+		if err != nil {
+			return nil, nil, err
+		}
+		if rest == "any" {
+			return &Rule{ArgAny: sub}, nil, nil
+		}
+		idx, err := strconv.Atoi(rest)
+		if err != nil {
+			return nil, nil, fmt.Errorf("where: invalid arg index in %q (use arg.N or arg.any): %w", key, err)
+		}
+		return &Rule{Args: map[int]Rule{idx: *sub}}, nil, nil
+	}
+	if irKey, ok := attrNameToIR(key); ok {
+		var decoded interface{}
+		if err := val.Decode(&decoded); err != nil {
+			return nil, nil, fmt.Errorf("where.%s: %w", key, err)
+		}
+		return &Rule{Attr: map[string]interface{}{irKey: decoded}}, nil, nil
+	}
+	return nil, nil, fmt.Errorf("where: unknown matcher key %q", key)
 }
 
 // negatedBarePresetTarget reports whether node is exactly a single-key
 // `{preset: <name>}` matcher naming a v2 property preset with the standard
 // negate=true polarity (access_controlled/caller_checked/reentrancy_guarded
-// today), and if so returns the v1 preset name to assert directly (bare, no
-// Not wrapper). ok is false for anything else (not a bare preset matcher, or
-// a preset with no negate=true mapping, e.g. user_controlled) — the "not"
-// case in lowerKeyValue falls back to generic recursive lowering in that
-// case.
+// today), and if so returns the evaluator preset name to assert directly
+// (bare, no Not wrapper). ok is false for anything else, and the "not" case
+// in lowerKeyValue falls back to generic recursive lowering.
 func negatedBarePresetTarget(node yaml.Node) (string, bool) {
 	if node.Kind != yaml.MappingNode {
 		return "", false
@@ -633,11 +765,11 @@ func negatedBarePresetTarget(node yaml.Node) (string, bool) {
 	if err := presetNode.Decode(&name); err != nil {
 		return "", false
 	}
-	v1, negate, ok := presetToV1(name)
+	irPreset, negate, ok := presetToIR(name)
 	if !ok || !negate {
 		return "", false
 	}
-	return v1, true
+	return irPreset, true
 }
 
 // rejectMultiKeyNotPreset returns a clear error when node is a multi-key
@@ -646,7 +778,7 @@ func negatedBarePresetTarget(node yaml.Node) (string, bool) {
 // single-key `{preset: X}` under `not:` has well-defined bare-negation
 // semantics (negatedBarePresetTarget above); a multi-key form falls through
 // to the generic recursive path in the "not" case, which wraps the WHOLE
-// merged sub-rule (preset's own Not from presetToV1's negate=true handling,
+// merged sub-rule (preset's own Not from presetToIR's negate=true handling,
 // plus every sibling key) in an outer Not — silently double-negating the
 // preset (Not{Not{Preset}} cancels back to the ORIGINAL "vulnerable" preset
 // instead of "not vulnerable") while also negating the sibling keys, which
@@ -670,7 +802,7 @@ func rejectMultiKeyNotPreset(node yaml.Node) error {
 // of matcher maps to AND) and lowers it to ONE merged Rule. Nested rules
 // (inside has:/in:/arg.N:/sequence elements/all:/any: branches) do not split
 // into separate AST/context layers the way top-level `where` items do — the
-// sub-rule is evaluated as a single Rule value by the v1 evaluator (e.g.
+// sub-rule is evaluated as a single Rule value by the evaluator (e.g.
 // Rule.Contains, Rule.Args[N]), so its ast and ctx parts are merged together
 // here.
 func lowerToRule(node yaml.Node) (*Rule, error) {
@@ -815,7 +947,7 @@ func mergeRuleInto(dst, src *Rule) error {
 		if *f.dst == "" {
 			*f.dst = f.src
 		} else if *f.dst != f.src {
-			return fmt.Errorf("where: conflicting %s: %q vs %q", f.name, *f.dst, f.src)
+			return fmt.Errorf("where: conflicting %s: %q vs %q — to require both constraints on the same node, wrap them in all: branches (all: [{%s: %q}, {%s: %q}]) or combine them into one pattern", f.name, *f.dst, f.src, f.name, *f.dst, f.name, f.src)
 		}
 	}
 
@@ -889,6 +1021,9 @@ func mergeRuleInto(dst, src *Rule) error {
 		return err
 	}
 	if err := mergePtr(&dst.Right, src.Right); err != nil {
+		return err
+	}
+	if err := mergePtr(&dst.ArgAny, src.ArgAny); err != nil {
 		return err
 	}
 

@@ -7,18 +7,23 @@ W3GoAudit-native vulnerability-detection fixtures (paired with
 core pipeline — parser/builder, WQL engine, and the CLI — rather than security
 detection.
 
+Each behavior has one canonical fixture lane. Benchmark-family fixtures live
+under [`../benchmarks/fixtures/`](../benchmarks/fixtures/) instead of being
+duplicated as aggregate files here.
+
 | Group | What it holds | Used by |
 |---|---|---|
-| [`security/`](security/) | General W3GoAudit-native detection fixtures for the official pack in [`../templates/official/`](../templates/official/) — deep single-class fixtures plus one `Vulnerable_*`/`Safe_*` fixture per promoted detector. See [`security/README.md`](security/README.md). | `pkg/engine/interprocedural_taint_test.go`, the documented full-pack scan |
+| [`security/`](security/) | W3GoAudit-native fixtures for the official pack in [`../templates/official/`](../templates/official/) — deep bug-class matrices, focused engine regressions, and promoted-detector fixtures with their safe controls. See [`security/README.md`](security/README.md). | `pkg/engine/*_test.go`, the documented full-pack scan |
 | [`core/`](core/) | Core-pipeline / tool fixtures (not security detection) — see the sub-table below. | builder/reader/engine unit tests, the documented `build` + `engine-features` smoke tests |
 
 ### `core/` — pipeline & tool fixtures
 
 | Subdirectory | What it exercises | Used by |
 |---|---|---|
-| [`core/build-database/`](core/build-database/) | Parser + builder (parsing, inheritance, selectors, call graph, C3 linearization, AST construction). Numbered `01-..` through `10-..`. `10-override-state-order.sol` is an asymmetric Base/Left/Right/Middle/Derived diamond that pins C3 linearization, state-variable storage order, and MRO function-override binding. | `pkg/builder/builder_test.go`, `pkg/reader/reader_test.go`, the documented `w3goaudit build` smoke test |
-| [`core/engine-features/`](core/engine-features/) | WQL engine operators (`sequence`, `inside`, semantic groups, `args` + `tainted_from`). Paired with [`../templates/test/`](../templates/test/). Also `type-cast-guards.sol` and the `path-collision/{pkg-a,pkg-b}/tx-origin.sol` pair (same-named files in sibling packages). | `pkg/engine/*_test.go`, the documented `w3goaudit … --template templates/test/` smoke test |
+| [`core/build-database/`](core/build-database/) | Sixteen parser/builder/report fixtures numbered `01-..` through `15-..`. There are two distinct `10-*` cases: `10-interface-impl.sol` pins interface-to-implementation navigation, while `10-override-state-order.sol` pins asymmetric-diamond C3 order, storage order, and override binding. See the [folder README](core/build-database/README.md) for the complete matrix. | `pkg/builder/*_test.go`, `pkg/reader/*_test.go`, `pkg/report/nav_test.go`, the documented `w3goaudit build` smoke test |
+| [`core/engine-features/`](core/engine-features/) | WQL engine operators (`sequence`, `in`, semantic groups, `arg.N` + `tainted`). Paired with [`../templates/test/`](../templates/test/). Also `type-cast-guards.sol` and the `path-collision/{pkg-a,pkg-b}/tx-origin.sol` pair (same-named files in sibling packages). | `pkg/engine/*_test.go`, the documented `w3goaudit … --template templates/test/` smoke test |
 | [`core/extract/`](core/extract/) | CLI `extract` subcommands (entry, inheritance, source, context, bundle, workflow). Realistic multi-bug DeFi vault fixture. | `cmd/w3goaudit/extract_test.go`, `cmd/w3goaudit/extract*.go` examples, `docs/usage.md` |
+| [`core/identity-collision/`](core/identity-collision/) | Same-named contracts in separate source paths, with intentionally distinct state/effects. | exact-identity builder, engine, navigation, and report regressions |
 
 ## Conventions
 

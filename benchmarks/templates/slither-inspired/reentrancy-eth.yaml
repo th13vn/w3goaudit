@@ -21,9 +21,10 @@ meta:
 # by a state write. Using `eth_transfer` (transfer/send/call{value:}) here
 # — instead of `outgoing_call` — distinguishes this detector from
 # reentrancy-no-eth and removes findings on calls that cannot transfer ETH.
-from: entry_function
-where:
-  - not: { preset: reentrancy_guarded }
-  - sequence:
-      - block: eth_transfer
-      - block: state_write
+query:
+  from: entry_function
+  where:
+    - not: { preset: reentrancy_guarded }
+    - sequence:
+        - block: eth_transfer
+        - block: state_write

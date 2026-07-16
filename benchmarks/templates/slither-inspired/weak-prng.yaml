@@ -12,10 +12,11 @@ meta:
     Use a commit-reveal scheme or a trusted oracle (e.g., Chainlink VRF) for
     randomness. Do not rely on block variables for security-critical decisions.
 
-from: function
-select: binary
-where:
-  - operator: "%"
-  - has:
-      block: member
-      name: (?i)(block\.timestamp|block\.number|block\.difficulty|blockhash)
+query:
+  from: function
+  select: binary
+  where:
+    - operator: "%"
+    - has:
+        block: member
+        name: (?i)(block\.timestamp|block\.number|block\.difficulty|blockhash)

@@ -16,24 +16,25 @@ meta:
 # hex mask) AND the enclosing statement has no other bitwise/shift operator.
 # Catches `base ^ exp`, `2 ^ 8`, `10 ^ 18` while excluding `(a & b) + (a ^ b)/2`,
 # `(3 * d) ^ 2`, and `x ^ 0xFF`.
-from: function
-select: binary
-where:
-  - operator: "\\^"
-  - left:
-      any:
-        - block: identifier
-        - block: literal
-          literal_kind: number
-  - right:
-      any:
-        - block: identifier
-        - block: literal
-          literal_kind: number
-  - not:
-      statement_has:
+query:
+  from: function
+  select: binary
+  where:
+    - operator: "\\^"
+    - left:
         any:
-          - block: binary
-            operator: "&|\\||<<|>>"
-          - block: unary
-            operator: "~"
+          - block: identifier
+          - block: literal
+            literal_kind: number
+    - right:
+        any:
+          - block: identifier
+          - block: literal
+            literal_kind: number
+    - not:
+        statement_has:
+          any:
+            - block: binary
+              operator: "&|\\||<<|>>"
+            - block: unary
+              operator: "~"

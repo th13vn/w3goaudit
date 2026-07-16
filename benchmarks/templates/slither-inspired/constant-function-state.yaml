@@ -18,8 +18,9 @@ meta:
 # (checked against the state_write node itself, which carries no mutability
 # attribute); wrapped in `all:` it is recognized as context-only and routed
 # to the function-level precondition, matching v1's `filter: mutability:` exactly.
-from: function
-select: state_write
-where:
-  - all:
-      - mutability: view,pure
+query:
+  from: function
+  select: state_write
+  where:
+    - all:
+        - mutability: view,pure

@@ -11,13 +11,14 @@ meta:
   recommendation: >
     This is a feature-test template, not a production detector.
 
-select: member
-from: function
-where:
-  - name: "tx\\.origin"
-  - in:
-      any:
-        - { block: require }
-        - { block: assert }
-        - { block: if }
-        - { block: ternary }
+query:
+  select: member
+  from: function
+  where:
+    - name: "tx\\.origin"
+    - in:
+        any:
+          - { block: require }
+          - { block: assert }
+          - { block: if }
+          - { block: ternary }

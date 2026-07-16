@@ -7,8 +7,9 @@ meta:
   recommendation: "n/a — diagnostic probe"
 
 # No filter: we want pure taint reachability, not access-control gating.
-select: external_call
-from: entry_function
-where:
-  - name: ^transferFrom$
-  - arg.0: { tainted: parameter }
+query:
+  select: external_call
+  from: entry_function
+  where:
+    - name: ^transferFrom$
+    - arg.0: { tainted: parameter }

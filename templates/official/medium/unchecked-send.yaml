@@ -27,15 +27,16 @@ meta:
 # value is presumed handled. `stmt.assign` covers
 # `bool ok = to.send(amt);` — checking of `ok` is left to a downstream
 # rule and is not in scope here.
-from: function
-select: eth_transfer
-where:
-  - name: ^send$
-  - not:
-      in:
-        any:
-          - block: require
-          - block: assert
-          - block: if
-          - block: assign
-          - block: return
+query:
+  from: function
+  select: eth_transfer
+  where:
+    - name: ^send$
+    - not:
+        in:
+          any:
+            - block: require
+            - block: assert
+            - block: if
+            - block: assign
+            - block: return

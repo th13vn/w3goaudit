@@ -17,14 +17,16 @@ meta:
 # `token_call` (v1) is IsTokenCall(kind) == (kind == call.external) — v2 has
 # no dedicated `token_call` block-kind alias, so `external_call` (call.external)
 # + `name:` is behaviorally identical.
-from: function
-select: external_call
-where:
-  - name: ^(transfer|transferFrom)$
-  - not:
-      in:
-        any:
-          - block: require
-          - block: assert
-          - block: if
-          - block: assign
+query:
+  from: entry_function
+  select: external_call
+  where:
+    - name: ^(transfer|transferFrom)$
+    - not:
+        in:
+          any:
+            - block: require
+            - block: assert
+            - block: if
+            - block: assign
+            - block: return

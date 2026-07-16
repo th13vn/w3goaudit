@@ -29,8 +29,9 @@ meta:
 #
 # `mutability: view,pure` is wrapped in `all:` so it routes to the
 # function-level precondition layer (see delegatecall-in-loop.yaml).
-from: function
-select: state_write
-where:
-  - all:
-      - mutability: view,pure
+query:
+  from: function
+  select: state_write
+  where:
+    - all:
+        - mutability: view,pure

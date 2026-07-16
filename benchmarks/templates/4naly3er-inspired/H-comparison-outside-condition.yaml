@@ -18,16 +18,17 @@ meta:
 # consumes its result. Treat require/assert/if/return as consuming, plus
 # loop (for/while condition), and binary so chained logical comparisons
 # (`a == b && c == d`) don't each trigger.
-from: function
-select: binary
-where:
-  - operator: (==|!=|<|>|<=|>=)
-  - not:
-      in:
-        any:
-          - block: require
-          - block: assert
-          - block: if
-          - block: loop
-          - block: return
-          - block: binary
+query:
+  from: function
+  select: binary
+  where:
+    - operator: (==|!=|<|>|<=|>=)
+    - not:
+        in:
+          any:
+            - block: require
+            - block: assert
+            - block: if
+            - block: loop
+            - block: return
+            - block: binary

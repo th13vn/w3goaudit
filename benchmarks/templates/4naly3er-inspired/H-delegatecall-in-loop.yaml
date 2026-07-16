@@ -14,7 +14,8 @@ meta:
     dedicated multicall pattern with strict access control and target
     whitelisting.
 
-from: function
-select: loop
-where:
-  - has: { block: delegatecall }
+query:
+  from: function
+  select: loop
+  where:
+    - has: { block: delegatecall }

@@ -16,53 +16,54 @@ meta:
     - https://github.com/crytic/slither/wiki/Detector-Documentation#functions-that-send-ether-to-arbitrary-destinations
     - https://swcregistry.io/docs/SWC-105
 
-from: entry_function
+query:
+  from: entry_function
 
-where:
-  # caller_checked (negated) = NOT privileged-access-controlled AND NOT
-  # caller-self-scoped. Sending ETH to a caller-chosen destination is safe
-  # when the caller can only move value tied to a resource they own — the
-  # NFT-vault pattern where `redeemETH`/`withdrawETH` forward msg.sender into
-  # `_withdraw` and gate on `ownerOf(tokenId) == caller` (item-ownership
-  # self-scoping, the ETH analogue of `require(from == msg.sender)` for
-  # transferFrom). A genuine arbitrary send — neither privileged-gated nor
-  # caller-scoped — still matches.
-  - not: { preset: caller_checked }
+  where:
+    # caller_checked (negated) = NOT privileged-access-controlled AND NOT
+    # caller-self-scoped. Sending ETH to a caller-chosen destination is safe
+    # when the caller can only move value tied to a resource they own — the
+    # NFT-vault pattern where `redeemETH`/`withdrawETH` forward msg.sender into
+    # `_withdraw` and gate on `ownerOf(tokenId) == caller` (item-ownership
+    # self-scoping, the ETH analogue of `require(from == msg.sender)` for
+    # transferFrom). A genuine arbitrary send — neither privileged-gated nor
+    # caller-scoped — still matches.
+    - not: { preset: caller_checked }
 
-  # Engine fixes that make this template precise:
-  #   - P0-1 (ast_builder.go:603): ERC20 `.transfer(to, amt)` is now
-  #     call.external, NOT call.builtin.transfer. So matching the builtin
-  #     here no longer FPs on ERC20s.
-  #   - P0-2 (ast_builder.go:582): `.call{value: x}(data)` now carries a
-  #     `has_value: true` attribute, letting us distinguish ETH-sending
-  #     `.call{value:}` from plain function-routing `.call(data)`.
-  - any:
-      # ETH built-ins (.transfer(amt) reverts on failure; .send(amt) returns
-      # bool). Both are unambiguously ETH-only after P0-1.
-      - has:
-          block: builtin_transfer
-          has:
-            receiver: true
-            tainted: parameter
-      - has:
-          block: builtin_send
-          has:
-            receiver: true
-            tainted: parameter
-      # `.call{value: ...}(data)` — ETH-bearing low-level call.
-      - has:
-          block: lowlevel_call
-          has_value: true
-          # Forwarding exactly `msg.value` to a caller-chosen receiver is usually
-          # a payment-router pattern, not a drain of existing contract funds.
-          not:
+    # Engine fixes that make this template precise:
+    #   - P0-1 (ast_builder.go:603): ERC20 `.transfer(to, amt)` is now
+    #     call.external, NOT call.builtin.transfer. So matching the builtin
+    #     here no longer FPs on ERC20s.
+    #   - P0-2 (ast_builder.go:582): `.call{value: x}(data)` now carries a
+    #     `has_value: true` attribute, letting us distinguish ETH-sending
+    #     `.call{value:}` from plain function-routing `.call(data)`.
+    - any:
+        # ETH built-ins (.transfer(amt) reverts on failure; .send(amt) returns
+        # bool). Both are unambiguously ETH-only after P0-1.
+        - has:
+            block: builtin_transfer
             has:
-              block: member
-              call_option: value
-              name: ^value$
-              left:
-                block: identifier
-                name: ^msg$
-          has:
-            receiver: true
-            tainted: parameter
+              receiver: true
+              tainted: parameter
+        - has:
+            block: builtin_send
+            has:
+              receiver: true
+              tainted: parameter
+        # `.call{value: ...}(data)` — ETH-bearing low-level call.
+        - has:
+            block: lowlevel_call
+            has_value: true
+            # Forwarding exactly `msg.value` to a caller-chosen receiver is usually
+            # a payment-router pattern, not a drain of existing contract funds.
+            not:
+              has:
+                block: member
+                call_option: value
+                name: ^value$
+                left:
+                  block: identifier
+                  name: ^msg$
+            has:
+              receiver: true
+              tainted: parameter

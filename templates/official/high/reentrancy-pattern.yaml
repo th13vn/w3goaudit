@@ -22,19 +22,19 @@ meta:
 # invocations (token.transfer/transferFrom/approve), which only re-enter
 # via non-standard ERC777-style hooks. This eliminates the dominant FP
 # class on vault-style `token.transferFrom(...); balances[...] += ...`
-# while preserving all TP detections (verified against test-reentrancy.sol,
+# while preserving all TP detections (verified against test-data/security/reentrancy.sol,
 # whose vulnerable fixtures all use call{value:}/transfer/send/raw .call).
-from: entry_function
-select: state_write
-where:
-  - not: { preset: reentrancy_guarded }
-  - sequence:
-      - any:
-          # eth_transfer matches .transfer/.send/.call{value:} AND raw .call(...)
-          # (call.builtin.transfer, call.builtin.send, call.lowlevel.call, asm.call)
-          # — i.e. every ETH-bearing or raw-call shape used in classical reentrancy.
-          - block: eth_transfer
-          # delegatecall variants (call.lowlevel.delegatecall, asm.delegatecall)
-          # can reenter via arbitrary code execution in the current context.
-          - block: delegatecall
-      - block: state_write
+query:
+  from: entry_function
+  where:
+    - not: { preset: reentrancy_guarded }
+    - sequence:
+        - any:
+            # eth_transfer matches .transfer/.send/.call{value:} AND raw .call(...)
+            # (call.builtin.transfer, call.builtin.send, call.lowlevel.call, asm.call)
+            # — i.e. every ETH-bearing or raw-call shape used in classical reentrancy.
+            - block: eth_transfer
+            # delegatecall variants (call.lowlevel.delegatecall, asm.delegatecall)
+            # can reenter via arbitrary code execution in the current context.
+            - block: delegatecall
+        - block: state_write

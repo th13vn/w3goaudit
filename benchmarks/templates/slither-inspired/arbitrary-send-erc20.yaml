@@ -15,9 +15,10 @@ meta:
 # `token_call` (v1) is IsTokenCall(kind) == (kind == call.external) — v2 has
 # no dedicated `token_call` block-kind alias, so `external_call` (call.external)
 # + `name:` is behaviorally identical.
-from: entry_function
-select: external_call
-where:
-  - not: { preset: access_controlled }
-  - name: ^transferFrom$
-  - arg.0: { tainted: parameter }
+query:
+  from: entry_function
+  select: external_call
+  where:
+    - not: { preset: access_controlled }
+    - name: ^transferFrom$
+    - arg.0: { tainted: parameter }

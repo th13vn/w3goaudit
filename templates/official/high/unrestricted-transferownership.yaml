@@ -12,12 +12,13 @@ meta:
     prefer a two-step transfer (`Ownable2Step`) so ownership cannot be handed to
     an unrecoverable or attacker-chosen address in a single call.
 
-from: entry_function
-select: state_write
-where:
-  - func_name: '^transferOwnership$'
-  - not: { preset: access_controlled }
-  - left:
-      name: '(?i)owner'
-  - right:
-      tainted: parameter
+query:
+  from: entry_function
+  select: state_write
+  where:
+    - func_name: '^transferOwnership$'
+    - not: { preset: access_controlled }
+    - left:
+        name: '(?i)owner'
+    - right:
+        tainted: parameter

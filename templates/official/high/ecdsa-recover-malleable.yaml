@@ -17,16 +17,17 @@ meta:
   references:
     - https://swcregistry.io/docs/SWC-117
 
-from: entry_function
-where:
-  - sequence:
-      - block: external_call
-        name: '^recover$'
-        has:
-          receiver: true
-          name: '^ECDSA$'
-      - block: state_write
-        left:
-          block: index
+query:
+  from: entry_function
+  where:
+    - sequence:
+        - block: external_call
+          name: '^recover$'
           has:
-            tainted: parameter
+            receiver: true
+            name: '^ECDSA$'
+        - block: state_write
+          left:
+            block: index
+            has:
+              tainted: parameter

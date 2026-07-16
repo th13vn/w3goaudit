@@ -13,10 +13,9 @@ meta:
     Reorder arithmetic to perform multiplication before division. Use a scaling
     factor if needed to maintain precision.
 
-from: function
-where:
-  - sequence:
-      - block: binary
-        operator: "/"
-      - block: binary
-        operator: "\\*"
+query:
+  from: function
+  select: binary
+  where:
+    - operator: "\\*"
+    - left: { block: binary, operator: "/" }

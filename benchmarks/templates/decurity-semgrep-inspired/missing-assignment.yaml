@@ -12,15 +12,16 @@ meta:
   references:
     - https://github.com/Decurity/semgrep-smart-contracts/tree/master/solidity/security
 
-from: function
-where:
-  # regex is a "dual" field; bare at top level it would route to the AST-match
-  # layer (checked against the matched identifier/binary_op node's own text).
-  # Wrapping in `all:` forces it onto the function precondition layer.
-  - all:
-      - regex: '(?m)^\s*(?:[A-Za-z_][A-Za-z0-9_]*(?:\[[^\]]+\])?|\w+\s*==\s*\w+)\s*;'
-  - has:
-      any:
-        - block: identifier
-        - block: binary
-          operator: '=='
+query:
+  from: function
+  where:
+    # regex is a "dual" field; bare at top level it would route to the AST-match
+    # layer (checked against the matched identifier/binary_op node's own text).
+    # Wrapping in `all:` forces it onto the function precondition layer.
+    - all:
+        - regex: '(?m)^\s*(?:[A-Za-z_][A-Za-z0-9_]*(?:\[[^\]]+\])?|\w+\s*==\s*\w+)\s*;'
+    - has:
+        any:
+          - block: identifier
+          - block: binary
+            operator: '=='

@@ -12,7 +12,8 @@ meta:
     Remove the boolean constant and simplify the expression. If the condition
     is always true/false, the branch can be removed entirely.
 
-from: function
-select: if
-where:
-  - has: { block: literal, name: ^(true|false)$ }
+query:
+  from: function
+  select: if
+  where:
+    - has: { block: literal, name: ^(true|false)$ }

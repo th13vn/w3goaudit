@@ -24,14 +24,15 @@ meta:
 # binary_op operator AND a descendant member_access / balanceOf call so
 # that side-of-comparison doesn't matter — `bal == 100e18` and
 # `100e18 == bal` both fire.
-from: function
-select: binary
-where:
-  - operator: "(==|!=)"
-  - any:
-      - has: { block: member, name: ^balance$ }
-      - has: { block: external_call, name: ^balanceOf$ }
-      # Also catch raw `block.number == X` (snapshot-locking abuse) and
-      # `block.timestamp == X` (rare but a real anti-pattern in vesting
-      # contracts).
-      - has: { block: member, name: ^(timestamp|number)$ }
+query:
+  from: function
+  select: binary
+  where:
+    - operator: "(==|!=)"
+    - any:
+        - has: { block: member, name: ^balance$ }
+        - has: { block: external_call, name: ^balanceOf$ }
+        # Also catch raw `block.number == X` (snapshot-locking abuse) and
+        # `block.timestamp == X` (rare but a real anti-pattern in vesting
+        # contracts).
+        - has: { block: member, name: ^(timestamp|number)$ }

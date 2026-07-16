@@ -6,12 +6,17 @@
 
 **Key Features:**
 - AST-based Solidity parsing via [solast-go](https://github.com/th13vn/solast-go), with precise source
-  locations (line/column/byte) on both AST nodes and declarations
+  locations on both AST nodes and declarations: one-based Unicode-code-point
+  columns and zero-based half-open UTF-8 byte offsets
 - Recursive import resolution with remapping support
+- Durable source/build diagnostics with source-cache parity and optional
+  fail-closed imports (`--strict-imports`)
+- Exact `file#Contract` / `file#Contract.selector(types)` identities throughout
+  inheritance, call graphs, extraction, reports, and navigation
 - C3 linearization for proper inheritance resolution
 - Comprehensive call graph with recursive tracing
 - Per-function effects analysis (state writes, guards, access control)
-- WQL v2 template-based vulnerability detection (`select`/`from`/`where`, auto-detected against legacy v1)
+- WQL template-based vulnerability detection (`select`/`from`/`where`)
 - Result-folder output: `overview.md`, `findings.md`, `results.sarif`, `run.log`, a machine-readable `data/`
   (including extension-facing `nav.json`/`explorer.json`), and per-main-contract workflow files + a
   state-change matrix; opt-in HTML mirror
@@ -32,8 +37,8 @@
 - Identifies main contracts and entry points
 
 **2. Security Analysis**
-- Executes user-defined WQL v2 templates against the database (`select`/`from`/`where`;
-  legacy v1 `query:` templates still load, auto-detected)
+- Executes user-defined WQL templates against the database
+  (`select`/`from`/`where`); removed top-level `query:` documents are rejected
 - Detects patterns like reentrancy, access control issues, dangerous calls
 - Supports taint analysis for tracking user-controlled input, including
   context-sensitive propagation through internal helper calls
@@ -81,6 +86,7 @@ w3goaudit/
 │   └── w3goaudit/          # CLI entry point (Cobra-based)
 │       ├── main.go         # Entry: rootCmd.Execute()
 │       ├── root.go         # The scan command (progress → summary → result folder)
+│       ├── scan_options.go # Immutable scan options + source/cache strict-import policy
 │       ├── build.go        # Build subcommand
 │       ├── extract.go      # Extract subcommand (11 sub-subcommands)
 │       ├── scan_filters.go # Template loading/precedence + severity/include/exclude filters
@@ -90,8 +96,11 @@ w3goaudit/
 │       └── helpers.go      # Shared utilities (result-folder path, run.log, DB loading)
 │
 ├── pkg/
+│   ├── logging/            # Immutable scan-local logger (serialized writes)
 │   ├── reader/             # File discovery and loading
 │   │   ├── reader.go       # Recursive .sol file discovery
+│   │   ├── imports.go      # Solidity-aware import directive lexer
+│   │   ├── remappings.go   # Foundry TOML/profile/context remapping logic
 │   │   ├── project.go      # Project root detection
 │   │   ├── resolver.go     # Import path resolution
 │   │   └── git.go          # Git repository detection and URL building
@@ -100,6 +109,8 @@ w3goaudit/
 │   │   ├── builder.go      # 7-phase build orchestration
 │   │   ├── contract.go     # Contract extraction from AST
 │   │   ├── ast_builder.go  # Function AST tree building
+│   │   ├── location.go     # Unicode columns / UTF-8 byte-range index
+│   │   ├── parser_input.go # Assembly-only := compatibility normalization
 │   │   ├── semantic.go     # Lightweight semantic type facts
 │   │   ├── inheritance.go  # C3 linearization
 │   │   ├── callgraph.go    # Call graph construction
@@ -107,8 +118,8 @@ w3goaudit/
 │   │
 │   ├── engine/             # Template execution
 │   │   ├── engine.go       # Query execution engine
-│   │   ├── template.go     # Template loading, parsing, normalization (auto-detects v1/v2)
-│   │   ├── wql_v2.go       # WQL v2 parser + lowering to the v1 Rule IR
+│   │   ├── template.go     # Template loading, parsing, normalization
+│   │   ├── wql_v2.go       # WQL parser + lowering to evaluator Rule IR
 │   │   ├── wql_v2_catalog.go # v2 block-kind/attribute/preset name tables
 │   │   ├── verify.go       # WQL rule verification (recursive Verify)
 │   │   └── presets.go      # Built-in presets (unAuthenticated, unCheckedSender, unLocked)
@@ -118,6 +129,7 @@ w3goaudit/
 │   │
 │   ├── types/              # Core data structures
 │   │   ├── database.go     # Contract database + MainContractEntry
+│   │   ├── diagnostic.go   # Durable analysis-quality diagnostics
 │   │   ├── contract.go     # Contract representation
 │   │   ├── function.go     # Function with selectors + access control helpers
 │   │   ├── ast.go          # AST node structures + semantic group helpers
@@ -127,6 +139,8 @@ w3goaudit/
 │   │
 │   ├── report/             # Output formatting
 │   │   ├── bundle.go       # Result-folder writer (overview/findings/SARIF/data, per-contract dirs)
+│   │   ├── diagnostics.go  # data/diagnostics.json + counts/completeness
+│   │   ├── manifest.go     # Complete result-folder machine index
 │   │   ├── nav.go          # data/nav.json: symbol navigation index (defs, callers, interface→impl)
 │   │   ├── explorer.go     # data/explorer.json: per-main-contract explorer model
 │   │   ├── state_matrix.go # State-change matrix (writers + reachable entry points)
@@ -141,14 +155,26 @@ w3goaudit/
 │   └── types/              # Core data structures (see above)
 │
 ├── templates/              # WQL detection templates (embed.go embeds official/)
-│   ├── official/              # Curated pack (WQL v2), embedded as the default
-│   ├── security/               # Legacy v1 `query:` seed templates, still shipped
-│   └── test/                  # Engine feature-exercise templates
+│   ├── official/           # 25 curated WQL detectors, embedded as the default
+│   └── test/               # 5 WQL engine feature-exercise templates
+├── benchmarks/             # Docker Compose benchmark
+│   ├── compose.yaml        # Only supported host entry point
+│   ├── run_benchmark.py    # CLI and sequential orchestration
+│   ├── benchmark_core.py   # Paths, indexes, process I/O, aliases, manifests
+│   ├── benchmark_adapters.py # Scanner commands + native-output normalization
+│   ├── benchmark_scoring.py  # Exact/relaxed matching and metrics
+│   ├── benchmark_reporting.py # benchmark.md rendering
+│   ├── call_chain.py       # Internal-call reachability helper
+│   ├── assert_thresholds.py # Release-quality threshold gate
+│   ├── templates/          # 76 WQL benchmark detector ports
+│   ├── corpus/             # Active answer keys + registry
+│   ├── fixtures/           # Split benchmark-family Solidity fixtures
+│   └── results/            # Sole host output mount; generated/ignored
 ├── test-data/              # Test contracts (core/, security/)
 └── docs/                   # Documentation
     ├── workflows.md        # Internal workflow details
     ├── usage.md            # CLI and SDK usage
-    ├── wql-syntax.md       # WQL v2 template language reference (v1 migration appendix)
+    ├── wql-syntax.md       # WQL template language reference
     ├── extension-output.md # data/nav.json + data/explorer.json schema
     └── project-overview.md # This file
 ```
@@ -168,6 +194,13 @@ w3goaudit/
 - Project root detection
 - Framework identification (Foundry/Hardhat/Truffle)
 - Remapping support for dependency resolution
+- Solidity-aware import parsing ignores comments/string lookalikes and decodes
+  valid Solidity string escapes before filesystem resolution
+- Foundry remappings honor the active `FOUNDRY_PROFILE`, optional context,
+  longest applicable context/prefix, and continue to later mappings/fallbacks
+  when a candidate target is missing or not a regular file
+- Canonical `ResolvedImports` provenance is persisted for exact identity after
+  database-cache round-trips
 - Path canonicalization (`EvalSymlinks` + `Clean`) so symlink/relative
   aliases don't double-load the same file
 - UTF-8 BOM stripping so pragma/import regexes work on BOM-prefixed sources
@@ -192,8 +225,8 @@ w3goaudit/
 4. **Build Inheritance** - Apply **canonical** C3 linearization (forward-order
    "no-tail" merge over the reversed base list — the MRO solc computes, not a
    divergence-prone heuristic; cycle-safe — `A is B; B is A` errors out instead
-   of panicking). Bases are resolved scope-aware via `ResolveContractName`, so a
-   duplicate contract name (real vs mock) picks the in-scope definition.
+   of panicking). `LinearizedBaseIDs` stores exact `file#Contract` identities;
+   ambiguous bases remain unresolved and diagnostic instead of being guessed.
 5. **Build Call Graph** - Resolve all function calls (deterministic iteration
    order). A post-pass (`ResolveSuperAcrossLeaves`) makes `super` resolution
    context-aware: `super.f()` binds against the linearization of the most-derived
@@ -230,17 +263,16 @@ interface/contract methods with the same names.
 **Responsibility:** Execute WQL templates to find vulnerabilities.
 
 **Capabilities:**
-- Load YAML templates in either syntax, auto-detected per file: **WQL v2**
-  (`select`/`from`/`where` — the primary authoring surface as of v0.4; all 106
-  official/benchmark/feature-test templates are v2) or legacy v1 (`query:` with
-  `filter:`/`match:`, still used by `templates/security/`). `TemplateV2.lower()`
-  (`pkg/engine/wql_v2.go`) parses v2 and lowers it into the same v1 `Rule` IR, so
-  the rest of the engine — matching, taint, reachability — never sees a v2/v1
-  distinction; only the front-end differs. Full load-time validation:
+- Load YAML templates as **WQL** (`meta` plus `query:` — `select`/`from`/
+  `where` or a query-level `and:`/`or:` composition; all 106 official,
+  benchmark, and feature-test templates use it). Unknown keys at any level
+  are rejected by the strict parser. `TemplateDoc.lower()`
+  (`pkg/engine/wql_v2.go`) compiles the document into evaluator `Rule` IR
+  before matching, taint, and reachability run. Full load-time validation includes:
   required metadata, rule-placement (`filter:` vs `match:`), regex validity,
   known presets, known kinds. Directory loading fails closed by default; use
   `--ignore-invalid-templates` only for ad-hoc mixed rule folders.
-- Parse WQL syntax (all/any/not/seq/has/inside) with bounded recursion
+- Parse WQL logic (`all`/`any`/`not`/`sequence`/`has`/`in`) with bounded recursion
   (`MaxRuleRecursionDepth = 64`)
 - Recursive `arg.N` constraint propagation through nested rules
 - Process-wide compiled-regex cache
@@ -290,6 +322,8 @@ engine per goroutine.
 // Database - Complete project representation
 type Database struct {
     ProjectRoot   string
+    ScanTarget    string
+    Diagnostics   []Diagnostic
     Contracts     map[string]*Contract
     SourceFiles   map[string]*SourceFile
     MainContracts map[string]*MainContractEntry  // contractID → entry with funcs + linearization
@@ -300,8 +334,9 @@ type Database struct {
 }
 
 type MainContractEntry struct {
-    EntryFunctions  []string  // resolved entry function IDs (absPath#ContractName.selector)
-    LinearizedBases []string  // C3 linearization (most derived first)
+    EntryFunctions    []string  // resolved exact function IDs
+    LinearizedBases   []string  // compatibility/display names
+    LinearizedBaseIDs []string  // exact C3 file#Contract identities
 }
 
 // Contract - Single contract/interface/library
@@ -315,7 +350,8 @@ type Contract struct {
     Events           []*Event
     Modifiers        []*Modifier
     BaseContracts    []string
-    LinearizedBases  []string  // C3 linearization (most derived first)
+    LinearizedBases  []string  // compatibility/display names
+    LinearizedBaseIDs []string // exact C3 identities, derived first
     InheritanceWeight int
     IsAbstract       bool
 }
@@ -335,10 +371,10 @@ type Function struct {
     Calls           []*FunctionCall
     StartLine       int
     EndLine         int
-    StartCol        int  // 1-based; also on Modifier/Contract/StateVariable/Event/Struct/Enum/Parameter
-    EndCol          int
-    StartByte       int  // 0-based; zero for synthetic/compiler-injected nodes
-    EndByte         int
+    StartCol        int  // 1-based Unicode-code-point column
+    EndCol          int  // 1-based, half-open Unicode-code-point column
+    StartByte       int  // 0-based UTF-8 byte offset
+    EndByte         int  // 0-based, half-open UTF-8 byte offset
 }
 ```
 
@@ -348,6 +384,9 @@ declarations (interior statements/expressions are now located, not just
 functions), `FunctionCall`/`CallEdge` add `Col`/`Byte`, and `pkg/report`
 surfaces them in findings, SARIF, and the `nav.json`/`explorer.json`
 navigation artifacts. Output schema bumped to `2.0.0` to reflect the added fields.
+SARIF declares `columnKind: unicodeCodePoints`; it does not emit
+`charOffset`/`charLength`, because those are character offsets rather than UTF-8
+byte offsets.
 
 **Code:** [pkg/types/](../pkg/types)
 
@@ -360,7 +399,7 @@ navigation artifacts. Output schema bumped to `2.0.0` to reflect the added field
 **Result folder** (`report.WriteBundle`, [pkg/report/bundle.go](../pkg/report/bundle.go)):
 - `overview.md`, `findings.md` — human-readable Markdown
 - `results.sarif` — SARIF 2.1.0 (always)
-- `data/{database.json,findings.json,overview.json}` — machine-readable; the
+- `data/{database.json,findings.json,overview.json,diagnostics.json}` — machine-readable; the
   canonical database lives only here (reusable via `--db`)
 - `data/nav.json`, `data/explorer.json` — extension-facing data layer for a
   future VSCode Solidity extension: a flat symbol navigation index (defs,
@@ -370,16 +409,17 @@ navigation artifacts. Output schema bumped to `2.0.0` to reflect the added field
   [pkg/report/explorer.go](../pkg/report/explorer.go); both manifest-indexed
   and schema-versioned like the rest of `data/` (see
   [docs/extension-output.md](./extension-output.md))
-- `<MainContract>/state-changes.md` — per-contract state-change matrix built by
+- `contracts/<relative-source>/<MainContract>/state-changes.md` — per-contract state-change matrix built by
   [pkg/report/state_matrix.go](../pkg/report/state_matrix.go): each state variable,
   the functions that write it, and the entry points that reach a writer (reverse
   call-graph walk)
-- `<MainContract>/workflows/<entryFn>.md` — one self-contained context block per
+- `contracts/<relative-source>/<MainContract>/workflows/<entryFn>.md` — one self-contained context block per
   entry function (signature, auth/access control, guards, branch conditions,
   transitive state effects, Mermaid call workflow)
-- Folder/file names are sanitized; collisions are disambiguated with
-  `Name__<filestem>` (contracts) and `<entryFn>__<selector>` (overloads); stale
-  per-contract folders from a previous run are pruned on re-scan
+- Contract folders mirror the source path, so duplicate names in different
+  files do not collide. Overloaded workflow names use
+  `<entryFn>__<selector>`. The complete `contracts/` tree is regenerated on
+  re-scan.
 - Opt-in `overview.html` + `findings.html` mirror (`--html`)
 
 **Console:** color-coded summary header, findings grouped by severity with
@@ -402,6 +442,11 @@ config and the template home that mirrors the published template pack.
   tag in `templates/.version`
 - Graceful degradation: any download failure (offline, repo/release missing)
   falls back to the embedded official pack — no hard failure
+- Resource-limited archive extraction (64 MiB compressed, 8 MiB per file,
+  128 MiB decompressed, 4,096 accepted files, 8,192 ZIP entries) and a
+  rollback-safe staged directory swap
+- Trust boundary: GitHub source zipballs are authenticated by TLS but provide
+  no digest/signature for independent verification
 - `config.yml` load with built-in defaults; every key is overridable by a CLI flag
 - `UpdateTemplates` powers `--update-templates`; tool self-update (`--update`)
   lives in `cmd/w3goaudit/update.go` (runs `go install …@latest`)
@@ -410,6 +455,34 @@ config and the template home that mirrors the published template pack.
 > embedded official pack.
 
 **Code:** [pkg/home/](../pkg/home)
+
+---
+
+### 7. Competitive Benchmark Harness
+
+**Responsibility:** Run the reproducible competitive corpus, normalize native
+scanner output, score it against the shared answer key, and enforce W3GoAudit's
+release-quality gate.
+
+| Module | Responsibility |
+|---|---|
+| `run_benchmark.py` | CLI and sequential orchestration. |
+| `benchmark_core.py` | Paths, source indexes, process I/O, aliases, and manifests. |
+| `benchmark_adapters.py` | Scanner commands and native-output normalization. |
+| `benchmark_scoring.py` | Exact/call-chain-relaxed matching and metrics. |
+| `benchmark_reporting.py` | `benchmark.md` rendering. |
+| `call_chain.py` | Internal-call reachability helper. |
+| `assert_thresholds.py` | Release-quality threshold gate. |
+
+Scanner and corpus-case execution remains sequential so tool timings are not
+distorted by CPU, memory, compiler-cache, or disk contention. The only
+supported multi-tool host workflow remains:
+
+```bash
+docker compose -f benchmarks/compose.yaml run --rm benchmark
+```
+
+**Code:** [benchmarks/](../benchmarks)
 
 ---
 
@@ -537,21 +610,26 @@ function _processWithdraw() internal {
 - Call graph construction
 - Entry point identification
 
-**WQL Query Language (v2, primary as of v0.4)**
-- Query structure: `select` (what to find) + `from` (scope) + `where` (flat matcher list, implicit AND);
-  `select` is optional for contract-scope pure-regex detectors
-- The loader auto-detects legacy v1 (`filter:`/`match:`) per file and lowers v2 into the same v1 `Rule` IR,
-  so the underlying evaluator is unchanged
+**WQL Query Language**
+- Public source is `meta` plus `query:` (unknown keys rejected at every
+  level); `query:` composes with `and:`/`or:` one level deep. `select` is
+  scalar and may be omitted
+  only when `where` supplies a complete scope-root matcher (for example a
+  top-level sequence or contract-root regex/structural rule).
+- The loader lowers source documents into evaluator `Rule` IR; the
+  underlying `Template`/`QueryBlock`/`Rule` values are execution IR, not a
+  second public YAML schema
 - Logic operators: all, any, not, sequence
-- Traversal: contains (descendants), inside (ancestors)
+- Traversal: `has` (descendants), `in` (ancestors)
 - Atomic matchers: `block:` (kind), `name:` (regex), bare attribute keys, `preset:`, `regex:`
-- Filter helpers: modifier, extends, func_name, visibility, mutability, has_guard, version, has_param
+- Context matchers: `modifier`, `base`, `func_name`, `visibility`, `mutability`,
+  `guarded_by`, `version`, `has_param`
 - Taint analysis: `tainted: parameter|state_var|local_var|sender` source tracking
-- Call-specific: `args: {0: ...}` or flat `arg.N:` keys
+- Call-specific: `arg.N:` keys
 - Semantic groups: outgoing_call, eth_transfer, delegatecall, check/guard, token_call, state_write/state_read, selfdestruct
-- Presets (v2 names, intuitive polarity): `access_controlled`, `caller_checked`, `reentrancy_guarded`,
-  `user_controlled` (map to the unchanged v1 `unAuthenticated`/`unCheckedSender`/`unLocked` internals via
-  `presetToV1`, which also flips polarity)
+- Presets (intuitive polarity): `access_controlled`, `caller_checked`,
+  `reentrancy_guarded` (mapped to evaluator presets through `presetToIR`);
+  parameter-controlled data is explicit as `tainted: parameter`
 
 **Extract Subcommands (11 total)**
 - Canonical order widest→narrowest: `main`, `entry`, `inheritance`, `statevar`, `selector`, `involve`, `workflow`, `bundle`, `context`, `source`, `diff`
@@ -560,12 +638,16 @@ function _processWithdraw() internal {
 - `workflow` — full transitive source for an entry function (BFS call graph, report-ready)
 - Output defaults to **Markdown**; every subcommand except `diff` accepts an optional
   trailing source `[path]` to build the database on the fly, so `--db` is not strictly required
+- Exact contract/function IDs, selectors, and 4-byte signatures are accepted;
+  ambiguous short names fail with sorted candidates. Inherited state/context/
+  bundle data walks exact `LinearizedBaseIDs`, not display names.
 
 
 **Reporting**
 - One **result folder** per scan: `overview.md`, `findings.md`, always-on
   `results.sarif` + `run.log`, a `data/` (database.json + findings.json +
-  overview.json), and one sub-folder per main contract
+  overview.json + diagnostics.json + manifest/nav/explorer), and one sub-folder
+  per main contract
 - Per-entry workflow files (signature, auth, guards, branches, state effects,
   call workflow) and a per-contract state-change matrix
 - Console with severity icons and reachability traces
@@ -596,12 +678,15 @@ function _processWithdraw() internal {
 - Folder-based output (Markdown + SARIF + JSON data/)
 - Database caching via JSON files (reuse `data/database.json` with `--db`)
 - Verbose terminal mode; full detail always captured in `run.log`
+- Source/cache warning parity; `--strict-imports` rejects persisted unresolved
+  imports before template execution/report generation
 
 **SDK**
 - Go library for integration
 - Builder, Engine, Report APIs
 - Database caching (load/save JSON)
-- Debug writer configuration
+- Scan-local immutable logger/options APIs; package-global logging wrappers are
+  deprecated compatibility surfaces
 
 ---
 
@@ -708,12 +793,13 @@ go test ./pkg/...
 ```
 test-data/
 ├── security/               # Security detection fixtures (paired with templates/official/)
-│   └── *.sol               # general + promoted-detector fixtures
+│   └── 15 *.sol            # canonical matrices/regressions; no aggregate test-* copies
 │
 └── core/                   # Core pipeline / tool fixtures (not security detection)
-    ├── build-database/     # Parser + builder tests (01-..10-)
+    ├── build-database/     # 16 parser/builder/report fixtures (01-..15-, two 10-* cases)
     ├── engine-features/    # WQL engine operator tests (paired with templates/test/)
-    └── extract/            # CLI `extract` demo fixture (defi-vault.sol)
+    ├── extract/            # CLI `extract` demo fixture (defi-vault.sol)
+    └── identity-collision/ # same-named contracts in separate source paths
 ```
 
 ### Running Tests
@@ -729,7 +815,15 @@ go test ./pkg/...
 ./w3goaudit test-data/security/ \
   --template templates/official/ \
   -o test-report/
+
+# Docker Compose is the only supported benchmark host workflow. The image
+# derives and verifies Go directly from go.mod.
+docker compose -f benchmarks/compose.yaml run --rm benchmark
 ```
+
+The image verifies the reviewed generated-lock hash for the pinned 4naly3er
+commit before proving that its dependencies install offline from the completed
+lockfile.
 
 ---
 
@@ -788,6 +882,10 @@ go test ./pkg/...
 
 ## Dependencies
 
+Build with the exact toolchain declared by `go.mod` (currently Go 1.26.5).
+This is a security-driven floor: govulncheck's reachable standard-library
+advisories require fixes available in Go >=1.25.12.
+
 ### Direct Dependencies
 
 - **solast-go** — Solidity AST parser
@@ -821,6 +919,6 @@ MIT License
 - [Internals](./internals.md) - Technical deep-dive: functions, workflows, algorithms, edge cases
 - [Workflows](./workflows.md) - Detailed internal workflows
 - [Usage Guide](./usage.md) - CLI and SDK usage
-- [WQL Syntax](./wql-syntax.md) - WQL v2 template language reference (with v1 migration appendix)
+- [WQL Syntax](./wql-syntax.md) - WQL template language reference
 - [Extension Output](./extension-output.md) - `data/nav.json` + `data/explorer.json` schema
 - [README](../README.md) - Quick start guide

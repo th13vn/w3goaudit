@@ -21,10 +21,11 @@ Complete SDK reference for integrating W3GoAudit into your Go applications.
 
 ## Overview
 
-The W3GoAudit SDK provides programmatic access to the Solidity contract analysis engine. It consists of five main packages:
+The W3GoAudit SDK provides programmatic access to the Solidity contract analysis engine. Its pipeline uses six main packages:
 
 ```
 pkg/
+├── logging/     # Immutable scan-local logger
 ├── reader/      # File discovery and loading
 ├── builder/     # Database construction
 ├── engine/      # Template execution
@@ -44,6 +45,7 @@ go get github.com/th13vn/w3goaudit
 
 ```go
 import (
+    "github.com/th13vn/w3goaudit/pkg/logging"
     "github.com/th13vn/w3goaudit/pkg/reader"
     "github.com/th13vn/w3goaudit/pkg/builder"
     "github.com/th13vn/w3goaudit/pkg/engine"
@@ -67,12 +69,14 @@ import (
 **Exported Functions:**
 ```go
 func New() *Reader
+func NewWithOptions(opts Options) *Reader
 func (r *Reader) Read(path string) ([]*types.SourceFile, error)
 func (r *Reader) ReadFile(path string) (*types.SourceFile, error)
 func (r *Reader) ReadFiles(paths []string) ([]*types.SourceFile, error)
 func (r *Reader) ReadDirectory(dirPath string) ([]*types.SourceFile, error)
 func (r *Reader) GetAllSources() []*types.SourceFile
 func (r *Reader) ResolveImports(projectRoot string) error
+func (r *Reader) Diagnostics() []types.Diagnostic
 func DetectProjectRoot(path string) (string, error)
 func DetectFramework(projectRoot string) string
 func SetVerboseWriter(w io.Writer)  // Set custom verbose output writer
@@ -97,6 +101,7 @@ func SetVerboseWriter(w io.Writer)  // Set custom verbose output writer
 **Exported Functions:**
 ```go
 func New() *Builder
+func NewWithOptions(opts Options) *Builder
 func (b *Builder) Build(sources []*types.SourceFile) (*types.Database, error)
 func (b *Builder) GetDatabase() *types.Database
 func SetVerboseWriter(w io.Writer)  // Set custom verbose output writer
@@ -118,7 +123,7 @@ func SetVerboseWriter(w io.Writer)  // Set custom verbose output writer
 
 **Exposed Types:**
 - `Engine` - Query execution engine
-- `Template` - WQL template structure
+- `Template` - Compiled evaluator IR returned by the WQL loader
 - `TemplateLoadOptions` - Directory loading policy
 - `Finding` - Vulnerability finding
 - `Location` - Finding location
@@ -127,6 +132,7 @@ func SetVerboseWriter(w io.Writer)  // Set custom verbose output writer
 **Exported Functions:**
 ```go
 func New(db *types.Database) *Engine
+func NewWithOptions(db *types.Database, opts Options) *Engine
 func (e *Engine) Execute(tmpl *Template) []*Finding
 func (e *Engine) ExecuteAll(templates []*Template) []*Finding
 func LoadTemplate(path string) (*Template, error)
@@ -144,12 +150,15 @@ directory loader and backs the binary's embedded default pack
 (`github.com/th13vn/w3goaudit/templates`.`Official`). `ParseTemplate` is the
 inline equivalent of `LoadTemplate` for SDK consumers that hold YAML in memory.
 
-> **WQL v2:** All 106 official/benchmark/feature-test templates shipped in
-> this repo are written in **WQL v2** (`select`/`from`/`where` — see
-> [`docs/wql-syntax.md`](./wql-syntax.md)) as of v0.4. `LoadTemplate` /
-> `LoadTemplates` / `ParseTemplate` auto-detect v1 `query:` vs v2 per
-> document — no version flag or opt-in needed. `templates/security/` still
-> holds legacy v1 seed templates, which continue to load unchanged.
+> **WQL:** All 106 official/benchmark/feature-test templates shipped in
+> this repo are written in **WQL** — `meta` plus one `query:` holding
+> `select`/`from`/`where` or a query-level `and:`/`or:` composition (see
+> [`docs/wql-syntax.md`](./wql-syntax.md)). `LoadTemplate`, `LoadTemplates`,
+> `LoadTemplatesFromFS`, and `ParseTemplate` accept this schema only; unknown
+> keys at any level are rejected. The returned `Template`/`QueryBlock`/`Rule`
+> values are compiled evaluator IR, not a second supported YAML schema; an
+> or:-composed template carries every executable block in
+> `Template.Queries` (`Queries[0] == Query`).
 
 **What It Does:**
 - Load YAML templates
@@ -171,11 +180,14 @@ type SourceFile struct {
     Checksum      string // SHA256 hash
     Contracts     []string
     Imports       []string
+    ResolvedImports []string // canonical imported files selected by the reader
     PragmaVersion string
 }
 
 type Database struct {
     ProjectRoot   string
+    ScanTarget    string
+    Diagnostics   []Diagnostic
     SourceFiles   map[string]*SourceFile
     Contracts     map[string]*Contract
     MainContracts map[string]*MainContractEntry
@@ -201,8 +213,9 @@ type SemanticFacts struct {
 }
 
 type MainContractEntry struct {
-    EntryFunctions  []string  // resolved entry function IDs
-    LinearizedBases []string  // C3 linearization (most derived first)
+    EntryFunctions    []string  // exact resolved function IDs
+    LinearizedBases   []string  // compatibility/display names
+    LinearizedBaseIDs []string  // exact file#Contract C3 identities
 }
 
 type Contract struct {
@@ -211,7 +224,8 @@ type Contract struct {
     Kind              ContractKind  // contract, interface, library, abstract
     SourceFile        string
     BaseContracts     []string
-    LinearizedBases   []string  // C3 linearization (most derived first)
+    LinearizedBases   []string  // compatibility/display names
+    LinearizedBaseIDs []string  // exact C3 identities (most derived first)
     InheritanceWeight int
     Functions         []*Function
     StateVariables    []*StateVariable
@@ -221,8 +235,8 @@ type Contract struct {
     Enums             []*Enum
     IsAbstract        bool
     StartLine, EndLine       int  // source location
-    StartCol, EndCol         int  // 1-based columns (v0.4)
-    StartByte, EndByte       int  // character offsets (v0.4)
+    StartCol, EndCol         int  // 1-based Unicode-code-point columns
+    StartByte, EndByte       int  // 0-based UTF-8 byte offsets
 }
 
 type Function struct {
@@ -241,8 +255,8 @@ type Function struct {
     EndLine         int
     StartCol        int  // 1-based column of StartLine (v0.4)
     EndCol          int  // 1-based column of EndLine (v0.4)
-    StartByte       int  // character offset into the source file (v0.4)
-    EndByte         int  // character offset into the source file (v0.4)
+    StartByte       int  // 0-based UTF-8 byte offset into the source file
+    EndByte         int  // 0-based, half-open UTF-8 byte offset
 }
 ```
 
@@ -250,14 +264,17 @@ type Function struct {
 > `EndByte` are new on `Contract` and `Function` above, and on every other
 > declaration type (`Modifier`, `StateVariable`, `Event`, `Struct`, `Enum`,
 > `Parameter`) plus `ASTNode` itself — including interior statement/expression
-> nodes, not just declaration roots. Columns are 1-based; byte offsets are
-> character offsets into the source file; all four are zero for synthetic
+> nodes, not just declaration roots. Columns are one-based Unicode-code-point
+> positions and `EndCol` is half-open. Byte offsets are zero-based, half-open
+> UTF-8 bytes into the source file; all four are zero for synthetic
 > nodes with no source counterpart. `FunctionCall` and `CallEdge` (the
 > call-graph edge type) gained a matching `Col`/`Byte` pair for the call site.
 > Output `schemaVersion` bumped `1.0.0` → `2.0.0` for this change. See
 > [`pkg/types/INDEX.md`](../pkg/types/INDEX.md) and
 > [`pkg/builder/INDEX.md`](../pkg/builder/INDEX.md#locationgo) for the full
 > field/helper reference.
+> SARIF declares `columnKind: unicodeCodePoints` and intentionally omits
+> `charOffset`/`charLength`; UTF-8 byte offsets are not SARIF character offsets.
 
 **Exported Functions:**
 ```go
@@ -267,10 +284,14 @@ func (db *Database) GetContractByName(name string) *Contract
 func (db *Database) GetAllFunctions() []*Function
 func (db *Database) GetContractByID(id string) *Contract
 func (db *Database) ResolveContractName(name, fromFile string) *Contract
+func (db *Database) ResolveContractNameExact(name, fromFile string) (*Contract, bool)
+func (db *Database) LinearizedContracts(contract *Contract) []*Contract
+func (db *Database) AnalysisComplete() bool
 func (db *Database) GetStats() *DatabaseStats
 func LoadFromJSON(path string) (*Database, error)  // Load pre-built database from JSON
+func LoadFromJSONWithOptions(path string, opts LoadOptions) (*Database, error)
 func MakeContractID(filePath, contractName string) string
-func MakeFunctionID(filePath, contractName, funcName string) string
+func MakeFunctionID(filePath, contractName, funcSelector string) string
 ```
 
 ---
@@ -282,20 +303,22 @@ func MakeFunctionID(filePath, contractName, funcName string) string
 **Exposed Types:**
 - `Generator` - Report generator
 - `SummaryReport` - Project summary
-- `BundleOptions` - Result-folder options (`HTML bool`)
+- `GeneratorOptions` - Scan-local logger + injectable `Now` clock
+- `BundleOptions` - Result-folder options (`HTML`, injectable `Now` clock)
 - `ToolMeta` - Tool name/version metadata stamped into reports
 - `NavJSON` / `ExplorerJSON` - extension data-layer models (v0.4, see below)
 
 **Exported Functions:**
 ```go
 func NewGenerator(db *types.Database) *Generator
+func NewGeneratorWithOptions(db *types.Database, opts GeneratorOptions) *Generator
 func (g *Generator) GenerateSummary() *SummaryReport
 func FormatFindingsAsMarkdown(findings []*engine.Finding, db *types.Database) string
 func FormatFindingsAsHTML(findings []*engine.Finding, db *types.Database) string
 func FormatFindingsAsSARIF(findings []*engine.Finding, tool ToolMeta, projectRoot string) (string, error)
 
 // WriteBundle renders the complete scan result folder (overview.md, findings.md,
-// results.sarif, data/{database,findings,overview,nav,explorer}.json, and one
+// results.sarif, data/{manifest,database,findings,overview,diagnostics,nav,explorer}.json, and one
 // folder per main contract with state-changes.md + workflows/<entryFn>.md).
 // run.log is written separately by the CLI; HTML mirrors are added when
 // opts.HTML is set.
@@ -307,6 +330,7 @@ func WriteBundle(dir string, db *types.Database, summary *SummaryReport,
 // data/explorer.json.
 func BuildNavJSON(db *types.Database) *NavJSON
 func BuildExplorerJSON(db *types.Database) *ExplorerJSON
+func BuildDiagnosticsJSON(db *types.Database) *DiagnosticsJSON
 
 // Severity helpers — the single source of truth shared by the formatters and
 // the CLI's --severity / --min-severity filters.
@@ -324,11 +348,20 @@ func IsKnownSeverity(s string) bool
 - Create call graph visualizations
 - Extract code snippets
 
+`WriteBundle` always emits `data/diagnostics.json`. Its manifest distinguishes
+`projectRoot` from the represented `scanTarget` (`target` remains the
+compatibility alias), reports `analysisComplete`/diagnostic counts, separates
+contract/interface/library/declaration counts, and indexes optional HTML only
+when emitted. Finding/content order is deterministic. Real timestamps vary;
+inject the same fixed `Now` into `GeneratorOptions` and `BundleOptions` when a
+byte-stable complete bundle is required.
+
 > **v0.4 — extension data layer:** `BuildNavJSON` and `BuildExplorerJSON`
 > (`pkg/report/nav.go`, `pkg/report/explorer.go`) build the two JSON models
 > the VSCode extension consumes (`data/nav.json` / `data/explorer.json`;
 > `WriteBundle` calls both automatically). Both share `SrcRange`, a compact
-> 1-based line/column span with character byte offsets and omitted zero
+> one-based Unicode-code-point line/column span with zero-based UTF-8 byte
+> offsets and omitted zero
 > fields:
 >
 > ```go
@@ -811,6 +844,7 @@ templates, err := engine.LoadTemplates("./templates/official/")
 ```go
 type TemplateLoadOptions struct {
     IgnoreInvalid bool
+    Logger        *logging.Logger
 }
 
 func LoadTemplatesWithOptions(dir string, opts TemplateLoadOptions) ([]*Template, error)
@@ -819,7 +853,10 @@ func LoadTemplatesLenient(dir string) ([]*Template, error)
 
 Use these only for mixed or ad-hoc directories where invalid templates should
 be skipped intentionally. Even lenient loading returns an error when no valid
-templates are found.
+templates are found. `Logger` optionally supplies the immutable scan-local
+logger from `pkg/logging`; nil preserves the deprecated package-global logging
+behavior for legacy callers. The installation import block above already
+imports that package as `logging`.
 
 **Example:**
 ```go
@@ -996,8 +1033,9 @@ func (db *Database) GetContractByName(name string) *Contract
 Gets the contract matching the name. On a name collision (the same name in more
 than one file) it returns the candidate with the lexicographically-smallest ID,
 so the result is deterministic across runs. Prefer `GetContractByID` when you
-already hold a fully-qualified `absPath#Name` ID, or `ResolveContractName` when
-you have a referring file and want scope-aware disambiguation.
+already hold a fully-qualified `absPath#Name` ID. For identity-sensitive
+resolution from a referring file, use `ResolveContractNameExact`; use
+`ResolveContractName` only when compatibility fallback is acceptable.
 
 **Parameters:**
 - `name` (string) - Contract name
@@ -1021,9 +1059,8 @@ Resolves an unqualified contract name to a concrete contract, preferring the
 candidate "closest" to `fromFile` when the name is ambiguous: same file → same
 directory → a relative import in `fromFile` that resolves exactly → else the
 lexicographically-smallest ID. Used internally by C3 linearization and
-internal-call resolution so a project's real `Token` is not confused with a
-`test/mocks/Token`. It is a deterministic heuristic, not full import-scope
-resolution (remapped imports like `@openzeppelin/...` are not resolved).
+legacy/name-compatible callers. Identity-sensitive core paths do not rely on
+this heuristic.
 
 **Parameters:**
 - `name` (string) - Unqualified contract name
@@ -1036,6 +1073,30 @@ resolution (remapped imports like `@openzeppelin/...` are not resolved).
 ```go
 base := db.ResolveContractName("IERC20", derived.SourceFile)
 ```
+
+#### ResolveContractNameExact / LinearizedContracts
+
+```go
+func (db *Database) ResolveContractNameExact(name, fromFile string) (*Contract, bool)
+func (db *Database) LinearizedContracts(contract *Contract) []*Contract
+```
+
+Use these for identity-sensitive work. Exact resolution considers the current
+file and `SourceFile.ResolvedImports` (including remapped imports) and returns
+`ok=false` when identity remains ambiguous; it never uses same-directory or
+lexicographic proximity as proof. `LinearizedContracts` follows canonical
+`LinearizedBaseIDs` in derived-first C3 order. Inheritance, call-graph, report,
+navigation, workflow, state, and extract consumers use these exact identities.
+
+#### Diagnostics and cache parity
+
+`Database.Diagnostics` contains deduplicated, stable-sorted analysis-quality
+records such as unresolved imports/bases, parser recovery/skips, invalid source
+ranges, and unresolved exact identity. `AnalysisComplete()` reports whether any
+diagnostic marks known coverage loss. Diagnostics, `ScanTarget`, source content,
+and exact MRO IDs serialize in the database, so source and equivalent
+`LoadFromJSONWithOptions` scans can enforce the same policy and render the same
+warning/diagnostic artifacts.
 
 ---
 
@@ -1191,16 +1252,20 @@ db, err := b.Build(sources)  // What happens?
 ```
 
 **Behavior:**
-- Builder returns error with parse details
-- Database is nil
+- Builder tolerates recoverable parser errors and continues with the remaining
+  source, recording `parse.recovered`
+- A fatally skipped file records `parse.skipped`; the returned database is
+  intentionally marked incomplete rather than silently appearing clean
 
 **Correct Handling:**
 ```go
 db, err := b.Build(sources)
-if err != nil {
-    // Log or report which file failed
-    log.Printf("Build failed: %v", err)
-    return err
+if err != nil { return err }
+for _, diagnostic := range db.Diagnostics {
+    log.Printf("analysis diagnostic: %s: %s", diagnostic.Code, diagnostic.Message)
+}
+if !db.AnalysisComplete() {
+    return errors.New("analysis is incomplete; inspect diagnostics")
 }
 ```
 
@@ -1259,11 +1324,12 @@ mu.RUnlock()
 
 **Problem:**
 ```yaml
-# Invalid v2 template - missing required metadata
-select: external_call
-from: entry_function
-where:
-  - preset: user_controlled
+# Invalid template - missing required metadata
+query:
+  select: external_call
+  from: entry_function
+  where:
+    - tainted: parameter
 # Missing 'meta.severity'!
 ```
 
@@ -1462,92 +1528,51 @@ func inspectDatabase(db *types.Database) {
 
 ---
 
-### Verbose Logging Configuration
+### Scan-Local Logging and Options
 
-Control verbose output across all packages with custom writers.
-
-**Enable Verbose Logging to File:**
+Create one immutable logger per analysis and inject it through every object.
+This avoids package-global state and keeps concurrent scans from crossing
+enabled flags or writers.
 
 ```go
-package main
+log := logging.New(true, logFile) // nil writer becomes io.Discard
 
-import (
-    \"os\"
-    
-    \"github.com/th13vn/w3goaudit/pkg/builder\"
-    \"github.com/th13vn/w3goaudit/pkg/engine\"
-    \"github.com/th13vn/w3goaudit/pkg/reader\"
+r := reader.NewWithOptions(reader.Options{Logger: log})
+sources, err := r.Read("./contracts")
+if err != nil { return err }
+if err := r.ResolveImports(r.ProjectRoot); err != nil { return err }
+
+b := builder.NewWithOptions(builder.Options{
+    Logger:      log,
+    ProjectRoot: r.ProjectRoot,
+    ScanTarget:  "./contracts",
+    Diagnostics: r.Diagnostics(),
+})
+db, err := b.Build(r.GetAllSources())
+if err != nil { return err }
+
+e := engine.NewWithOptions(db, engine.Options{Logger: log})
+templates, err := engine.LoadTemplatesWithOptions(
+    "./templates/official",
+    engine.TemplateLoadOptions{Logger: log},
 )
+if err != nil { return err }
+findings := e.ExecuteAll(templates)
 
-func main() {
-    // Create verbose log file
-    logFile, err := os.Create(\"verbose.log\")
-    if err != nil {
-        panic(err)
-    }
-    defer logFile.Close()
-    
-    // Enable verbose logging to file for all packages
-    reader.VerboseEnabled = true
-    reader.SetVerboseWriter(logFile)
-    
-    builder.VerboseEnabled = true
-    builder.SetVerboseWriter(logFile)
-    
-    engine.VerboseEnabled = true
-    engine.SetVerboseWriter(logFile)
-    
-    // Now all verbose output goes to verbose.log instead of stdout
-    r := reader.New()
-    sources, _ := r.Read(\"./contracts/\")
-    
-    b := builder.New()
-    db, _ := b.Build(sources)
-    
-    // Verbose messages are in verbose.log
-}
+gen := report.NewGeneratorWithOptions(db, report.GeneratorOptions{
+    Logger: log,
+    Now:    fixedClock, // omit in normal use
+})
+summary := gen.GenerateSummary()
+err = report.WriteBundle(out, db, summary, findings, tool, report.BundleOptions{
+    Now: fixedClock, // same clock makes timestamped artifacts byte-stable
+})
 ```
 
-**Enable Verbose to Stdout (Default):**
-
-```go
-import \"os\"
-
-// Simple toggle
-reader.VerboseEnabled = true
-builder.VerboseEnabled = true
-engine.VerboseEnabled = true
-
-// Explicitly set stdout (optional, this is the default)
-reader.SetVerboseWriter(os.Stdout)
-builder.SetVerboseWriter(os.Stdout)
-engine.SetVerboseWriter(os.Stdout)
-```
-
-**Conditional Verbose Logging:**
-
-```go
-func buildWithVerbose(sources []*types.SourceFile, logPath string) (*types.Database, error) {
-    // Setup verbose logging if path provided
-    if logPath != \"\" {
-        logFile, err := os.Create(logPath)
-        if err != nil {
-            return nil, fmt.Errorf(\"failed to create verbose log file: %w\", err)
-        }
-        defer logFile.Close()
-        
-        builder.VerboseEnabled = true
-        builder.SetVerboseWriter(logFile)
-    }
-    
-    b := builder.New()
-    return b.Build(sources)
-}
-
-// Usage
-db, err := buildWithVerbose(sources, \"build-verbose.log\")  // Verbose to file
-db, err := buildWithVerbose(sources, \"\")                   // No verbose output
-```
+`reader.New`, `builder.New`, `engine.New`, `types.NewDatabase`, and
+`report.NewGenerator` preserve the historical package-global verbose behavior
+for source compatibility. Treat `VerboseEnabled`/`SetVerboseWriter` as
+deprecated wrappers; new and concurrent code should use options constructors.
 
 ---
 
@@ -1790,14 +1815,23 @@ func getCachedDB(srcPath string) (*types.Database, error) {
 ### 4. Use Appropriate Template Scopes
 
 ```go
-// GOOD: - Use entrypoint for security
-tmpl := &engine.Template{
-    Query: engine.Query{
-        Scope: "entrypoint",  // Focus on attack surface
-        Match: ...,
-    },
+// GOOD: author public WQL and let the loader compile evaluator IR.
+tmpl, err := engine.ParseTemplate(`
+meta: {id: custom-external-call, severity: HIGH}
+query:
+  select: outgoing_call
+  from: entry_function
+  where:
+    - not: {preset: access_controlled}
+`)
+if err != nil {
+    return err
 }
 ```
+
+Use `entry_function` for the externally callable attack surface. Constructing
+`Template`/`QueryBlock`/`Rule` values manually couples SDK code to evaluator IR
+and should be reserved for engine-internal tests.
 
 ---
 

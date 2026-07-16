@@ -4,13 +4,17 @@ This document explains the internal workflows of W3GoAudit, detailing how the en
 
 ## Overview
 
-W3GoAudit has three main workflows:
+W3GoAudit has three product workflows plus one release-quality workflow:
 
 1. **Scan Workflow** - Analyze contracts with security templates
 2. **Build Workflow** - Construct contract database
 3. **Default Scan Workflow** - Scan + generate project reports (combined)
+4. **Competitive Benchmark Workflow** - Docker Compose-only multi-tool quality gate
 
-All workflows share a common foundation: **Reader → Builder → Database**.
+All workflows share a common foundation: **Reader → Builder → Database**. The
+CLI snapshots flags/config into immutable scan options and injects one
+scan-local logger through reader, builder, cache load, engine, template loading,
+and report generation.
 
 ---
 
@@ -19,7 +23,7 @@ All workflows share a common foundation: **Reader → Builder → Database**.
 **Command:** `w3goaudit <path> [--template <template-path>]`
 
 **Purpose:** Scan Solidity contracts for vulnerabilities using WQL templates
-(v2 `select`/`from`/`where`, auto-detected against legacy v1 `query:`).
+(`select`/`from`/`where`). Removed top-level `query:` documents are rejected.
 Omitting `--template` uses `~/.w3goaudit/templates/` when populated, else the
 embedded official pack (see §3 for the full flag set and filtering).
 
@@ -48,6 +52,10 @@ graph LR
 3. **Skip excluded directories**: `node_modules`, `out`, `artifacts`, `test`, `lib`, etc.
 4. **Read file contents** into memory
 5. **Detect project root** and framework (Foundry/Hardhat/Truffle)
+6. **Resolve imports recursively** and persist each unresolved import as a
+   structured database diagnostic. Warnings are rendered on stderr from that
+   diagnostic after either a source build or `--db` load, keeping both paths
+   equivalent. The default remains tolerant; `--strict-imports` fails closed.
 
 **Code:** [reader.go](../pkg/reader/reader.go)
 
@@ -79,12 +87,13 @@ The builder constructs a comprehensive database through **7 phases**:
 **Phase 4: Build Inheritance**
 - Apply **C3 linearization** for proper method resolution order
 - Calculate inheritance weights
-- Resolve base contracts
+- Store display names in `LinearizedBases` and exact `file#Contract` identities
+  in `LinearizedBaseIDs`; ambiguous identities stay unresolved and diagnostic
 
 **Phase 5: Build Call Graph**
 - Identify internal, external, self, super, and low-level calls
 - Resolve call targets using inheritance chain
-- Track line numbers for all calls
+- Track exact caller/target identities and line/Unicode-column/UTF-8-byte call sites
 - Context-aware `super` post-pass (`ResolveSuperAcrossLeaves`): bind each
   `super.f()` to the next definition in **every** instantiation leaf's MRO
   (sound union, additive + deduplicated), since Solidity resolves `super`
@@ -131,19 +140,19 @@ graph TD
    `th13vn/w3goaudit-templates` (zipball download, nuclei-style), falling back to
    the embedded pack when offline.
 2. **Load template file(s)** from YAML
-3. **Auto-detect syntax version per file**: a document with a top-level
-   `select`/`from` (no top-level `query`) is WQL v2; otherwise it's legacy v1
-   `query:`. All shipped templates are v2 except the legacy seed pack in
-   `templates/security/`.
-4. **Parse template structure**: v2 `select`/`from`/`where`, or v1 `meta` + `query`
-5. **Lower v2 to the v1 `Rule` IR** (`TemplateV2.lower()` in
-   [wql_v2.go](../pkg/engine/wql_v2.go)) so both syntaxes feed the same
-   validation and evaluator
-6. **Validate template syntax**
-7. **Fail closed on invalid template directories** — by default, one invalid
+3. **Parse WQL strictly**: `meta` plus `query:` (`select`/`from`/`where`, or
+   a query-level `and:`/`or:` composition); unknown fields at any level are
+   rejected.
+4. **Lower to evaluator `Rule` IR** (`TemplateDoc.lower()` in
+   [wql_v2.go](../pkg/engine/wql_v2.go)) before validation and execution —
+   `or:` produces one QueryBlock per branch (`Template.Queries`), executed
+   as a deduplicated union; `and:` produces one block of labeled `all:`
+   branches at the join scope.
+5. **Validate template syntax**
+6. **Fail closed on invalid template directories** — by default, one invalid
    template or zero valid templates aborts the scan; `--ignore-invalid-templates`
    is the explicit ad-hoc escape hatch
-8. **Store in engine**
+7. **Store in engine**
 
 **Code:** [template.go](../pkg/engine/template.go), [wql_v2.go](../pkg/engine/wql_v2.go)
 
@@ -212,7 +221,7 @@ graph TD
     A[Findings + Database + Summary] --> B[WriteBundle]
     B --> C[overview.md / findings.md]
     B --> D[results.sarif]
-    B --> E[data/ database.json, findings.json, overview.json, nav.json, explorer.json]
+    B --> E[data/ database.json, findings.json, overview.json, diagnostics.json, manifest.json, nav.json, explorer.json]
     B --> F["per-contract: state-changes.md + workflows/&lt;entryFn&gt;.md"]
     B -->|--html| G[overview.html / findings.html]
     H[CLI] --> I[run.log: full verbose detail, always]
@@ -224,8 +233,13 @@ graph TD
   references, per-occurrence reachability trace blocks, and `All matched sites`
   blocks for multi-site findings
 - `results.sarif` — SARIF 2.1.0 (always)
-- `data/{database.json,findings.json,overview.json}` — machine-readable mirror;
+- `data/{database.json,findings.json,overview.json,diagnostics.json}` — machine-readable mirror;
   the canonical database lives only here and is reusable via `--db`
+- `data/manifest.json` — the complete machine index. `projectRoot` is the
+  detected project root; `scanTarget` is the original selected file/directory;
+  `target` is its compatibility alias. Counts distinguish contracts,
+  interfaces, libraries, and total declarations. Completeness/count fields and
+  optional emitted HTML paths are indexed explicitly.
 - `data/nav.json` — symbol-level navigation index (definitions, reverse call
   graph, interface→implementation), built by
   [nav.go](../pkg/report/nav.go); `data/explorer.json` — per-main-contract
@@ -300,19 +314,27 @@ The output JSON contains:
       "events": [...],
       "bases": [...],
       "linearizedBases": [...],
+      "linearizedBaseIds": ["path#ContractName", "path#Base"],
       "inheritanceWeight": 0
     }
   },
   "mainContracts": {
-    "path#MainContract": ["funcID1", "funcID2", ...]
+    "path#MainContract": {
+      "entryFunctions": ["path#MainContract.selector(types)", ...],
+      "linearizedBases": ["MainContract", "Base"],
+      "linearizedBaseIds": ["path#MainContract", "path#Base"]
+    }
   },
   "sourceFiles": [...],
-  "projectRoot": "/path/to/project"
+  "projectRoot": "/path/to/project",
+  "scanTarget": "/path/to/project/contracts",
+  "diagnostics": []
 }
 ```
 
 **Key fields:**
 - `linearizedBases` - C3 linearization order
+- `linearizedBaseIds` - canonical exact C3 identities
 - `mainContracts` - Deployable contracts with entry function IDs
 - `functions[].Calls` - Call graph edges
 - `functions[].Selector` - 4-byte function selector
@@ -346,8 +368,8 @@ The terminal shows staged progress (`▶ Reading sources`, `▶ Building databas
 references section, and the result-folder location. Full verbose detail is always
 captured in `<output>/run.log`.
 
-> **Removed in v0.3:** `--fail-on` (CI gating dropped — this is an audit tool, not
-> a gate), `--format`/`--json`/`--md`/`--html`-as-format (the folder always
+> **Removed in v0.3:** `--fail-on`,
+> `--format`/`--json`/`--md`/`--html`-as-format (the folder always
 > carries Markdown + SARIF + JSON), `--location-source`, and `--log`.
 
 ### Flow Diagram
@@ -397,6 +419,29 @@ graph LR
    - Functions with external calls
 
 **Code:** [report/summary.go](../pkg/report/summary.go), [report/generator.go](../pkg/report/generator.go)
+
+---
+
+## 4. Competitive Benchmark Workflow
+
+**Command:**
+
+```bash
+docker compose -f benchmarks/compose.yaml run --rm benchmark
+```
+
+Docker Compose is the only supported host entry point. The image contains the
+pinned compared scanners, and its Dockerfile reads and verifies the Go version
+directly from `go.mod`; the host does not run the Python benchmark runner or
+install scanner toolchains. Requested tools fail closed before output is
+replaced, and the only host-owned output is
+`benchmarks/results/<RUN_NAME>/`.
+
+When W3GoAudit is requested, the container recomputes the competitive metrics
+from TP/FP/FN and requires precision >= 0.65, recall >= 0.95, and zero failed
+cases. The image verifies the reviewed generated-lock hash for the pinned
+4naly3er commit and proves that the completed lock supports an offline frozen
+install.
 
 ---
 
@@ -481,8 +526,8 @@ graph TD
 
 **Purpose:** Track where identifiers originate from
 
-**Sources tracked** (the four values `tainted:` accepts in WQL v2; `tainted_from:`
-in legacy v1):
+**Sources tracked** (the four values WQL accepts through `tainted:`;
+the lowered evaluator IR stores the value in its `tainted_from` field):
 - `parameter` - Function parameters (user input)
 - `state_var` - Contract state variables
 - `local_var` - Local variables
@@ -490,7 +535,7 @@ in legacy v1):
 
 **Use case example:**
 Detect when a user-controlled parameter is passed to a dangerous function. In
-WQL v2, `arg.N:` addresses a call argument by position and `tainted:` names the
+WQL, `arg.N:` addresses a call argument by position and `tainted:` names the
 source:
 
 ```yaml
@@ -530,10 +575,11 @@ where:
 ### Reader
 - **Invalid paths**: Clear error messages
 - **Non-Solidity files**: Skipped with warning in verbose mode
-- **Permission errors**: Reported and skipped
+- **Permission/import errors**: Reported and persisted as diagnostics where the
+  scan can safely continue
 
 ### Builder
-- **Parse errors**: File reported, continues with other files
+- **Parse errors**: `parse.skipped`/`parse.recovered` diagnostics survive cache round-trips
 - **Tolerance mode**: Continues on recoverable syntax errors
 - **Missing contracts**: Skipped in call graph resolution
 
@@ -545,6 +591,9 @@ where:
 ### Report
 - **File write errors**: Permission issues reported
 - **Invalid output paths**: Created if parent directory exists
+- **Determinism:** finding/content order is deterministic; generated timestamps
+  vary normally. SDK tests/tools can inject one fixed clock with
+  `GeneratorOptions.Now` and `BundleOptions.Now` for a byte-stable bundle.
 
 ---
 
@@ -554,7 +603,7 @@ where:
 
 ```bash
 w3goaudit ./contracts/ \
-  --template ./templates/official/reentrancy-pattern.yaml \
+  --template ./templates/official/high/reentrancy-pattern.yaml \
   -o report/ \
   --verbose
 ```
@@ -583,6 +632,6 @@ w3goaudit ./contracts/ \
 ## Related Documentation
 
 - [Usage Guide](./usage.md) - CLI commands and SDK usage
-- [WQL Syntax](./wql-syntax.md) - WQL v2 template writing guide (v1 migration appendix)
+- [WQL Syntax](./wql-syntax.md) - WQL template writing guide
 - [Extension Output](./extension-output.md) - `data/nav.json` + `data/explorer.json` schema
 - [Project Overview](./project-overview.md) - Architecture and design

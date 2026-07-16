@@ -22,14 +22,15 @@ meta:
 # If the call is the RHS of an assign (`(bool ok, ) = to.call(...)`) the
 # return is captured; downstream guard analysis is out of scope. If it
 # is inside require/assert/if/return, it's also considered handled.
-from: function
-select: lowlevel_call
-where:
-  - not:
-      in:
-        any:
-          - block: require
-          - block: assert
-          - block: if
-          - block: assign
-          - block: return
+query:
+  from: function
+  select: lowlevel_call
+  where:
+    - not:
+        in:
+          any:
+            - block: require
+            - block: assert
+            - block: if
+            - block: assign
+            - block: return

@@ -12,7 +12,8 @@ meta:
     Add access control (onlyOwner or role-based modifier) to any function
     containing selfdestruct, or remove selfdestruct entirely.
 
-from: entry_function
-select: selfdestruct
-where:
-  - not: { preset: access_controlled }
+query:
+  from: entry_function
+  select: selfdestruct
+  where:
+    - not: { preset: access_controlled }

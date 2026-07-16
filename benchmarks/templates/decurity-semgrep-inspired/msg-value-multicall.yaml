@@ -12,8 +12,9 @@ meta:
   references:
     - https://github.com/Decurity/semgrep-smart-contracts/tree/master/solidity/security
 
-from: entry_function
-select: member
-where:
-  - base: '(?i)(Multicall|BoringBatchable|Batchable)'
-  - name: '^msg\.value$'
+query:
+  from: entry_function
+  select: member
+  where:
+    - base: '(?i)(Multicall|BoringBatchable|Batchable)'
+    - name: '^msg\.value$'

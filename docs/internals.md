@@ -28,8 +28,9 @@ generic pattern matcher. Design goals, in priority order:
    vs privileged access control) without sacrificing recall.
 2. **Lightweight** — no SMT solver, no symbolic execution. Pure AST + call-graph
    + bounded dataflow. Fast on 500+ contract codebases.
-3. **Reproducibility** — deterministic ordering everywhere, byte-stable JSON,
-   a cacheable database (`build` → `scan --db`).
+3. **Reproducibility** — deterministic ordering/content, a cacheable database
+   (`build` → `scan --db`), and fixed-clock report APIs when timestamps must be
+   byte-stable too.
 4. **Extensibility** — users write their own WQL templates; the engine stays
    detector-agnostic (no per-detector logic baked into Go).
 
@@ -55,8 +56,10 @@ integrated engine with a user-extensible query language.
                             templates/ (WQL) ────┘
 ```
 
-`reader.New().Read(path)` → `builder.New().Build(sources)` → `*types.Database` →
-`engine.New(db).Execute(tmpl)` per template → `[]*Finding` → `report.WriteBundle(...)`.
+The CLI uses `NewWithOptions` constructors with one immutable
+`pkg/logging.Logger`; deprecated global verbose wrappers remain only for legacy
+SDK constructors. The data flow is `Reader` → `Builder` → `*types.Database` →
+`Engine` → `[]*Finding` → `report.WriteBundle(...)`.
 
 The **Database is the contract** between front-half (parse/build) and back-half
 (match/report). It is fully serializable, so `w3goaudit build -o db.json` then
@@ -93,9 +96,12 @@ remappings**:
   (`node_modules/` → `lib/` → project root → as-is).
 - `ResolveImports` loads transitively with an iterative loop over a growing
   `SourceFiles` slice, dedup-guarded against import cycles.
-- **Known limitation:** the first matching remapping prefix wins even if the
-  mapped file is absent (no fall-through). Remapped packages like
-  `@openzeppelin/...` are resolved heuristically, not via full import-scope rules.
+- Import directives are lexed with Solidity comment/string rules and decoded
+  escapes. Foundry TOML is parsed structurally; only the active
+  `FOUNDRY_PROFILE` participates. Context-qualified remappings are ranked by
+  context then prefix specificity, and a missing/non-file target falls through
+  to later mappings and project fallbacks. `SourceFile.ResolvedImports` records
+  the canonical selected targets for exact identity and cache parity.
 
 ---
 
@@ -216,25 +222,31 @@ positions).
 
 ### 5.1 Database & resolution
 
-`Database` holds `SourceFiles`, `Contracts` (keyed `absPath#Name`),
-`MainContracts`, `CallGraph`, `DataFlow`, `Semantics`. ID formats:
+`Database` holds `ProjectRoot`, the original `ScanTarget`, durable
+`Diagnostics`, `SourceFiles`, `Contracts` (keyed `absPath#Name`),
+`MainContracts`, `CallGraph`, `DataFlow`, and `Semantics`. ID formats:
 - Contract: `absPath#ContractName`
 - Function: `absPath#ContractName.selector(argTypes)`
 - Modifier: `absPath#ContractName.modifierName`
 
 Lookup hardening:
 - `GetContractByID` — O(1), use when you have an ID.
-- `GetContractByName` — deterministic **lex-min** on collisions (two `Token.sol`
-  in `/src` and `/test/mocks`), logs the ambiguity.
-- `ResolveContractName(name, fromFile)` — **scope-aware**: prefers a candidate in
-  the same file → same directory → a relative import in `fromFile` → else lex-min.
-  Used by inheritance and call resolution so a project's real `Token` isn't
-  confused with `test/mocks/Token`.
+- `GetContractByName` / `ResolveContractName` — deterministic compatibility
+  helpers for callers that knowingly accept name-only behavior.
+- `ResolveContractNameExact(name, fromFile)` — exact-only: use the current file
+  and canonical resolved imports, then return ambiguity rather than guessing.
+- `LinearizedContracts(contract)` — materialize the exact
+  `LinearizedBaseIDs` C3 chain for identity-sensitive consumers.
+
+Core inheritance, call graph, engine, report, navigation, state, workflow, and
+extract paths use exact objects/IDs. Same-directory proximity is never accepted
+as proof of identity.
 
 ### 5.2 ASTNode & the full kind set
 
 `ASTNode{ Kind, Name, Value, RefID, RefKind, TaintSources, Attributes, Parent,
-Children, StartLine, EndLine }`. `RefKind` ∈ `parameter`/`state_var`/`local_var`
+Children, StartLine, EndLine, StartCol, EndCol, StartByte, EndByte }`.
+`RefKind` ∈ `parameter`/`state_var`/`local_var`
 drives taint provenance.
 
 **Complete kind list** (from `ast.go`):
@@ -292,7 +304,16 @@ guards, taint) behave identically with `--db`.
 
 ### 6.1 Template lifecycle
 
-YAML → `LoadTemplate`/`ParseTemplate` → `finalizeTemplate`, which runs:
+Public WQL YAML (`meta` plus `query:`) → strict parse →
+`TemplateDoc.lower()` → evaluator `Template`/`QueryBlock`/`Rule` IR →
+`finalizeTemplate` (per query block). Unknown keys at any level are rejected
+by the strict parser. A query-level `or:` lowers to one QueryBlock per
+branch (`Template.Queries`), executed as a location-deduplicated union;
+`and:` lowers to one block of labeled `all:` branches at the join scope. The
+exported IR values describe evaluator execution and are not a supported YAML
+schema.
+
+Finalization runs:
 `validateTemplateMeta` (requires id+severity) → `validateScope` (rejects unknown
 scopes) → `normalizeRule` (promotes inline attrs like `operator` into `Attr`,
 expands `arg.N` flat keys, compiles+caches regexes) → `validateRulePlacement`
@@ -465,7 +486,7 @@ Unknown preset names are rejected at load (`IsKnownPreset`).
 ├── findings.md                 # FormatFindingsAsMarkdown
 ├── results.sarif               # FormatFindingsAsSARIF (always)
 ├── run.log                     # CLI tees verbose logs here
-├── data/{manifest.json, database.json, findings.json, overview.json}
+├── data/{manifest.json, database.json, findings.json, overview.json, diagnostics.json, nav.json, explorer.json}
 ├── contracts/<rel-src-path-no-ext>/<MainContract>/
 │   ├── README.md               # FormatContractReadme (findings + detail)
 │   ├── state-changes.md        # reachability/state-write matrix
@@ -491,8 +512,10 @@ Formatters:
   string/comment stripping).
 
 Determinism: function lists and "Defined in" groupings are sorted; Mermaid node
-IDs use FNV-64a (32-bit collided ~1% over 10k nodes); duplicate contract/overload
-names are disambiguated (`Name__<filestem>`, `<fn>__<selector>.md`).
+IDs use FNV-64a (32-bit collided ~1% over 10k nodes); contract folders mirror
+source paths and overloaded workflow files use `<fn>__<selector>.md`.
+`BundleOptions.Now` supplies one UTC timestamp to every bundle artifact; without
+a fixed clock, deterministic content still has intentionally varying timestamps.
 
 ---
 
@@ -506,7 +529,9 @@ filter (severity, include/exclude globs) → `WriteBundle` → console summary.
 Key flags: `-t/--template`, `-o/--output`, `-d/--db`, `-v/--verbose`, `-H/--html`,
 `-q/--stdout`, `--ignore-invalid-templates`, `-s/--severity`, `-m/--min-severity`,
 `-i/--include`/`-e/--exclude`, `-l/--list-templates`, `-T/--update-templates`,
-`-u/--update`.
+`-u/--update`, and `--strict-imports`. The strict-import gate consumes the same
+persisted import diagnostics for source and `--db` scans and runs before
+template execution/report generation.
 
 Subcommands: `build` (parse → `database.json`), `extract` (query a DB: `main`,
 `entry`, `inheritance`, `statevar`, `selector`, `involve`, `workflow`, `bundle`,
@@ -514,9 +539,10 @@ Subcommands: `build` (parse → `database.json`), `extract` (query a DB: `main`,
 
 **Template precedence** (`pkg/home`): `--template` > `~/.w3goaudit/templates/`
 (downloaded from `th13vn/w3goaudit-templates` on first run) > the embedded
-`official/` pack (`templates/embed.go`). Three template lanes exist —
-`templates/official/` (distributable), `benchmarks/templates/` (competitive
-benchmark detectors), `templates/security/` (legacy `SEC-*`).
+`official/` pack (`templates/embed.go`). The retained lanes are
+`templates/official/` (25 distributable detectors), `templates/test/` (5 engine
+feature templates), and `benchmarks/templates/` (76 competitive detector
+ports), all WQL.
 
 ---
 
@@ -560,16 +586,48 @@ These are the deliberate calls that separate w3goaudit's output from a naive mat
 7. **`incorrect-exp` shape.** Flags `^` only with simple value operands (id/decimal)
    *and* `not statement_contains` another bitwise op — catches `base ^ exp` while
    ignoring `(a & b) + (a ^ b)/2` and `(3*d) ^ 2`.
-8. **Sequence can't cross branches.** `if/else`, ternary arms, try/catch arms are
-   mutually exclusive (reentrancy FP killer).
+8. **Sequence can't cross *mutually-exclusive* branches.** `if/else` then-vs-else
+   arms, ternary true-vs-false arms, and try/catch body-vs-catch arms are
+   exclusive (reentrancy FP killer). But the `if` **condition** co-executes with
+   whichever arm runs, so a call in the condition followed by a state write in the
+   body IS a valid sequence — `isConditionExpr` identifies the condition by its
+   builder-set `cond_role="if"` attribute, not by kind prefix (a call-typed
+   condition like `if (t.call(...))` used to be misread as an arm → missed
+   reentrancy).
 9. **Type-cast-in-guard.** `require(x != address(0))` casts don't register as
    outgoing calls (reentrancy FP killer).
 10. **Decoy modifiers.** An auth-named modifier with a no-op body doesn't count as
     access control.
-11. **Scope-aware contract resolution.** A `test/mocks/Token` doesn't shadow the
-    real `Token` during inheritance/call resolution.
+11. **Exact contract resolution.** Duplicate `Token` declarations cannot
+    cross-wire: core paths use exact current objects, canonical resolved imports,
+    `ResolvedContractID`, and `LinearizedBaseIDs`; unresolved ambiguity remains a
+    diagnostic instead of becoming a same-directory/lexicographic guess.
 12. **Canonical path dedup, BOM stripping, tolerant parsing** — robustness at the
     reader/parser boundary so one odd file doesn't corrupt or abort the build.
+13. **Unicode columns vs. UTF-8 bytes.** The builder ignores the parser's
+    byte-oriented column field and converts byte ranges with one cached sparse
+    per-source index. `StartCol`/`EndCol` are one-based, half-open Unicode-code-
+    point columns; `StartByte`/`EndByte` are zero-based, half-open UTF-8 bytes.
+    SARIF declares `unicodeCodePoints` and never emits the bytes as
+    `charOffset`/`charLength`. LSP positions are separately zero-based and
+    commonly UTF-16, so consumers must convert rather than reuse these fields.
+14. **Deterministic findings.** `Engine.ExecuteAll` applies a total-order sort
+    (`SortFindings`: file → line → col → primaryAst → template → contract →
+    function → entry/reachability signature) before returning. Per-scope
+    execution iterates Go maps, so without this the same scan emitted the same
+    findings in a different order every run (noisy diffs, unstable SARIF/CI).
+15. **Same-name resolution extended.** Beyond inheritance/call resolution (item
+    11), entry-function IDs, main-contract detection, source excerpts, and the
+    report explorer/state-matrix/generator resolve via `ResolveContractName`
+    (or the contract's own pointer for `LinearizedBases[0]`); functions carry
+    `SourceFile` so source lookup never re-resolves by name.
+16. **Modifier bodies get contract context.** `BuildModifierAST` receives the
+    owning contract + db, so state-variable references inside a modifier (e.g. a
+    reentrancy guard's `locked` writes) are classified (`is_state_var`, taint) —
+    previously modifier ASTs were built context-free and those facts were lost.
+17. **Fail-closed WQL lowering.** A mixed context+AST `any:` and a multi-kind
+    (list) `select:` are rejected at load rather than silently over-matching /
+    never matching — see [wql-syntax.md](wql-syntax.md).
 
 ---
 
@@ -579,6 +637,8 @@ These are the deliberate calls that separate w3goaudit's output from a naive mat
   `MaxTaintFixpointPasses=8`.
 - Regex compiled once and cached; synthetic AST built once per contract.
 - The Database is cacheable (`build` → `--db`), so re-scans skip parsing.
+- Source/cache paths preserve normalized diagnostics and source snapshots;
+  report excerpts prefer the analyzed `SourceFile.Content` over live disk.
 - `Engine` is **not** concurrency-safe (mutable execution-context fields); use one
   Engine per goroutine.
 - Validation is load-time (regex, kind, preset, version, placement) — no silent

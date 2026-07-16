@@ -5,11 +5,11 @@ import (
 	"testing"
 )
 
-// These tests assert lower()'s output field-for-field against the v1 Rule IR
-// shape a hand-written v1 template would produce, for the worked examples in
+// These tests assert lower()'s output field-for-field against the evaluator
+// IR shape the engine executes, for the worked examples in
 // .vscode/specs/2026-07-09-wql-v2-language-spec.md §11.
 //
-// NOTE on the delegatecall case: blockKindToV1("delegatecall") resolves to
+// NOTE on the delegatecall case: blockKindToIR("delegatecall") resolves to
 // the "delegatecall" semantic group (pkg/engine/wql_v2_catalog.go), not the
 // exact kind string "call.lowlevel.delegatecall" — the semantic group also
 // covers the asm.delegatecall sibling (see the catalog's doc comment). Tests
@@ -18,11 +18,12 @@ import (
 
 const v2DelegatecallLowerYAML = `
 meta: { id: delegatecall-user-input, severity: CRITICAL, title: Delegatecall to user-controlled target }
-select: delegatecall
-from: entry_function
-where:
-  - arg.0: { tainted: parameter }
-  - not: { preset: access_controlled }
+query:
+  select: delegatecall
+  from: entry_function
+  where:
+    - arg.0: { tainted: parameter }
+    - not: { preset: access_controlled }
 `
 
 func TestLower_Delegatecall(t *testing.T) {
@@ -49,9 +50,9 @@ func TestLower_Delegatecall(t *testing.T) {
 		t.Errorf("Filter.Preset = %q, want %q", tmpl.Query.Filter.Preset, "unAuthenticated")
 	}
 
-	wantKind, ok := blockKindToV1("delegatecall")
+	wantKind, ok := blockKindToIR("delegatecall")
 	if !ok {
-		t.Fatalf("blockKindToV1(delegatecall) ok=false")
+		t.Fatalf("blockKindToIR(delegatecall) ok=false")
 	}
 	if tmpl.Query.Match.Contains == nil {
 		t.Fatalf("Match.Contains is nil")
@@ -70,13 +71,14 @@ func TestLower_Delegatecall(t *testing.T) {
 
 const v2ReentrancyLowerYAML = `
 meta: { id: reentrancy-eth, severity: HIGH, title: State write after external call }
-select: external_call
-from: entry_function
-where:
-  - not: { preset: reentrancy_guarded }
-  - sequence:
-      - { block: eth_transfer }
-      - { block: state_write }
+query:
+  select: external_call
+  from: entry_function
+  where:
+    - not: { preset: reentrancy_guarded }
+    - sequence:
+        - { block: external_call }
+        - { block: state_write }
 `
 
 func TestLower_ReentrancySequence(t *testing.T) {
@@ -102,10 +104,10 @@ func TestLower_ReentrancySequence(t *testing.T) {
 		t.Errorf("Match.Contains = %+v, want nil (sequence stays top-level)", tmpl.Query.Match.Contains)
 	}
 
-	wantEthTransfer, _ := blockKindToV1("eth_transfer")
-	wantStateWrite, _ := blockKindToV1("state_write")
-	if tmpl.Query.Match.Sequence[0].Kind != wantEthTransfer {
-		t.Errorf("Sequence[0].Kind = %q, want %q", tmpl.Query.Match.Sequence[0].Kind, wantEthTransfer)
+	wantExternalCall, _ := blockKindToIR("external_call")
+	wantStateWrite, _ := blockKindToIR("state_write")
+	if tmpl.Query.Match.Sequence[0].Kind != wantExternalCall {
+		t.Errorf("Sequence[0].Kind = %q, want %q", tmpl.Query.Match.Sequence[0].Kind, wantExternalCall)
 	}
 	if tmpl.Query.Match.Sequence[1].Kind != wantStateWrite {
 		t.Errorf("Sequence[1].Kind = %q, want %q", tmpl.Query.Match.Sequence[1].Kind, wantStateWrite)
@@ -114,10 +116,11 @@ func TestLower_ReentrancySequence(t *testing.T) {
 
 const v2BarePresetLowerYAML = `
 meta: { id: v2-bare-preset-assertion, severity: MEDIUM, title: bare preset assertion test }
-select: function
-from: entry_function
-where:
-  - preset: reentrancy_guarded
+query:
+  select: function
+  from: entry_function
+  where:
+    - preset: reentrancy_guarded
 `
 
 func TestLower_BarePresetAssertion(t *testing.T) {
@@ -156,10 +159,11 @@ func TestLower_BarePresetAssertion(t *testing.T) {
 // `match:`".
 const v2NotGuardedByLowerYAML = `
 meta: { id: v2-not-guarded-by, severity: MEDIUM, title: missing reentrancy guard modifier }
-select: external_call
-from: entry_function
-where:
-  - not: { guarded_by: { block: modifier } }
+query:
+  select: external_call
+  from: entry_function
+  where:
+    - not: { guarded_by: { block: modifier } }
 `
 
 func TestLower_NotGuardedByRoutesToFilter(t *testing.T) {
@@ -178,7 +182,7 @@ func TestLower_NotGuardedByRoutesToFilter(t *testing.T) {
 	if tmpl.Query.Filter.Not == nil || tmpl.Query.Filter.Not.HasGuard == nil {
 		t.Fatalf("Filter = %+v, want Not.HasGuard set", tmpl.Query.Filter)
 	}
-	wantModifierKind, _ := blockKindToV1("modifier")
+	wantModifierKind, _ := blockKindToIR("modifier")
 	if tmpl.Query.Filter.Not.HasGuard.Kind != wantModifierKind {
 		t.Errorf("Filter.Not.HasGuard.Kind = %q, want %q", tmpl.Query.Filter.Not.HasGuard.Kind, wantModifierKind)
 	}
@@ -194,7 +198,7 @@ func TestLower_NotGuardedByRoutesToFilter(t *testing.T) {
 	// The lowered template must pass finalizeTemplate — this is what would
 	// have failed with "`has_guard` is a context-level field and cannot
 	// appear inside `match:`" before the fix.
-	if err := finalizeTemplate(tmpl, []byte(v2NotGuardedByLowerYAML), "test"); err != nil {
+	if err := finalizeTemplate(tmpl, "test"); err != nil {
 		t.Fatalf("finalizeTemplate: %v", err)
 	}
 }
@@ -204,12 +208,13 @@ func TestLower_NotGuardedByRoutesToFilter(t *testing.T) {
 // Match.
 const v2AnyGuardedByFuncNameLowerYAML = `
 meta: { id: v2-any-guarded-by-func-name, severity: MEDIUM, title: any of guard/func_name test }
-select: external_call
-from: entry_function
-where:
-  - any:
-      - guarded_by: { block: modifier }
-      - func_name: "^admin"
+query:
+  select: external_call
+  from: entry_function
+  where:
+    - any:
+        - guarded_by: { block: modifier }
+        - func_name: "^admin"
 `
 
 func TestLower_AnyGuardedByOrFuncNameRoutesToFilter(t *testing.T) {
@@ -236,7 +241,7 @@ func TestLower_AnyGuardedByOrFuncNameRoutesToFilter(t *testing.T) {
 		t.Errorf("Match.Any = %+v, want empty (this any: is entirely context-level)", tmpl.Query.Match.Any)
 	}
 
-	if err := finalizeTemplate(tmpl, []byte(v2AnyGuardedByFuncNameLowerYAML), "test"); err != nil {
+	if err := finalizeTemplate(tmpl, "test"); err != nil {
 		t.Fatalf("finalizeTemplate: %v", err)
 	}
 }
@@ -246,10 +251,11 @@ func TestLower_AnyGuardedByOrFuncNameRoutesToFilter(t *testing.T) {
 // silently double-negating the preset.
 const v2NotMultiKeyPresetYAML = `
 meta: { id: v2-not-multikey-preset, severity: MEDIUM, title: multi-key not with preset test }
-select: external_call
-from: entry_function
-where:
-  - not: { preset: access_controlled, base: some-other-rule }
+query:
+  select: external_call
+  from: entry_function
+  where:
+    - not: { preset: access_controlled, base: some-other-rule }
 `
 
 func TestLower_NotMultiKeyPresetRejected(t *testing.T) {
@@ -270,11 +276,12 @@ func TestLower_NotMultiKeyPresetRejected(t *testing.T) {
 
 const v2LeftRightLowerYAML = `
 meta: { id: v2-left-right, severity: MEDIUM, title: left/right operand test }
-select: binary
-from: entry_function
-where:
-  - left: { name: "^msg$" }
-  - right: { tainted: parameter }
+query:
+  select: binary
+  from: entry_function
+  where:
+    - left: { name: "^msg$" }
+    - right: { tainted: parameter }
 `
 
 func TestLower_LeftRight(t *testing.T) {
@@ -297,7 +304,7 @@ func TestLower_LeftRight(t *testing.T) {
 		t.Errorf("Match.Contains.Right = %+v, want TaintedFrom=%q", tmpl.Query.Match.Contains.Right, "parameter")
 	}
 
-	if err := finalizeTemplate(tmpl, []byte(v2LeftRightLowerYAML), "test"); err != nil {
+	if err := finalizeTemplate(tmpl, "test"); err != nil {
 		t.Fatalf("finalizeTemplate: %v", err)
 	}
 }
@@ -306,10 +313,11 @@ func TestLower_LeftRight(t *testing.T) {
 
 const v2StatementHasLowerYAML = `
 meta: { id: v2-statement-has, severity: MEDIUM, title: statement_has test }
-select: external_call
-from: entry_function
-where:
-  - statement_has: { block: require }
+query:
+  select: external_call
+  from: entry_function
+  where:
+    - statement_has: { block: require }
 `
 
 func TestLower_StatementHas(t *testing.T) {
@@ -322,7 +330,7 @@ func TestLower_StatementHas(t *testing.T) {
 		t.Fatalf("lower: %v", err)
 	}
 
-	wantKind, _ := blockKindToV1("require")
+	wantKind, _ := blockKindToIR("require")
 	if tmpl.Query.Match.Contains == nil || tmpl.Query.Match.Contains.StatementContains == nil {
 		t.Fatalf("Match.Contains.StatementContains is nil")
 	}
@@ -330,7 +338,7 @@ func TestLower_StatementHas(t *testing.T) {
 		t.Errorf("StatementContains.Kind = %q, want %q", tmpl.Query.Match.Contains.StatementContains.Kind, wantKind)
 	}
 
-	if err := finalizeTemplate(tmpl, []byte(v2StatementHasLowerYAML), "test"); err != nil {
+	if err := finalizeTemplate(tmpl, "test"); err != nil {
 		t.Fatalf("finalizeTemplate: %v", err)
 	}
 }
@@ -339,10 +347,11 @@ func TestLower_StatementHas(t *testing.T) {
 
 const v2UncheckedVarLowerYAML = `
 meta: { id: v2-unchecked-var, severity: MEDIUM, title: unchecked_var test }
-select: binary
-from: entry_function
-where:
-  - unchecked_var: true
+query:
+  select: binary
+  from: entry_function
+  where:
+    - unchecked_var: true
 `
 
 func TestLower_UncheckedVar(t *testing.T) {
@@ -359,7 +368,7 @@ func TestLower_UncheckedVar(t *testing.T) {
 		t.Fatalf("Match.Contains.UncheckedVar = %+v, want true", tmpl.Query.Match.Contains)
 	}
 
-	if err := finalizeTemplate(tmpl, []byte(v2UncheckedVarLowerYAML), "test"); err != nil {
+	if err := finalizeTemplate(tmpl, "test"); err != nil {
 		t.Fatalf("finalizeTemplate: %v", err)
 	}
 }
@@ -368,10 +377,11 @@ func TestLower_UncheckedVar(t *testing.T) {
 
 const v2ModifierLowerYAML = `
 meta: { id: v2-modifier, severity: MEDIUM, title: modifier filter test }
-select: external_call
-from: entry_function
-where:
-  - modifier: "(?i)initializer"
+query:
+  select: external_call
+  from: entry_function
+  where:
+    - modifier: "(?i)initializer"
 `
 
 func TestLower_ModifierRoutesToFilter(t *testing.T) {
@@ -395,7 +405,7 @@ func TestLower_ModifierRoutesToFilter(t *testing.T) {
 		t.Errorf("Match.Contains.Modifier = %q, want empty", tmpl.Query.Match.Contains.Modifier)
 	}
 
-	if err := finalizeTemplate(tmpl, []byte(v2ModifierLowerYAML), "test"); err != nil {
+	if err := finalizeTemplate(tmpl, "test"); err != nil {
 		t.Fatalf("finalizeTemplate: %v", err)
 	}
 }
@@ -404,9 +414,10 @@ func TestLower_ModifierRoutesToFilter(t *testing.T) {
 
 const v2SelectAbsentLowerYAML = `
 meta: { id: v2-select-absent, severity: MEDIUM, title: select-absent regex-at-root test }
-from: contract
-where:
-  - regex: "slot"
+query:
+  from: contract
+  where:
+    - regex: "slot"
 `
 
 func TestLower_SelectAbsentAppliesRegexAtRoot(t *testing.T) {
@@ -429,7 +440,7 @@ func TestLower_SelectAbsentAppliesRegexAtRoot(t *testing.T) {
 		t.Errorf("Match.Contains = %+v, want nil (no select => no Contains wrap)", tmpl.Query.Match.Contains)
 	}
 
-	if err := finalizeTemplate(tmpl, []byte(v2SelectAbsentLowerYAML), "test"); err != nil {
+	if err := finalizeTemplate(tmpl, "test"); err != nil {
 		t.Fatalf("finalizeTemplate: %v", err)
 	}
 }
@@ -440,9 +451,10 @@ func TestLower_SelectAbsentAppliesRegexAtRoot(t *testing.T) {
 func TestLower_SelectAbsentNoASTMattersErrors(t *testing.T) {
 	const yamlSrc = `
 meta: { id: v2-select-absent-empty, severity: MEDIUM, title: select-absent with no AST matcher }
-from: contract
-where:
-  - modifier: "(?i)initializer"
+query:
+  from: contract
+  where:
+    - modifier: "(?i)initializer"
 `
 	tv2, err := parseV2([]byte(yamlSrc))
 	if err != nil {
@@ -451,5 +463,99 @@ where:
 	_, err = tv2.lower()
 	if err == nil {
 		t.Fatalf("lower: expected an error (no select, no AST where-matchers), got nil")
+	}
+}
+
+func TestLowerRejectsSelectIgnoredBySequence(t *testing.T) {
+	doc, err := parseV2([]byte(`
+meta: {id: conflict, severity: HIGH}
+query:
+  select: state_write
+  from: entry_function
+  where:
+    - sequence:
+        - {block: external_call}
+        - {block: state_write}
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = doc.lower()
+	if err == nil || !strings.Contains(err.Error(), "select conflicts with sequence") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestLowerAllowsSelectMatchingSequenceAnchor(t *testing.T) {
+	doc, err := parseV2([]byte(`
+meta: {id: matching-anchor, severity: HIGH}
+query:
+  select: external_call
+  from: entry_function
+  where:
+    - sequence:
+        - {block: external_call}
+        - {block: state_write}
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpl, err := doc.lower()
+	if err != nil {
+		t.Fatalf("lower: %v", err)
+	}
+	want, _ := blockKindToIR("external_call")
+	if got := tmpl.Query.Match.Sequence[0].Kind; got != want {
+		t.Fatalf("sequence anchor = %q, want %q", got, want)
+	}
+}
+
+func TestLowerSelectFillsUnkindedSequenceAnchor(t *testing.T) {
+	doc, err := parseV2([]byte(`
+meta: {id: filled-anchor, severity: HIGH}
+query:
+  select: external_call
+  from: entry_function
+  where:
+    - sequence:
+        - {name: ^transfer$}
+        - {block: state_write}
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpl, err := doc.lower()
+	if err != nil {
+		t.Fatalf("lower: %v", err)
+	}
+	wantKind, _ := blockKindToIR("external_call")
+	anchor := tmpl.Query.Match.Sequence[0]
+	if anchor.Kind != wantKind {
+		t.Fatalf("sequence anchor kind = %q, want %q", anchor.Kind, wantKind)
+	}
+	if anchor.Name != "^transfer$" {
+		t.Fatalf("sequence anchor name = %q, want retained predicate %q", anchor.Name, "^transfer$")
+	}
+}
+
+func TestLowerRejectsSelectWithCompositeSequenceAnchor(t *testing.T) {
+	doc, err := parseV2([]byte(`
+meta: {id: composite-anchor, severity: HIGH}
+query:
+  select: state_write
+  from: entry_function
+  where:
+    - sequence:
+        - any:
+            - {block: eth_transfer}
+            - {block: delegatecall}
+        - {block: state_write}
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = doc.lower()
+	if err == nil || !strings.Contains(err.Error(), "select conflicts with sequence") {
+		t.Fatalf("error = %v", err)
 	}
 }

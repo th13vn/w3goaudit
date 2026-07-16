@@ -15,9 +15,10 @@ meta:
     Never use msg.value inside a loop. Instead, accept an explicit array of
     amounts and verify their sum equals msg.value before the loop.
 
-from: function
-select: loop
-where:
-  - has:
-      block: member
-      name: "msg\\.value"
+query:
+  from: function
+  select: loop
+  where:
+    - has:
+        block: member
+        name: "msg\\.value"

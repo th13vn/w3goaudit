@@ -13,7 +13,8 @@ A Go-based CLI & SDK for auditing Solidity smart contracts using rule-based temp
 # Install (templates download on first run; embedded pack is the offline fallback)
 go install github.com/th13vn/w3goaudit/cmd/w3goaudit@latest
 
-# Scan contracts → writes a ./contracts result folder
+# Scan contracts → writes a ./contracts-audit result folder
+# (the "-audit" suffix is the collision guard: the output can't overwrite the scanned dir)
 w3goaudit ./contracts/
 
 # Scan one file into a named folder
@@ -72,11 +73,18 @@ files and a state-change report. See [Result folder layout](#result-folder-layou
 - **C3 Linearization** - Proper Solidity inheritance resolution
 - **Function Selectors** - Calculate 4-byte keccak256 selectors
 - **Call Graph** - Recursive tracing with filtered built-ins and optimized styling
-- **WQL Templates** - Powerful query language for security pattern matching, with load-time validation (regex, preset names, filter/match placement) so typos fail fast instead of producing silent zero-finding scans. Includes scope-aware `source_regex` for rare raw-source predicates and contract-scope AST matching for same-contract local/inherited combination rules.
-- **Result Folder** - One opinionated folder per scan: a `README.md` landing page, `summary.md`, `overview.md` (metrics + in-scope contract index), `findings.md`, always-on `results.sarif` + `run.log`, a machine-readable `data/` (manifest.json index, database.json reusable via `--db`, findings.json, overview.json), and a `contracts/` tree mirroring source paths (one sub-folder per main contract). Opt-in HTML mirror with `--html`.
+- **Exact Identity** - Internal contracts use `absPath#Contract`; functions use
+  `absPath#Contract.selector(types)`. Exact C3 `LinearizedBaseIDs` and resolved
+  import provenance prevent duplicate names in different files from cross-wiring.
+- **Precise Locations** - One-based, half-open Unicode-code-point columns plus
+  zero-based, half-open UTF-8 byte offsets. SARIF declares
+  `columnKind: unicodeCodePoints` and never emits byte offsets as
+  `charOffset`/`charLength`.
+- **WQL Templates** - Powerful query language for security pattern matching, with load-time validation (regex, preset names, filter/match placement) so typos fail fast instead of producing silent zero-finding scans. Includes a source-scope `regex` matcher for rare raw-source predicates and contract-scope AST matching for same-contract local/inherited combination rules.
+- **Result Folder** - One opinionated folder per scan: a `README.md` landing page, `summary.md`, `overview.md` (metrics + in-scope contract index), `findings.md`, always-on `results.sarif` + `run.log`, a machine-readable `data/` (`manifest.json`, reusable `database.json`, findings/overview, always-on `diagnostics.json`, plus nav/explorer data for the editor extension), and a `contracts/` tree mirroring source paths. Opt-in **fully offline** HTML mirror with `--html` (graph library embedded — no CDN request).
 - **Per-Entry Workflow Files** - For every entry function, a self-contained context block (signature, auth / access control, guards & checks, branch conditions, transitive state effects, Mermaid call workflow) — built to be fed to a human or an AI auditor.
 - **State-Change Matrix** - Per contract, each state variable mapped to the functions that write it and the entry points that reach a writer (reverse call-graph walk).
-- **Self-Provisioning Templates** - Downloads the latest [`w3goaudit-templates`](https://github.com/th13vn/w3goaudit-templates) release on first run (nuclei-style, no git clone), refreshable with `--update-templates`; embedded official pack is the always-available offline fallback.
+- **Self-Provisioning Templates** - Downloads the latest [`w3goaudit-templates`](https://github.com/th13vn/w3goaudit-templates) release on first run (nuclei-style, no git clone), refreshable with `--update-templates`; embedded official pack is the always-available offline fallback. Extraction is size/file-count capped and installed with a rollback-safe staged directory swap. The GitHub zipball is TLS-authenticated but not checksum/signature verified.
 - **Reachability-Aware Findings** - Every finding can carry the full call chain from an externally-callable entry down to the function that hosts the dangerous statement: structured `reachability.steps[]` + `entryPoint` (auditor's fix-here pointer) + `primaryAst` in JSON, `relatedLocations` in SARIF, dotted-level trace block in Markdown / HTML, `↳ via …` continuation line on the `--verbose` console. Multi-site findings also carry `related[]`, and Markdown renders all matched sites with full function context.
 - **SARIF 2.1.0** - Always emitted (`results.sarif`) for GitHub Code Scanning, with portable relative URIs + `srcRoot`; fail-closed template loading, `NO_COLOR`-aware console.
 - **Project Detection** - Auto-detect Foundry, Hardhat, Truffle
@@ -146,7 +154,10 @@ human or AI auditor:
 │   ├── manifest.json      # index: tool, scope, counts, file list, per-contract refs
 │   ├── database.json      # canonical DB — reuse via --db data/database.json
 │   ├── findings.json
-│   └── overview.json
+│   ├── overview.json
+│   ├── diagnostics.json    # analysis-quality diagnostics; [] when complete
+│   ├── nav.json           # flat symbol/caller/interface-impl index (extension)
+│   └── explorer.json      # per-main-contract model: constants, storage, entry/getter fns
 └── contracts/             # one sub-tree per main contract, mirroring source paths
     └── <relative-source-path-without-ext>/
         └── <ContractName>/
@@ -163,6 +174,12 @@ with the scanned directory. Each `workflows/<entryFn>.md` records the signature
 (selector, 4-byte, payable, version), auth / access control (modifiers,
 `msg.sender` checks, ⚠ Unprotected, ⚠ tx.origin), guards/checks, branch
 conditions, transitive state effects, and a Mermaid call-workflow diagram.
+
+`data/manifest.json` distinguishes the detected `projectRoot` from the original
+`scanTarget` (`target` is the compatibility alias), separates declaration
+category counts, exposes `analysisComplete`/diagnostic counts, and indexes every
+emitted artifact. Finding/content ordering is deterministic; generated
+timestamps vary unless SDK callers inject a fixed report/bundle clock.
 
 ---
 
@@ -192,8 +209,11 @@ The root command **is** the scan (there is no `scan` subcommand). Every scan
 flag has a long and short form: `-o/--output`, `-t/--template`, `-d/--db`,
 `-v/--verbose`, `-s/--severity` (exact set), `-m/--min-severity` (threshold),
 `-i/--include`, `-e/--exclude`, `-l/--list-templates`, `-H/--html`,
-`-q/--stdout`, `-T/--update-templates`, `-u/--update`. `--severity` and
-`--min-severity` are mutually exclusive.
+`-q/--stdout`, `--strict-imports`, `-T/--update-templates`, `-u/--update`.
+`--severity` and `--min-severity` are mutually exclusive. Import resolution is
+tolerant by default; use `--strict-imports` when unresolved imports must fail
+the source scan or an equivalent `--db` cache scan. Import warnings are always
+written to stderr.
 
 `extract` subcommands are listed widest-scope first (project → contract →
 function → utility). Like the scan, each one (except `diff`) can **build from a
@@ -201,10 +221,16 @@ source path** — `extract <name> ./contracts/` — or load a pre-built database
 with `--db`. Extract output defaults to **markdown**; pass `--format=json` (or
 `-o file.json`) for the machine-readable shape.
 
+Contract queries accept an exact `file#Contract` ID or a unique name. Function
+queries accept an exact function ID, `Contract.selector`, a full selector, a
+4-byte signature, or a unique bare name. Ambiguous queries fail with sorted
+candidates instead of selecting by map order; `--contract` follows the same
+exact-ID-or-unique-name rule.
+
 ### Examples
 
 ```bash
-# Default scan → writes a ./contracts result folder
+# Default scan → writes a ./contracts-audit result folder (collision guard adds "-audit")
 w3goaudit ./contracts/
 
 # Scan one file into a named folder
@@ -226,6 +252,10 @@ w3goaudit -l
 
 # Re-scan a pre-built database (e.g. the DB from a previous run)
 w3goaudit -d ./contracts/data/database.json
+
+# Fail closed when any persisted/source import is unresolved
+w3goaudit ./contracts/ --strict-imports
+w3goaudit -d ./contracts/data/database.json --strict-imports
 
 # Refresh templates from the latest release; update the tool itself
 w3goaudit --update-templates
@@ -293,19 +323,20 @@ meta:
   description: External call before state variable update
   recommendation: Apply Check-Effects-Interactions pattern
 
-from: entry_function       # public/external functions of main contracts
-select: state_write
-where:
-  - not: { preset: reentrancy_guarded }
-  - sequence:
-      - block: outgoing_call
-      - block: state_write
+query:
+  from: entry_function     # public/external functions of main contracts
+  where:
+    - not: { preset: reentrancy_guarded }
+    - sequence:
+        - block: outgoing_call
+        - block: state_write
 ```
 
-This is **WQL v2** — the primary template syntax (all 106 official/
-benchmark/feature-test templates ship in v2). The legacy v1 `query: {
-scope, filter, match }` syntax is still supported. For the complete WQL
-syntax, see [WQL Syntax Guide](./docs/wql-syntax.md).
+This is **WQL** (W3GoAudit Query Language) — a YAML template is `meta` plus
+one `query:` (`select`/`from`/`where`, or a query-level `and:`/`or:`
+composition). All 106 repository templates (25 official, 5 feature-test, and
+76 benchmark) use it; see the
+[WQL Syntax Guide](./docs/wql-syntax.md) for the full language reference.
 
 ---
 
@@ -316,6 +347,7 @@ w3goaudit/
 ├── cmd/w3goaudit/          # CLI entry point (root scan, build, extract, completion)
 ├── pkg/
 │   ├── reader/             # File discovery and loading
+│   ├── logging/            # Immutable scan-local logger
 │   ├── builder/            # Database construction (7 phases incl. per-fn effects)
 │   ├── engine/             # WQL template execution
 │   ├── home/               # ~/.w3goaudit config + template home (release download)
@@ -324,6 +356,7 @@ w3goaudit/
 ├── templates/              # WQL detection templates (official/ embedded via go:embed)
 │   ├── official/              # Curated official pack (embedded fallback; split by severity: critical/ high/ medium/)
 │   └── test/                  # Engine feature-exercise templates
+├── benchmarks/             # Docker Compose benchmark, 76 WQL ports, corpora, fixtures, results/
 ├── test-data/              # Test contracts (core/, security/)
 └── docs/                   # Comprehensive documentation
 ```
@@ -383,6 +416,14 @@ The contract database contains:
 
 ## Testing
 
+Development uses the exact Go version declared by `go.mod` (currently
+Go 1.26.5). This security-driven floor includes the standard-library fixes
+required by govulncheck. Before release, run formatting, `go mod tidy -diff`,
+vet, staticcheck, cyclomatic complexity, Markdown links,
+normal/race/shuffled tests, host and Linux ARM64 builds, govulncheck, a full
+official scan/artifact smoke test, and the Docker Compose competitive benchmark
+locally or in user-owned external automation.
+
 ```bash
 # Build database
 w3goaudit build test-data/core/build-database/ -o test-db.json --verbose
@@ -392,7 +433,15 @@ w3goaudit test-data/security/ --template templates/official/ -o scan-report/
 
 # Project overview (always part of the scan — see overview.md in the folder)
 w3goaudit test-data/core/build-database/ -o overview-out/
+
+# Competitive quality gate: precision >= 0.65, recall >= 0.95, failed cases = 0.
+# Docker Compose is the only supported host entry point. The Dockerfile derives
+# and verifies the Go version directly from go.mod.
+docker compose -f benchmarks/compose.yaml run --rm benchmark
 ```
+
+See [benchmarks/README.md](./benchmarks/README.md) for suites, tool selection,
+output ownership, and the fail-closed contract.
 
 Test contracts are documented in:
 - [test-data/security/README.md](./test-data/security/README.md)
