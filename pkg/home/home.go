@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"time"
@@ -33,9 +34,10 @@ type Config struct {
 		HTML    bool   `yaml:"html"`     // also emit HTML mirror by default
 	} `yaml:"output"`
 	Scan struct {
-		MinSeverity  string   `yaml:"min_severity"`  // default --min-severity
-		ExcludePaths []string `yaml:"exclude_paths"` // reserved: paths to skip
-		Workers      int      `yaml:"workers"`       // reserved: 0 = auto
+		MinSeverity   string   `yaml:"min_severity"`   // default --min-severity
+		StrictImports bool     `yaml:"strict_imports"` // fail when any import is unresolved
+		ExcludePaths  []string `yaml:"exclude_paths"`  // reserved: paths to skip
+		Workers       int      `yaml:"workers"`        // reserved: 0 = auto
 	} `yaml:"scan"`
 	Report struct {
 		RepoBase string `yaml:"repo_base"` // "" = relative paths; else source-link base
@@ -141,6 +143,7 @@ output:
   html: false                      # also emit overview.html + findings.html
 scan:
   min_severity: ""                 # default severity threshold (critical|high|medium|low|info)
+  strict_imports: false            # fail instead of continuing when an import cannot be resolved
   exclude_paths:                   # reserved: paths skipped during discovery
     - node_modules
     - lib
@@ -185,7 +188,11 @@ func EnsureInit(logf func(string, ...any)) {
 		}
 	}
 
-	cfg, _ := Load()
+	cfg, err := Load()
+	if err != nil {
+		logf("⚠ could not load config (%v) — using built-in pack", err)
+		return
+	}
 	tdir, err := cfg.ResolveTemplatesDir()
 	if err != nil {
 		return
@@ -273,11 +280,8 @@ func SyncTemplates(repo, templatesDir string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if err := downloadAndExtract(rel.ZipballURL, templatesDir); err != nil {
+	if err := downloadAndExtractVersion(rel.ZipballURL, templatesDir, rel.TagName); err != nil {
 		return "", err
-	}
-	if err := os.WriteFile(filepath.Join(templatesDir, ".version"), []byte(rel.TagName+"\n"), 0644); err != nil {
-		return rel.TagName, fmt.Errorf("writing .version: %w", err)
 	}
 	return rel.TagName, nil
 }
@@ -299,10 +303,45 @@ func UpdateTemplates(repo, templatesDir string) (string, bool, error) {
 	return rel.TagName, true, nil
 }
 
-// downloadAndExtract fetches a zip and extracts it into dest. GitHub source
+// Download / decompression size caps. Templates are small YAML/Markdown; these
+// bound a hostile or corrupt zip so it cannot exhaust disk. NOTE: the download
+// is authenticated by TLS only — GitHub's source zipball_url publishes no
+// digest, so there is no checksum/signature verification. Templates are data
+// (never executed), so a swapped pack cannot achieve code execution, but a
+// MITM/compromised host could suppress detectors. Pin to a trusted mirror with
+// a published checksum if that risk matters for your threat model.
+const (
+	maxZipDownloadBytes = 64 << 20  // 64 MiB compressed
+	maxEntryBytes       = 8 << 20   // 8 MiB per extracted file
+	maxArchiveBytes     = 128 << 20 // 128 MiB across accepted files
+	maxArchiveFiles     = 4096      // accepted template/documentation files
+	maxArchiveEntries   = 8192      // all central-directory entries, including ignored files
+)
+
+type archiveLimits struct {
+	CompressedBytes int64
+	EntryBytes      int64
+	TotalBytes      int64
+	Files           int
+	Entries         int
+}
+
+var defaultArchiveLimits = archiveLimits{
+	CompressedBytes: maxZipDownloadBytes,
+	EntryBytes:      maxEntryBytes,
+	TotalBytes:      maxArchiveBytes,
+	Files:           maxArchiveFiles,
+	Entries:         maxArchiveEntries,
+}
+
+// downloadAndExtractVersion installs one archive and, when version is non-empty,
+// stages its .version marker as part of the same directory swap. GitHub source
 // zipballs wrap everything in a single top-level directory, which is stripped.
-// Only .yaml/.yml/.md files are written, keeping the template home clean.
-func downloadAndExtract(zipURL, dest string) error {
+// Only .yaml/.yml/.md files are written, keeping the template home clean. The
+// extraction is staged in a sibling temp dir and installed with a rollback
+// backup, so an extraction or install failure leaves the existing template
+// home intact rather than half-replaced.
+func downloadAndExtractVersion(zipURL, dest, version string) error {
 	req, err := http.NewRequest(http.MethodGet, zipURL, nil)
 	if err != nil {
 		return err
@@ -323,11 +362,18 @@ func downloadAndExtract(zipURL, dest string) error {
 		return err
 	}
 	defer os.Remove(tmp.Name())
-	if _, err := io.Copy(tmp, resp.Body); err != nil {
+	// Cap the compressed download. Read one extra byte to detect overflow.
+	n, err := io.Copy(tmp, io.LimitReader(resp.Body, defaultArchiveLimits.CompressedBytes+1))
+	if err != nil {
 		tmp.Close()
 		return err
 	}
-	tmp.Close()
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if n > defaultArchiveLimits.CompressedBytes {
+		return fmt.Errorf("template zip exceeds %d bytes; refusing to extract", defaultArchiveLimits.CompressedBytes)
+	}
 
 	zr, err := zip.OpenReader(tmp.Name())
 	if err != nil {
@@ -335,69 +381,293 @@ func downloadAndExtract(zipURL, dest string) error {
 	}
 	defer zr.Close()
 
-	// Replace existing contents so removed templates don't linger.
-	if err := os.RemoveAll(dest); err != nil {
-		return fmt.Errorf("clearing template dir: %w", err)
-	}
-	if err := os.MkdirAll(dest, 0755); err != nil {
+	// Stage into a sibling temp dir, then install with rollback. Extracting in
+	// place after RemoveAll(dest) would leave dest partial on failure.
+	if err := os.MkdirAll(filepath.Dir(dest), 0755); err != nil {
 		return err
 	}
-
-	count := 0
-	for _, f := range zr.File {
-		if f.FileInfo().IsDir() {
-			continue
-		}
-		rel := stripTopLevel(f.Name)
-		if rel == "" {
-			continue
-		}
-		ext := strings.ToLower(filepath.Ext(rel))
-		if ext != ".yaml" && ext != ".yml" && ext != ".md" {
-			continue
-		}
-		if err := extractOne(f, filepath.Join(dest, rel)); err != nil {
-			return err
-		}
-		count++
+	stage, err := os.MkdirTemp(filepath.Dir(dest), ".templates-stage-*")
+	if err != nil {
+		return err
 	}
-	if count == 0 {
-		return fmt.Errorf("zip contained no template files")
+	defer os.RemoveAll(stage) // no-op after a successful rename
+
+	if err := extractArchive(&zr.Reader, stage, defaultArchiveLimits); err != nil {
+		return err
+	}
+	if version != "" {
+		if err := os.WriteFile(filepath.Join(stage, ".version"), []byte(version+"\n"), 0644); err != nil {
+			return fmt.Errorf("staging .version: %w", err)
+		}
+	}
+	if err := swapTemplateDirs(stage, dest, os.Rename, os.RemoveAll); err != nil {
+		return err
 	}
 	return nil
 }
 
-// stripTopLevel removes the leading "<repo>-<sha>/" component GitHub adds.
-// It also defends against zip-slip by rejecting any "../" traversal.
-func stripTopLevel(name string) string {
-	name = filepath.ToSlash(name)
-	if i := strings.IndexByte(name, '/'); i >= 0 {
-		name = name[i+1:]
-	} else {
-		return ""
-	}
-	if name == "" || strings.Contains(name, "..") {
-		return ""
-	}
-	return name
+type archiveEntry struct {
+	file   *zip.File
+	target string
 }
 
-func extractOne(f *zip.File, target string) error {
+// extractArchive preflights and extracts accepted template files while
+// enforcing both declared and actually-streamed decompression limits.
+func extractArchive(zr *zip.Reader, dest string, limits archiveLimits) error {
+	if limits.EntryBytes <= 0 || limits.TotalBytes <= 0 || limits.Files <= 0 || limits.Entries <= 0 {
+		return fmt.Errorf("invalid archive limits")
+	}
+	// zip.OpenReader has already parsed the central directory, but rejecting an
+	// oversized entry table here bounds all subsequent allocation and work,
+	// including directories and file types that extraction otherwise ignores.
+	if len(zr.File) > limits.Entries {
+		return fmt.Errorf("archive entry count exceeds %d", limits.Entries)
+	}
+	destRoot, err := filepath.Abs(dest)
+	if err != nil {
+		return fmt.Errorf("resolving archive destination: %w", err)
+	}
+
+	entryCapacity := len(zr.File)
+	if entryCapacity > limits.Files {
+		entryCapacity = limits.Files
+	}
+	entries := make([]archiveEntry, 0, entryCapacity)
+	portablePaths := make(map[string]string, entryCapacity)
+	var declaredTotal uint64
+	for _, f := range zr.File {
+		rel, err := archiveRelativePath(f.Name)
+		if err != nil {
+			return fmt.Errorf("unsafe archive path %q: %w", f.Name, err)
+		}
+		if f.FileInfo().IsDir() {
+			continue
+		}
+		if rel == "" {
+			continue
+		}
+		ext := strings.ToLower(path.Ext(rel))
+		if ext != ".yaml" && ext != ".yml" && ext != ".md" {
+			continue
+		}
+		if !f.Mode().IsRegular() {
+			return fmt.Errorf("archive entry %s is not a regular file", rel)
+		}
+		// Windows paths are case-insensitive by default. Refuse aliases so the
+		// same archive installs deterministically on every supported OS.
+		portableKey := strings.ToLower(rel)
+		if previous, ok := portablePaths[portableKey]; ok {
+			return fmt.Errorf("archive paths %q and %q collide on case-insensitive filesystems", previous, rel)
+		}
+		portablePaths[portableKey] = rel
+		if len(entries) >= limits.Files {
+			return fmt.Errorf("archive template file count exceeds %d", limits.Files)
+		}
+		if f.UncompressedSize64 > uint64(limits.EntryBytes) {
+			return fmt.Errorf("template file %s exceeds %d bytes; refusing to extract", rel, limits.EntryBytes)
+		}
+		if f.UncompressedSize64 > uint64(limits.TotalBytes) ||
+			declaredTotal > uint64(limits.TotalBytes)-f.UncompressedSize64 {
+			return fmt.Errorf("archive total decompressed size exceeds %d bytes", limits.TotalBytes)
+		}
+		declaredTotal += f.UncompressedSize64
+		target, err := containedArchiveTarget(destRoot, rel)
+		if err != nil {
+			return fmt.Errorf("unsafe archive path %q: %w", f.Name, err)
+		}
+		entries = append(entries, archiveEntry{file: f, target: target})
+	}
+	if len(entries) == 0 {
+		return fmt.Errorf("zip contained no template files")
+	}
+
+	var total int64
+	for _, entry := range entries {
+		n, err := extractOneLimited(entry.file, entry.target, limits.EntryBytes, limits.TotalBytes-total)
+		if err != nil {
+			return err
+		}
+		total += n
+	}
+	return nil
+}
+
+// swapTemplateDirs replaces dest without discarding it until stage has been
+// successfully installed. rename and removeAll are injected for failure tests.
+func swapTemplateDirs(stage, dest string, rename func(string, string) error, removeAll func(string) error) error {
+	stage = filepath.Clean(stage)
+	dest = filepath.Clean(dest)
+	parent := filepath.Dir(dest)
+	if filepath.Dir(stage) != parent {
+		return fmt.Errorf("template stage and destination must have the same parent")
+	}
+	if stage == dest {
+		return fmt.Errorf("template stage and destination must be different paths")
+	}
+
+	backup := filepath.Join(parent, "."+filepath.Base(dest)+"-backup-"+filepath.Base(stage))
+	if err := removeAll(backup); err != nil {
+		return fmt.Errorf("clearing stale template backup: %w", err)
+	}
+
+	hadDest := true
+	if _, err := os.Lstat(dest); err != nil {
+		if !os.IsNotExist(err) {
+			return fmt.Errorf("checking template dir: %w", err)
+		}
+		hadDest = false
+	}
+	if hadDest {
+		if err := rename(dest, backup); err != nil {
+			return fmt.Errorf("backing up template dir: %w", err)
+		}
+	}
+
+	if err := rename(stage, dest); err != nil {
+		if hadDest {
+			if restoreErr := rename(backup, dest); restoreErr != nil {
+				return fmt.Errorf("installing templates: %w; restoring previous templates: %v", err, restoreErr)
+			}
+		}
+		return fmt.Errorf("installing templates: %w", err)
+	}
+	if hadDest {
+		// The new directory is already committed at dest. Cleanup is best
+		// effort: reporting an error here would make UpdateTemplates return
+		// changed=false even though callers are already using the new pack.
+		// The unique backup can be removed by a later maintenance pass.
+		_ = removeAll(backup)
+	}
+	return nil
+}
+
+// archiveRelativePath validates a ZIP name using the strictest portable path
+// rules supported by this package, then removes GitHub's top-level wrapper.
+// Backslashes, drive/ADS colons, UNC/absolute forms, traversal, Windows device
+// names, and components changed by Windows trailing-dot/space normalization are
+// rejected even when extraction is running on Unix.
+func archiveRelativePath(name string) (string, error) {
+	if name == "" {
+		return "", fmt.Errorf("empty name")
+	}
+	if strings.ContainsRune(name, '\\') {
+		return "", fmt.Errorf("backslash path separator is not portable")
+	}
+	if strings.HasPrefix(name, "/") {
+		return "", fmt.Errorf("absolute or UNC path is not allowed")
+	}
+
+	parts := strings.Split(name, "/")
+	for i, part := range parts {
+		if part == "" {
+			if i == len(parts)-1 {
+				continue // conventional directory marker
+			}
+			return "", fmt.Errorf("empty path component is not allowed")
+		}
+		if err := validatePortablePathComponent(part); err != nil {
+			return "", err
+		}
+	}
+	if len(parts) < 2 {
+		return "", nil
+	}
+	relParts := parts[1:]
+	if len(relParts) == 1 && relParts[0] == "" {
+		return "", nil
+	}
+	if relParts[len(relParts)-1] == "" {
+		relParts = relParts[:len(relParts)-1]
+	}
+	return strings.Join(relParts, "/"), nil
+}
+
+func validatePortablePathComponent(component string) error {
+	if component == "." || component == ".." {
+		return fmt.Errorf("dot path component %q is not allowed", component)
+	}
+	if strings.TrimRight(component, " .") != component {
+		return fmt.Errorf("path component %q has a trailing dot or space", component)
+	}
+	for _, r := range component {
+		if r < 0x20 || strings.ContainsRune(`<>:"|?*`, r) {
+			return fmt.Errorf("path component %q contains a Windows-invalid character", component)
+		}
+	}
+
+	base := component
+	if i := strings.IndexByte(base, '.'); i >= 0 {
+		base = base[:i]
+	}
+	base = strings.ToUpper(strings.TrimRight(base, " ."))
+	if isWindowsDeviceName(base) {
+		return fmt.Errorf("path component %q is a reserved Windows device name", component)
+	}
+	return nil
+}
+
+func isWindowsDeviceName(name string) bool {
+	switch name {
+	case "CON", "PRN", "AUX", "NUL", "CLOCK$", "CONIN$", "CONOUT$",
+		"COM¹", "COM²", "COM³", "LPT¹", "LPT²", "LPT³":
+		return true
+	}
+	if len(name) == 4 && (strings.HasPrefix(name, "COM") || strings.HasPrefix(name, "LPT")) {
+		return name[3] >= '1' && name[3] <= '9'
+	}
+	return false
+}
+
+func containedArchiveTarget(destRoot, rel string) (string, error) {
+	target := filepath.Join(destRoot, filepath.FromSlash(rel))
+	within, err := filepath.Rel(destRoot, target)
+	if err != nil {
+		return "", fmt.Errorf("checking destination containment: %w", err)
+	}
+	if filepath.IsAbs(within) || within == ".." || strings.HasPrefix(within, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("path escapes the archive destination")
+	}
+	return target, nil
+}
+
+func extractOneLimited(f *zip.File, target string, entryLimit, totalRemaining int64) (int64, error) {
 	if err := os.MkdirAll(filepath.Dir(target), 0755); err != nil {
-		return err
+		return 0, err
 	}
 	rc, err := f.Open()
 	if err != nil {
-		return err
+		return 0, err
 	}
 	defer rc.Close()
 	out, err := os.Create(target)
 	if err != nil {
-		return err
+		return 0, err
 	}
-	defer out.Close()
-	if _, err := io.Copy(out, rc); err != nil {
-		return err
+	removePartial := func() {
+		_ = out.Close()
+		_ = os.Remove(target)
 	}
-	return nil
+
+	readLimit := entryLimit
+	if totalRemaining < readLimit {
+		readLimit = totalRemaining
+	}
+	n, err := io.Copy(out, io.LimitReader(rc, readLimit+1))
+	if err != nil {
+		removePartial()
+		return 0, err
+	}
+	if n > entryLimit {
+		removePartial()
+		return 0, fmt.Errorf("template file %s exceeds %d bytes; refusing to extract", target, entryLimit)
+	}
+	if n > totalRemaining {
+		removePartial()
+		return 0, fmt.Errorf("archive total decompressed size exceeds limit")
+	}
+	if err := out.Close(); err != nil {
+		_ = os.Remove(target)
+		return 0, err
+	}
+	return n, nil
 }

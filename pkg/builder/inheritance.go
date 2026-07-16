@@ -8,7 +8,8 @@ import (
 
 // InheritanceBuilder builds the inheritance tree for contracts
 type InheritanceBuilder struct {
-	db *types.Database
+	db   *types.Database
+	logf func(string, ...any)
 	// inProgress tracks contracts currently being linearized so cyclic
 	// inheritance (A is B; B is A) returns an error instead of recursing
 	// until the Go stack overflows.
@@ -18,14 +19,26 @@ type InheritanceBuilder struct {
 	// top-level contracts and avoids the previous superlinear re-computation of
 	// shared ancestors on deep (OpenZeppelin-style) hierarchies.
 	memo map[string][]string
+	// idInProgress/memoIDs mirror the display-name C3 state but operate on exact
+	// file#Contract identities. Unresolved bases remain visible in
+	// LinearizedBases but cannot appear in the exact object MRO.
+	idInProgress map[string]bool
+	memoIDs      map[string][]string
 }
 
 // NewInheritanceBuilder creates a new inheritance builder
 func NewInheritanceBuilder(db *types.Database) *InheritanceBuilder {
+	return newInheritanceBuilder(db, VerboseLog)
+}
+
+func newInheritanceBuilder(db *types.Database, logf func(string, ...any)) *InheritanceBuilder {
 	return &InheritanceBuilder{
-		db:         db,
-		inProgress: make(map[string]bool),
-		memo:       make(map[string][]string),
+		db:           db,
+		logf:         logf,
+		inProgress:   make(map[string]bool),
+		memo:         make(map[string][]string),
+		idInProgress: make(map[string]bool),
+		memoIDs:      make(map[string][]string),
 	}
 }
 
@@ -40,16 +53,88 @@ func (ib *InheritanceBuilder) Build() error {
 		if err != nil {
 			// Fall back to "just this contract" so downstream phases don't crash.
 			// Surface the reason via verbose so the user can see what failed.
-			VerboseLog("C3 linearization failed for %s: %v (falling back to self-only)", contract.Name, err)
+			ib.logf("C3 linearization failed for %s: %v (falling back to self-only)", contract.Name, err)
 			linearized = []string{contract.Name}
 		}
 		contract.LinearizedBases = linearized
+		linearizedIDs, idErr := ib.c3LinearizeIDs(contract)
+		if idErr != nil {
+			ib.logf("exact C3 linearization failed for %s: %v (falling back to exact self)", contract.ID, idErr)
+			linearizedIDs = []string{contract.ID}
+		}
+		contract.LinearizedBaseIDs = linearizedIDs
 
 		// Calculate inheritance weight (depth of inheritance)
 		contract.InheritanceWeight = len(linearized)
 	}
 
 	return nil
+}
+
+// c3LinearizeIDs computes the same Solidity C3 order as c3Linearize, but with
+// exact contract IDs as the merge keys. Keeping this independent from the
+// compatibility display-name slice prevents two contracts with the same short
+// name from collapsing into one MRO entry.
+func (ib *InheritanceBuilder) c3LinearizeIDs(contract *types.Contract) ([]string, error) {
+	if contract == nil {
+		return nil, fmt.Errorf("nil contract")
+	}
+	if cached, ok := ib.memoIDs[contract.ID]; ok {
+		return append([]string(nil), cached...), nil
+	}
+	if ib.idInProgress[contract.ID] {
+		return nil, fmt.Errorf("cyclic inheritance detected at %s", contract.ID)
+	}
+	ib.idInProgress[contract.ID] = true
+	defer delete(ib.idInProgress, contract.ID)
+
+	if len(contract.BaseContracts) == 0 {
+		result := []string{contract.ID}
+		ib.memoIDs[contract.ID] = append([]string(nil), result...)
+		return result, nil
+	}
+
+	revBases := make([]*types.Contract, 0, len(contract.BaseContracts))
+	for i := len(contract.BaseContracts) - 1; i >= 0; i-- {
+		baseName := contract.BaseContracts[i]
+		base, exact := ib.db.ResolveContractNameExact(baseName, contract.SourceFile)
+		if exact {
+			revBases = append(revBases, base)
+			continue
+		}
+		if len(ib.db.FindContractsByName(baseName)) > 1 {
+			ib.db.AddDiagnostic(types.Diagnostic{
+				Code:       types.DiagnosticIdentity,
+				Severity:   types.DiagnosticWarning,
+				Phase:      "builder",
+				Message:    fmt.Sprintf("base contract %q referenced by %q is ambiguous in source scope", baseName, contract.Name),
+				File:       contract.SourceFile,
+				Symbol:     baseName,
+				Incomplete: true,
+			})
+		}
+	}
+
+	lists := make([][]string, 0, len(revBases)+1)
+	degraded := false
+	directIDs := make([]string, 0, len(revBases))
+	for _, base := range revBases {
+		directIDs = append(directIDs, base.ID)
+		parentIDs, err := ib.c3LinearizeIDs(base)
+		if err != nil {
+			ib.logf("exact C3 parent linearization skipped (%s -> %s): %v", contract.ID, base.ID, err)
+			degraded = true
+			continue
+		}
+		lists = append(lists, parentIDs)
+	}
+	lists = append(lists, directIDs)
+
+	result := append([]string{contract.ID}, ib.c3Merge(lists)...)
+	if !degraded {
+		ib.memoIDs[contract.ID] = append([]string(nil), result...)
+	}
+	return result, nil
 }
 
 // c3Linearize performs canonical C3 linearization (Solidity's Method Resolution
@@ -111,7 +196,7 @@ func (ib *InheritanceBuilder) c3Linearize(contract *types.Contract) ([]string, e
 		if base == nil {
 			// Unknown base (e.g. an interface from an unresolved import): keep its
 			// name in the direct-base list below, but we cannot recurse into it.
-			VerboseLog("C3 parent not found (%s -> %s); using name only", contract.Name, baseName)
+			ib.logf("C3 parent not found (%s -> %s); using name only", contract.Name, baseName)
 			continue
 		}
 		parentLin, err := ib.c3Linearize(base)
@@ -119,7 +204,7 @@ func (ib *InheritanceBuilder) c3Linearize(contract *types.Contract) ([]string, e
 			// Cyclic parent: skip recursion but keep linearizing the rest so
 			// downstream phases still receive a usable (if partial) MRO. The
 			// partial result is context-sensitive, so don't memoize it.
-			VerboseLog("C3 parent linearization skipped (%s -> %s): %v", contract.Name, baseName, err)
+			ib.logf("C3 parent linearization skipped (%s -> %s): %v", contract.Name, baseName, err)
 			degraded = true
 			continue
 		}
@@ -186,7 +271,7 @@ func (ib *InheritanceBuilder) c3Merge(lists [][]string) []string {
 					break
 				}
 			}
-			VerboseLog("C3 merge: inconsistent linearization, forcing head %q", head)
+			ib.logf("C3 merge: inconsistent linearization, forcing head %q", head)
 		}
 
 		result = append(result, head)
@@ -220,35 +305,4 @@ func removeElement(list []string, element string) []string {
 		}
 	}
 	return result
-}
-
-// GetInheritedFunctions returns all functions from base contracts
-func (ib *InheritanceBuilder) GetInheritedFunctions(contractName string) []*types.Function {
-	contract := ib.db.GetContractByName(contractName)
-	if contract == nil {
-		return nil
-	}
-
-	var functions []*types.Function
-	seen := make(map[string]bool)
-
-	// Traverse in order (most derived first, which is the MRO order)
-	// Skip index 0 since that's the contract itself
-	for i := 1; i < len(contract.LinearizedBases); i++ {
-		baseName := contract.LinearizedBases[i]
-		baseContract := ib.db.GetContractByName(baseName)
-		if baseContract == nil {
-			continue
-		}
-
-		for _, fn := range baseContract.Functions {
-			signature := fn.GetSignature(nil)
-			if signature != "" && !seen[signature] {
-				seen[signature] = true
-				functions = append(functions, fn)
-			}
-		}
-	}
-
-	return functions
 }

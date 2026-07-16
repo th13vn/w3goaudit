@@ -11,22 +11,68 @@ import (
 
 // ASTBuilder builds w3goaudit AST from Solidity AST
 type ASTBuilder struct {
-	contract      *types.Contract
-	function      *types.Function
-	db            *types.Database
-	symbolTable   map[string]string // variable name -> RefKind (parameter, state_var, local_var)
-	symbolTypes   map[string]types.TypeInfo
-	taintTable    map[string][]string // variable name -> list of taints
-	paramNames    map[string]bool     // quick lookup for parameter names
-	stateVarNames map[string]bool     // quick lookup for state variable names
+	contract       *types.Contract
+	function       *types.Function
+	db             *types.Database
+	locator        *sourceLocator
+	symbolTable    map[string]string // variable name -> RefKind (parameter, state_var, local_var)
+	symbolTypes    map[string]types.TypeInfo
+	taintTable     map[string][]string // variable name -> list of taints
+	paramNames     map[string]bool     // quick lookup for parameter names
+	stateVarNames  map[string]bool     // quick lookup for state variable names
+	assemblyScopes []map[string]assemblySymbol
+	assemblyFlow   map[*types.ASTNode]assemblyControlFlow
+	assemblyLHS    map[*types.ASTNode]int
+	assemblyTypes  map[*types.ASTNode]assemblyObservedType
 }
+
+type assemblySymbol struct {
+	taintSources []string
+	typeInfo     types.TypeInfo
+}
+
+type assemblyFlowState struct {
+	taintTable     map[string][]string
+	symbolTypes    map[string]types.TypeInfo
+	assemblyScopes []map[string]assemblySymbol
+}
+
+type assemblyControlFlow struct {
+	kind       string
+	condition  *types.ASTNode
+	pre        []*types.ASTNode
+	body       []*types.ASTNode
+	post       []*types.ASTNode
+	cases      [][]*types.ASTNode
+	hasDefault bool
+}
+
+type assemblyObservedType struct {
+	initialized bool
+	unknown     bool
+	typeInfo    types.TypeInfo
+}
+
+const maxAssemblyLoopFixpointPasses = 16
 
 // BuildFunctionAST builds an AST tree for a function body
 func BuildFunctionAST(fndef *ast.FunctionDefinition, fn *types.Function, contract *types.Contract, db *types.Database) *types.ASTNode {
+	file := ""
+	if fn != nil {
+		file = fn.SourceFile
+	}
+	if file == "" && contract != nil {
+		file = contract.SourceFile
+	}
+	return buildFunctionASTWithLocator(fndef, fn, contract, db, sourceLocatorFromDatabase(db, file))
+}
+
+func buildFunctionASTWithLocator(fndef *ast.FunctionDefinition, fn *types.Function, contract *types.Contract, db *types.Database, locator *sourceLocator) *types.ASTNode {
 	builder := &ASTBuilder{
 		contract:      contract,
 		function:      fn,
 		db:            db,
+		locator:       locator,
 		symbolTable:   make(map[string]string),
 		symbolTypes:   make(map[string]types.TypeInfo),
 		taintTable:    make(map[string][]string),
@@ -39,7 +85,7 @@ func BuildFunctionAST(fndef *ast.FunctionDefinition, fn *types.Function, contrac
 
 	// Create function root node
 	root := types.NewASTNode(types.KindDeclFunction)
-	applySpan(root, fndef)
+	builder.locator.apply(root, fndef)
 	root.Name = fn.Name
 	root.SetAttribute("visibility", string(fn.Visibility))
 	root.SetAttribute("mutability", string(fn.StateMutability))
@@ -52,9 +98,28 @@ func BuildFunctionAST(fndef *ast.FunctionDefinition, fn *types.Function, contrac
 	return root
 }
 
-// BuildModifierAST builds an AST tree for a modifier body
+// BuildModifierAST preserves the original one-argument SDK API. Without owning
+// contract context it cannot classify state-variable references; new callers
+// should prefer BuildModifierASTWithContext.
 func BuildModifierAST(moddef *ast.ModifierDefinition) *types.ASTNode {
+	return buildModifierASTWithLocator(moddef, nil, nil, nil)
+}
+
+// BuildModifierASTWithContext builds a modifier AST with its owning contract
+// and database so state-variable references and source locations are resolved.
+func BuildModifierASTWithContext(moddef *ast.ModifierDefinition, contract *types.Contract, db *types.Database) *types.ASTNode {
+	file := ""
+	if contract != nil {
+		file = contract.SourceFile
+	}
+	return buildModifierASTWithLocator(moddef, contract, db, sourceLocatorFromDatabase(db, file))
+}
+
+func buildModifierASTWithLocator(moddef *ast.ModifierDefinition, contract *types.Contract, db *types.Database, locator *sourceLocator) *types.ASTNode {
 	builder := &ASTBuilder{
+		contract:      contract,
+		db:            db,
+		locator:       locator,
 		symbolTable:   make(map[string]string),
 		symbolTypes:   make(map[string]types.TypeInfo),
 		taintTable:    make(map[string][]string),
@@ -71,9 +136,20 @@ func BuildModifierAST(moddef *ast.ModifierDefinition) *types.ASTNode {
 		}
 	}
 
+	// Add the owning contract's state variables so writes/reads of them inside
+	// the modifier body are resolved (is_state_var, RefKind, taint source).
+	if contract != nil {
+		for _, sv := range contract.StateVariables {
+			builder.symbolTable[sv.Name] = "state_var"
+			ti := builder.typeInfoFromTypeName(sv.TypeName, "state_var")
+			builder.symbolTypes[sv.Name] = ti
+			builder.stateVarNames[sv.Name] = true
+		}
+	}
+
 	// Create modifier root node
 	root := types.NewASTNode(types.KindDeclModifier)
-	applySpan(root, moddef)
+	builder.locator.apply(root, moddef)
 	root.Name = moddef.Name
 
 	// Build AST from modifier body
@@ -112,6 +188,20 @@ func (b *ASTBuilder) buildSymbolTable() {
 		b.stateVarNames[sv.Name] = true
 	}
 
+	// Named return parameters are Solidity locals: inline assembly may read and
+	// assign them directly (for example `result := value`). Keep them in the
+	// surrounding symbol state so Yul writes are visible after the assignment.
+	// Add them after contract storage so the function-local name wins if it
+	// shadows a state variable.
+	for _, result := range b.function.Returns {
+		if result.Name != "" {
+			b.symbolTable[result.Name] = "local_var"
+			ti := b.typeInfoFromTypeName(result.TypeName, "return_parameter")
+			b.symbolTypes[result.Name] = ti
+			b.addSemanticSymbol(result.Name, "local_var", ti)
+		}
+	}
+
 	// Note: Local variables are added during traversal
 }
 
@@ -129,7 +219,7 @@ func (b *ASTBuilder) buildBlock(parent *types.ASTNode, block *ast.Block) {
 // onto the produced node. Central chokepoint so every statement node is located.
 func (b *ASTBuilder) buildStatement(stmt ast.Node) *types.ASTNode {
 	node := b.buildStatementInner(stmt)
-	applySpan(node, stmt)
+	b.locator.apply(node, stmt)
 	return node
 }
 
@@ -195,7 +285,7 @@ func (b *ASTBuilder) buildStatementInner(stmt ast.Node) *types.ASTNode {
 // buildInlineAssembly builds AST for inline assembly block
 func (b *ASTBuilder) buildInlineAssembly(asm *ast.InlineAssembly) *types.ASTNode {
 	node := types.NewASTNode(types.KindAsmBlock)
-	applySpan(node, asm)
+	b.locator.apply(node, asm)
 
 	if asm.Language != "" {
 		node.SetAttribute("language", asm.Language)
@@ -214,7 +304,12 @@ func (b *ASTBuilder) buildAssemblyBlock(parent *types.ASTNode, block *ast.Assemb
 	if block == nil {
 		return
 	}
+	b.pushAssemblyScope()
+	defer b.popAssemblyScope()
+	b.buildAssemblyBlockOperations(parent, block)
+}
 
+func (b *ASTBuilder) buildAssemblyBlockOperations(parent *types.ASTNode, block *ast.AssemblyBlock) {
 	for _, op := range block.Operations {
 		opNode := b.buildAssemblyOperation(op)
 		if opNode != nil {
@@ -227,7 +322,7 @@ func (b *ASTBuilder) buildAssemblyBlock(parent *types.ASTNode, block *ast.Assemb
 // source location onto the produced node.
 func (b *ASTBuilder) buildAssemblyOperation(op ast.Node) *types.ASTNode {
 	node := b.buildAssemblyOperationInner(op)
-	applySpan(node, op)
+	b.locator.apply(node, op)
 	return node
 }
 
@@ -240,90 +335,223 @@ func (b *ASTBuilder) buildAssemblyOperationInner(op ast.Node) *types.ASTNode {
 	switch o := op.(type) {
 	case *ast.AssemblyCall:
 		return b.buildAssemblyCall(o)
+	case *ast.AssemblyIdentifier:
+		return b.buildAssemblyIdentifier(o.Name)
+	case *ast.AssemblyLiteral:
+		return buildAssemblyLiteral(o)
 	case *ast.AssemblyLocalDefinition:
-		node := types.NewASTNode(types.KindDeclVariable)
-		node.SetAttribute("assembly", true)
-		if o.Expression != nil {
-			exprNode := b.buildAssemblyOperation(o.Expression)
-			if exprNode != nil {
-				node.AddChild(exprNode)
-			}
-		}
-		return node
+		return b.buildAssemblyLocalDefinition(o)
 	case *ast.AssemblyAssignment:
-		// `ok := delegatecall(...)` — the standard proxy pattern assigns to an
-		// existing variable WITHOUT `let`. Previously this hit the generic branch
-		// and its RHS call was never visited, so asm.delegatecall/asm.call inside
-		// it were invisible to templates and the call graph.
-		node := types.NewASTNode(types.KindStmtAssign)
-		node.SetAttribute("assembly", true)
-		if o.Expression != nil {
-			if exprNode := b.buildAssemblyOperation(o.Expression); exprNode != nil {
-				node.AddChild(exprNode)
-			}
-		}
-		return node
+		return b.buildAssemblyAssignment(o)
 	case *ast.AssemblyBlock:
-		blockNode := types.NewASTNode(types.KindStmtBlock)
-		blockNode.SetAttribute("assembly", true)
-		b.buildAssemblyBlock(blockNode, o)
-		return blockNode
+		return b.buildAssemblyBlockNode(o)
 	case *ast.AssemblyIf:
-		node := types.NewASTNode(types.KindStmtIf)
-		node.SetAttribute("assembly", true)
-		if o.Condition != nil {
-			if condNode := b.buildAssemblyOperation(o.Condition); condNode != nil {
-				condNode.SetAttribute("cond_role", "if")
-				node.AddChild(condNode)
-			}
-		}
-		if o.Body != nil {
-			b.buildAssemblyBlock(node, o.Body)
-		}
-		return node
+		return b.buildAssemblyIf(o)
 	case *ast.AssemblySwitch:
-		node := types.NewASTNode(types.KindStmtIf)
-		node.SetAttribute("assembly", true)
-		node.SetAttribute("switch", true)
-		if o.Expression != nil {
-			if exprNode := b.buildAssemblyOperation(o.Expression); exprNode != nil {
-				node.AddChild(exprNode)
-			}
-		}
-		for _, c := range o.Cases {
-			if c == nil || c.Body == nil {
-				continue
-			}
-			b.buildAssemblyBlock(node, c.Body)
-		}
-		return node
+		return b.buildAssemblySwitch(o)
 	case *ast.AssemblyFor:
-		node := types.NewASTNode(types.KindStmtLoop)
-		node.SetAttribute("assembly", true)
-		node.SetAttribute("loop_type", "asm_for")
-		for _, blk := range []*ast.AssemblyBlock{o.Pre, o.Post, o.Body} {
-			if blk != nil {
-				b.buildAssemblyBlock(node, blk)
-			}
-		}
-		if o.Condition != nil {
-			if condNode := b.buildAssemblyOperation(o.Condition); condNode != nil {
-				condNode.SetAttribute("cond_role", "loop")
-				node.AddChild(condNode)
-			}
-		}
-		return node
+		return b.buildAssemblyFor(o)
 	default:
 		// Generic assembly operation
 		return types.NewASTNode("assembly_operation")
 	}
 }
 
+func buildAssemblyLiteral(literal *ast.AssemblyLiteral) *types.ASTNode {
+	node := types.NewASTNode(types.KindExprLiteral)
+	node.Value = literal.Value
+	node.SetAttribute("subtype", literal.Kind)
+	node.SetAttribute("assembly", true)
+	return node
+}
+
+func (b *ASTBuilder) buildAssemblyLocalDefinition(definition *ast.AssemblyLocalDefinition) *types.ASTNode {
+	node := types.NewASTNode(types.KindDeclVariable)
+	node.SetAttribute("assembly", true)
+	var expression *types.ASTNode
+	if definition.Expression != nil {
+		expression = b.buildAssemblyOperation(definition.Expression)
+	}
+	taintSources := b.computeTaint(expression)
+	typeInfo := b.typeFromNode(expression)
+	lhsCount := 0
+	for _, name := range definition.Names {
+		if name == nil || name.Name == "" {
+			continue
+		}
+		lhsCount++
+		b.declareAssemblySymbol(name.Name, assemblySymbol{
+			taintSources: append([]string(nil), taintSources...),
+			typeInfo:     typeInfo,
+		})
+		node.AddChild(b.buildAssemblyIdentifier(name.Name))
+	}
+	b.setAssemblyLHSCount(node, lhsCount)
+	if expression != nil {
+		node.AddChild(expression)
+	}
+	return node
+}
+
+func (b *ASTBuilder) buildAssemblyAssignment(assignment *ast.AssemblyAssignment) *types.ASTNode {
+	// Yul assignment without `let` updates an existing Yul or Solidity symbol.
+	node := types.NewASTNode(types.KindStmtAssign)
+	node.SetAttribute("assembly", true)
+	var expression *types.ASTNode
+	if assignment.Expression != nil {
+		expression = b.buildAssemblyOperation(assignment.Expression)
+	}
+	taintSources := b.computeTaint(expression)
+	typeInfo := b.typeFromNode(expression)
+	lhsCount := 0
+	for _, name := range assignment.Names {
+		if name == nil || name.Name == "" {
+			continue
+		}
+		lhsCount++
+		b.assignAssemblySymbol(name.Name, taintSources, typeInfo)
+		node.AddChild(b.buildAssemblyIdentifier(name.Name))
+	}
+	b.setAssemblyLHSCount(node, lhsCount)
+	if expression != nil {
+		node.AddChild(expression)
+	}
+	return node
+}
+
+func (b *ASTBuilder) buildAssemblyBlockNode(block *ast.AssemblyBlock) *types.ASTNode {
+	node := types.NewASTNode(types.KindStmtBlock)
+	node.SetAttribute("assembly", true)
+	b.buildAssemblyBlock(node, block)
+	return node
+}
+
+func (b *ASTBuilder) buildAssemblyIf(statement *ast.AssemblyIf) *types.ASTNode {
+	node := types.NewASTNode(types.KindStmtIf)
+	node.SetAttribute("assembly", true)
+	condition := b.buildAssemblyCondition(statement.Condition, "if")
+	if condition != nil {
+		node.AddChild(condition)
+	}
+	inputState := b.snapshotAssemblyFlowState()
+	bodyStart := len(node.Children)
+	if statement.Body != nil {
+		b.restoreAssemblyFlowState(inputState)
+		b.buildAssemblyBlock(node, statement.Body)
+		bodyState := b.snapshotAssemblyFlowState()
+		b.restoreAssemblyFlowState(b.mergeAssemblyFlowStates(inputState, bodyState))
+	}
+	b.setAssemblyControlFlow(node, assemblyControlFlow{
+		kind:      "if",
+		condition: condition,
+		body:      assemblyChildSlice(node, bodyStart),
+	})
+	return node
+}
+
+func (b *ASTBuilder) buildAssemblySwitch(statement *ast.AssemblySwitch) *types.ASTNode {
+	node := types.NewASTNode(types.KindStmtIf)
+	node.SetAttribute("assembly", true)
+	node.SetAttribute("switch", true)
+	condition := b.buildAssemblyCondition(statement.Expression, "")
+	if condition != nil {
+		node.AddChild(condition)
+	}
+	inputState := b.snapshotAssemblyFlowState()
+	pathStates, caseNodes, hasDefault := b.buildAssemblySwitchCases(node, statement, inputState)
+	if !hasDefault || len(pathStates) == 0 {
+		pathStates = append(pathStates, inputState)
+	}
+	b.restoreAssemblyFlowState(b.mergeAssemblyFlowStates(pathStates...))
+	b.setAssemblyControlFlow(node, assemblyControlFlow{
+		kind:       "switch",
+		condition:  condition,
+		cases:      caseNodes,
+		hasDefault: hasDefault,
+	})
+	return node
+}
+
+func (b *ASTBuilder) buildAssemblySwitchCases(node *types.ASTNode, statement *ast.AssemblySwitch, inputState assemblyFlowState) ([]assemblyFlowState, [][]*types.ASTNode, bool) {
+	pathStates := make([]assemblyFlowState, 0, len(statement.Cases)+1)
+	caseNodes := make([][]*types.ASTNode, 0, len(statement.Cases))
+	hasDefault := false
+	for _, currentCase := range statement.Cases {
+		if currentCase == nil {
+			caseNodes = append(caseNodes, nil)
+			continue
+		}
+		hasDefault = hasDefault || currentCase.Default
+		if currentCase.Body == nil {
+			caseNodes = append(caseNodes, nil)
+			pathStates = append(pathStates, inputState)
+			continue
+		}
+		b.restoreAssemblyFlowState(inputState)
+		caseStart := len(node.Children)
+		b.buildAssemblyBlock(node, currentCase.Body)
+		caseNodes = append(caseNodes, assemblyChildSlice(node, caseStart))
+		pathStates = append(pathStates, b.snapshotAssemblyFlowState())
+	}
+	return pathStates, caseNodes, hasDefault
+}
+
+func (b *ASTBuilder) buildAssemblyFor(loop *ast.AssemblyFor) *types.ASTNode {
+	node := types.NewASTNode(types.KindStmtLoop)
+	node.SetAttribute("assembly", true)
+	node.SetAttribute("loop_type", "asm_for")
+	b.pushAssemblyScope()
+	defer b.popAssemblyScope()
+
+	preStart := len(node.Children)
+	if loop.Pre != nil {
+		b.buildAssemblyBlockOperations(node, loop.Pre)
+	}
+	preNodes := assemblyChildSlice(node, preStart)
+	condition := b.buildAssemblyCondition(loop.Condition, "loop")
+	if condition != nil {
+		node.AddChild(condition)
+	}
+	loopInputState := b.snapshotAssemblyFlowState()
+	b.restoreAssemblyFlowState(loopInputState)
+
+	bodyStart := len(node.Children)
+	if loop.Body != nil {
+		b.buildAssemblyBlock(node, loop.Body)
+	}
+	bodyNodes := assemblyChildSlice(node, bodyStart)
+	postStart := len(node.Children)
+	if loop.Post != nil {
+		b.buildAssemblyBlock(node, loop.Post)
+	}
+	flow := assemblyControlFlow{
+		kind:      "for",
+		condition: condition,
+		pre:       preNodes,
+		body:      bodyNodes,
+		post:      assemblyChildSlice(node, postStart),
+	}
+	b.setAssemblyControlFlow(node, flow)
+	b.restoreAssemblyFlowState(b.runAssemblyLoopFixpoint(loopInputState, flow))
+	return node
+}
+
+func (b *ASTBuilder) buildAssemblyCondition(operation ast.Node, role string) *types.ASTNode {
+	if operation == nil {
+		return nil
+	}
+	node := b.buildAssemblyOperation(operation)
+	if node != nil && role != "" {
+		node.SetAttribute("cond_role", role)
+	}
+	return node
+}
+
 // buildAssemblyCall dispatches to buildAssemblyCallInner and stamps source
 // location onto the produced node.
 func (b *ASTBuilder) buildAssemblyCall(call *ast.AssemblyCall) *types.ASTNode {
 	node := b.buildAssemblyCallInner(call)
-	applySpan(node, call)
+	b.locator.apply(node, call)
 	return node
 }
 
@@ -692,7 +920,7 @@ func (b *ASTBuilder) buildTryStatement(stmt *ast.TryStatement) *types.ASTNode {
 	// not pair them (e.g. a CEI sequence that crosses the try/catch boundary).
 	if stmt.Body != nil {
 		bodyNode := types.NewASTNode(types.KindStmtBlock)
-		applySpan(bodyNode, stmt.Body)
+		b.locator.apply(bodyNode, stmt.Body)
 		bodyNode.SetAttribute("try_part", "body")
 		b.buildBlock(bodyNode, stmt.Body)
 		node.AddChild(bodyNode)
@@ -704,7 +932,7 @@ func (b *ASTBuilder) buildTryStatement(stmt *ast.TryStatement) *types.ASTNode {
 			continue
 		}
 		catchNode := types.NewASTNode(types.KindStmtBlock)
-		applySpan(catchNode, clause.Body)
+		b.locator.apply(catchNode, clause.Body)
 		catchNode.SetAttribute("try_part", fmt.Sprintf("catch:%d", i))
 		b.buildBlock(catchNode, clause.Body)
 		node.AddChild(catchNode)
@@ -718,7 +946,7 @@ func (b *ASTBuilder) buildTryStatement(stmt *ast.TryStatement) *types.ASTNode {
 // node is located.
 func (b *ASTBuilder) buildExpression(expr ast.Node) *types.ASTNode {
 	node := b.buildExpressionInner(expr)
-	applySpan(node, expr)
+	b.locator.apply(node, expr)
 	return node
 }
 
@@ -1304,11 +1532,18 @@ func (b *ASTBuilder) buildIndexAccess(ia *ast.IndexAccess) *types.ASTNode {
 
 // buildIdentifier builds AST for identifier
 func (b *ASTBuilder) buildIdentifier(ident *ast.Identifier) *types.ASTNode {
+	return b.buildNamedIdentifier(ident.Name)
+}
+
+// buildNamedIdentifier builds a source-language-neutral identifier node. Both
+// Solidity and Yul identifiers resolve through the same symbol/type/taint
+// tables so assembly sinks retain parameter and state-variable provenance.
+func (b *ASTBuilder) buildNamedIdentifier(name string) *types.ASTNode {
 	node := types.NewASTNode(types.KindExprIdentifier)
-	node.Name = ident.Name
+	node.Name = name
 
 	// Set RefKind for taint analysis
-	if refKind, exists := b.symbolTable[ident.Name]; exists {
+	if refKind, exists := b.symbolTable[name]; exists {
 		node.RefKind = refKind
 	} else {
 		// Could be a contract name, enum, or other reference
@@ -1318,24 +1553,698 @@ func (b *ASTBuilder) buildIdentifier(ident *ast.Identifier) *types.ASTNode {
 	// Set RefID for cross-reference (only if we have contract/function context)
 	if b.contract != nil && b.function != nil {
 		if node.RefKind == "state_var" {
-			node.RefID = fmt.Sprintf("%s#%s.%s", b.contract.SourceFile, b.contract.Name, ident.Name)
+			node.RefID = fmt.Sprintf("%s#%s.%s", b.contract.SourceFile, b.contract.Name, name)
 		} else if node.RefKind == "parameter" {
-			node.RefID = fmt.Sprintf("%s#%s.%s.%s", b.contract.SourceFile, b.contract.Name, b.function.Name, ident.Name)
+			node.RefID = fmt.Sprintf("%s#%s.%s.%s", b.contract.SourceFile, b.contract.Name, b.function.Name, name)
 		} else if node.RefKind == "local_var" {
-			node.RefID = fmt.Sprintf("%s#%s.%s.-%s", b.contract.SourceFile, b.contract.Name, b.function.Name, ident.Name)
+			node.RefID = fmt.Sprintf("%s#%s.%s.-%s", b.contract.SourceFile, b.contract.Name, b.function.Name, name)
 		}
 	}
 
-	// Initialize TaintSources from static kind
-	if node.RefKind == "parameter" || node.RefKind == "state_var" {
+	// An explicit flow-state entry wins even when it is empty: legal Yul writes
+	// can sanitize a Solidity parameter, while an absent entry still means the
+	// parameter/state variable retains its declaration-time taint source.
+	if storedTaint, ok := b.taintTable[node.Name]; ok {
+		node.TaintSources = append([]string(nil), storedTaint...)
+	} else if node.RefKind == "parameter" || node.RefKind == "state_var" {
 		node.TaintSources = []string{node.RefKind}
-	} else if storedTaint, ok := b.taintTable[node.Name]; ok {
-		// Inherit taint from previous operations in this function
-		node.TaintSources = storedTaint
 	}
-	b.applyTypeAttributes(node, b.symbolTypes[ident.Name])
+	b.applyTypeAttributes(node, b.symbolTypes[name])
 
 	return node
+}
+
+func (b *ASTBuilder) buildAssemblyIdentifier(name string) *types.ASTNode {
+	if symbol, _, ok := b.lookupAssemblySymbol(name); ok {
+		node := types.NewASTNode(types.KindExprIdentifier)
+		node.Name = name
+		node.RefKind = "local_var"
+		if b.contract != nil && b.function != nil {
+			node.RefID = fmt.Sprintf("%s#%s.%s.-%s", b.contract.SourceFile, b.contract.Name, b.function.Name, name)
+		}
+		node.TaintSources = append([]string(nil), symbol.taintSources...)
+		b.applyTypeAttributes(node, symbol.typeInfo)
+		node.SetAttribute("assembly", true)
+		return node
+	}
+
+	node := b.buildNamedIdentifier(name)
+	node.SetAttribute("assembly", true)
+	return node
+}
+
+func (b *ASTBuilder) pushAssemblyScope() {
+	b.assemblyScopes = append(b.assemblyScopes, make(map[string]assemblySymbol))
+}
+
+func (b *ASTBuilder) popAssemblyScope() {
+	b.assemblyScopes = b.assemblyScopes[:len(b.assemblyScopes)-1]
+}
+
+func (b *ASTBuilder) declareAssemblySymbol(name string, symbol assemblySymbol) {
+	if len(b.assemblyScopes) == 0 {
+		b.pushAssemblyScope()
+	}
+	b.assemblyScopes[len(b.assemblyScopes)-1][name] = symbol
+}
+
+func (b *ASTBuilder) lookupAssemblySymbol(name string) (assemblySymbol, int, bool) {
+	for i := len(b.assemblyScopes) - 1; i >= 0; i-- {
+		if symbol, ok := b.assemblyScopes[i][name]; ok {
+			return symbol, i, true
+		}
+	}
+	return assemblySymbol{}, 0, false
+}
+
+func (b *ASTBuilder) assignAssemblySymbol(name string, taintSources []string, typeInfo types.TypeInfo) {
+	symbol, scope, ok := b.lookupAssemblySymbol(name)
+	if ok {
+		symbol.taintSources = append([]string(nil), taintSources...)
+		if typeInfo.IsKnown() {
+			symbol.typeInfo = typeInfo
+		}
+		b.assemblyScopes[scope][name] = symbol
+		return
+	}
+
+	// If no Yul declaration shadows the name, an assembly assignment may target
+	// an in-scope Solidity parameter, named return, or local. Record even an
+	// empty taint set so a clean overwrite is distinguishable from "never
+	// assigned". Solidity storage variables are intentionally excluded: Yul
+	// accesses those via `.slot`/`.offset`, not direct assignment.
+	refKind, ok := b.symbolTable[name]
+	if !ok || (refKind != "parameter" && refKind != "local_var") {
+		return
+	}
+	b.taintTable[name] = append([]string(nil), taintSources...)
+	if typeInfo.IsKnown() {
+		b.symbolTypes[name] = typeInfo
+		b.addSemanticSymbol(name, refKind, typeInfo)
+	}
+}
+
+func assemblyChildSlice(parent *types.ASTNode, start int) []*types.ASTNode {
+	if parent == nil || start < 0 || start >= len(parent.Children) {
+		return nil
+	}
+	return append([]*types.ASTNode(nil), parent.Children[start:]...)
+}
+
+func (b *ASTBuilder) setAssemblyControlFlow(node *types.ASTNode, flow assemblyControlFlow) {
+	if b.assemblyFlow == nil {
+		b.assemblyFlow = make(map[*types.ASTNode]assemblyControlFlow)
+	}
+	b.assemblyFlow[node] = flow
+}
+
+func (b *ASTBuilder) setAssemblyLHSCount(node *types.ASTNode, count int) {
+	if b.assemblyLHS == nil {
+		b.assemblyLHS = make(map[*types.ASTNode]int)
+	}
+	b.assemblyLHS[node] = count
+}
+
+// runAssemblyLoopFixpoint computes the least conservative loop-head state:
+// headNext = join(loopInput, transfer(head)). The transfer walks the existing
+// simplified AST only; it never rebuilds or appends nodes. Identifier facts
+// observed on later iterations are unioned into those existing nodes.
+func (b *ASTBuilder) runAssemblyLoopFixpoint(loopInput assemblyFlowState, flow assemblyControlFlow) assemblyFlowState {
+	head := loopInput
+	for pass := 0; pass < maxAssemblyLoopFixpointPasses; pass++ {
+		b.restoreAssemblyFlowState(head)
+		b.observeAssemblyTree(flow.condition)
+		b.transferAssemblyScopedNodes(flow.body)
+		b.transferAssemblyScopedNodes(flow.post)
+		iteration := b.snapshotAssemblyFlowState()
+		next := b.mergeAssemblyFlowStates(loopInput, iteration)
+		if equalAssemblyFlowStates(head, next) {
+			return next
+		}
+		head = next
+	}
+	// Taint joins are monotone and finite. Returning the last joined head at the
+	// cap is conservative; it includes the zero-iteration input and every source
+	// observed by the bounded transfers.
+	return head
+}
+
+func (b *ASTBuilder) transferAssemblyScopedNodes(nodes []*types.ASTNode) {
+	b.pushAssemblyScope()
+	b.transferAssemblyNodes(nodes)
+	b.popAssemblyScope()
+}
+
+func (b *ASTBuilder) transferAssemblyNodes(nodes []*types.ASTNode) {
+	for _, node := range nodes {
+		b.transferAssemblyNode(node)
+	}
+}
+
+func (b *ASTBuilder) transferAssemblyNode(node *types.ASTNode) {
+	if node == nil {
+		return
+	}
+	if flow, ok := b.assemblyFlow[node]; ok {
+		switch flow.kind {
+		case "if":
+			b.transferAssemblyIf(flow)
+		case "switch":
+			b.transferAssemblySwitch(flow)
+		case "for":
+			b.transferAssemblyFor(flow)
+		}
+		return
+	}
+
+	switch {
+	case node.Kind == types.KindStmtBlock && node.GetAttributeBool("assembly"):
+		b.transferAssemblyScopedNodes(node.Children)
+	case node.Kind == types.KindDeclVariable && node.GetAttributeBool("assembly"):
+		b.transferAssemblyDefinition(node)
+	case node.Kind == types.KindStmtAssign && node.GetAttributeBool("assembly"):
+		b.transferAssemblyAssignment(node)
+	default:
+		b.observeAssemblyTree(node)
+	}
+}
+
+func (b *ASTBuilder) transferAssemblyDefinition(node *types.ASTNode) {
+	lhsCount := b.assemblyLHS[node]
+	if lhsCount > len(node.Children) {
+		lhsCount = len(node.Children)
+	}
+	var taint []string
+	var typeInfo types.TypeInfo
+	if lhsCount < len(node.Children) {
+		rhs := node.Children[lhsCount]
+		taint = b.currentAssemblyNodeTaint(rhs)
+		typeInfo = b.currentAssemblyNodeType(rhs)
+		b.observeAssemblyTree(rhs)
+	}
+	for i := 0; i < lhsCount; i++ {
+		lhs := node.Children[i]
+		if lhs == nil || lhs.Name == "" {
+			continue
+		}
+		b.declareAssemblySymbol(lhs.Name, assemblySymbol{
+			taintSources: append([]string(nil), taint...),
+			typeInfo:     typeInfo,
+		})
+		b.observeAssemblyIdentifier(lhs)
+	}
+}
+
+func (b *ASTBuilder) transferAssemblyAssignment(node *types.ASTNode) {
+	lhsCount := b.assemblyLHS[node]
+	if lhsCount > len(node.Children) {
+		lhsCount = len(node.Children)
+	}
+	var taint []string
+	var typeInfo types.TypeInfo
+	if lhsCount < len(node.Children) {
+		rhs := node.Children[lhsCount]
+		taint = b.currentAssemblyNodeTaint(rhs)
+		typeInfo = b.currentAssemblyNodeType(rhs)
+		b.observeAssemblyTree(rhs)
+	}
+	for i := 0; i < lhsCount; i++ {
+		lhs := node.Children[i]
+		if lhs == nil || lhs.Name == "" {
+			continue
+		}
+		b.assignAssemblySymbolState(lhs.Name, taint, typeInfo)
+		b.observeAssemblyIdentifier(lhs)
+	}
+}
+
+func (b *ASTBuilder) transferAssemblyIf(flow assemblyControlFlow) {
+	b.observeAssemblyTree(flow.condition)
+	input := b.snapshotAssemblyFlowState()
+	b.restoreAssemblyFlowState(input)
+	b.transferAssemblyScopedNodes(flow.body)
+	bodyState := b.snapshotAssemblyFlowState()
+	b.restoreAssemblyFlowState(b.mergeAssemblyFlowStates(input, bodyState))
+}
+
+func (b *ASTBuilder) transferAssemblySwitch(flow assemblyControlFlow) {
+	b.observeAssemblyTree(flow.condition)
+	input := b.snapshotAssemblyFlowState()
+	paths := make([]assemblyFlowState, 0, len(flow.cases)+1)
+	for _, caseNodes := range flow.cases {
+		b.restoreAssemblyFlowState(input)
+		b.transferAssemblyScopedNodes(caseNodes)
+		paths = append(paths, b.snapshotAssemblyFlowState())
+	}
+	if !flow.hasDefault {
+		paths = append(paths, input)
+	}
+	if len(paths) == 0 {
+		paths = append(paths, input)
+	}
+	b.restoreAssemblyFlowState(b.mergeAssemblyFlowStates(paths...))
+}
+
+func (b *ASTBuilder) transferAssemblyFor(flow assemblyControlFlow) {
+	b.pushAssemblyScope()
+	b.transferAssemblyNodes(flow.pre)
+	b.observeAssemblyTree(flow.condition)
+	loopInput := b.snapshotAssemblyFlowState()
+	b.restoreAssemblyFlowState(b.runAssemblyLoopFixpoint(loopInput, flow))
+	b.popAssemblyScope()
+}
+
+func (b *ASTBuilder) assignAssemblySymbolState(name string, taintSources []string, typeInfo types.TypeInfo) {
+	symbol, scope, ok := b.lookupAssemblySymbol(name)
+	if ok {
+		symbol.taintSources = append([]string(nil), taintSources...)
+		if typeInfo.IsKnown() {
+			symbol.typeInfo = typeInfo
+		}
+		b.assemblyScopes[scope][name] = symbol
+		return
+	}
+	refKind, ok := b.symbolTable[name]
+	if !ok || (refKind != "parameter" && refKind != "local_var") {
+		return
+	}
+	b.taintTable[name] = append([]string(nil), taintSources...)
+	if typeInfo.IsKnown() {
+		b.symbolTypes[name] = typeInfo
+	}
+}
+
+func (b *ASTBuilder) observeAssemblyTree(node *types.ASTNode) {
+	if node == nil {
+		return
+	}
+	if node.Kind == types.KindExprIdentifier && node.GetAttributeBool("assembly") {
+		b.observeAssemblyIdentifier(node)
+	}
+	for _, child := range node.Children {
+		b.observeAssemblyTree(child)
+	}
+}
+
+func (b *ASTBuilder) observeAssemblyIdentifier(node *types.ASTNode) {
+	if node == nil {
+		return
+	}
+	taint, typeInfo := b.currentAssemblyIdentifierFacts(node.Name)
+	node.TaintSources = unionAssemblyTaintSources(node.TaintSources, taint)
+	b.observeAssemblyIdentifierType(node, typeInfo)
+}
+
+func (b *ASTBuilder) currentAssemblyIdentifierFacts(name string) ([]string, types.TypeInfo) {
+	if symbol, _, ok := b.lookupAssemblySymbol(name); ok {
+		return append([]string(nil), symbol.taintSources...), symbol.typeInfo
+	}
+	var taint []string
+	if stored, ok := b.taintTable[name]; ok {
+		taint = append([]string(nil), stored...)
+	} else {
+		taint = append([]string(nil), b.defaultAssemblyTaint(name)...)
+	}
+	return taint, b.symbolTypes[name]
+}
+
+func (b *ASTBuilder) currentAssemblyNodeTaint(node *types.ASTNode) []string {
+	if node == nil {
+		return nil
+	}
+	if node.Kind == types.KindExprIdentifier && node.GetAttributeBool("assembly") {
+		taint, _ := b.currentAssemblyIdentifierFacts(node.Name)
+		return taint
+	}
+	paths := make([][]string, 0, len(node.Children)+1)
+	paths = append(paths, node.TaintSources)
+	for _, child := range node.Children {
+		paths = append(paths, b.currentAssemblyNodeTaint(child))
+	}
+	return unionAssemblyTaintSources(paths...)
+}
+
+func (b *ASTBuilder) currentAssemblyNodeType(node *types.ASTNode) types.TypeInfo {
+	if node == nil {
+		return types.TypeInfo{}
+	}
+	if node.Kind == types.KindExprIdentifier && node.GetAttributeBool("assembly") {
+		_, typeInfo := b.currentAssemblyIdentifierFacts(node.Name)
+		return typeInfo
+	}
+	return b.typeFromNode(node)
+}
+
+func (b *ASTBuilder) observeAssemblyIdentifierType(node *types.ASTNode, current types.TypeInfo) {
+	if b.assemblyTypes == nil {
+		b.assemblyTypes = make(map[*types.ASTNode]assemblyObservedType)
+	}
+	observed := b.assemblyTypes[node]
+	if !observed.initialized {
+		observed.initialized = true
+		observed.typeInfo = b.typeFromNode(node)
+		observed.unknown = !observed.typeInfo.IsKnown()
+	}
+	if observed.unknown || !current.IsKnown() {
+		observed.unknown = true
+		observed.typeInfo = types.TypeInfo{}
+		clearAssemblyTypeAttributes(node)
+		b.assemblyTypes[node] = observed
+		return
+	}
+	merged, agrees := mergeAssemblyTypeInfo(observed.typeInfo, current)
+	if !agrees {
+		observed.unknown = true
+		observed.typeInfo = types.TypeInfo{}
+		clearAssemblyTypeAttributes(node)
+	} else {
+		observed.typeInfo = merged
+		clearAssemblyTypeAttributes(node)
+		b.applyTypeAttributes(node, merged)
+	}
+	b.assemblyTypes[node] = observed
+}
+
+func clearAssemblyTypeAttributes(node *types.ASTNode) {
+	if node == nil {
+		return
+	}
+	for _, key := range []string{
+		"type", "type_base", "type_kind", "type_confidence", "type_source",
+		"type_contract_id", "type_is_address", "type_is_payable", "type_element",
+		"type_key", "type_value",
+	} {
+		delete(node.Attributes, key)
+	}
+}
+
+func (b *ASTBuilder) snapshotAssemblyFlowState() assemblyFlowState {
+	return assemblyFlowState{
+		taintTable:     cloneAssemblyTaintTable(b.taintTable),
+		symbolTypes:    cloneAssemblyTypeTable(b.symbolTypes),
+		assemblyScopes: cloneAssemblyScopes(b.assemblyScopes),
+	}
+}
+
+func (b *ASTBuilder) restoreAssemblyFlowState(state assemblyFlowState) {
+	b.taintTable = cloneAssemblyTaintTable(state.taintTable)
+	b.symbolTypes = cloneAssemblyTypeTable(state.symbolTypes)
+	b.assemblyScopes = cloneAssemblyScopes(state.assemblyScopes)
+}
+
+// mergeAssemblyFlowStates joins feasible control-flow paths. Taint is a may
+// property, so sources are unioned. Types are a must-agree property, so a fact
+// survives only when every path has the same value.
+func (b *ASTBuilder) mergeAssemblyFlowStates(states ...assemblyFlowState) assemblyFlowState {
+	if len(states) == 0 {
+		return b.snapshotAssemblyFlowState()
+	}
+
+	taintTables := make([]map[string][]string, 0, len(states))
+	typeTables := make([]map[string]types.TypeInfo, 0, len(states))
+	for _, state := range states {
+		taintTables = append(taintTables, state.taintTable)
+		typeTables = append(typeTables, state.symbolTypes)
+	}
+
+	return assemblyFlowState{
+		taintTable:     mergeAssemblyTaintTables(taintTables, b.defaultAssemblyTaint),
+		symbolTypes:    mergeAssemblyTypeTables(typeTables),
+		assemblyScopes: mergeAssemblyScopeStates(states),
+	}
+}
+
+func (b *ASTBuilder) defaultAssemblyTaint(name string) []string {
+	switch b.symbolTable[name] {
+	case "parameter", "state_var":
+		return []string{b.symbolTable[name]}
+	default:
+		return nil
+	}
+}
+
+func cloneAssemblyTaintTable(in map[string][]string) map[string][]string {
+	out := make(map[string][]string, len(in))
+	for name, sources := range in {
+		out[name] = append([]string(nil), sources...)
+	}
+	return out
+}
+
+func cloneAssemblyTypeTable(in map[string]types.TypeInfo) map[string]types.TypeInfo {
+	out := make(map[string]types.TypeInfo, len(in))
+	for name, typeInfo := range in {
+		out[name] = typeInfo
+	}
+	return out
+}
+
+func cloneAssemblyScopes(in []map[string]assemblySymbol) []map[string]assemblySymbol {
+	out := make([]map[string]assemblySymbol, len(in))
+	for i, scope := range in {
+		out[i] = make(map[string]assemblySymbol, len(scope))
+		for name, symbol := range scope {
+			symbol.taintSources = append([]string(nil), symbol.taintSources...)
+			out[i][name] = symbol
+		}
+	}
+	return out
+}
+
+func equalAssemblyFlowStates(left, right assemblyFlowState) bool {
+	return equalAssemblyTaintTables(left.taintTable, right.taintTable) &&
+		equalAssemblyTypeTables(left.symbolTypes, right.symbolTypes) &&
+		equalAssemblyScopes(left.assemblyScopes, right.assemblyScopes)
+}
+
+func equalAssemblyTaintTables(left, right map[string][]string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for name, sources := range left {
+		candidate, ok := right[name]
+		if !ok || !equalAssemblyTaintSources(sources, candidate) {
+			return false
+		}
+	}
+	return true
+}
+
+func equalAssemblyTypeTables(left, right map[string]types.TypeInfo) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for name, typeInfo := range left {
+		if candidate, ok := right[name]; !ok || candidate != typeInfo {
+			return false
+		}
+	}
+	return true
+}
+
+func equalAssemblyScopes(left, right []map[string]assemblySymbol) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for i := range left {
+		if len(left[i]) != len(right[i]) {
+			return false
+		}
+		for name, symbol := range left[i] {
+			candidate, ok := right[i][name]
+			if !ok || !equalAssemblyTaintSources(symbol.taintSources, candidate.taintSources) || candidate.typeInfo != symbol.typeInfo {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func mergeAssemblyTaintTables(tables []map[string][]string, defaultTaint func(string) []string) map[string][]string {
+	merged := make(map[string][]string)
+	for name := range unionAssemblyMapKeys(tables) {
+		pathSources := make([][]string, 0, len(tables))
+		for _, table := range tables {
+			if sources, ok := table[name]; ok {
+				pathSources = append(pathSources, sources)
+			} else {
+				pathSources = append(pathSources, defaultTaint(name))
+			}
+		}
+		sources := unionAssemblyTaintSources(pathSources...)
+		if !equalAssemblyTaintSources(sources, defaultTaint(name)) {
+			merged[name] = sources
+		}
+	}
+	return merged
+}
+
+func mergeAssemblyTypeTables(tables []map[string]types.TypeInfo) map[string]types.TypeInfo {
+	merged := make(map[string]types.TypeInfo)
+	for name := range unionAssemblyMapKeys(tables) {
+		first, ok := tables[0][name]
+		if !ok {
+			continue
+		}
+		pathTypes := make([]types.TypeInfo, 0, len(tables))
+		pathTypes = append(pathTypes, first)
+		presentEverywhere := true
+		for _, table := range tables[1:] {
+			candidate, exists := table[name]
+			if !exists {
+				presentEverywhere = false
+				break
+			}
+			pathTypes = append(pathTypes, candidate)
+		}
+		if !presentEverywhere {
+			continue
+		}
+		if typeInfo, agrees := mergeAssemblyTypeInfo(pathTypes...); agrees {
+			merged[name] = typeInfo
+		}
+	}
+	return merged
+}
+
+func mergeAssemblyScopeStates(states []assemblyFlowState) []map[string]assemblySymbol {
+	scopeCount := len(states[0].assemblyScopes)
+	for _, state := range states[1:] {
+		if len(state.assemblyScopes) < scopeCount {
+			scopeCount = len(state.assemblyScopes)
+		}
+	}
+
+	merged := make([]map[string]assemblySymbol, scopeCount)
+	for scopeIndex := 0; scopeIndex < scopeCount; scopeIndex++ {
+		scopes := make([]map[string]assemblySymbol, 0, len(states))
+		for _, state := range states {
+			scopes = append(scopes, state.assemblyScopes[scopeIndex])
+		}
+		merged[scopeIndex] = mergeAssemblySymbols(scopes)
+	}
+	return merged
+}
+
+func mergeAssemblySymbols(scopes []map[string]assemblySymbol) map[string]assemblySymbol {
+	merged := make(map[string]assemblySymbol)
+	for name := range unionAssemblyMapKeys(scopes) {
+		first, ok := scopes[0][name]
+		if !ok {
+			continue
+		}
+		pathSources := make([][]string, 0, len(scopes))
+		pathSources = append(pathSources, first.taintSources)
+		pathTypes := make([]types.TypeInfo, 0, len(scopes))
+		pathTypes = append(pathTypes, first.typeInfo)
+		presentEverywhere := true
+		for _, scope := range scopes[1:] {
+			candidate, exists := scope[name]
+			if !exists {
+				presentEverywhere = false
+				break
+			}
+			pathSources = append(pathSources, candidate.taintSources)
+			pathTypes = append(pathTypes, candidate.typeInfo)
+		}
+		if !presentEverywhere {
+			continue
+		}
+		first.taintSources = unionAssemblyTaintSources(pathSources...)
+		if typeInfo, agrees := mergeAssemblyTypeInfo(pathTypes...); agrees {
+			first.typeInfo = typeInfo
+		} else {
+			first.typeInfo = types.TypeInfo{}
+		}
+		merged[name] = first
+	}
+	return merged
+}
+
+func mergeAssemblyTypeInfo(pathTypes ...types.TypeInfo) (types.TypeInfo, bool) {
+	if len(pathTypes) == 0 {
+		return types.TypeInfo{}, false
+	}
+	merged := pathTypes[0]
+	for _, candidate := range pathTypes[1:] {
+		if !sameAssemblyTypeShape(merged, candidate) {
+			return types.TypeInfo{}, false
+		}
+		if candidate.Source != merged.Source {
+			merged.Source = "flow_merge"
+		}
+		merged.Confidence = weakerAssemblyTypeConfidence(merged.Confidence, candidate.Confidence)
+	}
+	return merged, true
+}
+
+func sameAssemblyTypeShape(left, right types.TypeInfo) bool {
+	return left.Name == right.Name &&
+		left.BaseName == right.BaseName &&
+		left.Kind == right.Kind &&
+		left.ContractID == right.ContractID &&
+		left.IsAddress == right.IsAddress &&
+		left.IsPayable == right.IsPayable &&
+		left.ElementType == right.ElementType &&
+		left.KeyType == right.KeyType &&
+		left.ValueType == right.ValueType
+}
+
+func weakerAssemblyTypeConfidence(left, right string) string {
+	if assemblyTypeConfidenceRank(right) < assemblyTypeConfidenceRank(left) {
+		return right
+	}
+	return left
+}
+
+func assemblyTypeConfidenceRank(confidence string) int {
+	switch confidence {
+	case "high":
+		return 3
+	case "medium":
+		return 2
+	case "low":
+		return 1
+	default:
+		return 0
+	}
+}
+
+func unionAssemblyMapKeys[V any](maps []map[string]V) map[string]struct{} {
+	keys := make(map[string]struct{})
+	for _, values := range maps {
+		for key := range values {
+			keys[key] = struct{}{}
+		}
+	}
+	return keys
+}
+
+func unionAssemblyTaintSources(paths ...[]string) []string {
+	set := make(map[string]struct{})
+	for _, sources := range paths {
+		for _, source := range sources {
+			set[source] = struct{}{}
+		}
+	}
+	merged := make([]string, 0, len(set))
+	for source := range set {
+		merged = append(merged, source)
+	}
+	sort.Strings(merged)
+	return merged
+}
+
+func equalAssemblyTaintSources(left, right []string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for i := range left {
+		if left[i] != right[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // buildLiteral builds AST for literal values

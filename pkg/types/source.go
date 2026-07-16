@@ -13,11 +13,20 @@ func (db *Database) GetFunctionSource(fn *Function) string {
 	if fn == nil {
 		return ""
 	}
-	contract := db.GetContractByName(fn.ContractName)
-	if contract == nil {
+	// Prefer the file recorded on the function itself. Resolving the owning
+	// contract by name is ambiguous under collisions (e.g. a mock `Token` and a
+	// real `Token`) and can slice a different file's source. Fall back to
+	// name resolution only for databases built before SourceFile was recorded.
+	sourceFile := fn.SourceFile
+	if sourceFile == "" {
+		if contract := db.GetContractByName(fn.ContractName); contract != nil {
+			sourceFile = contract.SourceFile
+		}
+	}
+	if sourceFile == "" {
 		return ""
 	}
-	return db.GetSourceLines(contract.SourceFile, fn.StartLine, fn.EndLine)
+	return db.GetSourceLines(sourceFile, fn.StartLine, fn.EndLine)
 }
 
 // GetModifierSource returns the raw Solidity source for a modifier defined in

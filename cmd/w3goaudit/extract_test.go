@@ -1,12 +1,79 @@
 package main
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/th13vn/w3goaudit/pkg/builder"
 	"github.com/th13vn/w3goaudit/pkg/reader"
 	"github.com/th13vn/w3goaudit/pkg/types"
 )
+
+func duplicateExtractDB() *types.Database {
+	db := types.NewDatabase()
+	for _, file := range []string{"/a/Token.sol", "/z/Token.sol"} {
+		contract := &types.Contract{
+			ID: file + "#Token", Name: "Token", SourceFile: file, Kind: types.ContractKindContract,
+			Functions: []*types.Function{{Name: "run", Selector: "run()", Signature: "c0406226", ContractName: "Token", SourceFile: file}},
+		}
+		db.AddContract(contract)
+	}
+	return db
+}
+
+func TestExtractResolutionRejectsAmbiguity(t *testing.T) {
+	db := duplicateExtractDB()
+	if _, err := resolveContractQuery(db, "Token"); err == nil || !strings.Contains(err.Error(), "ambiguous contract") {
+		t.Fatalf("contract err = %v", err)
+	}
+	fn, contract, err := resolveFunctionQuery(db, "run", "")
+	if err == nil || fn != nil || contract != nil || !strings.Contains(err.Error(), "/a/Token.sol#Token.run()\n  /z/Token.sol#Token.run()") {
+		t.Fatalf("fn=%v contract=%v err=%v", fn, contract, err)
+	}
+}
+
+func TestExtractResolutionAcceptsExactIDsAndQualifiers(t *testing.T) {
+	db := duplicateExtractDB()
+	fn, contract, err := resolveFunctionQuery(db, "/z/Token.sol#Token.run()", "")
+	if err != nil || fn == nil || contract == nil || contract.SourceFile != "/z/Token.sol" {
+		t.Fatalf("fn=%v contract=%v err=%v", fn, contract, err)
+	}
+	fn, contract, err = resolveFunctionQuery(db, "Token.run()", "/a/Token.sol#Token")
+	if err != nil || fn == nil || contract == nil || contract.SourceFile != "/a/Token.sol" {
+		t.Fatalf("qualified fn=%v contract=%v err=%v", fn, contract, err)
+	}
+}
+
+func TestExtractInheritedContextUsesExactBaseIdentity(t *testing.T) {
+	db := types.NewDatabase()
+	wrong := &types.Contract{
+		ID: "/a/Base.sol#Base", Name: "Base", SourceFile: "/a/Base.sol", Kind: types.ContractKindContract,
+		StateVariables: []*types.StateVariable{{Name: "wrong", TypeName: "uint256"}},
+	}
+	right := &types.Contract{
+		ID: "/z/Base.sol#Base", Name: "Base", SourceFile: "/z/Base.sol", Kind: types.ContractKindContract,
+		StateVariables: []*types.StateVariable{{Name: "right", TypeName: "address"}},
+	}
+	vault := &types.Contract{
+		ID: "/z/Vault.sol#Vault", Name: "Vault", SourceFile: "/z/Vault.sol", Kind: types.ContractKindContract,
+		LinearizedBases:   []string{"Vault", "Base"},
+		LinearizedBaseIDs: []string{"/z/Vault.sol#Vault", "/z/Base.sol#Base"},
+		Functions: []*types.Function{{
+			Name: "run", Selector: "run()", ContractName: "Vault", SourceFile: "/z/Vault.sol",
+		}},
+	}
+	db.AddContract(wrong)
+	db.AddContract(right)
+	db.AddContract(vault)
+
+	bundle := buildBundle(db, vault, vault.Functions[0])
+	if len(bundle.StateVars) != 1 || bundle.StateVars[0].Name != "right" {
+		t.Fatalf("state variables = %#v, want exact /z/Base.sol base", bundle.StateVars)
+	}
+	if len(bundle.Inheritance) != 2 || bundle.Inheritance[1].Kind != string(right.Kind) {
+		t.Fatalf("inheritance = %#v, want exact /z/Base.sol base kind", bundle.Inheritance)
+	}
+}
 
 // The extract subcommands read a built database and slice it by contract,
 // entrypoint, inheritance, and call context. These tests build that database

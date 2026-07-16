@@ -7,14 +7,22 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 
+	"github.com/th13vn/w3goaudit/pkg/logging"
 	"github.com/th13vn/w3goaudit/pkg/types"
 )
 
+// Options configures one Reader instance.
+type Options struct {
+	Logger *logging.Logger
+}
+
 // Reader handles reading Solidity files and directories
 type Reader struct {
+	logger *logging.Logger
+	legacy bool
+
 	// ProjectRoot is the detected project root
 	ProjectRoot string
 
@@ -26,13 +34,50 @@ type Reader struct {
 
 	// resolver handles import path resolution
 	resolver *Resolver
+
+	// diagnostics persist analysis loss for transfer into the built database.
+	diagnostics []types.Diagnostic
 }
 
-// New creates a new Reader
+// UnresolvedImport records an import statement that could not be resolved to a
+// file on disk, and the file it appeared in.
+type UnresolvedImport struct {
+	ImportPath string
+	FromFile   string
+	Reason     string
+}
+
+// New creates a Reader that preserves the legacy package-global verbose
+// configuration. New code should use NewWithOptions for scan-local logging.
 func New() *Reader {
+	return newReader(nil, true)
+}
+
+// NewWithOptions creates a Reader with scan-local configuration. A nil logger
+// is treated as disabled and never falls back to package globals.
+func NewWithOptions(opts Options) *Reader {
+	return newReader(opts.Logger, false)
+}
+
+func newReader(logger *logging.Logger, legacy bool) *Reader {
+	if logger == nil && !legacy {
+		logger = logging.Disabled()
+	}
 	return &Reader{
+		logger:      logger,
+		legacy:      legacy,
 		SourceFiles: make([]*types.SourceFile, 0),
 		loadedPaths: make(map[string]bool),
+	}
+}
+
+func (r *Reader) logf(format string, args ...any) {
+	if r != nil && r.legacy {
+		VerboseLog(format, args...)
+		return
+	}
+	if r != nil {
+		r.logger.Printf(format, args...)
 	}
 }
 
@@ -43,7 +88,7 @@ func (r *Reader) ReadFile(path string) (*types.SourceFile, error) {
 		return nil, err
 	}
 
-	VerboseLog("Reading file: %s", absPath)
+	r.logf("Reading file: %s", absPath)
 
 	// Check for .sol extension
 	if !strings.HasSuffix(absPath, ".sol") {
@@ -67,7 +112,7 @@ func (r *Reader) ReadFile(path string) (*types.SourceFile, error) {
 		return nil, err
 	}
 
-	VerboseLog("Successfully read %d bytes from %s", len(content), filepath.Base(absPath))
+	r.logf("Successfully read %d bytes from %s", len(content), filepath.Base(absPath))
 
 	sf := &types.SourceFile{
 		Path:     absPath,
@@ -105,7 +150,7 @@ func (r *Reader) ReadDirectory(dirPath string) ([]*types.SourceFile, error) {
 		return nil, err
 	}
 
-	VerboseLog("Scanning directory: %s", absPath)
+	r.logf("Scanning directory: %s", absPath)
 
 	var result []*types.SourceFile
 
@@ -116,7 +161,7 @@ func (r *Reader) ReadDirectory(dirPath string) ([]*types.SourceFile, error) {
 
 		// Skip hidden directories
 		if info.IsDir() && strings.HasPrefix(info.Name(), ".") {
-			VerboseLog("Skipping hidden directory: %s", info.Name())
+			r.logf("Skipping hidden directory: %s", info.Name())
 			return filepath.SkipDir
 		}
 
@@ -157,7 +202,7 @@ func (r *Reader) ReadDirectory(dirPath string) ([]*types.SourceFile, error) {
 				"dependencies":    true,
 			}
 			if skipDirs[name] {
-				VerboseLog("Skipping directory: %s", name)
+				r.logf("Skipping directory: %s", name)
 				return filepath.SkipDir
 			}
 		}
@@ -178,7 +223,7 @@ func (r *Reader) ReadDirectory(dirPath string) ([]*types.SourceFile, error) {
 		return nil, err
 	}
 
-	VerboseLog("Found %d Solidity files in directory", len(result))
+	r.logf("Found %d Solidity files in directory", len(result))
 
 	return result, nil
 }
@@ -199,11 +244,11 @@ func (r *Reader) Read(path string) ([]*types.SourceFile, error) {
 	}
 
 	if info.IsDir() {
-		VerboseLog("Auto-detected directory: %s", absPath)
+		r.logf("Auto-detected directory: %s", absPath)
 		return r.ReadDirectory(absPath)
 	}
 
-	VerboseLog("Auto-detected file: %s", absPath)
+	r.logf("Auto-detected file: %s", absPath)
 	sf, err := r.ReadFile(absPath)
 	if err != nil {
 		return nil, err
@@ -222,33 +267,33 @@ func (r *Reader) GetAllSources() []*types.SourceFile {
 
 // ResolveImports recursively loads imported files using remapping resolution
 func (r *Reader) ResolveImports(projectRoot string) error {
-	VerboseLog("Starting import resolution with project root: %s", projectRoot)
+	r.logf("Starting import resolution with project root: %s", projectRoot)
 
 	// Initialize resolver if not already done
 	if r.resolver == nil {
-		r.resolver = NewResolver(projectRoot)
+		r.resolver = newResolver(projectRoot, r.logger, r.legacy)
 	}
 
 	// Track initially loaded files
 	for _, sf := range r.SourceFiles {
 		r.loadedPaths[sf.Path] = true
-		VerboseLog("Marking initial file as loaded: %s", sf.Path)
+		r.logf("Marking initial file as loaded: %s", sf.Path)
 	}
 
 	initialCount := len(r.SourceFiles)
-	VerboseLog("Processing imports from %d initial files", initialCount)
+	r.logf("Processing imports from %d initial files", initialCount)
 
 	// Process imports from all files (loop extends as new files are added)
 	for i := 0; i < len(r.SourceFiles); i++ {
 		sf := r.SourceFiles[i]
 		if err := r.processFileImports(sf); err != nil {
-			VerboseLog("Error processing imports from %s: %v", sf.Path, err)
+			r.logf("Error processing imports from %s: %v", sf.Path, err)
 			// Continue processing other files even if one fails
 		}
 	}
 
 	loadedCount := len(r.SourceFiles) - initialCount
-	VerboseLog("Import resolution complete: loaded %d additional files", loadedCount)
+	r.logf("Import resolution complete: loaded %d additional files", loadedCount)
 
 	return nil
 }
@@ -261,64 +306,133 @@ func (r *Reader) processFileImports(sf *types.SourceFile) error {
 		return nil
 	}
 
-	VerboseLog("Found %d imports in %s", len(imports), filepath.Base(sf.Path))
+	r.logf("Found %d imports in %s", len(imports), filepath.Base(sf.Path))
 
 	for _, importPath := range imports {
-		if err := r.loadImport(importPath, sf.Path); err != nil {
-			VerboseLog("  Could not load import '%s': %v", importPath, err)
+		resolvedPath, err := r.loadImport(importPath, sf.Path)
+		if err != nil {
+			r.logf("  Could not load import '%s': %v", importPath, err)
+			// Record it durably so source and cache scans expose the same known
+			// analysis loss.
+			r.diagnostics = append(r.diagnostics, types.Diagnostic{
+				Code:       types.DiagnosticUnresolvedImport,
+				Severity:   types.DiagnosticWarning,
+				Phase:      "reader",
+				Message:    err.Error(),
+				File:       sf.Path,
+				ImportPath: importPath,
+				Incomplete: true,
+			})
 			// Continue with other imports
+			continue
 		}
+		recordResolvedImport(sf, resolvedPath)
 	}
 
 	return nil
 }
 
+// UnresolvedImports returns the imports that could not be resolved to a file on
+// disk during ResolveImports. Deduplicated by (import path, source file).
+func (r *Reader) UnresolvedImports() []UnresolvedImport {
+	diagnostics := r.Diagnostics()
+	out := make([]UnresolvedImport, 0, len(diagnostics))
+	seen := make(map[string]struct{}, len(diagnostics))
+	for _, diagnostic := range diagnostics {
+		if diagnostic.Code != types.DiagnosticUnresolvedImport {
+			continue
+		}
+		key := diagnostic.ImportPath + "\x00" + diagnostic.File
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, UnresolvedImport{
+			ImportPath: diagnostic.ImportPath,
+			FromFile:   diagnostic.File,
+			Reason:     diagnostic.Message,
+		})
+	}
+	return out
+}
+
+// Diagnostics returns a normalized defensive copy of all analysis diagnostics
+// recorded while reading and resolving imports.
+func (r *Reader) Diagnostics() []types.Diagnostic {
+	if r == nil || len(r.diagnostics) == 0 {
+		return []types.Diagnostic{}
+	}
+	seen := make(map[types.Diagnostic]struct{}, len(r.diagnostics))
+	out := make([]types.Diagnostic, 0, len(r.diagnostics))
+	for _, diagnostic := range r.diagnostics {
+		if _, exists := seen[diagnostic]; exists {
+			continue
+		}
+		seen[diagnostic] = struct{}{}
+		out = append(out, diagnostic)
+	}
+	types.SortDiagnostics(out)
+	return out
+}
+
 // loadImport resolves and loads a single import if not already loaded
-func (r *Reader) loadImport(importPath string, fromFile string) error {
+func (r *Reader) loadImport(importPath string, fromFile string) (string, error) {
 	// Resolve import to absolute path
 	resolved, err := r.resolver.Resolve(importPath, fromFile)
 	if err != nil {
-		return fmt.Errorf("failed to resolve: %w", err)
+		return "", fmt.Errorf("failed to resolve: %w", err)
 	}
 
 	// Skip if empty or same as import path (couldn't resolve)
 	if resolved == "" || resolved == importPath {
-		return fmt.Errorf("could not resolve import path")
+		return "", fmt.Errorf("could not resolve import path")
 	}
 
 	// Canonicalize so that symlink / relative-spelling aliases share one key.
 	absPath, err := canonicalPath(resolved)
 	if err != nil {
-		return fmt.Errorf("failed to canonicalize: %w", err)
+		return "", fmt.Errorf("failed to canonicalize: %w", err)
 	}
 
 	// Skip if already loaded (canonical key — no aliasing).
 	if r.loadedPaths[absPath] {
-		VerboseLog("  ✓ %s (already loaded)", importPath)
-		return nil
+		r.logf("  ✓ %s (already loaded)", importPath)
+		return absPath, nil
 	}
 
 	// Check if file exists
 	if _, err := os.Stat(absPath); os.IsNotExist(err) {
-		return fmt.Errorf("file does not exist: %s", absPath)
+		return "", fmt.Errorf("file does not exist: %s", absPath)
 	}
 
 	// Load the file
-	VerboseLog("  → Loading %s", importPath)
-	VerboseLog("    Resolved to: %s", absPath)
+	r.logf("  → Loading %s", importPath)
+	r.logf("    Resolved to: %s", absPath)
 
 	importedFile, err := r.readFileWithoutTracking(absPath)
 	if err != nil {
-		return fmt.Errorf("failed to read file: %w", err)
+		return "", fmt.Errorf("failed to read file: %w", err)
 	}
 
 	// Mark as loaded and add to source files
 	r.loadedPaths[absPath] = true
 	r.SourceFiles = append(r.SourceFiles, importedFile)
 
-	VerboseLog("  ✓ Loaded successfully (%d bytes)", len(importedFile.Content))
+	r.logf("  ✓ Loaded successfully (%d bytes)", len(importedFile.Content))
 
-	return nil
+	return absPath, nil
+}
+
+func recordResolvedImport(sf *types.SourceFile, resolvedPath string) {
+	if sf == nil || resolvedPath == "" {
+		return
+	}
+	for _, existing := range sf.ResolvedImports {
+		if existing == resolvedPath {
+			return
+		}
+	}
+	sf.ResolvedImports = append(sf.ResolvedImports, resolvedPath)
 }
 
 // readFileWithoutTracking reads a file without adding to loadedPaths
@@ -339,29 +453,6 @@ func (r *Reader) readFileWithoutTracking(absPath string) (*types.SourceFile, err
 		Content:  stripBOM(string(content)),
 		Checksum: calculateChecksum(content),
 	}, nil
-}
-
-// extractImports extracts all import paths from Solidity source code
-func extractImports(content string) []string {
-	// Match: import "path"; or import { ... } from "path"; or import * as Name from "path";
-	pattern := regexp.MustCompile(`import\s+(?:(?:\{[^}]*\}|\*)\s+(?:as\s+\w+\s+)?from\s+)?["']([^"']+)["']`)
-	matches := pattern.FindAllStringSubmatch(content, -1)
-
-	var imports []string
-	seen := make(map[string]bool)
-
-	for _, match := range matches {
-		if len(match) > 1 {
-			importPath := match[1]
-			// Deduplicate
-			if !seen[importPath] {
-				imports = append(imports, importPath)
-				seen[importPath] = true
-			}
-		}
-	}
-
-	return imports
 }
 
 // calculateChecksum returns the SHA256 hash of the content

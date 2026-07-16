@@ -172,6 +172,18 @@ non-auth-named `gate()` modifier that calls the helper.
 
 ---
 
+### 10-interface-impl.sol
+**Purpose:** Pin interface-method to concrete-implementation navigation.
+
+**Contract shape:** `IToken` declares `transfer(address,uint256)` and `Token`
+implements it.
+
+**Expected Results:**
+- `pkg/report/nav_test.go` resolves `IToken.transfer` to `Token.transfer`
+- Navigation identity remains exact when same-named interfaces exist elsewhere
+
+---
+
 ### 10-override-state-order.sol
 **Purpose:** Asymmetric diamond that pins the three inheritance properties
 auditors rely on, all verified against solc 0.8.20. Drives
@@ -324,7 +336,7 @@ cat test-db.json | jq '.contracts["path#ContractName"].functions[] | select(.vis
 
 | Metric | Expected Value |
 |--------|---------------|
-| Total Files | 15 |
+| Total Files | 16 (numbered 01 through 15, with two `10-*` fixtures) |
 | Total Contracts | ~51 |
 | Interfaces | ~9 |
 | Libraries | ~3 |

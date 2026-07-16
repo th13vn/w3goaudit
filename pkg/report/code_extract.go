@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/th13vn/w3goaudit/pkg/engine"
+	"github.com/th13vn/w3goaudit/pkg/types"
 )
 
 // extractCodeForFinding extracts relevant code for a finding, showing function name and matches.
@@ -14,7 +15,7 @@ import (
 // Defensive against stale or out-of-range line numbers: returns a clear error
 // comment when the file is unreadable, line is 0, or the line is past EOF.
 // Previously these conditions silently produced an empty code block.
-func extractCodeForFinding(finding *engine.Finding, contextLines int) string {
+func extractCodeForFinding(finding *engine.Finding, contextLines int, db *types.Database) string {
 	if finding.Location.File == "" {
 		return "// Code context not available (no source file).\n"
 	}
@@ -22,22 +23,9 @@ func extractCodeForFinding(finding *engine.Finding, contextLines int) string {
 		return "// Code context not available (line unknown).\n"
 	}
 
-	file, err := os.Open(finding.Location.File)
+	allLines, currentLine, err := readSourceLines(finding.Location.File, db)
 	if err != nil {
-		return fmt.Sprintf("// Unable to read source file: %s\n", finding.Location.File)
-	}
-	defer file.Close()
-
-	scanner := bufio.NewScanner(file)
-	// Allow long source lines; default 64KB chokes on minified or generated code.
-	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
-	currentLine := 0
-	allLines := make(map[int]string)
-
-	// Read entire file
-	for scanner.Scan() {
-		currentLine++
-		allLines[currentLine] = scanner.Text()
+		return fmt.Sprintf("// Unable to fully read source file %s: %v\n", finding.Location.File, err)
 	}
 
 	// Bounds check: if the finding's line is past EOF, the source has changed
@@ -54,7 +42,9 @@ func extractCodeForFinding(finding *engine.Finding, contextLines int) string {
 	if finding.Location.Function != "" {
 		for line := finding.Location.Line; line > 0 && line > finding.Location.Line-50; line-- {
 			text := allLines[line]
-			if strings.Contains(text, "function "+finding.Location.Function) {
+			// Word-boundary match so searching `withdraw` doesn't latch onto a
+			// `withdrawAll` declaration and start the excerpt at the wrong function.
+			if declaresFunction(text, finding.Location.Function) {
 				funcLine = line
 				lines = append(lines, fmt.Sprintf("  %s", text))
 				break
@@ -120,7 +110,7 @@ func extractCodeForFinding(finding *engine.Finding, contextLines int) string {
 	return strings.Join(lines, "\n") + "\n"
 }
 
-func extractFullFunctionForLocation(location engine.Location) string {
+func extractFullFunctionForLocation(location engine.Location, db *types.Database) string {
 	if location.File == "" {
 		return "// Code context not available (no source file).\n"
 	}
@@ -128,7 +118,7 @@ func extractFullFunctionForLocation(location engine.Location) string {
 		return "// Code context not available (line unknown).\n"
 	}
 
-	allLines, totalLines, err := readSourceLines(location.File)
+	allLines, totalLines, err := readSourceLines(location.File, db)
 	if err != nil {
 		return fmt.Sprintf("// Unable to read source file: %s\n", location.File)
 	}
@@ -184,14 +174,12 @@ func declaresFunction(line, name string) bool {
 	return !isIdent
 }
 
-func readSourceLines(path string) (map[int]string, int, error) {
-	file, err := os.Open(path)
+func readSourceLines(path string, db *types.Database) (map[int]string, int, error) {
+	content, err := reportSourceContent(path, db)
 	if err != nil {
 		return nil, 0, err
 	}
-	defer file.Close()
-
-	scanner := bufio.NewScanner(file)
+	scanner := bufio.NewScanner(strings.NewReader(content))
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 	currentLine := 0
 	allLines := make(map[int]string)
@@ -205,11 +193,36 @@ func readSourceLines(path string) (map[int]string, int, error) {
 	return allLines, currentLine, nil
 }
 
+// reportSourceContent returns the exact source snapshot stored in the database
+// whenever available. This keeps --db reports tied to the content that was
+// actually analyzed even if the original file is later changed or deleted.
+// Legacy databases without serialized content fall back to the filesystem.
+func reportSourceContent(path string, db *types.Database) (string, error) {
+	if db != nil {
+		if source := db.SourceFiles[path]; source != nil && source.Content != "" {
+			return source.Content, nil
+		}
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	return string(data), nil
+}
+
+type reportLexState struct {
+	inBlockComment bool
+	inString       bool
+	quote          byte
+	escaped        bool
+}
+
 func findBlockEnd(lines map[int]string, totalLines, start int) int {
 	depth := 0
 	seenOpen := false
+	state := reportLexState{}
 	for i := start; i <= totalLines; i++ {
-		line := stripStringContent(stripLineCommentForReport(lines[i]))
+		line := codeOnlyForReport(lines[i], &state)
 		for _, r := range line {
 			switch r {
 			case '{':
@@ -228,40 +241,50 @@ func findBlockEnd(lines map[int]string, totalLines, start int) int {
 	return 0
 }
 
-func stripLineCommentForReport(line string) string {
-	if idx := strings.Index(line, "//"); idx >= 0 {
-		return line[:idx]
-	}
-	return line
-}
-
-func stripStringContent(line string) string {
-	inString := false
-	escaped := false
-	quote := rune(0)
-	out := make([]rune, 0, len(line))
-	for _, r := range line {
-		if inString {
-			if escaped {
-				escaped = false
-				continue
-			}
-			if r == '\\' {
-				escaped = true
-				continue
-			}
-			if r == quote {
-				inString = false
-				quote = 0
+// codeOnlyForReport removes strings and comments in lexical order while
+// preserving executable characters. Comment markers inside strings and quote
+// characters inside comments are ignored, so brace counting follows Solidity
+// source structure rather than a sequence of lossy regex-like passes.
+func codeOnlyForReport(line string, state *reportLexState) string {
+	out := make([]byte, 0, len(line))
+	for i := 0; i < len(line); i++ {
+		current := line[i]
+		if state.inBlockComment {
+			if i+1 < len(line) && line[i] == '*' && line[i+1] == '/' {
+				state.inBlockComment = false
+				i++ // consume '/'
 			}
 			continue
 		}
-		if r == '\'' || r == '"' {
-			inString = true
-			quote = r
+		if state.inString {
+			if state.escaped {
+				state.escaped = false
+				continue
+			}
+			if current == '\\' {
+				state.escaped = true
+				continue
+			}
+			if current == state.quote {
+				state.inString = false
+				state.quote = 0
+			}
 			continue
 		}
-		out = append(out, r)
+		if i+1 < len(line) && current == '/' && line[i+1] == '/' {
+			break
+		}
+		if i+1 < len(line) && line[i] == '/' && line[i+1] == '*' {
+			state.inBlockComment = true
+			i++ // consume '*'
+			continue
+		}
+		if current == '\'' || current == '"' {
+			state.inString = true
+			state.quote = current
+			continue
+		}
+		out = append(out, current)
 	}
 	return string(out)
 }

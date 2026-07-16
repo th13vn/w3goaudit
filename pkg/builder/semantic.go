@@ -16,11 +16,7 @@ func (cgb *CallGraphBuilder) typeInfoFromTypeName(typeName, source string) types
 	if cgb == nil {
 		return types.TypeInfo{}
 	}
-	var contract *types.Contract
-	if cgb.db != nil && cgb.currentContract != "" {
-		contract = cgb.db.GetContractByName(cgb.currentContract)
-	}
-	return resolveTypeInfo(typeName, source, cgb.db, contract)
+	return resolveTypeInfo(typeName, source, cgb.db, cgb.currentContract)
 }
 
 func resolveTypeInfo(typeName, source string, db *types.Database, contract *types.Contract) types.TypeInfo {
@@ -63,9 +59,16 @@ func resolveTypeInfo(typeName, source string, db *types.Database, contract *type
 	}
 
 	if db != nil {
-		if c := db.GetContractByName(baseName); c != nil {
-			ti.Kind = string(c.Kind)
-			ti.ContractID = c.ID
+		var resolved *types.Contract
+		if contract != nil {
+			resolved, _ = db.ResolveContractNameExact(baseName, contract.SourceFile)
+		}
+		if resolved == nil && contract == nil {
+			resolved = db.GetContractByName(baseName)
+		}
+		if resolved != nil {
+			ti.Kind = string(resolved.Kind)
+			ti.ContractID = resolved.ID
 			ti.Confidence = "high"
 			return ti
 		}
@@ -159,8 +162,8 @@ func (cgb *CallGraphBuilder) expressionType(expr ast.Node) types.TypeInfo {
 		if ti, ok := cgb.symbolTypes[e.Name]; ok {
 			return ti
 		}
-		if e.Name == "this" || e.Name == "super" {
-			return cgb.typeInfoFromTypeName(cgb.currentContract, e.Name)
+		if (e.Name == "this" || e.Name == "super") && cgb.currentContract != nil {
+			return cgb.typeInfoFromTypeName(cgb.currentContract.Name, e.Name)
 		}
 		if isPrimitiveTypeName(e.Name) || cgb.isKnownUserType(e.Name) {
 			return cgb.typeInfoFromTypeName(e.Name, "type_identifier")
@@ -350,7 +353,12 @@ func (cgb *CallGraphBuilder) isKnownUserType(name string) bool {
 	if cgb == nil || cgb.db == nil || name == "" {
 		return false
 	}
-	return cgb.db.GetContractByName(baseTypeName(name)) != nil
+	base := baseTypeName(name)
+	if cgb.currentFile == nil {
+		return cgb.db.GetContractByName(base) != nil
+	}
+	_, exact := cgb.db.ResolveContractNameExact(base, cgb.currentFile.Path)
+	return exact
 }
 
 func extractParentNameFromExpr(expr ast.Node) string {

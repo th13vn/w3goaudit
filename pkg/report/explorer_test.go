@@ -11,7 +11,7 @@ func explorerFixtureDB() *types.Database {
 	db := types.NewDatabase()
 	c := &types.Contract{
 		ID: "/x.sol#Vault", Name: "Vault", Kind: types.ContractKindContract,
-		SourceFile: "/x.sol", LinearizedBases: []string{"Vault"},
+		SourceFile: "/x.sol", LinearizedBases: []string{"Vault"}, LinearizedBaseIDs: []string{"/x.sol#Vault"},
 		StartLine: 3, StartCol: 1,
 		StateVariables: []*types.StateVariable{
 			{Name: "MAX", TypeName: "uint256", Visibility: "public", IsConstant: true, StartLine: 4},
@@ -25,7 +25,7 @@ func explorerFixtureDB() *types.Database {
 		},
 	}
 	db.Contracts[c.ID] = c
-	db.MainContracts[c.ID] = &types.MainContractEntry{LinearizedBases: []string{"Vault"}}
+	db.MainContracts[c.ID] = &types.MainContractEntry{LinearizedBases: []string{"Vault"}, LinearizedBaseIDs: []string{"/x.sol#Vault"}}
 	return db
 }
 

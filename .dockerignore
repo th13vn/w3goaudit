@@ -3,20 +3,24 @@
 .vscode/
 
 # Benchmark output is mounted at runtime, not baked into the image.
-benchmark-results/
+benchmarks/results/
 
 # Local build/cache noise.
-benchmarks/__pycache__/
 **/__pycache__/
+**/.cache/
+**/.mypy_cache/
+**/.pytest_cache/
+**/.ruff_cache/
+**/.venv/
 *.pyc
 w3goaudit
-dist/
-build/
-tmp/
+**/dist/
+**/build/
+**/tmp/
 
 # Dependency folders from frontend or Solidity projects should not inflate the
 # benchmark image if they appear later.
-node_modules/
-artifacts/
-out/
-cache/
+**/node_modules/
+**/artifacts/
+**/out/
+**/cache/

@@ -7,6 +7,7 @@ Complete guide for using W3GoAudit as a CLI tool and Go SDK.
 ## Table of Contents
 
 - [Installation](#installation)
+- [Competitive Benchmark](#competitive-benchmark)
 - [CLI Usage](#cli-usage)
   - [Default Scan (No Subcommand)](#default-scan)
   - [Result Folder Layout](#result-folder-layout)
@@ -26,7 +27,9 @@ Complete guide for using W3GoAudit as a CLI tool and Go SDK.
 
 ### Prerequisites
 
-- **Go 1.21+** installed (also required for `--update`)
+- The exact Go version declared by `go.mod` (currently **Go 1.26.5**; also
+  required for `--update`). This is a security-driven toolchain floor: the
+  standard-library advisory fixes required by govulncheck need Go >=1.25.12.
 - **Git** only if building from a clone
 
 ### Install via Go (recommended)
@@ -61,6 +64,14 @@ sudo mv w3goaudit /usr/local/bin/
 w3goaudit version
 ```
 
+For source contributors, use the Go version from `go.mod` and run formatting,
+`go mod tidy -diff`, vet, staticcheck v0.6.1/gocyclo v0.6.0, Markdown link
+checks, normal/race/shuffled tests, host and Linux ARM64 builds, govulncheck
+v1.1.4, an official-template scan with manifest/JSON/SARIF/offline-HTML
+validation, and the Docker Compose competitive benchmark (precision >= 0.65,
+recall >= 0.95, zero failed cases) locally or in user-owned external
+automation.
+
 ### Self-Update
 
 ```bash
@@ -70,6 +81,23 @@ w3goaudit --update      # or -u
 
 `--update` uses your local Go toolchain (no platform binaries are shipped). If
 `go` is not on your PATH it reports a clear message instead of failing opaquely.
+
+---
+
+## Competitive Benchmark
+
+Docker Compose is the only supported benchmark host entry point. The image
+contains the pinned compared scanners, and its Dockerfile derives and verifies
+the Go version directly from the repository's `go.mod`.
+
+```bash
+docker compose -f benchmarks/compose.yaml run --rm benchmark
+```
+
+The host owns only `benchmarks/results/<RUN_NAME>/`; it does not run the Python
+benchmark runner directly or install scanner toolchains. The image verifies
+the reviewed generated-lock hash for the pinned 4naly3er commit. See
+[`benchmarks/README.md`](../benchmarks/README.md) for suites and tool selection.
 
 ---
 
@@ -121,6 +149,7 @@ Every flag has a long and short form.
 | `--stdout`                   | `-q`  | bool   | Print the summary to the terminal only; write **no** files                                                                                                       |
 | `--no-color`                 |       | bool   | Disable ANSI color in console output; `NO_COLOR` env always wins                                                                                                 |
 | `--ignore-invalid-templates` |       | bool   | Skip invalid templates in a directory instead of failing the scan                                                                                                |
+| `--strict-imports`           |       | bool   | Fail when any Solidity import is unresolved; applies identically to source builds and persisted `--db` diagnostics                                               |
 | `--update-templates`         | `-T`  | bool   | Refresh `~/.w3goaudit/templates` from the latest published release and exit                                                                                      |
 | `--update`                   | `-u`  | bool   | Update w3goaudit itself via `go install …@latest` and exit                                                                                                       |
 
@@ -140,6 +169,10 @@ Every flag has a long and short form.
   `meta.id`, missing `meta.severity`, or a directory with zero valid templates
   returns an error. Use `--ignore-invalid-templates` only for mixed/ad-hoc
   directories where skipping bad files is intentional.
+- Import resolution is tolerant by default, but every unresolved import is
+  persisted as a database diagnostic and warned on stderr. `--strict-imports`
+  converts that same diagnostic into an error for both source scans and
+  `--db` cache scans, so cache reuse cannot silently weaken the policy.
 - `NO_COLOR` (https://no-color.org) is honored everywhere — the summary header,
   per-section emoji, and severity icons all suppress.
 - Bug location is hardcoded to the best provenance: the dangerous-node
@@ -147,10 +180,8 @@ Every flag has a long and short form.
   fix-here pointer when the sink is reached through internal calls.
 
 > **Removed in v0.3:** `--format`, `--json`, `--md`, `--html`-as-format,
-> `--fail-on`, `--location-source`, and `--log`. The `.github/` directory was
-> also removed. CI gating was dropped (this is an audit tool, not a gate);
-> `run.log` replaces `--log`; format flags are gone because the folder always
-> carries Markdown + SARIF + JSON.
+> `--fail-on`, `--location-source`, and `--log`. `run.log` replaces `--log`;
+> format flags are gone because the folder always carries Markdown + SARIF + JSON.
 
 #### Examples
 
@@ -198,6 +229,12 @@ w3goaudit build ./contracts/ -o db.json
 w3goaudit -d ./contracts/data/database.json
 ```
 
+**Fail closed on unresolved imports (source or cache):**
+```bash
+w3goaudit ./contracts/ --strict-imports
+w3goaudit -d ./contracts/data/database.json --strict-imports
+```
+
 **List the active template set (no path required):**
 ```bash
 w3goaudit -l
@@ -231,7 +268,7 @@ w3goaudit ./contracts/ -v
 
 📂 Results written to: ./contracts-audit
    README.md · summary.md · overview.md · findings.md · results.sarif · run.log
-   data/ (manifest.json, findings.json, overview.json, database.json, nav.json, explorer.json)
+   data/ (manifest.json, findings.json, overview.json, diagnostics.json, database.json, nav.json, explorer.json)
    contracts/<path>/<Contract>/ (README.md, state-changes.md, workflows/)
 ```
 
@@ -255,6 +292,7 @@ to be fed to a human or an AI auditor:
 │   ├── database.json      # canonical DB — reuse via --db data/database.json
 │   ├── findings.json
 │   ├── overview.json
+│   ├── diagnostics.json    # analysis-quality diagnostics; [] when complete
 │   ├── nav.json           # extension navigation index (symbols, callers, interfaceImpl)
 │   └── explorer.json      # extension explorer model (per-contract constants/storage/entries/getters)
 └── contracts/             # one sub-tree per main contract, mirroring source paths
@@ -282,6 +320,15 @@ to be fed to a human or an AI auditor:
   idempotent (no stale folders from deleted contracts).
 - `data/database.json` is the **only** copy of the database; reuse it with
   `--db data/database.json`.
+- `data/diagnostics.json` is always present. It distinguishes analyzer coverage
+  loss (unresolved imports/bases, parser recovery/skips, invalid locations,
+  unresolved identity) from security findings and is identical for source and
+  equivalent `--db` scans.
+- `data/manifest.json` is the machine index. `projectRoot` is the detected
+  project root; `scanTarget` is the selected file/directory represented by the
+  database; `target` is a compatibility alias of `scanTarget`. It exposes
+  `analysisComplete`, diagnostic counts, separate declaration-category counts,
+  and only those optional HTML paths that were actually emitted.
 
 **Per-entry-function workflow file**
 (`contracts/<path>/<Contract>/workflows/<entryFn>.md`)
@@ -316,13 +363,16 @@ w3goaudit build <path> -o <output.json> [flags]
 | --------------------- | ------ | -------- | -------------------------------------------- |
 | `-o, --output <file>` | string | **Yes**  | Output JSON file path                        |
 | `--db <file>`         | string | No       | Load existing database instead of rebuilding |
-| `--verbose <file>`    | string | No       | Enable verbose logging to the given log file |
+| `--verbose[=<file>]`  | string | No       | Enable verbose logging; omit the value for stdout or provide a log-file path |
+| `--strict-imports`    | bool   | No       | Fail before writing JSON when an import diagnostic is unresolved |
 
 #### Examples
 
 ```bash
 w3goaudit build ./contracts/ -o database.json
 w3goaudit build ./contracts/ -o database.json --verbose
+w3goaudit build ./contracts/ -o database.json --verbose=/tmp/build.log
+w3goaudit build ./contracts/ -o database.json --strict-imports
 ```
 
 The resulting `database.json` can later be re-scanned with
@@ -359,6 +409,15 @@ pre-built `--db <database.json>` or a source path.
 The canonical subcommand order is widest→narrowest scope: `main`, `entry`,
 `inheritance`, `statevar`, `selector`, `involve`, `workflow`, `bundle`,
 `context`, `source`, `diff`.
+
+**Identity and ambiguity:** contract arguments accept an exact
+`file#Contract` ID or a unique case-insensitive name. Function arguments accept
+an exact `file#Contract.selector(types)` ID, `Contract.selector`, a full
+selector, a 4-byte signature, or a unique bare name. `--contract` accepts an
+exact contract ID or a unique name. Ambiguous input fails with sorted candidate
+IDs instead of selecting by map/declaration order. Inherited state, inheritance
+kind, context, workflow, and bundle data walk the exact `LinearizedBaseIDs` C3
+chain.
 
 #### extract main
 
@@ -726,6 +785,11 @@ A scan writes one result folder (see [Result Folder Layout](#result-folder-layou
 `results.sarif`, `run.log`, and the `data/` JSON are always produced; the HTML
 mirror is opt-in via `--html/-H`.
 
+Finding ordering and generated content are deterministic, but real
+`generatedAt` timestamps vary between runs. SDK callers that need a byte-stable
+bundle can inject a fixed clock through `report.GeneratorOptions.Now` and
+`report.BundleOptions.Now`; the bundle uses that one UTC instant consistently.
+
 ### Console (Terminal)
 
 Staged progress lines, then a one-line summary header:
@@ -768,9 +832,10 @@ Machine-readable mirror; each carries `schemaVersion: "2.0.0"`.
 
 | File                   | Content                                                           |
 | ---------------------- | ----------------------------------------------------------------- |
-| `data/database.json` | Canonical database (reusable via `--db`); carries pragma versions |
-| `data/overview.json` | `{ schemaVersion, tool, generatedAt, stats, overview }`           |
+| `data/database.json` | Canonical database (reusable via `--db`); carries scan target, source snapshots, exact MRO IDs, and diagnostics |
+| `data/overview.json` | `{ schemaVersion, tool, generatedAt, projectRoot, scanTarget, analysisComplete, diagnosticCounts, stats, overview }` |
 | `data/findings.json` | `{ schemaVersion, tool, generatedAt, counts, findings[] }`        |
+| `data/diagnostics.json` | `{ schemaVersion, generatedAt, analysisComplete, counts, diagnostics[] }`; always emitted |
 | `data/nav.json` | `{ schemaVersion, symbols[], callers[], interfaceImpl[] }` — navigation index for the VSCode extension |
 | `data/explorer.json` | `{ schemaVersion, contracts[] }` — per-deployable-contract constants/storage/entryFunctions/getters, for the extension's explorer tab |
 
@@ -831,6 +896,10 @@ Always written (single file — schema requirement).
 - Severity → SARIF level: `CRITICAL`/`HIGH` → `error`, `MEDIUM` → `warning`, `LOW`/`INFO` → `note`
 - `properties.security-severity` carries a CVSS-style 0–10 score (GitHub Code Scanning)
 - One rule entry per unique TemplateID; one result entry per finding
+- Every run declares `columnKind: unicodeCodePoints`. `startColumn`/`endColumn`
+  are one-based, half-open Unicode-code-point columns. W3GoAudit's byte offsets
+  are zero-based, half-open UTF-8 bytes and are deliberately not emitted as
+  SARIF `charOffset`/`charLength`.
 - For findings that traversed an internal call chain, `result.relatedLocations[]`
   lists every hop from entry to host; `result.properties.entryPoint` and
   `result.properties.primaryAst` carry the fix-here pointer and matched AST node
@@ -853,6 +922,7 @@ output:
   html: false                      # also emit overview.html + findings.html
 scan:
   min_severity: ""                 # default --min-severity threshold
+  strict_imports: false            # fail when any source/cache import is unresolved
   exclude_paths:                   # reserved: paths skipped during discovery
     - node_modules
     - lib
@@ -866,7 +936,7 @@ color: auto                        # auto | never
 ```
 
 The keys consumed today are `templates.dir`, `templates.repo`, `output.base_dir`,
-`output.html`, `scan.min_severity`, and `color`. `scan.exclude_paths`,
+`output.html`, `scan.min_severity`, `scan.strict_imports`, and `color`. `scan.exclude_paths`,
 `scan.workers`, and `report.repo_base` are reserved for future use.
 
 ### Project Detection
@@ -906,6 +976,13 @@ On first run, if `~/.w3goaudit/templates/` is empty, w3goaudit downloads the
 extracts the `.yaml`/`.yml`/`.md` files into the home, and records the tag in
 `templates/.version`. If the download fails (offline, repo/release unreachable),
 it falls back to the embedded pack — no hard failure, just a notice.
+
+Archive handling is resource-limited: 64 MiB compressed, 8 MiB per extracted
+file, 128 MiB total decompressed, 4,096 accepted files, and 8,192 total ZIP
+entries. Extraction is staged beside the destination and swapped into place;
+the prior directory is restored if installation fails. GitHub source zipballs
+are authenticated by TLS but do not provide a digest/signature, so the managed
+pack is not independently content-authenticated.
 
 ### `--update-templates / -T`
 

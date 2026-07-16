@@ -32,7 +32,7 @@ func (r resolvedFn) selector() string {
 }
 
 func (r resolvedFn) key() string {
-	return r.sourceFile + "#" + r.contract + "." + r.selector()
+	return types.MakeFunctionID(r.sourceFile, r.contract, r.selector())
 }
 
 func (r resolvedFn) label(main string) string {
@@ -49,6 +49,7 @@ type stateMatrixBuilder struct {
 	main       *types.Contract
 	bySelector map[string]resolvedFn
 	byName     map[string]resolvedFn
+	allByID    map[string]resolvedFn
 }
 
 func newStateMatrixBuilder(db *types.Database, main *types.Contract) *stateMatrixBuilder {
@@ -57,16 +58,16 @@ func newStateMatrixBuilder(db *types.Database, main *types.Contract) *stateMatri
 		main:       main,
 		bySelector: make(map[string]resolvedFn),
 		byName:     make(map[string]resolvedFn),
+		allByID:    make(map[string]resolvedFn),
 	}
-	// LinearizedBases is derived-first; iterate in REVERSE so the most-derived
+	mro := db.LinearizedContracts(main)
+	// The exact MRO is derived-first; iterate in REVERSE so the most-derived
 	// implementation wins on name/selector collisions (matches dispatch).
-	for i := len(main.LinearizedBases) - 1; i >= 0; i-- {
-		bc := db.GetContractByName(main.LinearizedBases[i])
-		if bc == nil {
-			continue
-		}
+	for i := len(mro) - 1; i >= 0; i-- {
+		bc := mro[i]
 		for _, fn := range bc.Functions {
 			rf := resolvedFn{fn: fn, contract: bc.Name, sourceFile: bc.SourceFile}
+			b.allByID[rf.key()] = rf
 			if fn.Selector != "" {
 				b.bySelector[fn.Selector] = rf
 			}
@@ -84,10 +85,21 @@ func (b *stateMatrixBuilder) effects(rf resolvedFn) *types.FunctionEffects {
 	return b.db.Semantics.GetFunctionEffects(id)
 }
 
-// resolveCall maps a call target to a known function within the hierarchy.
-func (b *stateMatrixBuilder) resolveCall(target string) (resolvedFn, bool) {
-	if target == "" {
+// resolveCall maps a recorded call to a known function. Explicit super/library
+// targets use their exact resolved contract ID; virtual internal/self calls use
+// the most-derived selector map for the deployment hierarchy.
+func (b *stateMatrixBuilder) resolveCall(call *types.FunctionCall) (resolvedFn, bool) {
+	if call == nil {
 		return resolvedFn{}, false
+	}
+	target := call.ResolvedFunction
+	if target == "" {
+		target = call.Target
+	}
+	if call.CallType == types.CallTypeSuper || call.CallType == types.CallTypeLibrary {
+		if rf, ok := b.resolveExactTarget(call, target); ok {
+			return rf, true
+		}
 	}
 	if rf, ok := b.bySelector[target]; ok {
 		return rf, true
@@ -97,6 +109,34 @@ func (b *stateMatrixBuilder) resolveCall(target string) (resolvedFn, bool) {
 		name = name[:i]
 	}
 	if rf, ok := b.byName[name]; ok {
+		return rf, true
+	}
+	return b.resolveExactTarget(call, target)
+}
+
+func (b *stateMatrixBuilder) resolveExactTarget(call *types.FunctionCall, target string) (resolvedFn, bool) {
+	if call == nil || call.ResolvedContractID == "" {
+		return resolvedFn{}, false
+	}
+	contract := b.db.GetContractByID(call.ResolvedContractID)
+	if contract == nil {
+		return resolvedFn{}, false
+	}
+	name := target
+	if i := strings.IndexByte(name, '('); i >= 0 {
+		name = name[:i]
+	}
+	for _, fn := range contract.Functions {
+		if target != "" && strings.Contains(target, "(") && fn.Selector != target {
+			continue
+		}
+		if !strings.Contains(target, "(") && fn.Name != name {
+			continue
+		}
+		if call.ArgCount >= 0 && !strings.Contains(target, "(") && len(fn.Parameters) != call.ArgCount {
+			continue
+		}
+		rf := resolvedFn{fn: fn, contract: contract.Name, sourceFile: contract.SourceFile}
 		return rf, true
 	}
 	return resolvedFn{}, false
@@ -131,11 +171,7 @@ func (b *stateMatrixBuilder) reachable(entry resolvedFn) []resolvedFn {
 			if !isIntraContractCall(call.CallType) {
 				continue
 			}
-			target := call.ResolvedFunction
-			if target == "" {
-				target = call.Target
-			}
-			if next, ok := b.resolveCall(target); ok {
+			if next, ok := b.resolveCall(call); ok {
 				visit(next)
 			}
 		}
@@ -157,11 +193,9 @@ func isIntraContractCall(ct types.CallType) bool {
 func (b *stateMatrixBuilder) entryFns() []resolvedFn {
 	var out []resolvedFn
 	seen := make(map[string]bool)
-	for i := len(b.main.LinearizedBases) - 1; i >= 0; i-- {
-		bc := b.db.GetContractByName(b.main.LinearizedBases[i])
-		if bc == nil {
-			continue
-		}
+	// Derived-first, first selector wins: inherited overrides stay attached to
+	// the exact contract that supplies the runtime implementation.
+	for _, bc := range b.db.LinearizedContracts(b.main) {
 		for _, fn := range bc.Functions {
 			if !fn.IsEntrypoint() {
 				continue
@@ -248,18 +282,14 @@ func BuildStateMatrix(db *types.Database, main *types.Contract, states []*StateS
 
 // allResolved returns the deduped set of functions across the hierarchy.
 func allResolved(b *stateMatrixBuilder) []resolvedFn {
-	seen := make(map[string]bool)
-	var out []resolvedFn
-	add := func(m map[string]resolvedFn) {
-		for _, rf := range m {
-			if seen[rf.key()] {
-				continue
-			}
-			seen[rf.key()] = true
-			out = append(out, rf)
-		}
+	keys := make([]string, 0, len(b.allByID))
+	for key := range b.allByID {
+		keys = append(keys, key)
 	}
-	add(b.bySelector)
-	add(b.byName)
+	sort.Strings(keys)
+	out := make([]resolvedFn, 0, len(keys))
+	for _, key := range keys {
+		out = append(out, b.allByID[key])
+	}
 	return out
 }

@@ -8,36 +8,30 @@ import (
 	"github.com/th13vn/w3goaudit/pkg/home"
 )
 
-// Config-derived state applied to the scan. These are seeded from
-// ~/.w3goaudit/config.yml and overridden by explicit CLI flags.
-var (
-	outputBaseDir   string // config output.base_dir
-	templateHomeDir string // resolved ~/.w3goaudit/templates when populated
-	templatesRepo   string // config templates.repo (download source)
-)
-
-// applyConfigDefaults seeds flag globals from the user config for any flag the
-// user did not explicitly set. CLI flags always win.
-func applyConfigDefaults(cmd *cobra.Command, cfg *home.Config) {
-	if cfg == nil {
+// applyConfigDefaults applies config values to one immutable scan snapshot.
+// CLI flags always win, and no Cobra-bound package global is mutated.
+func applyConfigDefaults(cmd *cobra.Command, cfg *home.Config, opts *scanOptions) {
+	if cfg == nil || opts == nil {
 		return
 	}
 	if !cmd.Flags().Changed("html") && cfg.Output.HTML {
-		htmlOutput = true
+		opts.HTML = true
 	}
 	if !cmd.Flags().Changed("min-severity") && cfg.Scan.MinSeverity != "" {
-		minSeverity = cfg.Scan.MinSeverity
+		opts.MinSeverity = cfg.Scan.MinSeverity
+	}
+	if !cmd.Flags().Changed("strict-imports") {
+		opts.StrictImports = cfg.Scan.StrictImports
 	}
 	if !cmd.Flags().Changed("no-color") && strings.EqualFold(cfg.Color, "never") {
-		noColor = true
+		opts.NoColor = true
 	}
-	outputBaseDir = cfg.Output.BaseDir
-	templatesRepo = cfg.Templates.Repo
+	opts.OutputBaseDir = cfg.Output.BaseDir
 
 	// Resolve the template home; only use it when it actually holds templates,
 	// so loadScanTemplates can cleanly fall back to the embedded pack.
 	if dir, err := cfg.ResolveTemplatesDir(); err == nil && home.HasTemplates(dir) {
-		templateHomeDir = dir
+		opts.TemplateHomeDir = dir
 	}
 }
 

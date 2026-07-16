@@ -52,8 +52,16 @@ func BuildNavJSON(db *types.Database) *NavJSON {
 			Range: declRange(c.SourceFile, c.StartLine, c.StartCol, c.EndLine, c.EndCol, c.StartByte, c.EndByte),
 		})
 		for _, fn := range c.Functions {
+			// fallback/receive/constructor have an empty Selector, so keying the
+			// symbol ID on selector alone collapses them all to `file#Contract.`
+			// — a contract with both fallback and receive would emit two symbols
+			// with the same id. Fall back to the function name to disambiguate.
+			idSel := fn.Selector
+			if idSel == "" {
+				idSel = fn.Name
+			}
 			nav.Symbols = append(nav.Symbols, &NavSymbol{
-				ID: types.MakeFunctionID(c.SourceFile, c.Name, fn.Selector), Kind: "function",
+				ID: types.MakeFunctionID(c.SourceFile, c.Name, idSel), Kind: "function",
 				Name: fn.Name, Selector: fn.Selector,
 				Range: declRange(c.SourceFile, fn.StartLine, fn.StartCol, fn.EndLine, fn.EndCol, fn.StartByte, fn.EndByte),
 			})
@@ -79,7 +87,18 @@ func BuildNavJSON(db *types.Database) *NavJSON {
 
 	// Deterministic ordering so the emitted nav.json is stable across runs
 	// (map iteration over db.Contracts is unordered).
-	sort.Slice(nav.Symbols, func(i, j int) bool { return nav.Symbols[i].ID < nav.Symbols[j].ID })
+	sort.Slice(nav.Symbols, func(i, j int) bool {
+		if nav.Symbols[i].ID != nav.Symbols[j].ID {
+			return nav.Symbols[i].ID < nav.Symbols[j].ID
+		}
+		if nav.Symbols[i].Kind != nav.Symbols[j].Kind {
+			return nav.Symbols[i].Kind < nav.Symbols[j].Kind
+		}
+		if nav.Symbols[i].Name != nav.Symbols[j].Name {
+			return nav.Symbols[i].Name < nav.Symbols[j].Name
+		}
+		return nav.Symbols[i].Range.StartLine < nav.Symbols[j].Range.StartLine
+	})
 	sort.Slice(nav.Callers, func(i, j int) bool {
 		if nav.Callers[i].Callee != nav.Callers[j].Callee {
 			return nav.Callers[i].Callee < nav.Callers[j].Callee
@@ -93,7 +112,12 @@ func BuildNavJSON(db *types.Database) *NavJSON {
 		if nav.InterfaceImpl[i].Interface != nav.InterfaceImpl[j].Interface {
 			return nav.InterfaceImpl[i].Interface < nav.InterfaceImpl[j].Interface
 		}
-		return nav.InterfaceImpl[i].Method < nav.InterfaceImpl[j].Method
+		if nav.InterfaceImpl[i].Method != nav.InterfaceImpl[j].Method {
+			return nav.InterfaceImpl[i].Method < nav.InterfaceImpl[j].Method
+		}
+		// Multiple contracts can implement the same interface method; without
+		// this tiebreaker their relative order is map-iteration random.
+		return nav.InterfaceImpl[i].Implementation < nav.InterfaceImpl[j].Implementation
 	})
 	return nav
 }
@@ -115,7 +139,7 @@ func resolveInterfaceImpls(db *types.Database) []*NavInterfaceImpl {
 				if impl == nil || impl.Kind == types.ContractKindInterface {
 					continue
 				}
-				if !inheritsInterface(impl, iface.Name) {
+				if !inheritsInterface(db, impl, iface.ID) {
 					continue
 				}
 				if implFn := findImpl(db, impl, m.Selector); implFn != nil {
@@ -131,9 +155,9 @@ func resolveInterfaceImpls(db *types.Database) []*NavInterfaceImpl {
 	return out
 }
 
-func inheritsInterface(c *types.Contract, ifaceName string) bool {
-	for _, b := range c.LinearizedBases {
-		if b == ifaceName {
+func inheritsInterface(db *types.Database, c *types.Contract, ifaceID string) bool {
+	for _, base := range db.LinearizedContracts(c) {
+		if base != nil && base.ID == ifaceID {
 			return true
 		}
 	}
@@ -148,18 +172,10 @@ type implRef struct {
 
 // findImpl walks c's MRO derived-first and returns the first non-interface
 // function with a real body whose selector matches (most-derived override
-// wins). The first entry of LinearizedBases (index 0) is c itself by C3
-// linearization semantics, so it is resolved via the c pointer directly
-// rather than by name: db.GetContractByName can pick the wrong contract when
-// multiple contracts across files share the same name.
+// wins). LinearizedContracts supplies exact file#Contract objects, including
+// for legacy databases whose display-name MRO contains collisions.
 func findImpl(db *types.Database, c *types.Contract, selector string) *implRef {
-	for i, baseName := range c.LinearizedBases {
-		var base *types.Contract
-		if i == 0 {
-			base = c
-		} else {
-			base = db.GetContractByName(baseName)
-		}
+	for _, base := range db.LinearizedContracts(c) {
 		if base == nil || base.Kind == types.ContractKindInterface {
 			continue
 		}

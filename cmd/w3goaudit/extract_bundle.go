@@ -76,9 +76,9 @@ Examples:
 			return err
 		}
 
-		fn, contract := findFunction(db, args[0], contractFilter)
-		if fn == nil {
-			return fmt.Errorf("function %q not found%s", args[0], contractHint(contractFilter))
+		fn, contract, err := resolveFunctionQuery(db, args[0], contractFilter)
+		if err != nil {
+			return err
 		}
 
 		bundle := buildBundle(db, contract, fn)
@@ -101,7 +101,7 @@ func init() {
 // buildBundle assembles the BundleOutput for a function. Shared with any
 // future SDK callers that want the same combined structure.
 func buildBundle(db *types.Database, contract *types.Contract, fn *types.Function) BundleOutput {
-	funcID := fmt.Sprintf("%s#%s.%s", contract.SourceFile, contract.Name, fn.Name)
+	funcID := exactFunctionID(contract, fn)
 
 	var callees, callers []CallEdgeInfo
 	if db.CallGraph != nil {
@@ -113,14 +113,9 @@ func buildBundle(db *types.Database, contract *types.Contract, fn *types.Functio
 		}
 	}
 
-	// State vars in storage order: base contracts first (reverse-iterate the
-	// derived-first LinearizedBases).
+	// State vars in storage order: exact base contracts first.
 	var stateVars []StateVarInfo
-	for i := len(contract.LinearizedBases) - 1; i >= 0; i-- {
-		base := db.GetContractByName(contract.LinearizedBases[i])
-		if base == nil {
-			continue
-		}
+	for _, base := range linearizedContractsBaseFirst(db, contract) {
 		for _, sv := range base.StateVariables {
 			stateVars = append(stateVars, StateVarInfo{
 				Name: sv.Name, TypeName: sv.TypeName, Visibility: sv.Visibility,
@@ -134,7 +129,7 @@ func buildBundle(db *types.Database, contract *types.Contract, fn *types.Functio
 	var chain []InheritanceEntry
 	for i, baseName := range contract.LinearizedBases {
 		kind := "unknown"
-		if base := db.GetContractByName(baseName); base != nil {
+		if base := linearizedContractAt(db, contract, i); base != nil {
 			kind = string(base.Kind)
 		}
 		chain = append(chain, InheritanceEntry{Order: i + 1, Name: baseName, Kind: kind})

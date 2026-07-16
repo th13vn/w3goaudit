@@ -12,6 +12,15 @@ type SummaryReport struct {
 	// ProjectRoot is the root directory of the project
 	ProjectRoot string `json:"projectRoot"`
 
+	// ScanTarget is the original source file or directory selected for analysis.
+	// Legacy databases fall back to ProjectRoot.
+	ScanTarget string `json:"scanTarget,omitempty"`
+
+	// AnalysisComplete reports whether no durable diagnostic marks known
+	// analysis loss. DiagnosticCounts summarizes those durable records.
+	AnalysisComplete bool             `json:"analysisComplete"`
+	DiagnosticCounts DiagnosticCounts `json:"diagnosticCounts"`
+
 	// GitInfo contains git repository information (nil if not a git repo)
 	GitInfo *GitInfo `json:"gitInfo,omitempty"`
 

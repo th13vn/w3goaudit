@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 
 	"github.com/th13vn/w3goaudit/pkg/engine"
 	"github.com/th13vn/w3goaudit/pkg/types"
@@ -15,6 +16,7 @@ import (
 // is produced by SummaryReport.ToMarkdown (see markdown.go).
 func FormatFindingsAsMarkdown(findings []*engine.Finding, db *types.Database) string {
 	var sb strings.Builder
+	projectRoot := reportRootFromDB(db)
 
 	sb.WriteString("# Security Findings — W3GoAudit\n\n")
 	sb.WriteString("**Summary**\n\n")
@@ -27,7 +29,10 @@ func FormatFindingsAsMarkdown(findings []*engine.Finding, db *types.Database) st
 	}
 
 	// Summary stats — counts per severity + scan totals.
-	stats := db.GetStats()
+	stats := &types.DatabaseStats{}
+	if db != nil {
+		stats = db.GetStats()
+	}
 	bySev := countBySeverity(findings)
 	sb.WriteString(fmt.Sprintf("Total Issues:       %d\n", countUniqueIssues(findings)))
 	sb.WriteString(fmt.Sprintf("Total Occurrences:  %d\n", len(findings)))
@@ -65,7 +70,7 @@ func FormatFindingsAsMarkdown(findings []*engine.Finding, db *types.Database) st
 			sb.WriteString(fmt.Sprintf("- **Template:** `%s`\n", group.TemplateID))
 			sb.WriteString(fmt.Sprintf("- **Locations:** %d occurrence(s)\n", len(group.Findings)))
 			for _, f := range group.Findings {
-				sb.WriteString(fmt.Sprintf("  - `%s`\n", formatLocation(f)))
+				sb.WriteString(fmt.Sprintf("  - `%s`\n", formatLocation(projectRoot, f)))
 			}
 			sb.WriteString("\n")
 
@@ -79,14 +84,14 @@ func FormatFindingsAsMarkdown(findings []*engine.Finding, db *types.Database) st
 
 			// Collapsible code sections per location.
 			for _, f := range group.Findings {
-				location := formatLocation(f)
+				location := formatLocation(projectRoot, f)
 				sb.WriteString(fmt.Sprintf("<details>\n<summary>%s</summary>\n\n", location))
-				sb.WriteString(renderFindingTraceMarkdown(f))
-				sb.WriteString(renderRelatedLocationsMarkdown(f))
+				sb.WriteString(renderFindingTraceMarkdown(projectRoot, f))
+				sb.WriteString(renderRelatedLocationsMarkdown(projectRoot, f, db))
 				if len(f.Related) == 0 {
 					// Use a fence longer than any backtick run in the excerpt so
 					// source containing ``` cannot break out of the code block.
-					code := extractCodeForFinding(f, 3)
+					code := extractCodeForFinding(f, 3, db)
 					fence := mdFence(code)
 					sb.WriteString(fence + "solidity\n")
 					sb.WriteString(code)
@@ -128,7 +133,7 @@ func FormatFindingsAsMarkdown(findings []*engine.Finding, db *types.Database) st
 	return sb.String()
 }
 
-func renderRelatedLocationsMarkdown(f *engine.Finding) string {
+func renderRelatedLocationsMarkdown(projectRoot string, f *engine.Finding, db *types.Database) string {
 	if f == nil || len(f.Related) == 0 {
 		return ""
 	}
@@ -139,7 +144,7 @@ func renderRelatedLocationsMarkdown(f *engine.Finding) string {
 		if label == "" {
 			label = "matched site"
 		}
-		sb.WriteString(fmt.Sprintf("- **%s:** `%s`\n", label, formatRelatedLocation(loc)))
+		sb.WriteString(fmt.Sprintf("- **%s:** `%s`\n", label, formatRelatedLocation(projectRoot, loc)))
 	}
 	sb.WriteString("\n**Matched site context**\n\n")
 	for _, loc := range f.Related {
@@ -147,13 +152,13 @@ func renderRelatedLocationsMarkdown(f *engine.Finding) string {
 		if label == "" {
 			label = "matched site"
 		}
-		sb.WriteString(fmt.Sprintf("#### %s — `%s`\n\n", label, formatRelatedLocation(loc)))
+		sb.WriteString(fmt.Sprintf("#### %s — `%s`\n\n", label, formatRelatedLocation(projectRoot, loc)))
 		code := extractFullFunctionForLocation(engine.Location{
 			File:     loc.File,
 			Contract: loc.Contract,
 			Function: loc.Function,
 			Line:     loc.Line,
-		})
+		}, db)
 		fence := mdFence(code)
 		sb.WriteString(fence + "solidity\n")
 		sb.WriteString(code)
@@ -165,8 +170,8 @@ func renderRelatedLocationsMarkdown(f *engine.Finding) string {
 	return sb.String()
 }
 
-func formatRelatedLocation(loc engine.RelatedLocation) string {
-	location := relPathForReport(loc.File)
+func formatRelatedLocation(projectRoot string, loc engine.RelatedLocation) string {
+	location := relPathForReport(projectRoot, loc.File)
 	if loc.Contract != "" {
 		location += " :: " + loc.Contract
 	}
@@ -267,12 +272,12 @@ func groupFindings(findings []*engine.Finding) map[string][]*GroupedFinding {
 
 // formatLocation formats a finding location as a string
 // formatLocation renders a finding's location for human-readable reports.
-// Uses the relative path under db.ProjectRoot when available so reviewers
+// Uses the relative path under the explicit project root when available so reviewers
 // can disambiguate duplicate filenames (e.g. /src/Token.sol vs
 // /test/mocks/Token.sol); falls back to basename if the location is outside
 // the project root or the project root is unknown.
-func formatLocation(f *engine.Finding) string {
-	location := relPathForReport(f.Location.File)
+func formatLocation(projectRoot string, f *engine.Finding) string {
+	location := relPathForReport(projectRoot, f.Location.File)
 	if f.Location.Contract != "" {
 		location += " :: " + f.Location.Contract
 	}
@@ -285,24 +290,45 @@ func formatLocation(f *engine.Finding) string {
 	return location
 }
 
-// reportProjectRoot is set by the CLI before rendering so formatLocation can
-// emit project-relative paths. Falls back to basename when unset.
-var reportProjectRoot string
+var (
+	reportProjectRootMu sync.RWMutex
+	reportProjectRoot   string
+)
 
-// SetReportProjectRoot configures the directory used to compute relative
-// finding paths. Called once at scan start.
-func SetReportProjectRoot(root string) { reportProjectRoot = root }
+// SetReportProjectRoot configures the compatibility fallback used when a
+// report API has no explicit project root.
+//
+// Deprecated: pass the project root through Database, SummaryReport, or the
+// explicit projectRoot argument used by report helpers.
+func SetReportProjectRoot(root string) {
+	reportProjectRootMu.Lock()
+	reportProjectRoot = root
+	reportProjectRootMu.Unlock()
+}
 
-// relPathForReport returns the path relative to reportProjectRoot when
-// possible; otherwise falls back to filepath.Base so we still produce
-// something readable.
-func relPathForReport(absFile string) string {
-	if reportProjectRoot != "" && absFile != "" {
-		if rel, err := filepath.Rel(reportProjectRoot, absFile); err == nil && !strings.HasPrefix(rel, "..") {
+// relPathForReport returns the path relative to the explicit project root when
+// possible. The deprecated process-global root is consulted only when the
+// explicit root is empty; otherwise this function is scan-local and safe for
+// concurrent callers.
+func relPathForReport(projectRoot, absFile string) string {
+	if projectRoot == "" {
+		reportProjectRootMu.RLock()
+		projectRoot = reportProjectRoot
+		reportProjectRootMu.RUnlock()
+	}
+	if projectRoot != "" && absFile != "" {
+		if rel, err := filepath.Rel(projectRoot, absFile); err == nil && rel != ".." && !filepath.IsAbs(rel) && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 			return rel
 		}
 	}
 	return filepath.Base(absFile)
+}
+
+func reportRootFromDB(db *types.Database) string {
+	if db == nil {
+		return ""
+	}
+	return db.ProjectRoot
 }
 
 // countUniqueIssues counts distinct issue groups, matching exactly how
@@ -327,6 +353,7 @@ func countUniqueIssues(findings []*engine.Finding) int {
 // styles for keyboard nav, and a screen-reader-friendly heading hierarchy.
 func FormatFindingsAsHTML(findings []*engine.Finding, db *types.Database) string {
 	var sb strings.Builder
+	projectRoot := reportRootFromDB(db)
 
 	// HTML header with dark mode styles
 	sb.WriteString(`<!DOCTYPE html>
@@ -609,7 +636,7 @@ func FormatFindingsAsHTML(findings []*engine.Finding, db *types.Database) string
 `, len(group.Findings)))
 			for _, f := range group.Findings {
 				sb.WriteString(fmt.Sprintf(`                <li>%s</li>
-`, htmlEscape(formatLocation(f))))
+`, htmlEscape(formatLocation(projectRoot, f))))
 			}
 			sb.WriteString(`            </ul>
         </div>
@@ -634,12 +661,12 @@ func FormatFindingsAsHTML(findings []*engine.Finding, db *types.Database) string
 			for _, f := range group.Findings {
 				sb.WriteString(fmt.Sprintf(`        <details>
             <summary>%s</summary>
-`, htmlEscape(formatLocation(f))))
-				sb.WriteString("            " + renderFindingTraceHTML(f) + "\n")
+`, htmlEscape(formatLocation(projectRoot, f))))
+				sb.WriteString("            " + renderFindingTraceHTML(projectRoot, f) + "\n")
 				sb.WriteString(`            <pre><code class="language-solidity">`)
 
 				// CRITICAL: the excerpt is raw scanned contract source — escape it.
-				sb.WriteString(htmlEscape(extractCodeForFinding(f, 5)))
+				sb.WriteString(htmlEscape(extractCodeForFinding(f, 5, db)))
 
 				sb.WriteString(`</code></pre>
         </details>
@@ -723,7 +750,7 @@ func FormatFindingsAsHTML(findings []*engine.Finding, db *types.Database) string
 //
 // When the finding has no Reachability (e.g. contract-scope rules), the
 // function returns an empty string so the rest of the report is unaffected.
-func renderFindingTraceMarkdown(f *engine.Finding) string {
+func renderFindingTraceMarkdown(projectRoot string, f *engine.Finding) string {
 	if f == nil {
 		return ""
 	}
@@ -731,7 +758,7 @@ func renderFindingTraceMarkdown(f *engine.Finding) string {
 	if f.Location.File != "" {
 		// Project-relative, like formatLocation — avoid leaking the auditor's
 		// absolute filesystem layout into a shareable report.
-		sb.WriteString(fmt.Sprintf("**File:** `%s`\n\n", relPathForReport(f.Location.File)))
+		sb.WriteString(fmt.Sprintf("**File:** `%s`\n\n", relPathForReport(projectRoot, f.Location.File)))
 	}
 	if f.EntryPoint != nil && f.EntryPoint.Function != "" {
 		fqn := f.EntryPoint.Function
@@ -792,14 +819,14 @@ func renderFindingTraceMarkdown(f *engine.Finding) string {
 // It produces a small, semantic block — a definition list for the headers and
 // a nested-margin <ol> for the call chain. CSS classes are namespaced so a
 // theme can style them without conflicting with the host page.
-func renderFindingTraceHTML(f *engine.Finding) string {
+func renderFindingTraceHTML(projectRoot string, f *engine.Finding) string {
 	if f == nil {
 		return ""
 	}
 	var sb strings.Builder
 	sb.WriteString(`<div class="w3a-trace">`)
 	if f.Location.File != "" {
-		sb.WriteString(fmt.Sprintf(`<div class="w3a-trace-file"><span class="w3a-trace-label">File:</span> <code>%s</code></div>`, htmlEscape(relPathForReport(f.Location.File))))
+		sb.WriteString(fmt.Sprintf(`<div class="w3a-trace-file"><span class="w3a-trace-label">File:</span> <code>%s</code></div>`, htmlEscape(relPathForReport(projectRoot, f.Location.File))))
 	}
 	if f.EntryPoint != nil && f.EntryPoint.Function != "" {
 		fqn := f.EntryPoint.Function

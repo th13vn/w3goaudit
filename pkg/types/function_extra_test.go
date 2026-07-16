@@ -195,6 +195,85 @@ func TestUniqueIDFormatAndStability(t *testing.T) {
 	if other.UniqueID(nil) == id {
 		t.Fatal("UniqueID should differ when the contract name differs")
 	}
+
+	// The exact defining file is also part of identity: duplicate contract names
+	// in different source files must never collapse to the same helper ID.
+	fn.SourceFile = "/a/Token.sol"
+	duplicate := *fn
+	duplicate.SourceFile = "/z/Token.sol"
+	if duplicate.UniqueID(nil) == fn.UniqueID(nil) {
+		t.Fatal("UniqueID should differ when duplicate contracts live in different files")
+	}
+}
+
+func TestAccessControlModifierLookupUsesExactFunctionOwner(t *testing.T) {
+	db := NewDatabase()
+	aGuard := NewASTNode(KindCheckRequire)
+	zNoOp := NewASTNode(KindDeclModifier)
+	aFn := &Function{Name: "run", ContractName: "Token", SourceFile: "/a/Token.sol", Modifiers: []string{"onlyOwner"}}
+	zFn := &Function{Name: "run", ContractName: "Token", SourceFile: "/z/Token.sol", Modifiers: []string{"onlyOwner"}}
+	a := &Contract{
+		ID: "/a/Token.sol#Token", Name: "Token", SourceFile: "/a/Token.sol",
+		LinearizedBases: []string{"Token"}, LinearizedBaseIDs: []string{"/a/Token.sol#Token"},
+		Functions: []*Function{aFn}, Modifiers: []*Modifier{{Name: "onlyOwner", AST: aGuard}},
+	}
+	z := &Contract{
+		ID: "/z/Token.sol#Token", Name: "Token", SourceFile: "/z/Token.sol",
+		LinearizedBases: []string{"Token"}, LinearizedBaseIDs: []string{"/z/Token.sol#Token"},
+		Functions: []*Function{zFn}, Modifiers: []*Modifier{{Name: "onlyOwner", AST: zNoOp}},
+	}
+	db.AddContract(a)
+	db.AddContract(z)
+
+	if !aFn.IsAccessControlled(db) {
+		t.Fatal("a.Token.run should use a.Token's protective modifier")
+	}
+	if zFn.IsAccessControlled(db) {
+		t.Fatal("z.Token.run must not borrow a.Token's protective same-named modifier")
+	}
+}
+
+func TestRecursiveCallerCheckUsesResolvedContractID(t *testing.T) {
+	db := NewDatabase()
+	aRoot := NewASTNode(KindDeclFunction)
+	requireNode := NewASTNode(KindCheckRequire)
+	comparison := NewASTNode(KindExprBinaryOp)
+	sender := NewASTNode(KindExprMemberAccess)
+	sender.Name = "sender"
+	msg := NewASTNode(KindExprIdentifier)
+	msg.Name = "msg"
+	sender.AddChild(msg)
+	comparison.AddChild(sender)
+	comparison.AddChild(NewASTNode(KindExprLiteral))
+	requireNode.AddChild(comparison)
+	aRoot.AddChild(requireNode)
+
+	aScope := &Function{Name: "scope", Selector: "scope()", ContractName: "Token", SourceFile: "/a/Token.sol", AST: aRoot}
+	zScope := &Function{Name: "scope", Selector: "scope()", ContractName: "Token", SourceFile: "/z/Token.sol", AST: NewASTNode(KindDeclFunction)}
+	zRun := &Function{
+		Name: "run", Selector: "run()", ContractName: "Token", SourceFile: "/z/Token.sol",
+		Calls: []*FunctionCall{{
+			Target: "scope", ResolvedFunction: "scope()", ResolvedContract: "Token",
+			ResolvedContractID: "/z/Token.sol#Token", CallType: CallTypeInternal, Resolved: true,
+		}},
+	}
+	a := &Contract{
+		ID: "/a/Token.sol#Token", Name: "Token", SourceFile: "/a/Token.sol",
+		LinearizedBases: []string{"Token"}, LinearizedBaseIDs: []string{"/a/Token.sol#Token"}, Functions: []*Function{aScope},
+	}
+	z := &Contract{
+		ID: "/z/Token.sol#Token", Name: "Token", SourceFile: "/z/Token.sol",
+		LinearizedBases: []string{"Token"}, LinearizedBaseIDs: []string{"/z/Token.sol#Token"}, Functions: []*Function{zRun, zScope},
+	}
+	db.AddContract(a)
+	db.AddContract(z)
+
+	if !aScope.ComparesCallerIdentity(db) {
+		t.Fatal("a.Token.scope fixture should contain a caller comparison")
+	}
+	if zRun.ComparesCallerIdentity(db) {
+		t.Fatal("z.Token.run must not recurse into a.Token.scope through a short-name collision")
+	}
 }
 
 func TestIsAccessControlledNoModifier(t *testing.T) {
@@ -434,7 +513,7 @@ func TestForwardedOwnerOfIsSelfScopingNotAccessControl(t *testing.T) {
 			// Resolution stores the full selector, not the bare name — the auth
 			// descent must still resolve it to the `_withdraw` function.
 			ResolvedContract: "Vault",
-			ResolvedFunction: "_withdraw(address,uint256,address,uint256)",
+			ResolvedFunction: "_withdraw(address,uint256,address)",
 		}},
 	}
 

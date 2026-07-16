@@ -2,7 +2,7 @@
 
 Every scan's result folder (see [Result Folder Layout](./usage.md#result-folder-layout))
 writes two additional files under `data/` alongside `manifest.json`,
-`database.json`, `findings.json`, and `overview.json`:
+`database.json`, `findings.json`, `overview.json`, and `diagnostics.json`:
 
 - **`data/nav.json`** — a flat, symbol-level navigation index: every
   declaration in the database, the reverse call graph, and
@@ -41,11 +41,19 @@ Every location in both files uses the same shape:
 }
 ```
 
-- Line and column are **1-based** (editor convention: line 1, col 1 is the
-  first character of the file).
-- `startByte`/`endByte` are **0-based** raw byte offsets into the source
-  file, independent of line/column — useful for exact substring extraction
-  or diffing across edits without re-tokenizing.
+- Line and column are **1-based Unicode-code-point positions** (line 1, col 1 is the
+  first character of the file). The range is **half-open**: `startCol` is the
+  column of the first character, `endCol` is the column just *past* the last
+  character (so `endCol - startCol` is the code-point width on a single line).
+  This matches SARIF when the run declares `columnKind: unicodeCodePoints`.
+  It does **not** directly match LSP: LSP lines/characters are zero-based and
+  default to UTF-16 code units unless a negotiated position encoding says
+  otherwise.
+- `startByte`/`endByte` are **0-based**, half-open **UTF-8 byte** offsets into
+  the source file — raw byte offsets, **not** character/code-point offsets (they
+  differ once non-ASCII appears). Useful for exact substring extraction or
+  diffing across edits without re-tokenizing. Do not feed them to a consumer
+  expecting character offsets (e.g. SARIF `charOffset`) without converting.
 - Fields are `omitempty`: a synthetic or location-less declaration (e.g. a
   compiler-injected node) may emit a partial or empty range rather than
   zeros that look like "line 0, col 0".
@@ -130,7 +138,7 @@ would jump to on "go to implementation":
 ```
 
 For each interface method, the implementing contract is found by walking
-its `LinearizedBases` (C3 MRO) derived-first and taking the first function
+its exact `LinearizedBaseIDs` (C3 MRO) derived-first and taking the first function
 with a matching selector and a real body — i.e. the most-derived override,
 matching Solidity's own dispatch semantics.
 
@@ -227,7 +235,7 @@ real dispatch. Constructors and functions without a selector are skipped.
 
 `contracts[]` is sorted by `id`. Within a contract, `constants`/`storage`
 preserve base-to-derived, declaration order (deterministic by
-construction — no secondary sort needed since `LinearizedBases` is itself
+construction — no secondary sort needed since `LinearizedBaseIDs` is itself
 a deterministic MRO). `entryFunctions`/`getters` likewise follow the
 deterministic MRO walk order.
 

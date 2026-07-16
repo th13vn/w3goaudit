@@ -8,6 +8,10 @@ pragma solidity ^0.8.20;
 //   - try/catch success body                      -> calls still in call graph
 //   - do/while loops                              -> stmt.loop (loop_type=do_while)
 //   - assembly assignment (ok := delegatecall)    -> asm.delegatecall visited
+//   - assembly local shadowing                     -> no inherited parameter taint
+//   - assembly writes to Solidity symbols          -> outer taint state updated
+//   - assembly for-loop order                       -> body runs before post
+//   - assembly path joins                           -> branch/zero-loop taint union
 //   - compound assignments (%= &= etc.)           -> stmt.assign / state write
 //   - tuple assignment ((a,b)=(b,a))              -> expr.tuple targets
 //   - new C()                                     -> call.create edge
@@ -86,6 +90,131 @@ contract StatementForms {
     function asmDelegate(address impl) external returns (bool ok) {
         assembly {
             ok := delegatecall(gas(), impl, 0, 0, 0, 0)
+        }
+    }
+
+    // A Yul local shadows the Solidity parameter for the nested block only.
+    function asmShadow(address receiver) external pure {
+        assembly {
+            pop(receiver)
+            {
+                let receiver := 0
+                pop(receiver)
+            }
+            pop(receiver)
+        }
+    }
+
+    // Assignments to Solidity parameters, locals, and named return variables
+    // are legal in Yul and must update the surrounding symbol's taint state.
+    function asmOuterSymbols(address source, address sanitized)
+        external
+        pure
+        returns (address result)
+    {
+        address copied;
+        assembly {
+            sanitized := 0
+            pop(sanitized)
+
+            copied := source
+            result := copied
+            pop(copied)
+            pop(result)
+        }
+    }
+
+    // Yul for-loops execute body before post. The body taints `current`, so the
+    // post sink must see taint; the post then sanitizes it, so the sink after
+    // the loop must be clean.
+    function asmForRuntimeOrder(address source) external pure {
+        address current;
+        assembly {
+            current := 0
+            for { let i := 0 } lt(i, 1) {
+                pop(current)
+                current := 0
+                i := add(i, 1)
+            } {
+                current := source
+            }
+            pop(current)
+        }
+    }
+
+    // A conditional body is optional. Sanitization in that body must not erase
+    // input taint, while a taint copy in the body must survive the path join.
+    // The Yul locals exercise the assembly lexical-scope state in the same join.
+    function asmIfPathMerge(address source, uint256 typedSource) external pure {
+        address outerSanitized = source;
+        address outerCopied;
+        address outerType = source;
+        assembly {
+            let localSanitized := source
+            let localCopied := 0
+            if source {
+                outerSanitized := 0
+                outerCopied := source
+                outerType := typedSource
+                localSanitized := 0
+                localCopied := source
+            }
+            pop(outerSanitized)
+            pop(outerCopied)
+            pop(outerType)
+            pop(localSanitized)
+            pop(localCopied)
+        }
+    }
+
+    // Switch cases are mutually exclusive. With no default, the unmatched
+    // input path is feasible too; a later case must not overwrite an earlier
+    // case's taint state during analysis.
+    function asmSwitchPathMerge(address source, uint256 selector) external pure {
+        address sanitized = source;
+        address copied;
+        assembly {
+            switch selector
+            case 0 {
+                sanitized := 0
+                copied := source
+            }
+            case 1 {
+                copied := 0
+            }
+            pop(sanitized)
+            pop(copied)
+        }
+    }
+
+    // A Yul for-loop may execute zero times. The zero-iteration path preserves
+    // input taint, while one possible iteration can introduce new taint.
+    function asmZeroIterationMerge(address source) external pure {
+        address sanitized = source;
+        address copied;
+        assembly {
+            for { } source { } {
+                sanitized := 0
+                copied := source
+            }
+            pop(sanitized)
+            pop(copied)
+        }
+    }
+
+    // Loop-carried taint requires a second iteration: iteration 1 taints b,
+    // iteration 2 copies b into a. The existing pop(a) node in the loop body
+    // and the sink after the loop must both reflect that later iteration.
+    function asmForLoopCarried(address source) external pure {
+        assembly {
+            let a := 0
+            let b := 0
+            for { let i := 0 } lt(i, 2) { i := add(i, 1) } {
+                a := b
+                b := source
+                pop(a)
+            }
+            pop(a)
         }
     }
 

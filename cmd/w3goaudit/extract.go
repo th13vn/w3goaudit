@@ -104,18 +104,8 @@ func resolveExtractDB(cmd *cobra.Command, args []string) (*types.Database, error
 }
 
 func findContract(db *types.Database, name string) *types.Contract {
-	// Try exact name match first
-	c := db.GetContractByName(name)
-	if c != nil {
-		return c
-	}
-	// Try case-insensitive
-	for _, contract := range db.Contracts {
-		if strings.EqualFold(contract.Name, name) {
-			return contract
-		}
-	}
-	return nil
+	contract, _ := resolveContractQuery(db, name)
+	return contract
 }
 
 // ── extract entry ───────────────────────────────────────────────────────────
@@ -157,9 +147,9 @@ Example:
 		if err != nil {
 			return err
 		}
-		contract := findContract(db, args[0])
-		if contract == nil {
-			return fmt.Errorf("contract %q not found in database", args[0])
+		contract, err := resolveContractQuery(db, args[0])
+		if err != nil {
+			return err
 		}
 
 		var funcs []EntryFuncInfo
@@ -344,9 +334,9 @@ Example:
 		if err != nil {
 			return err
 		}
-		contract := findContract(db, args[0])
-		if contract == nil {
-			return fmt.Errorf("contract %q not found in database", args[0])
+		contract, err := resolveContractQuery(db, args[0])
+		if err != nil {
+			return err
 		}
 
 		// Validate the contract is a main (deployable) contract — surface a
@@ -375,7 +365,7 @@ Example:
 		var chain []InheritanceEntry
 		for i, baseName := range contract.LinearizedBases {
 			kind := "unknown"
-			if base := db.GetContractByName(baseName); base != nil {
+			if base := linearizedContractAt(db, contract, i); base != nil {
 				kind = string(base.Kind)
 			}
 			chain = append(chain, InheritanceEntry{
@@ -441,21 +431,15 @@ Example:
 		if err != nil {
 			return err
 		}
-		contract := findContract(db, args[0])
-		if contract == nil {
-			return fmt.Errorf("contract %q not found in database", args[0])
+		contract, err := resolveContractQuery(db, args[0])
+		if err != nil {
+			return err
 		}
 
 		var vars []StateVarInfo
 
-		// Walk inheritance chain in reverse (base first) to get storage order
-		bases := contract.LinearizedBases
-		for i := len(bases) - 1; i >= 0; i-- {
-			baseName := bases[i]
-			base := db.GetContractByName(baseName)
-			if base == nil {
-				continue
-			}
+		// Walk the exact inheritance chain base-first to get storage order.
+		for _, base := range linearizedContractsBaseFirst(db, contract) {
 			for _, sv := range base.StateVariables {
 				vars = append(vars, StateVarInfo{
 					Name:        sv.Name,
@@ -463,7 +447,7 @@ Example:
 					Visibility:  sv.Visibility,
 					IsConstant:  sv.IsConstant,
 					IsImmutable: sv.IsImmutable,
-					DefinedIn:   baseName,
+					DefinedIn:   base.Name,
 				})
 			}
 		}
@@ -520,9 +504,9 @@ Example:
 		if err != nil {
 			return err
 		}
-		contract := findContract(db, args[0])
-		if contract == nil {
-			return fmt.Errorf("contract %q not found in database", args[0])
+		contract, err := resolveContractQuery(db, args[0])
+		if err != nil {
+			return err
 		}
 
 		var sels []SelectorInfo
@@ -763,9 +747,9 @@ Examples:
 		}
 		funcName := args[0]
 
-		fn, contract := findFunction(db, funcName, contractFilter)
-		if fn == nil {
-			return fmt.Errorf("function %q not found%s", funcName, contractHint(contractFilter))
+		fn, contract, err := resolveFunctionQuery(db, funcName, contractFilter)
+		if err != nil {
+			return err
 		}
 
 		output := SourceOutput{
@@ -844,12 +828,12 @@ Examples:
 		}
 		funcName := args[0]
 
-		fn, contract := findFunction(db, funcName, contractFilter)
-		if fn == nil {
-			return fmt.Errorf("function %q not found%s", funcName, contractHint(contractFilter))
+		fn, contract, err := resolveFunctionQuery(db, funcName, contractFilter)
+		if err != nil {
+			return err
 		}
 
-		funcID := fmt.Sprintf("%s#%s.%s", contract.SourceFile, contract.Name, fn.Name)
+		funcID := exactFunctionID(contract, fn)
 
 		var callees, callers []CallEdgeInfo
 		if db.CallGraph != nil {
@@ -861,13 +845,9 @@ Examples:
 			}
 		}
 
-		// State vars — inheritance order: base-first (storage order)
+		// State vars — exact inheritance order, base-first (storage order).
 		var stateVars []StateVarInfo
-		for i := len(contract.LinearizedBases) - 1; i >= 0; i-- {
-			base := db.GetContractByName(contract.LinearizedBases[i])
-			if base == nil {
-				continue
-			}
+		for _, base := range linearizedContractsBaseFirst(db, contract) {
 			for _, sv := range base.StateVariables {
 				stateVars = append(stateVars, StateVarInfo{
 					Name: sv.Name, TypeName: sv.TypeName, Visibility: sv.Visibility,
@@ -965,9 +945,9 @@ Examples:
 		}
 		entryFuncName := args[0]
 
-		fn, contract := findFunction(db, entryFuncName, contractFilter)
-		if fn == nil {
-			return fmt.Errorf("entry function %q not found%s", entryFuncName, contractHint(contractFilter))
+		fn, contract, err := resolveFunctionQuery(db, entryFuncName, contractFilter)
+		if err != nil {
+			return err
 		}
 
 		// BFS over call graph, collecting internal/library/super callees
@@ -980,7 +960,7 @@ Examples:
 		var collected []WorkflowFunction
 		var combined strings.Builder
 
-		entryFuncID := fmt.Sprintf("%s#%s.%s", contract.SourceFile, contract.Name, fn.Name)
+		entryFuncID := exactFunctionID(contract, fn)
 		queue := []queueItem{{entryFuncID, 0}}
 
 		for len(queue) > 0 {
@@ -995,8 +975,8 @@ Examples:
 			// Resolve the node from its ID — it may be a function OR a modifier
 			// (modifier edges are enqueued below; resolving only functions
 			// previously dropped them, contradicting the documented behavior).
-			_, cName, fSelector := parseWorkflowFuncID(item.funcID)
-			c := db.GetContractByName(cName)
+			filePath, cName, fSelector := parseWorkflowFuncID(item.funcID)
+			c := db.GetContractByID(types.MakeContractID(filePath, cName))
 			if c == nil {
 				continue
 			}
@@ -1081,17 +1061,8 @@ func init() {
 // findFunction locates a function by name, optionally filtered by contract name.
 // Returns (nil, nil) if not found.
 func findFunction(db *types.Database, funcName, contractFilter string) (*types.Function, *types.Contract) {
-	for _, c := range db.Contracts {
-		if contractFilter != "" && !strings.EqualFold(c.Name, contractFilter) {
-			continue
-		}
-		for _, f := range c.Functions {
-			if f.Name == funcName {
-				return f, c
-			}
-		}
-	}
-	return nil, nil
+	fn, contract, _ := resolveFunctionQuery(db, funcName, contractFilter)
+	return fn, contract
 }
 
 // findFunctionBySelector finds a function in a contract by name, 4-byte selector, or full signature.
@@ -1114,14 +1085,6 @@ func findModifierByName(c *types.Contract, name string) *types.Modifier {
 		}
 	}
 	return nil
-}
-
-// contractHint returns a disambiguation hint when contractFilter is set.
-func contractHint(contractFilter string) string {
-	if contractFilter != "" {
-		return fmt.Sprintf(" in contract %q", contractFilter)
-	}
-	return " in any contract (use --contract to disambiguate)"
 }
 
 // edgeToInfo converts a CallEdge to a CallEdgeInfo.

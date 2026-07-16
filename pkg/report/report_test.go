@@ -5,7 +5,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
+	"github.com/th13vn/w3goaudit/pkg/builder"
 	"github.com/th13vn/w3goaudit/pkg/engine"
 	"github.com/th13vn/w3goaudit/pkg/types"
 )
@@ -72,6 +74,9 @@ func TestFormatFindingsAsSARIF(t *testing.T) {
 		t.Fatalf("expected exactly 1 run, got %v", doc["runs"])
 	}
 	run := runs[0].(map[string]interface{})
+	if got := run["columnKind"]; got != "unicodeCodePoints" {
+		t.Errorf("columnKind = %v, want unicodeCodePoints", got)
+	}
 
 	driver := run["tool"].(map[string]interface{})["driver"].(map[string]interface{})
 	if got := driver["name"]; got != "w3goaudit" {
@@ -136,6 +141,106 @@ func TestFormatFindingsAsSARIF(t *testing.T) {
 	region := phys["region"].(map[string]interface{})
 	if region["startLine"].(float64) != 42 {
 		t.Errorf("startLine = %v, want 42", region["startLine"])
+	}
+}
+
+func TestSARIFUnicodeColumnsNeverUseByteOffsetsAsCharacterOffsets(t *testing.T) {
+	findings := []*engine.Finding{{
+		TemplateID: "unicode-location",
+		Severity:   "MEDIUM",
+		Location: engine.Location{
+			File:      "/repo/Unicode.sol",
+			Line:      3,
+			Col:       19,
+			EndLine:   3,
+			EndCol:    44,
+			StartByte: 87,
+			EndByte:   116,
+		},
+	}}
+	out, err := FormatFindingsAsSARIF(findings, ToolMeta{Name: "w3goaudit"}, "/repo")
+	if err != nil {
+		t.Fatalf("FormatFindingsAsSARIF: %v", err)
+	}
+	var doc map[string]interface{}
+	if err := json.Unmarshal([]byte(out), &doc); err != nil {
+		t.Fatalf("invalid SARIF: %v", err)
+	}
+	run := doc["runs"].([]interface{})[0].(map[string]interface{})
+	if run["columnKind"] != "unicodeCodePoints" {
+		t.Fatalf("columnKind = %v, want unicodeCodePoints", run["columnKind"])
+	}
+	result := run["results"].([]interface{})[0].(map[string]interface{})
+	physical := result["locations"].([]interface{})[0].(map[string]interface{})["physicalLocation"].(map[string]interface{})
+	region := physical["region"].(map[string]interface{})
+	if region["startColumn"] != float64(19) || region["endColumn"] != float64(44) {
+		t.Fatalf("region columns = start %v end %v", region["startColumn"], region["endColumn"])
+	}
+	if _, ok := region["charOffset"]; ok {
+		t.Fatalf("region must not emit UTF-8 byte offset as SARIF charOffset: %#v", region)
+	}
+	if _, ok := region["charLength"]; ok {
+		t.Fatalf("region must not emit UTF-8 byte length as SARIF charLength: %#v", region)
+	}
+}
+
+func TestSARIFUsesParserBackedUnicodeColumns(t *testing.T) {
+	src := `contract C {
+    function run(address target, bytes memory data) external {
+        string memory marker = "→😀"; target.delegatecall(data);
+    }
+}`
+	db, err := builder.New().Build([]*types.SourceFile{{Path: "/repo/Unicode.sol", Content: src}})
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	contract := db.GetContractByName("C")
+	if contract == nil || len(contract.Functions) != 1 || contract.Functions[0].AST == nil {
+		t.Fatalf("unexpected parsed contract: %#v", contract)
+	}
+	calls := contract.Functions[0].AST.CollectDescendants(func(n *types.ASTNode) bool {
+		return n.Kind == types.KindCallLowlevelDelegate
+	})
+	if len(calls) != 1 {
+		t.Fatalf("delegatecall nodes = %d, want 1", len(calls))
+	}
+	call := calls[0]
+	callByte := strings.Index(src, "target.delegatecall")
+	lineStart := strings.LastIndex(src[:callByte], "\n") + 1
+	wantCol := utf8.RuneCountInString(src[lineStart:callByte]) + 1
+	if call.StartCol != wantCol || call.StartByte != callByte {
+		t.Fatalf("parser-backed call = col %d byte %d, want col %d byte %d", call.StartCol, call.StartByte, wantCol, callByte)
+	}
+
+	findings := []*engine.Finding{{
+		TemplateID: "unicode-location",
+		Severity:   "MEDIUM",
+		Location: engine.Location{
+			File:      "/repo/Unicode.sol",
+			Line:      call.StartLine,
+			Col:       call.StartCol,
+			EndLine:   call.EndLine,
+			EndCol:    call.EndCol,
+			StartByte: call.StartByte,
+			EndByte:   call.EndByte,
+		},
+	}}
+	out, err := FormatFindingsAsSARIF(findings, ToolMeta{Name: "w3goaudit"}, "/repo")
+	if err != nil {
+		t.Fatalf("FormatFindingsAsSARIF: %v", err)
+	}
+	var doc map[string]interface{}
+	if err := json.Unmarshal([]byte(out), &doc); err != nil {
+		t.Fatalf("invalid SARIF: %v", err)
+	}
+	run := doc["runs"].([]interface{})[0].(map[string]interface{})
+	result := run["results"].([]interface{})[0].(map[string]interface{})
+	region := result["locations"].([]interface{})[0].(map[string]interface{})["physicalLocation"].(map[string]interface{})["region"].(map[string]interface{})
+	if run["columnKind"] != "unicodeCodePoints" || region["startColumn"] != float64(wantCol) {
+		t.Fatalf("SARIF run/region = columnKind %v startColumn %v, want unicodeCodePoints/%d", run["columnKind"], region["startColumn"], wantCol)
+	}
+	if _, ok := region["charOffset"]; ok {
+		t.Fatalf("parser byte offset leaked into SARIF charOffset: %#v", region)
 	}
 }
 

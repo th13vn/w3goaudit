@@ -11,7 +11,8 @@ Main orchestrator for the 7-phase build process.
 
 **Exports:**
 - `Builder` struct
-- `New()` - Create builder instance
+- `New()` - Create a builder using deprecated package-global verbose logging
+- `NewWithOptions(Options{Logger, ProjectRoot, ScanTarget, Diagnostics})` - Create a scan-local builder with durable scan metadata and reader diagnostics; a nil logger is disabled
 - `Build(sources)` - Main entry point (7 phases)
 - `GetDatabase()` - Get built database
 
@@ -25,6 +26,11 @@ Main orchestrator for the 7-phase build process.
 7. **Analyze Effects** (`effects.go`) - Walk each function's AST to record
    per-function `FunctionEffects` (state writes, require/assert/revert + branch
    guards, access control) into `Database.Semantics.FunctionEffects`.
+
+Phase 2 visits functions and modifiers in a total order keyed by exact owning
+source/contract before source position and name. This keeps serialized data-flow
+edges deterministic even when two files declare the same contract, function,
+modifier, and line layout.
 
 ### effects.go
 Phase-7 per-function effects analysis.
@@ -42,12 +48,17 @@ Phase-7 per-function effects analysis.
   guard conditions. Consumed by `pkg/report` (`state_matrix.go`, `bundle.go`).
 
 ### verbose.go
-Debug logging infrastructure.
+Deprecated compatibility logging infrastructure.
 
 **Exports:**
 - `VerboseEnabled` - Global flag to enable/disable verbose logging
 - `VerboseLog(format, args...)` - Conditional verbose logging function
 - `SetVerboseWriter(w io.Writer)` - Set custom output writer for verbose logs (default: os.Stdout)
+
+New builders keep the injected `*logging.Logger` on the object and forward the
+same logger to `Database`, `InheritanceBuilder`, and `CallGraphBuilder`. Legacy
+constructors keep routing through the serialized global writer for source
+compatibility; normal scan-local builds never consult global logging state.
 
 **Output Prefix:** None (clean output)
 
@@ -80,18 +91,25 @@ Contract extraction from raw AST.
 ### location.go
 Source-location helpers shared by `ast_builder.go` (v0.4).
 
-**Exports:**
-- `spanFields(src ast.Node) (startLine, endLine, startCol, endCol, startByte, endByte int)` -
-  extracts line/column/byte-offset location from any solast-go `ast.Node` via
-  its `GetLocation()`/`GetRange()`. Returns all zeros for a nil node or one
-  with no location (synthetic).
-- `applySpan(dst *types.ASTNode, src ast.Node)` - copies `spanFields(src)`
-  onto `dst`. No-op if either is nil. Preserves an existing `StartLine`/
-  `EndLine` when `src` has no location (does not zero them out), but
-  `StartCol`/`EndCol`/`StartByte`/`EndByte` are still overwritten with zero in
-  that case — a chokepoint call on a node built without a direct source
-  counterpart can regress previously-set column/byte fields even though the
-  line fields survive.
+**Core helpers:**
+- `sourceLocator` indexes each `SourceFile` once. It stores one entry per line,
+  plus sparse entries only for multibyte runes (start/end byte and cumulative
+  extra UTF-8 bytes) and the first invalid byte. The same locator is threaded
+  through contract extraction, simplified-AST construction, and call-graph
+  analysis.
+- `sourceSpan` carries 1-based lines/columns and 0-based half-open UTF-8 byte
+  offsets. Parser line numbers and ranges remain canonical; parser columns are
+  ignored because solast-go counts bytes on non-ASCII lines.
+- Column lookup validates the endpoint against the indexed line, rejects
+  offsets inside a multibyte rune or after invalid UTF-8, then binary-searches
+  the sparse rune entries. Complexity is O(log m) per endpoint for `m`
+  non-ASCII runes on that line, after O(source bytes) indexing; memory is
+  O(lines + non-ASCII runes), not O(source bytes).
+- `(*sourceLocator).span(node)` converts both endpoints and
+  `(*sourceLocator).apply(dst, node)` stamps an AST node. If a byte range is
+  outside its reported line, reversed, or splits invalid UTF-8, line and byte
+  fields remain available, both columns are omitted, and exactly one durable
+  `location.invalid` diagnostic is recorded for that source file.
 
 Depends on `github.com/th13vn/solast-go` **v0.1.7**, which added `Loc`/`Range`
 accessors to call/member/index postfix expressions — the source of call-site
@@ -103,16 +121,29 @@ Builds simplified AST trees for function bodies.
 
 **Exports:**
 - `BuildFunctionAST()` - Convert raw AST to simplified tree; applies its own
-  span (`applySpan(root, fndef)`) as the function-body root.
-- `BuildModifierAST()` - Same, for modifier bodies.
+  span as the function-body root. The exported compatibility wrapper obtains
+  source content from `db.SourceFiles`; the builder's internal path reuses the
+  cached per-file locator.
+- `BuildModifierAST(moddef)` - Original one-argument SDK compatibility API.
+- `BuildModifierASTWithContext(moddef, contract, db)` - Contextual modifier
+  builder used by new callers. Takes the owning contract + db so the modifier body's identifier references resolve
+  (state-variable names get `is_state_var`/`RefKind`/taint source). Callers must
+  pass the owning contract — `buildASTs` builds a modifier→contract map from
+  `db.Contracts` since `types.Modifier` has no contract back-reference. Building
+  a modifier AST with `nil` context (the old signature) silently missed every
+  state-write/taint fact inside modifier bodies.
 
 **Interior-node locations (v0.4):** every interior node is stamped via a
 dispatch-wrapper chokepoint rather than ad hoc call sites, so no statement or
 expression type can be added without a location:
-- `buildStatement()` calls `buildStatementInner()` then `applySpan(node, stmt)`.
-- `buildExpression()` calls `buildExpressionInner()` then `applySpan(node, expr)`.
+- `buildStatement()` calls `buildStatementInner()` then `locator.apply(node, stmt)`.
+- `buildExpression()` calls `buildExpressionInner()` then `locator.apply(node, expr)`.
 - `buildAssemblyOperation()` / `buildAssemblyCall()` follow the same
-  `*Inner` + `applySpan` pattern for assembly opcodes/calls.
+  `*Inner` + `locator.apply` pattern for assembly opcodes/calls.
+- `buildAssemblyOperationInner()` is only the type dispatcher; local
+  definitions, assignments, blocks, if/switch/for control flow, and conditions
+  are implemented by focused private builders. This preserves the single
+  location-stamping chokepoint while keeping each Yul state transition isolated.
 - `buildInlineAssembly()` applies its own span directly (single call site,
   no `*Inner` split).
 
@@ -150,7 +181,15 @@ Kinds use dot-notation (the `Kind*` constants in `pkg/types/ast.go`):
 - `new Contract(args)` produces a `call.create` node (and a call-graph creation edge).
 - Inline-assembly `ok := delegatecall(...)` (an `AssemblyAssignment`, no `let`) has
   its RHS classified (`asm.delegatecall`, `asm.call`, …) instead of being dropped;
-  `AssemblyIf`/`AssemblySwitch`/`AssemblyFor` bodies are also walked.
+  `AssemblyIf`/`AssemblySwitch`/`AssemblyFor` bodies are also walked. Yul
+  `for` analysis follows runtime mutation order (`pre`, condition, body, post),
+  so body taint reaches post sinks. It builds the loop AST once, then runs a
+  bounded monotone **state-only fixpoint** over those existing condition/body/
+  post nodes: `headNext = join(loopInput, transfer(head))` until stable. This
+  captures loop-carried flows that need multiple iterations (for example
+  `a := b; b := source`) without duplicating AST nodes. Identifier taints seen
+  on later iterations are unioned into the existing sink nodes, and the stable
+  head remains the after-state so the zero-iteration path is preserved.
 
 **Call Classification:**
 
@@ -189,7 +228,7 @@ modifier map on a low-level call is no longer dropped at parse time
 - `has_salt: true` attribute set when `{salt: ...}` is present (CREATE2).
 
 Templates use this via `attr: has_value: true` to discriminate ETH-bearing
-low-level calls from plain function-routing calls. See [`templates/official/arbitrary-send-eth.yaml`](../../templates/official/arbitrary-send-eth.yaml) for usage.
+low-level calls from plain function-routing calls. See [`templates/official/high/arbitrary-send-eth.yaml`](../../templates/official/high/arbitrary-send-eth.yaml) for usage.
 
 **Call receiver preservation:** member-call receivers are attached as tagged
 children with `attr.call_receiver = true`, e.g. `target` in
@@ -222,7 +261,7 @@ Unknown or complex expressions keep the previous heuristic behavior.
 - This lets templates distinguish a constant *condition* (`if (true)`) from a
   boolean literal living in the branch body (`if (c) return true;`), which the
   recursive `contains` operator cannot do on its own. Used by
-  `templates/official/boolean-cst.yaml`.
+  `templates/official/medium/boolean-cst.yaml`.
 
 **Literal Subtype (`subtype`):**
 - `buildLiteral()` tags each `expr.literal` with `subtype`: `number`, `string`,
@@ -236,11 +275,27 @@ Unknown or complex expressions keep the previous heuristic behavior.
 - `buildAssemblyBlock()` - Process inline assembly
 - Identifies `call`, `delegatecall`, `staticcall` opcodes
 - Creates appropriate AST nodes for assembly calls
+- Yul blocks maintain their own lexical scope stack. `let` declarations shadow
+  same-named Solidity parameters/state variables only inside their block, and
+  Yul local assignments update the local's taint/type facts. References outside
+  the nested block fall back to the surrounding Yul or Solidity symbol.
+- With no Yul-local shadow, legal assignments to Solidity parameters, named
+  returns, and locals update the surrounding taint/type state. Explicit clean
+  writes are retained as empty overrides, so a sanitized parameter does not
+  regain declaration-time taint on its next assembly reference.
+- Yul control-flow joins snapshot the outer symbol state and active Yul scopes.
+  `if` joins input with its optional body; `switch` analyzes cases independently
+  and also includes input when there is no default; `for` iterates a state-only
+  body→post transfer to a fixpoint while joining the zero-iteration input at
+  every head. Nested Yul `if`/`switch`/`for` models are replayed with the same
+  lexical-scope and branch semantics. Taint sources are sorted unions (a
+  branch-only sanitizer cannot erase another path), while type facts survive
+  only when every feasible path and observed iteration agrees.
 
 **Unchecked Block Handling:**
 - Solidity `unchecked { ... }` blocks are represented as `stmt.unchecked`.
 - Child statements are preserved under the unchecked node, allowing templates
-  such as `templates/official/unchecked-arithmetic.yaml` to match arithmetic
+  such as `templates/official/medium/unchecked-arithmetic.yaml` to match arithmetic
   inside the block.
 
 **Try/Catch Handling (`buildTryStatement`):**
@@ -269,11 +324,16 @@ C3 linearization algorithm for proper Solidity inheritance.
 - `GetInheritedFunctions(contractName)` - Get all inherited functions
 
 **What it does:**
-- Calculates `LinearizedBases` using C3 algorithm
+- Calculates compatibility/display `LinearizedBases` and canonical exact
+  `LinearizedBaseIDs` using the same C3 algorithm
 - **Parent Order:** Right-to-left (rightmost parent in `is` clause is most derived-like)
 - **Output Order:** Derived-first (most derived contract first, most base last)
 - Computes `InheritanceWeight` (depth in hierarchy)
 - Matches Solidity compiler's method resolution order
+- Exact-ID C3 merge keys prevent same-named contracts in different files from
+  collapsing into one identity. Unresolved names remain visible in the display
+  slice; ambiguous base identities are omitted from the exact slice and record
+  `identity.unresolved` instead of choosing a plausible wrong contract.
 
 **Iteration Pattern:**
 - **For override resolution** (find most-derived impl): iterate **forward**
@@ -339,9 +399,38 @@ Function call graph construction.
 **Statement traversal:** `analyzeNode` walks `unchecked { }` blocks, `do/while`
 bodies, `try` **success bodies** (previously only the catch clauses were
 walked), and calls embedded in `emit`/`revert` arguments — closing
-false-negative gaps for code that places calls in those positions.
+false-negative gaps for code that places calls in those positions. The main
+type switch delegates variable declarations, try statements, call arguments,
+binary assignments, tuples, and call options to private helpers; call
+classification similarly separates identifier/member/cast/library/option
+receivers before the shared edge-emission path.
 
-**Stores:** `Function.Calls` / `Modifier.Calls` with resolved target information.
+**Stores:** `Function.Calls` / `Modifier.Calls` with resolved target information,
+including additive `ResolvedContractID` exact identities.
+
+**Exact identity:** builder traversal stores the current source file, contract,
+function, and modifier as exact object pointers. The raw AST contract is matched
+with `file#Contract`; calls are attached directly to those objects rather than
+re-resolving a short name. Internal, `super`, modifier, explicit typed, and
+library targets walk `Database.LinearizedContracts` or source-scoped exact
+resolution. Edge `From`/`To` IDs are therefore always constructed from the
+owning objects' source files. Dynamic and low-level targets may remain
+unresolved normally; `identity.unresolved` is reserved for genuinely ambiguous
+or missing AST/type identities. `callgraph_identity_test.go` and
+`test-data/core/identity-collision/` pin two independent `Token` contracts so
+their function/modifier edges can never cross files.
+
+Raw AST functions are attached to extracted `Function` objects by exact byte
+span, with a full parameter-type-list fallback for location-less legacy input.
+Name+line and name+arity are never sufficient, so overloads declared on the
+same line stay separate. Target overload resolution deduplicates overridden
+selectors derived-first, uses known argument types, and leaves genuinely
+ambiguous same-arity calls unresolved instead of selecting declaration order.
+
+Extension-library resolution honors `UsingDirective.ForType`, receiver type,
+and call arity (including the implicit receiver parameter). More than one
+applicable library or overload remains unresolved; it is never resolved by map
+or declaration order.
 
 **Context-aware `super` resolution (`ResolveSuperAcrossLeaves`):** in Solidity,
 `super.f()` binds against the C3 linearization of the **most-derived contract
@@ -350,10 +439,10 @@ per-call resolver in `resolveTarget` only knows the textual contract's own MRO,
 so for a cooperative diamond it records the *standalone* target and misses the
 *in-leaf* target (e.g. `StepB.step → Root.step` but not `StepB.step → StepA.step`
 when `StepB` runs as part of `Full`, whose MRO is `[Full, StepB, StepA, Root]`).
-This phase-5 post-pass walks **every** contract's MRO as a potential
+This phase-5 post-pass walks **every** contract's exact-ID MRO as a potential
 instantiation leaf and, for each `super` call site hosted by a contract in that
 MRO, adds an edge to the next contract in *that* leaf's MRO that defines the
-function (exact-arity preferred, name-only fallback — `nextDefInMRO`). It is
+function (exact selector preferred, otherwise unique arity — `nextDefInMRO`). It is
 **additive** (standalone edges kept) and **deduplicated by `(From,To)`**, so the
 result is the **sound union** of super targets over all instantiation contexts.
 Without it, a function reached only through an intermediate contract's `super`
@@ -366,13 +455,26 @@ reached by two distinct leaves whose `super` targets differ; pins the exact
 
 **Deterministic iteration:** `Build()` sorts the source-file map keys before
 walking, so call-graph construction is reproducible across runs. Per-file parse
-failures emit a verbose log instead of being silently skipped. From-IDs use
-`SplitN`/`Join` so selectors containing dots (`f(Lib.Type)`) are not truncated.
+failures emit a verbose log instead of being silently skipped. Caller IDs use
+the exact current function object's full selector, including dotted user-defined
+types (`f(Lib.Type)`).
 
 **Parse-once:** Phase 1 stashes each file's parsed `*ast.SourceUnit` on
 `SourceFile.AST`; the call-graph phase reuses it instead of re-parsing every
 file (re-parses only for a database reloaded from JSON, where the tree is not
 serialized).
+
+**Yul assignment parser compatibility:** solast-go v0.1.7 tokenizes Yul `:=` as
+`COLON` + `ASSIGN` even though its assembly parser expects a single assignment
+token. `parser_input.go` supplies both Phase 1 and the call-graph fallback with
+a temporary, same-byte-length input where `:=` becomes ` =` only inside a real
+inline `assembly { ... }` region. Ordinary Solidity, quoted strings, and
+line/block comments are skipped, while original
+`SourceFile.Content` and all byte/line/column ranges remain unchanged.
+The normalization pass is a small explicit lexical-state scanner whose code,
+quoted-string, line-comment, and block-comment transitions are isolated in
+private methods; replacements and byte-for-byte position preservation are
+unchanged.
 
 **Tolerant-parse guard:** Phase 1 calls `parser.ParseWithErrors` (solast-go
 ≥ v0.1.6) instead of `parser.Parse`. Tolerant parsing recovers from syntax
@@ -381,9 +483,13 @@ errors so one broken file doesn't abort the build, but it previously did so
 keyword like `from`, fixed in solast-go v0.1.5) could drop the rest of a
 contract body, producing false negatives in every detector with no signal.
 `parseFile` now emits a verbose `⚠️` warning naming the file, the recovered
-error count, and the first error+line whenever tolerant recovery occurred, so
-incomplete extraction is diagnosable rather than invisible. Policy is unchanged
-(the build still proceeds); only the visibility improves.
+error count, and the first error+line whenever tolerant recovery occurred. It
+also persists one `parse.recovered` diagnostic for every recovered parser error;
+a fatal file skip records `parse.skipped`. After inheritance, every unresolved
+base reference records `inheritance.base_unresolved` with its referring file
+and base symbol. All are marked incomplete and are normalized before `Build`
+returns. Policy is unchanged (the build still proceeds by default), but the
+coverage loss now survives JSON cache round-trips.
 
 **Assembly opcode coverage:** `classifyAssemblyCall` recognizes the full
 security-relevant Yul opcode set: `create`, `create2`, `log0`–`log4`, `revert`,
@@ -394,7 +500,7 @@ builder consumes the resulting kinds.)
 ## Build Flow
 
 ```
-Sources → Parse → AST Trees + Semantic Facts → Selectors → Inheritance → Call Graph → Entry Points → Database
+Options metadata + reader diagnostics → Sources → Parse → AST Trees + Semantic Facts → Selectors → Inheritance → Call Graph → Entry Points → normalized Database diagnostics
 ```
 
 ## Integration Points

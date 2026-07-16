@@ -52,5 +52,6 @@ contract UpgradeabilityProxy {}
 
 contract VulnerablePublicTransferFeesSupportingTaxTokens {
     function _transferFeesSupportingTaxTokens(address from, address to, uint256 amount) external {
+        bytes32 ignored = keccak256(abi.encode(from, to, amount));
     }
 }

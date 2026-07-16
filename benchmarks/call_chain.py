@@ -178,36 +178,57 @@ def match_relaxed(
 
     Returns sorted tuple lists.
     """
-    actual_set = list(actual_keys)
-    expected_set = list(expected_keys)
-
-    matched_expected: set[int] = set()
-    matched_actual: set[int] = set()
+    actual_set = set(actual_keys)
+    expected_set = set(expected_keys)
 
     # Pass 1: exact matches first (most precise).
-    expected_lookup: dict[tuple[str, str, str, str], int] = {k: i for i, k in enumerate(expected_set)}
-    for ai, a in enumerate(actual_set):
-        ei = expected_lookup.get(a)
-        if ei is not None and ei not in matched_expected:
-            matched_expected.add(ei)
-            matched_actual.add(ai)
+    matched_actual = actual_set & expected_set
+    matched_expected = set(matched_actual)
 
-    # Pass 2: chain-relaxed matches across what's left.
-    for ai, a in enumerate(actual_set):
-        if ai in matched_actual:
-            continue
-        for ei, e in enumerate(expected_set):
-            if ei in matched_expected:
-                continue
-            if a[0] != e[0] or a[1] != e[1] or a[2] != e[2]:
-                continue
-            graph = chains_by_case.get(a[0]) or {}
-            if is_same_chain(graph, a[2], a[3], e[3]):
-                matched_expected.add(ei)
-                matched_actual.add(ai)
-                break
+    actual_groups: dict[tuple[str, str, str], list[tuple[str, str, str, str]]] = defaultdict(list)
+    expected_groups: dict[tuple[str, str, str], list[tuple[str, str, str, str]]] = defaultdict(list)
+    for key in sorted(actual_set - matched_actual):
+        actual_groups[key[:3]].append(key)
+    for key in sorted(expected_set - matched_expected):
+        expected_groups[key[:3]].append(key)
 
-    tp = sorted({expected_set[i] for i in matched_expected})
-    fp = sorted({actual_set[i] for i in range(len(actual_set)) if i not in matched_actual})
-    fn = sorted({expected_set[i] for i in range(len(expected_set)) if i not in matched_expected})
+    # Pass 2: deterministic maximum-cardinality matching within each strict
+    # case/category/contract group.
+    for group in sorted(actual_groups.keys() & expected_groups.keys()):
+        case_id, _category, contract = group
+        graph = chains_by_case.get(case_id) or {}
+        adjacency = {
+            actual: [
+                expected
+                for expected in expected_groups[group]
+                if is_same_chain(graph, contract, actual[3], expected[3])
+            ]
+            for actual in actual_groups[group]
+        }
+        expected_to_actual: dict[
+            tuple[str, str, str, str], tuple[str, str, str, str]
+        ] = {}
+
+        def augment(
+            actual: tuple[str, str, str, str],
+            seen: set[tuple[str, str, str, str]],
+        ) -> bool:
+            for expected in adjacency[actual]:
+                if expected in seen:
+                    continue
+                seen.add(expected)
+                current = expected_to_actual.get(expected)
+                if current is None or augment(current, seen):
+                    expected_to_actual[expected] = actual
+                    return True
+            return False
+
+        for actual in actual_groups[group]:
+            augment(actual, set())
+        matched_expected.update(expected_to_actual)
+        matched_actual.update(expected_to_actual.values())
+
+    tp = sorted(matched_expected)
+    fp = sorted(actual_set - matched_actual)
+    fn = sorted(expected_set - matched_expected)
     return tp, fp, fn

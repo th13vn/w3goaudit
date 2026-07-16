@@ -111,9 +111,18 @@ a benchmark category but are not in `expected` are **false positives**;
 ## Adding a new corpus
 
 1. Create `benchmarks/corpus/<name>.json` following the structure above.
-2. Add an entry to [`registry.json`](registry.json) describing it.
-3. Either run it directly with `--corpus benchmarks/corpus/<name>.json`, or wire
-   a friendly `--suite` name by adding it to the `SUITES` map in
-   `run_benchmark.py`.
-4. Make sure every `category` used in `cases[].expected` exists under
+2. For a named suite, add the mapping to `run_benchmark.SUITES` in
+   `../run_benchmark.py`, add the matching entry to
+   [`registry.json`](registry.json), and add the suite name to the supported
+   suite validation in [`../entrypoint.sh`](../entrypoint.sh).
+3. Make sure every `category` used in `cases[].expected` exists under
    `categories`, and that each tool you intend to compare has an `aliases` entry.
+4. Run the named suite only through the supported Docker Compose host workflow:
+
+   ```bash
+   SUITE=<name> \
+     docker compose -f benchmarks/compose.yaml run --rm benchmark
+   ```
+
+   The Dockerfile derives and verifies Go directly from the root `go.mod` and
+   verifies the reviewed generated-lock hash for the pinned 4naly3er commit.

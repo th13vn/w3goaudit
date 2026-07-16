@@ -69,11 +69,13 @@ func parseGitRemote(configPath string) string {
 				// Entered another section
 				break
 			}
-			if strings.HasPrefix(line, "url = ") {
-				return strings.TrimPrefix(line, "url = ")
+			// Accept both `url = X` and `url=X` (git accepts either spelling).
+			if k, v, ok := strings.Cut(line, "="); ok && strings.TrimSpace(k) == "url" {
+				return strings.TrimSpace(v)
 			}
 		}
 	}
+	_ = scanner.Err() // best-effort read; a truncated config just yields no URL
 
 	return ""
 }
@@ -87,11 +89,30 @@ func parseGitBranch(headPath string) string {
 
 	line := strings.TrimSpace(string(content))
 	// Format: ref: refs/heads/main
-	if strings.HasPrefix(line, "ref: refs/heads/") {
-		return strings.TrimPrefix(line, "ref: refs/heads/")
+	if rest, ok := strings.CutPrefix(line, "ref: refs/heads/"); ok {
+		return rest
+	}
+	// Detached HEAD: .git/HEAD holds a raw 40-hex commit SHA. Return it so blob
+	// links pin to that commit rather than falling back to a possibly-wrong
+	// "main" branch.
+	if isHexSHA(line) {
+		return line
 	}
 
 	return ""
+}
+
+// isHexSHA reports whether s looks like a git object SHA (40 hex chars).
+func isHexSHA(s string) bool {
+	if len(s) != 40 {
+		return false
+	}
+	for _, c := range s {
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
+			return false
+		}
+	}
+	return true
 }
 
 // GitRemoteToWebURL converts a git remote URL to a web URL

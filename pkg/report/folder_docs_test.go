@@ -6,9 +6,6 @@ import "testing"
 // layout (relative, extension stripped, sanitized contract name) and that the
 // root-prefix walks back up exactly that many levels.
 func TestContractFolderRel(t *testing.T) {
-	SetReportProjectRoot("/project")
-	t.Cleanup(func() { SetReportProjectRoot("") })
-
 	cases := []struct {
 		source     string
 		name       string
@@ -24,7 +21,7 @@ func TestContractFolderRel(t *testing.T) {
 	}
 	for _, c := range cases {
 		mc := &ContractSummary{Name: c.name, SourceFile: c.source}
-		if got := contractFolderRel(mc); got != c.wantDir {
+		if got := contractFolderRel("/project", mc); got != c.wantDir {
 			t.Errorf("contractFolderRel(%s, %s) = %q, want %q", c.source, c.name, got, c.wantDir)
 		}
 		if got := rootPrefixFor(c.wantDir); got != c.wantPrefix {

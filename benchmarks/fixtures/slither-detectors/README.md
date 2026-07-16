@@ -39,13 +39,15 @@ Pair with templates in `../../templates/slither-inspired/` (template IDs
 | `unprotected-upgrade.sol` | `Vulnerable_UnprotectedUpgrade`, `Safe_UnprotectedUpgrade` |
 | `weak-prng.sol` | `Vulnerable_WeakPRNG`, `Safe_WeakPRNG` |
 
-## Run
+## Benchmark workflow
 
 ```bash
-# Whole directory
-w3goaudit benchmarks/fixtures/slither-detectors/ --template benchmarks/templates/slither-inspired/
-
-# One detector
-w3goaudit benchmarks/fixtures/slither-detectors/reentrancy-eth.sol \
-  --template benchmarks/templates/slither-inspired/reentrancy-eth.yaml
+SUITE=slither \
+TOOLS=w3goaudit,slither \
+docker compose -f benchmarks/compose.yaml run --rm benchmark
 ```
+
+Run this from the repository root. All pinned scanners are installed in the
+shared image. The Dockerfile derives and verifies Go directly from the root
+`go.mod` and verifies the reviewed generated-lock hash for the pinned 4naly3er
+commit. See `../../README.md` for the full Compose contract.

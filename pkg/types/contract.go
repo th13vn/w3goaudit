@@ -32,6 +32,11 @@ type Contract struct {
 	// Most derived (current contract) first, most base contract last
 	LinearizedBases []string `json:"linearizedBases,omitempty"`
 
+	// LinearizedBaseIDs is the exact file#Contract identity for each entry in
+	// LinearizedBases. It is additive to preserve schema-2.0.0 readers that use
+	// the display-name slice, while new consumers avoid short-name collisions.
+	LinearizedBaseIDs []string `json:"linearizedBaseIds,omitempty"`
+
 	// InheritanceWeight is used to score main contract candidates
 	// Higher weight = more derived = more likely to be main contract
 	InheritanceWeight int `json:"inheritanceWeight"`

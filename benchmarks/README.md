@@ -1,128 +1,173 @@
 # W3GoAudit Competitive Benchmark
 
-This folder is the benchmark home for W3GoAudit. It answers one question:
+This directory contains the self-contained competitive benchmark for
+W3GoAudit, Slither, Semgrep with the vendored Decurity rules, and 4naly3er. The
+corpora, Solidity fixtures, detector mappings, W3GoAudit templates, runner, and
+threshold gate all live under `benchmarks/`.
 
-> When a Solidity file has known bugs, which tool finds them, which tool misses
-> them, and which tool reports extra noise?
+## Supported host workflow
 
-It is **self-contained**: the W3GoAudit rule templates, the vulnerable fixtures,
-and each comparison tool's rules all live inside `benchmarks/`, so the benchmark
-runs from a clean checkout without depending on anything outside this folder.
-
-## Compared tools
-
-| Tool | What it is | Rules used |
-|---|---|---|
-| `w3goaudit` | this project | `benchmarks/templates/**` (WQL) |
-| `slither` | Crytic Slither (built-in Python detectors) | `config/slither/detectors.json` manifest |
-| `semgrep` | Semgrep with the **Decurity** Solidity ruleset | `config/semgrep-decurity/*.yaml` (real rules) |
-| `4naly3er` | Picodes 4naly3er (built-in TS detectors) | `config/4naly3er/detectors.json` manifest |
-
-Slither and 4naly3er ship their detectors as code, so each has a
-`config/<tool>/detectors.json` **manifest** mapping that tool's native detector
-IDs/codes onto shared benchmark categories. Semgrep runs external rule files, so
-its real rules are vendored verbatim. See [How scoring stays fair](#how-scoring-stays-fair).
-
-## Quick start
+Docker Compose is the only supported host entry point. The host does not need
+Python, Go, Solidity compilers, or any compared scanner installed; those tools
+are pinned in the benchmark image.
 
 ```bash
-# Default: competitive suite, all four tools, output to results/latest
-python3 benchmarks/run_benchmark.py
-
-# Only W3GoAudit (fast; no market tools needed)
-python3 benchmarks/run_benchmark.py --tools w3goaudit
-
-# One tool head-to-head
-python3 benchmarks/run_benchmark.py --suite slither   --tools w3goaudit,slither
-python3 benchmarks/run_benchmark.py --suite decurity  --tools w3goaudit,semgrep
-python3 benchmarks/run_benchmark.py --suite 4naly3er  --tools w3goaudit,4naly3er
-
-# Self-contained Docker run with Slither + Semgrep installed in the image
-bash benchmarks/run_docker_benchmark.sh
+docker compose -f benchmarks/compose.yaml run --rm benchmark
 ```
 
-Unavailable tools are **skipped**, not fatal — `run_benchmark.py --tools w3goaudit,slither`
-still reports W3GoAudit if Slither is missing.
+The Dockerfile carries the reviewed generated-lock hash for the pinned
+4naly3er commit, so the canonical Compose command needs no build argument.
+
+Compose accepts these environment variables:
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `SUITE` | `competitive` | Corpus suite: `competitive`, `slither`, `decurity`, or `4naly3er`. |
+| `TOOLS` | `w3goaudit,slither,semgrep,4naly3er` | Comma-separated requested scanners. |
+| `RUN_NAME` | `latest` | Safe single path component created below `benchmarks/results/`. |
+
+Set any non-default values in the environment of the same Compose command.
+`RUN_NAME` accepts letters, digits, dots, underscores, and dashes, but not
+leading dots or path separators.
+
+## Fail-closed execution
+
+Every requested scanner is resolved and prepared before raw output is
+replaced. A missing executable or preparation failure aborts the run; requested
+tools are never silently skipped. Container output is canonicalized beneath
+`/workspace/benchmarks/results/<RUN_NAME>`, and Compose exposes only the matching
+host `benchmarks/results/` bind mount plus an executable `/tmp` tmpfs.
+
+Slither and 4naly3er run directory cases one Solidity fragment at a time. A
+fragment that solc rejects is recorded as not analyzable, while compiler-valid
+fragments in the same case still produce evidence. Slither requires explicit
+solc/compiler-failure diagnostics before treating missing JSON as a compiler
+skip. 4naly3er requires both its `Cannot compile AST for` diagnostic and a
+structured Solidity compiler error before treating a missing report the same
+way. Timeouts, runtime crashes, unexplained exits, and nonzero exits that still
+write a report mark the aggregate case as an error. If no fragment produces
+output, the requested tool run fails as a compiler/toolchain failure. This
+per-fragment reporting is distinct from skipping an unavailable requested tool.
+
+When `w3goaudit` is requested, the entrypoint runs the threshold gate after the
+benchmark runner. The gate recomputes metrics from TP/FP/FN and requires:
+
+- precision at least `0.65`;
+- detection rate (recall) at least `0.95`;
+- zero failed cases.
+
+Any threshold violation exits nonzero.
 
 ## Suites
 
-| Suite | Corpus | Compares |
-|---|---|---|
-| `competitive` *(default)* | `corpus/competitive.json` | All tools on the union of every detectable category (72 categories, 3 fixture sets). W3GoAudit runs the full template set on every fixture. |
-| `slither` | `corpus/slither-inspired.json` | Slither vs W3GoAudit's Slither port. |
-| `decurity` | `corpus/decurity-semgrep-inspired.json` | Decurity Semgrep rules vs W3GoAudit's conversions. |
-| `4naly3er` | `corpus/4naly3er-inspired.json` | 4naly3er vs W3GoAudit's 4naly3er port (High/Medium security issues). |
+The active suites are fully owned by `benchmarks/corpus/`; the `SUITES` map in
+`run_benchmark.py` and `corpus/registry.json` must remain synchronized.
 
-## Folder layout
+| Suite | Corpus | Recommended tools |
+|---|---|---|
+| `competitive` | `corpus/competitive.json` | all four tools |
+| `slither` | `corpus/slither-inspired.json` | `w3goaudit,slither` |
+| `decurity` | `corpus/decurity-semgrep-inspired.json` | `w3goaudit,semgrep` |
+| `4naly3er` | `corpus/4naly3er-inspired.json` | `w3goaudit,4naly3er` |
+
+Each corpus is the answer key: it identifies fixtures, expected bug categories,
+contracts and functions, and per-tool aliases. `corpus/SCHEMA.md` documents the
+format, and `corpus/registry.json` catalogs the built-in suites.
+
+## Compared tools and pinned image inputs
+
+| Tool/input | Version or source |
+|---|---|
+| Base image / Node | `node:20.20.2-bookworm-slim` |
+| Go | version from root `go.mod` (`1.26.5`), Linux AMD64 archive SHA-256 pinned in the Dockerfile |
+| solc-select / solc | `1.2.0` / `0.8.26` |
+| Slither | `0.11.5` |
+| Semgrep | `1.169.0` with `config/semgrep-decurity/*.yaml` |
+| Yarn | `1.22.22` |
+| 4naly3er | commit `8a9d1ebb7d362bc94f036fa9123d0977c6cb7436`; generated `yarn.lock` SHA-256 `5384b83d119c9776fee287b52965b7035de05e27d90758dedace01692f8e81cb` |
+| W3GoAudit | built from the current checkout with benchmark templates under `templates/` |
+
+Slither and 4naly3er implement detectors in code, so
+`config/<tool>/detectors.json` maps their native IDs to shared benchmark
+categories. Semgrep uses the vendored Decurity YAML rules directly.
+
+## Results
+
+The host receives each run under `benchmarks/results/<RUN_NAME>/`:
+
+```text
+benchmark.md       human-readable comparison
+benchmark.json     machine-readable report and metrics
+raw/               per-tool stdout, stderr, and native artifacts
+```
+
+All contents beneath `benchmarks/results/` are generated and ignored by Git;
+only `.gitkeep` preserves the empty directory in a clean checkout. Both the
+default `latest` run and every named run may be overwritten or removed without
+changing repository state.
+
+## Scoring model
+
+Each tool's native findings are normalized to `case`, `category`, `contract`,
+`function`, and `rule_id`. The scorer compares those findings with the corpus
+answer key:
+
+| Metric | Meaning |
+|---|---|
+| TP | Expected bug found. |
+| FP | Benchmark-category finding absent from the answer key. |
+| FN | Expected bug missed. |
+| Precision | `TP / (TP + FP)`. |
+| Detection rate | `TP / (TP + FN)`. |
+| F1 | Harmonic mean of precision and detection rate. |
+
+Alias mappings credit equivalent native detector names. `call_chain.py` also
+relaxes function equality when two tools attribute the same category in the
+same contract to functions on one internal call chain; exact matches are tried
+first.
+
+## Harness modules
+
+The Python harness is split by responsibility while keeping scanner and corpus
+case execution sequential:
+
+| Module | Responsibility |
+|---|---|
+| `run_benchmark.py` | CLI and sequential orchestration. |
+| `benchmark_core.py` | Paths, source indexes, process I/O, aliases, and manifests. |
+| `benchmark_adapters.py` | Scanner commands and native-output normalization. |
+| `benchmark_scoring.py` | Exact/call-chain-relaxed matching and metrics. |
+| `benchmark_reporting.py` | `benchmark.md` rendering. |
+| `call_chain.py` | Internal-call reachability helper. |
+| `assert_thresholds.py` | Release-quality threshold gate. |
+
+Maintainers can exercise the host-independent Python contracts directly:
+
+```bash
+python3 -m compileall -q benchmarks
+python3 -m unittest discover -s benchmarks -p 'test_*.py' -v
+```
+
+These commands verify the harness without documenting an alternative benchmark
+entry point. The canonical four-tool command remains:
+
+```bash
+docker compose -f benchmarks/compose.yaml run --rm benchmark
+```
+
+## Layout
 
 ```text
 benchmarks/
-  run_benchmark.py            runner (suite -> corpus map in SUITES)
-  call_chain.py               call-chain-relaxed scoring helper
-  Dockerfile, run_docker_benchmark.sh
-  config/                     comparison-tool rules, one folder per tool
-    slither/detectors.json        Slither detector manifest (id -> category)
-    4naly3er/detectors.json       4naly3er detector manifest (id/aliases -> category)
-    semgrep-decurity/*.yaml       vendored Decurity Semgrep rules + README
-  templates/                  W3GoAudit WQL rules, grouped by inspiration source
-    slither-inspired/  4naly3er-inspired/  decurity-semgrep-inspired/
-  fixtures/                   vulnerable Solidity fixtures (one .sol per detector)
-    slither-detectors/  4naly3er-detectors/  decurity-semgrep-inspired/
-  corpus/                     answer keys
-    SCHEMA.md  registry.json  competitive.json  slither-inspired.json
-    decurity-semgrep-inspired.json  4naly3er-inspired.json
-  results/
-    latest/                   default --out (git-ignored, overwritten each run)
-    <named-run>/              kept run created with --out benchmarks/results/<name>
+  Dockerfile, compose.yaml, entrypoint.sh
+  run_benchmark.py, assert_thresholds.py, call_chain.py
+  config/       comparison-tool detector mappings and vendored rules
+  templates/    W3GoAudit WQL benchmark templates
+  fixtures/     vulnerable and safe Solidity fragments
+  corpus/       active answer keys, schema, and registry
+  results/      ignored host output; only .gitkeep is tracked
 ```
 
-## What the benchmark does
-
-1. Reads a corpus (the answer key): bug `categories` (with per-tool rule aliases)
-   plus `cases` (Solidity fixtures and the bugs expected in each).
-2. Runs each tool on each case and **converts every tool's native output into one
-   shape**: `case`, `category`, `contract`, `function`, `rule_id`.
-3. Scores each tool against the answer key: TP (found), FP (extra noise), FN (missed),
-   then precision / detection-rate / F1, overall and per bug type.
-4. Writes `results/<out>/benchmark.md` (read this), `benchmark.json`, and raw tool output under `raw/`.
-
-### How scoring stays fair
-
-- **Output conversion never drops a real hit.** Each tool's native IDs are mapped
-  to shared categories through (a) the corpus `aliases`, (b) the auto-loaded
-  `config/<tool>/detectors.json` manifest, and (c) case-insensitive substring
-  matching. So if a tool genuinely reports a bug under any known form of its
-  detector id/title, it is credited — it is not penalised for naming.
-- **The corpus is scoped to what tools can find.** Every category is detectable by
-  at least one compared tool; a tool with no detector for a category legitimately
-  records a miss (FN) rather than being unfairly blamed.
-- **Same bug, different function = still found.** `call_chain.py` relaxes
-  `(contract, function)` equality when two tools attribute the same bug to
-  different functions on the same internal-call chain (built once per case from
-  `w3goaudit build`). Strict equality is tried first, so exact scores are preserved.
-
-## Reading results
-
-`results/latest/benchmark.md` is the human report.
-
-| Word | Meaning |
-|---|---|
-| TP | bug existed and the tool found it |
-| FP | tool reported something not in the answer key (noise) |
-| FN | bug existed but the tool missed it |
-| Precision | how clean the findings are (less noise = higher) |
-| Detection Rate | how many expected bugs were found (fewer misses = higher) |
-| F1 | combined precision + detection-rate score |
-
-## Adding a corpus
-
-1. Create `corpus/<name>.json` (see `corpus/SCHEMA.md`).
-2. Add it to `corpus/registry.json` and the `SUITES` map in `run_benchmark.py`.
-3. Ensure every `category` used in `cases[].expected` exists under `categories`,
-   and that built-in-detector tools have an entry in their
-   `config/<tool>/detectors.json` manifest.
-
-> **Next:** the upcoming competitive benchmark on a public dataset and
-> real-world exploited contracts (DeFiHackLabs) plugs in as additional fixture
-> sets under `fixtures/` + corpora under `corpus/`, with a matching
-> `templates/realworld-inspired/` lane added for the W3GoAudit rules.
+When adding a suite, add its corpus beneath `corpus/`, register it in
+`corpus/registry.json`, add the same mapping to `SUITES`, and verify every
+referenced target, template, and category exists.

@@ -80,13 +80,11 @@ func BuildExplorerJSON(db *types.Database) *ExplorerJSON {
 			ID: c.ID, Name: c.Name, Kind: string(c.Kind),
 			Range: declRange(c.SourceFile, c.StartLine, c.StartCol, c.EndLine, c.EndCol, c.StartByte, c.EndByte),
 		}
+		mro := db.LinearizedContracts(c)
 		// State: walk MRO most-base-first (storage-slot order), preserving each
-		// contract's declared order. LinearizedBases is derived-first, so reverse it.
-		for i := len(c.LinearizedBases) - 1; i >= 0; i-- {
-			base := db.GetContractByName(c.LinearizedBases[i])
-			if base == nil {
-				continue
-			}
+		// contract's declared order. LinearizedContracts is derived-first.
+		for i := len(mro) - 1; i >= 0; i-- {
+			base := mro[i]
 			for _, sv := range base.StateVariables {
 				esv := &ExplorerStateVar{
 					Name: sv.Name, TypeName: sv.TypeName, Visibility: sv.Visibility,
@@ -102,11 +100,7 @@ func BuildExplorerJSON(db *types.Database) *ExplorerJSON {
 		}
 		// Functions: walk MRO derived-first, first selector wins (most-derived override).
 		seen := map[string]bool{}
-		for _, baseName := range c.LinearizedBases {
-			base := db.GetContractByName(baseName)
-			if base == nil {
-				continue
-			}
+		for _, base := range mro {
 			for _, fn := range base.Functions {
 				if fn.IsConstructor || fn.Selector == "" || seen[fn.Selector] {
 					continue

@@ -63,12 +63,37 @@ func (df *DataFlowGraph) AddEdge(edge *DataFlowEdge) {
 	}
 }
 
+// EnsureIndex rebuilds the adjacency maps from Edges. The maps are unexported
+// so they are lost across a JSON round-trip (build cache); without this a
+// cache-loaded DataFlowGraph would answer every query with nil. Mirrors
+// CallGraph.EnsureIndex and is called by the query methods.
+func (df *DataFlowGraph) EnsureIndex() {
+	if len(df.outgoing) > 0 || len(df.incoming) > 0 {
+		return
+	}
+	df.outgoing = make(map[string][]*DataFlowEdge)
+	df.incoming = make(map[string][]*DataFlowEdge)
+	for _, edge := range df.Edges {
+		if edge == nil {
+			continue
+		}
+		if edge.FromID != "" {
+			df.outgoing[edge.FromID] = append(df.outgoing[edge.FromID], edge)
+		}
+		if edge.ToID != "" {
+			df.incoming[edge.ToID] = append(df.incoming[edge.ToID], edge)
+		}
+	}
+}
+
 // GetSourcesFor returns all edges supplying data INTO the passed ID
 func (df *DataFlowGraph) GetSourcesFor(targetID string) []*DataFlowEdge {
+	df.EnsureIndex()
 	return df.incoming[targetID]
 }
 
 // GetDestinationsFor returns all edges flowing OUT FROM the passed ID
 func (df *DataFlowGraph) GetDestinationsFor(sourceID string) []*DataFlowEdge {
+	df.EnsureIndex()
 	return df.outgoing[sourceID]
 }

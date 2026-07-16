@@ -2,6 +2,7 @@ package builder
 
 import (
 	"encoding/json"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -83,6 +84,56 @@ func TestBuildBasicContracts(t *testing.T) {
 		if c.Kind != kind {
 			t.Errorf("%s.Kind = %q, want %q", name, c.Kind, kind)
 		}
+	}
+}
+
+func TestBuildPersistsMetadataAndAnalysisDiagnostics(t *testing.T) {
+	readerDiagnostic := types.Diagnostic{
+		Code:       types.DiagnosticUnresolvedImport,
+		Severity:   types.DiagnosticWarning,
+		Phase:      "reader",
+		Message:    "missing import",
+		File:       "/project/Main.sol",
+		ImportPath: "./Missing.sol",
+		Incomplete: true,
+	}
+	source := &types.SourceFile{
+		Path: "/project/Main.sol",
+		Content: `contract Main is Missing {
+    function broken( external {}
+}`,
+	}
+	b := NewWithOptions(Options{
+		ProjectRoot: "/project",
+		ScanTarget:  "/project/Main.sol",
+		Diagnostics: []types.Diagnostic{readerDiagnostic, readerDiagnostic},
+	})
+	db, err := b.Build([]*types.SourceFile{source})
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	if db.ProjectRoot != "/project" || db.ScanTarget != "/project/Main.sol" {
+		t.Fatalf("metadata = root %q target %q", db.ProjectRoot, db.ScanTarget)
+	}
+
+	counts := make(map[string]int)
+	for _, d := range db.Diagnostics {
+		counts[d.Code]++
+		if !d.Incomplete {
+			t.Fatalf("analysis-loss diagnostic is not incomplete: %#v", d)
+		}
+	}
+	if counts[types.DiagnosticUnresolvedImport] != 1 {
+		t.Fatalf("unresolved-import diagnostic count = %d, diagnostics=%#v", counts[types.DiagnosticUnresolvedImport], db.Diagnostics)
+	}
+	if counts[types.DiagnosticParseRecovered] == 0 {
+		t.Fatalf("missing tolerant parser recovery diagnostic: %#v", db.Diagnostics)
+	}
+	if counts[types.DiagnosticUnresolvedBase] != 1 {
+		t.Fatalf("unresolved-base diagnostic count = %d, diagnostics=%#v", counts[types.DiagnosticUnresolvedBase], db.Diagnostics)
+	}
+	if db.AnalysisComplete() {
+		t.Fatal("Build reported complete analysis after recorded loss")
 	}
 }
 
@@ -815,6 +866,48 @@ func TestBuildIsDeterministic(t *testing.T) {
 		if string(got) != string(first) {
 			t.Fatalf("build %d produced different JSON than the first build; "+
 				"output is non-deterministic (likely map iteration leaking into an output slice)", i+1)
+		}
+	}
+}
+
+func TestBuildIsDeterministicWithSameNamedSamePositionDeclarations(t *testing.T) {
+	dir := t.TempDir()
+	content := `pragma solidity ^0.8.0;
+contract Token {
+    uint256 value;
+    modifier guard() { value = 1; _; }
+    function run(uint256 next) external guard { value = next; }
+}`
+	for _, subdir := range []string{"a", "z"} {
+		path := filepath.Join(dir, subdir, "Token.sol")
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	build := func() []byte {
+		sources, err := reader.New().Read(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		db, err := New().Build(sources)
+		if err != nil {
+			t.Fatal(err)
+		}
+		data, err := json.Marshal(db)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return data
+	}
+
+	first := build()
+	for i := 0; i < 10; i++ {
+		if got := build(); string(got) != string(first) {
+			t.Fatalf("duplicate declaration build %d was not deterministic", i+1)
 		}
 	}
 }

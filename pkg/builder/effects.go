@@ -1,6 +1,7 @@
 package builder
 
 import (
+	"strconv"
 	"strings"
 
 	"github.com/th13vn/w3goaudit/pkg/types"
@@ -267,7 +268,11 @@ func dedupWrites(writes []types.StateWrite) []types.StateWrite {
 	seen := make(map[string]bool)
 	out := writes[:0]
 	for _, w := range writes {
-		key := w.Var + "|" + w.Kind
+		// Include Line in the key: two writes to the same var at different
+		// lines (`owner = a;` then `owner = b;`) are distinct events, and
+		// collapsing them by (var, kind) alone discards line precision — the
+		// retained StateWrite.Line would arbitrarily be the first occurrence.
+		key := w.Var + "|" + w.Kind + "|" + strconv.Itoa(w.Line)
 		if seen[key] {
 			continue
 		}

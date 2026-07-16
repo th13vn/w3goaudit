@@ -8,14 +8,10 @@ import (
 	"strings"
 
 	"github.com/th13vn/w3goaudit/pkg/builder"
-	"github.com/th13vn/w3goaudit/pkg/engine"
+	"github.com/th13vn/w3goaudit/pkg/logging"
 	"github.com/th13vn/w3goaudit/pkg/reader"
-	"github.com/th13vn/w3goaudit/pkg/report"
 	"github.com/th13vn/w3goaudit/pkg/types"
 )
-
-// runLogFile holds the run.log handle for the current scan (if any).
-var runLogFile *os.File
 
 // resolveOutputDir picks the result-folder path. An explicit -o wins; otherwise
 // the folder is named after the scanned project directory (or the .sol file
@@ -23,6 +19,10 @@ var runLogFile *os.File
 // scanned input directory itself, "-audit" is appended so we never write report
 // files into the source tree.
 func resolveOutputDir(inputPath, dbPath, outputFlag string) string {
+	return resolveOutputDirWithBase(inputPath, dbPath, outputFlag, "")
+}
+
+func resolveOutputDirWithBase(inputPath, dbPath, outputFlag, outputBaseDir string) string {
 	if outputFlag != "" {
 		return outputFlag
 	}
@@ -65,168 +65,174 @@ func resolveOutputDir(inputPath, dbPath, outputFlag string) string {
 	return out
 }
 
-// setupRunLog opens <dir>/run.log and routes verbose detail to it. run.log
-// always captures full detail; when terminalVerbose is set, detail is also teed
-// to stdout. Returns a close function.
-func setupRunLog(dir string, terminalVerbose bool) (func(), error) {
+// setupRunLog opens <dir>/run.log and returns the scan-local logger that owns
+// it. run.log always captures full detail; terminal verbose mode additionally
+// tees detail to stdout. No package-global logger state is mutated.
+func setupRunLog(dir string, terminalVerbose bool, stdout io.Writer) (*logging.Logger, func() error, error) {
 	if err := os.MkdirAll(dir, 0755); err != nil {
-		return nil, fmt.Errorf("creating output folder %s: %w", dir, err)
+		return nil, nil, fmt.Errorf("creating output folder %s: %w", dir, err)
 	}
 	f, err := os.Create(filepath.Join(dir, "run.log"))
 	if err != nil {
-		return nil, fmt.Errorf("creating run.log: %w", err)
+		return nil, nil, fmt.Errorf("creating run.log: %w", err)
 	}
-	runLogFile = f
 
 	var w io.Writer = f
 	if terminalVerbose {
-		w = io.MultiWriter(f, os.Stdout)
+		w = io.MultiWriter(f, stdout)
 	}
-	enableVerbose(w)
-
-	return func() {
-		if runLogFile != nil {
-			runLogFile.Close()
-			runLogFile = nil
-		}
-	}, nil
+	return logging.New(true, w), f.Close, nil
 }
 
-// enableVerbose turns on verbose logging for every package and routes it to w.
-func enableVerbose(w io.Writer) {
-	reader.VerboseEnabled = true
-	builder.VerboseEnabled = true
-	engine.VerboseEnabled = true
-	types.VerboseEnabled = true
-	report.VerboseEnabled = true
-
-	reader.SetVerboseWriter(w)
-	builder.SetVerboseWriter(w)
-	engine.SetVerboseWriter(w)
-	types.SetVerboseWriter(w)
-	report.SetVerboseWriter(w)
-}
-
-// enableVerboseStdout enables verbose logging straight to the terminal, used by
-// --stdout mode where there is no run.log.
-func enableVerboseStdout() {
-	enableVerbose(os.Stdout)
-}
-
-// verboseFile holds the current verbose file handle (if any)
-var verboseFile *os.File
-
-// setupVerboseLogging configures verbose output based on the verbose flag value
-// If verbosePath is empty or "true", verbose goes to stdout
-// Otherwise, verbose is written to the specified file
-func setupVerboseLogging(verbosePath string) error {
-	// Enable verbose for all packages
-	reader.VerboseEnabled = true
-	builder.VerboseEnabled = true
-	engine.VerboseEnabled = true
-	types.VerboseEnabled = true
-	report.VerboseEnabled = true
-
-	// If no path or "true", use stdout (default)
+// setupBuildLogger creates the build subcommand's optional scan-local logger.
+// A bare --verbose writes to stdout; --verbose=<path> writes only to that file.
+func setupBuildLogger(enabled bool, verbosePath string, stdout, stderr io.Writer) (*logging.Logger, func() error, error) {
+	if !enabled {
+		return logging.Disabled(), func() error { return nil }, nil
+	}
 	if verbosePath == "" || verbosePath == "true" {
-		return nil
+		return logging.New(true, stdout), func() error { return nil }, nil
 	}
-
-	// Create parent directories if they don't exist
 	if dir := filepath.Dir(verbosePath); dir != "" && dir != "." {
 		if err := os.MkdirAll(dir, 0755); err != nil {
-			return fmt.Errorf("failed to create verbose directory %s: %w", dir, err)
+			return nil, nil, fmt.Errorf("creating verbose directory %s: %w", dir, err)
 		}
 	}
-
-	// Create verbose file
 	f, err := os.Create(verbosePath)
 	if err != nil {
-		return fmt.Errorf("failed to create verbose file: %w", err)
+		return nil, nil, fmt.Errorf("creating verbose log: %w", err)
 	}
-
-	verboseFile = f
-
-	// Set verbose writers for all packages
-	reader.SetVerboseWriter(f)
-	builder.SetVerboseWriter(f)
-	engine.SetVerboseWriter(f)
-	types.SetVerboseWriter(f)
-	report.SetVerboseWriter(f)
-
-	fmt.Fprintf(os.Stderr, "Verbose logging enabled (output: %s)\n", verbosePath)
-	return nil
+	fmt.Fprintf(stderr, "Verbose logging enabled (output: %s)\n", verbosePath)
+	return logging.New(true, f), f.Close, nil
 }
 
-// closeVerboseFile closes the verbose file if it was opened
-func closeVerboseFile() {
-	if verboseFile != nil {
-		verboseFile.Close()
-		verboseFile = nil
+// buildDatabaseWithOptions is the common source pipeline: read → resolve
+// imports → build database. Metadata and diagnostics are transferred into the
+// builder before any analysis phase runs.
+func buildDatabaseWithOptions(opts databaseLoadOptions) (*types.Database, error) {
+	logger := opts.Logger
+	if logger == nil {
+		logger = logging.Disabled()
 	}
-}
-
-// buildDatabase is the common pipeline: read → resolve imports → build database.
-// Returns an error rather than calling os.Exit so SDK consumers can recover.
-func buildDatabase(inputPath string, verbose bool) (*types.Database, error) {
-	r := reader.New()
-	sources, err := r.Read(inputPath)
+	r := reader.NewWithOptions(reader.Options{Logger: logger})
+	scanTarget, err := canonicalScanTarget(opts.InputPath)
+	if err != nil {
+		return nil, fmt.Errorf("resolving scan target: %w", err)
+	}
+	sources, err := r.Read(opts.InputPath)
 	if err != nil {
 		return nil, fmt.Errorf("reading files: %w", err)
 	}
+	logger.Printf("Found %d Solidity files", len(sources))
 
-	if verbose {
-		fmt.Printf("Found %d Solidity files\n", len(sources))
+	projectRoot, err := reader.DetectProjectRoot(opts.InputPath)
+	if err != nil {
+		return nil, fmt.Errorf("detecting project root: %w", err)
 	}
-
-	projectRoot, err := reader.DetectProjectRoot(inputPath)
 	framework := reader.DetectFramework(projectRoot)
-	if err == nil && verbose {
-		fmt.Printf("Project root: %s\n", projectRoot)
-		fmt.Printf("Framework: %s\n", framework)
-	}
+	logger.Printf("Project root: %s", projectRoot)
+	logger.Printf("Framework: %s", framework)
 
-	// Resolve imports recursively. Warnings go to stderr so they don't corrupt
-	// machine-readable output piped from stdout (e.g. --json).
 	if err := r.ResolveImports(projectRoot); err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: import resolution failed: %v\n", err)
+		return nil, fmt.Errorf("resolving imports: %w", err)
 	}
 	sources = r.GetAllSources()
+	logger.Printf("After import resolution: %d total files", len(sources))
 
-	if verbose {
-		fmt.Printf("After import resolution: %d total files\n", len(sources))
-	}
-
-	// Build database
-	b := builder.New()
+	b := builder.NewWithOptions(builder.Options{
+		Logger:      logger,
+		ProjectRoot: projectRoot,
+		ScanTarget:  scanTarget,
+		Diagnostics: r.Diagnostics(),
+	})
 	db, err := b.Build(sources)
 	if err != nil {
 		return nil, fmt.Errorf("building database: %w", err)
 	}
-
-	db.ProjectRoot = projectRoot
 	db.Framework = string(framework)
+	db.NormalizeDiagnostics()
 	return db, nil
 }
 
-// loadOrBuildDatabase loads from --db if provided, otherwise builds from source path.
-func loadOrBuildDatabase(inputPath, dbPath string, verbose bool) (*types.Database, error) {
-	if dbPath != "" {
-		if verbose {
-			fmt.Printf("Loading database from %s\n", dbPath)
-		}
-		db, err := types.LoadFromJSON(dbPath)
+func canonicalScanTarget(inputPath string) (string, error) {
+	absPath, err := filepath.Abs(inputPath)
+	if err != nil {
+		return "", err
+	}
+	if resolved, err := filepath.EvalSymlinks(absPath); err == nil {
+		return filepath.Clean(resolved), nil
+	}
+	return filepath.Clean(absPath), nil
+}
+
+// loadOrBuildDatabaseWithOptions loads a cache or builds from source using the
+// same logger and warning channel. Persisted diagnostics make both modes expose
+// unresolved imports identically.
+func loadOrBuildDatabaseWithOptions(opts databaseLoadOptions) (*types.Database, error) {
+	logger := opts.Logger
+	if logger == nil {
+		logger = logging.Disabled()
+	}
+	var (
+		db  *types.Database
+		err error
+	)
+	if opts.DBPath != "" {
+		logger.Printf("Loading database from %s", opts.DBPath)
+		db, err = types.LoadFromJSONWithOptions(opts.DBPath, types.LoadOptions{Logger: logger})
 		if err != nil {
 			return nil, fmt.Errorf("loading database: %w", err)
 		}
-		if verbose {
-			stats := db.GetStats()
-			fmt.Printf("Loaded database: %d contracts, %d functions\n", stats.TotalContracts, stats.TotalFunctions)
+		db.NormalizeDiagnostics()
+		stats := db.GetStats()
+		logger.Printf("Loaded database: %d contracts, %d functions", stats.TotalContracts, stats.TotalFunctions)
+	} else {
+		db, err = buildDatabaseWithOptions(opts)
+		if err != nil {
+			return nil, err
 		}
-		return db, nil
 	}
+	emitImportDiagnostics(opts.Stderr, db)
+	return db, nil
+}
 
-	return buildDatabase(inputPath, verbose)
+func emitImportDiagnostics(w io.Writer, db *types.Database) {
+	if w == nil || db == nil {
+		return
+	}
+	diagnostics := make([]types.Diagnostic, 0)
+	for _, diagnostic := range db.Diagnostics {
+		if diagnostic.Code == types.DiagnosticUnresolvedImport {
+			diagnostics = append(diagnostics, diagnostic)
+		}
+	}
+	if len(diagnostics) == 0 {
+		return
+	}
+	fmt.Fprintf(w, "Warning: %d import(s) could not be resolved — analysis may be incomplete:\n", len(diagnostics))
+	limit := len(diagnostics)
+	if limit > 10 {
+		limit = 10
+	}
+	for _, diagnostic := range diagnostics[:limit] {
+		fmt.Fprintf(w, "  - %q (in %s)\n", diagnostic.ImportPath, filepath.Base(diagnostic.File))
+	}
+	if len(diagnostics) > limit {
+		fmt.Fprintf(w, "  … and %d more\n", len(diagnostics)-limit)
+	}
+}
+
+// loadOrBuildDatabase preserves the existing private helper signature for
+// extract commands while avoiding package-global verbose configuration.
+func loadOrBuildDatabase(inputPath, dbPath string, verbose bool) (*types.Database, error) {
+	logger := logging.New(verbose, os.Stdout)
+	return loadOrBuildDatabaseWithOptions(databaseLoadOptions{
+		InputPath: inputPath,
+		DBPath:    dbPath,
+		Logger:    logger,
+		Stdout:    os.Stdout,
+		Stderr:    os.Stderr,
+	})
 }
 
 // writeOutput writes content to file or stdout. Returns an error rather than

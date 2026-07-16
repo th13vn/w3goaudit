@@ -44,6 +44,7 @@ func FormatFindingsAsSARIF(findings []*engine.Finding, tool ToolMeta, projectRoo
 	results := buildSarifResults(findings, projectRoot)
 
 	run := map[string]interface{}{
+		"columnKind": "unicodeCodePoints",
 		"tool": map[string]interface{}{
 			"driver": map[string]interface{}{
 				"name":           tool.Name,
@@ -155,6 +156,31 @@ func buildSarifRules(findings []*engine.Finding) []map[string]interface{} {
 // buildSarifResults emits one result per finding, pointing back to its rule.
 // projectRoot enables relative `artifactLocation.uri` + `uriBaseId: srcRoot`,
 // which is what GitHub Code Scanning and other SARIF consumers expect.
+// sarifRegion builds a SARIF region from a finding location, emitting the
+// precise 1-based column fields (v0.4) when the matched node supplied them so
+// consumers like GitHub Code Scanning can highlight the exact range instead of
+// a whole line. startColumn/endColumn are 1-based half-open, matching the SARIF
+// spec directly (endColumn is the column just past the region).
+//
+// charOffset/charLength are deliberately NOT emitted: our byte offsets are
+// UTF-8 byte offsets, while SARIF charOffset/charLength are character offsets —
+// they diverge whenever non-ASCII precedes the finding. The line/column region
+// is unambiguous and sufficient; emitting byte offsets as char offsets would
+// send viewers to the wrong place.
+func sarifRegion(loc engine.Location) map[string]interface{} {
+	region := map[string]interface{}{"startLine": maxInt(loc.Line, 1)}
+	if loc.Col > 0 {
+		region["startColumn"] = loc.Col
+	}
+	if loc.EndLine > 0 {
+		region["endLine"] = loc.EndLine
+	}
+	if loc.EndCol > 0 {
+		region["endColumn"] = loc.EndCol
+	}
+	return region
+}
+
 func buildSarifResults(findings []*engine.Finding, projectRoot string) []map[string]interface{} {
 	results := make([]map[string]interface{}, 0, len(findings))
 	for _, f := range findings {
@@ -174,9 +200,7 @@ func buildSarifResults(findings []*engine.Finding, projectRoot string) []map[str
 				{
 					"physicalLocation": map[string]interface{}{
 						"artifactLocation": artifactLoc,
-						"region": map[string]interface{}{
-							"startLine": maxInt(f.Location.Line, 1),
-						},
+						"region":           sarifRegion(f.Location),
 					},
 				},
 			},
@@ -212,8 +236,19 @@ func buildSarifResults(findings []*engine.Finding, projectRoot string) []map[str
 		if f.Reachability != nil && len(f.Reachability.Steps) > 0 {
 			related := make([]map[string]interface{}, 0, len(f.Reachability.Steps))
 			for i, s := range f.Reachability.Steps {
+				// Each hop renders at its own file. Cross-contract chains
+				// otherwise point every intermediate step at the primary
+				// file's byte offsets, sending SARIF viewers to the wrong file.
+				hopLoc := artifactLoc
+				if s.File != "" && s.File != f.Location.File {
+					hUri, hBase := sarifArtifactURI(s.File, projectRoot)
+					hopLoc = map[string]interface{}{"uri": hUri}
+					if hBase != "" {
+						hopLoc["uriBaseId"] = hBase
+					}
+				}
 				phys := map[string]interface{}{
-					"artifactLocation": artifactLoc,
+					"artifactLocation": hopLoc,
 					"region": map[string]interface{}{
 						"startLine": maxInt(s.Line, 1),
 					},
@@ -273,6 +308,12 @@ func buildSarifResults(findings []*engine.Finding, projectRoot string) []map[str
 			}
 			if f.PrimaryAST.End != 0 {
 				node["endLine"] = f.PrimaryAST.End
+			}
+			if f.PrimaryAST.StartCol > 0 {
+				node["startColumn"] = f.PrimaryAST.StartCol
+			}
+			if f.PrimaryAST.EndCol > 0 {
+				node["endColumn"] = f.PrimaryAST.EndCol
 			}
 			props["primaryAst"] = node
 		}

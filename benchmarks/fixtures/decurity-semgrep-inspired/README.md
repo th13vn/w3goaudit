@@ -109,13 +109,12 @@ detected with a `Safe*` counterpart that should not.
 | `unrestricted-transfer-ownership-helper.sol` | `VulnerableUnrestrictedTransferOwnershipHelper` |
 | `unrestricted-transfer-ownership.sol` | `VulnerableUnrestrictedTransferOwnership` |
 
-## Run
+## Benchmark workflow
 
-```bash
-# Whole directory under both rulesets
-bash benchmarks/run_docker_benchmark.sh --suite decurity --tools w3goaudit,semgrep
+Use the Docker Compose workflow documented in `../../README.md`, with
+`SUITE=decurity` and `TOOLS=w3goaudit,semgrep` supplied to that command. The
+benchmark does not support a helper script or direct host-runner invocation.
 
-# One rule
-w3goaudit benchmarks/fixtures/decurity-semgrep-inspired/erc777-reentrancy.sol \
-  --template benchmarks/templates/decurity-semgrep-inspired/erc777-reentrancy.yaml
-```
+For focused detector development, pair a fixture in this directory with the
+same-named WQL file under `../../templates/decurity-semgrep-inspired/` and the
+vendored Semgrep rule under `../../config/semgrep-decurity/`.

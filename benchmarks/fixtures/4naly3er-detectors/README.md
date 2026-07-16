@@ -49,13 +49,15 @@ WQL templates for the 14 High/Medium 4naly3er security detectors, not for all
 | `unsafe-casting.sol` | `Vulnerable_UnsafeCasting`, `Safe_UnsafeCasting` |
 | `wst-eth-price.sol` | `Vulnerable_WstEthPrice`, `Safe_WstEthPrice` |
 
-## Run
+## Benchmark workflow
 
 ```bash
-# Whole directory
-w3goaudit benchmarks/fixtures/4naly3er-detectors/ --template benchmarks/templates/4naly3er-inspired/
-
-# One detector
-w3goaudit benchmarks/fixtures/4naly3er-detectors/tx-origin.sol \
-  --template benchmarks/templates/4naly3er-inspired/M-avoid-tx-origin.yaml
+SUITE=4naly3er \
+TOOLS=w3goaudit,4naly3er \
+docker compose -f benchmarks/compose.yaml run --rm benchmark
 ```
+
+Run this from the repository root. The Dockerfile derives and verifies Go
+directly from the root `go.mod` and verifies the reviewed generated-lock hash
+for the pinned 4naly3er commit. See `../../README.md` for the full Compose
+contract and output location.

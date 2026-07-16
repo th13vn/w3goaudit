@@ -1,7 +1,6 @@
 package builder
 
 import (
-	"fmt"
 	"sort"
 	"strings"
 
@@ -12,22 +11,37 @@ import (
 
 // CallGraphBuilder builds the call graph for the project
 type CallGraphBuilder struct {
-	db                 *types.Database
-	currentContract    string
-	currentFunction    string
-	currentFunctionObj *types.Function
-	// currentModifierObj is non-nil while analyzing a modifier body; in that
+	db              *types.Database
+	logf            func(string, ...any)
+	locators        map[string]*sourceLocator
+	locator         *sourceLocator
+	currentContract *types.Contract
+	currentFunction *types.Function
+	// currentModifier is non-nil while analyzing a modifier body; in that
 	// state, discovered calls are attached to the modifier's Calls slice and the
 	// edge "From" is the modifier ID rather than a function ID.
-	currentModifierObj *types.Modifier
-	currentFile        string
-	symbolTypes        map[string]types.TypeInfo
+	currentModifier *types.Modifier
+	currentFile     *types.SourceFile
+	symbolTypes     map[string]types.TypeInfo
 }
 
 // NewCallGraphBuilder creates a new call graph builder
 func NewCallGraphBuilder(db *types.Database) *CallGraphBuilder {
+	return newCallGraphBuilder(db, VerboseLog)
+}
+
+func newCallGraphBuilder(db *types.Database, logf func(string, ...any)) *CallGraphBuilder {
+	return newCallGraphBuilderWithLocators(db, logf, nil)
+}
+
+func newCallGraphBuilderWithLocators(db *types.Database, logf func(string, ...any), locators map[string]*sourceLocator) *CallGraphBuilder {
+	if locators == nil {
+		locators = make(map[string]*sourceLocator)
+	}
 	return &CallGraphBuilder{
-		db: db,
+		db:       db,
+		logf:     logf,
+		locators: locators,
 	}
 }
 
@@ -45,10 +59,10 @@ func (cgb *CallGraphBuilder) Build() error {
 
 	for _, path := range paths {
 		sf := cgb.db.SourceFiles[path]
-		cgb.currentFile = path
+		cgb.currentFile = sf
 		if err := cgb.analyzeFile(sf); err != nil {
 			// Surface the failure via verbose so silent skips don't hide a real bug.
-			VerboseLog("call-graph analysis failed for %s: %v (skipping)", path, err)
+			cgb.logf("call-graph analysis failed for %s: %v (skipping)", path, err)
 			continue
 		}
 	}
@@ -60,9 +74,14 @@ func (cgb *CallGraphBuilder) Build() error {
 // the build's Phase 1 (stashed on SourceFile.AST) and only re-parses if that
 // cache is absent (e.g. a database reloaded from JSON, where AST is not stored).
 func (cgb *CallGraphBuilder) analyzeFile(sf *types.SourceFile) error {
+	cgb.locator = cgb.locators[sf.Path]
+	if cgb.locator == nil {
+		cgb.locator = newSourceLocator(sf, cgb.db)
+		cgb.locators[sf.Path] = cgb.locator
+	}
 	result, ok := sf.AST.(*ast.SourceUnit)
 	if !ok || result == nil {
-		parsed, err := parser.Parse(sf.Content, &parser.Options{
+		parsed, err := parser.Parse(normalizeYulAssignmentsForParser(sf.Content), &parser.Options{
 			Tolerant: true,
 			Loc:      true,
 			Range:    true,
@@ -85,7 +104,16 @@ func (cgb *CallGraphBuilder) analyzeFile(sf *types.SourceFile) error {
 
 // analyzeContract analyzes a contract's functions and modifier bodies.
 func (cgb *CallGraphBuilder) analyzeContract(contract *ast.ContractDefinition) {
-	cgb.currentContract = contract.Name
+	if contract == nil || cgb.currentFile == nil {
+		return
+	}
+	contractID := types.MakeContractID(cgb.currentFile.Path, contract.Name)
+	cgb.currentContract = cgb.db.GetContractByID(contractID)
+	if cgb.currentContract == nil {
+		cgb.addIdentityDiagnostic(contract.Name, cgb.locator.span(contract).startLine,
+			"AST contract could not be matched to its exact database identity")
+		return
+	}
 
 	for _, subNode := range contract.SubNodes {
 		switch n := subNode.(type) {
@@ -98,6 +126,7 @@ func (cgb *CallGraphBuilder) analyzeContract(contract *ast.ContractDefinition) {
 			cgb.analyzeModifierDefinition(n)
 		}
 	}
+	cgb.currentContract = nil
 }
 
 // analyzeModifierDefinition walks a modifier body, attaching discovered calls to
@@ -107,24 +136,26 @@ func (cgb *CallGraphBuilder) analyzeModifierDefinition(mod *ast.ModifierDefiniti
 	if mod == nil || mod.Body == nil {
 		return
 	}
-	contractObj := cgb.db.GetContractByName(cgb.currentContract)
-	if contractObj == nil {
+	if cgb.currentContract == nil {
 		return
 	}
 	var modObj *types.Modifier
-	for _, m := range contractObj.Modifiers {
-		if m.Name == mod.Name {
+	modLine := cgb.locator.span(mod).startLine
+	for _, m := range cgb.currentContract.Modifiers {
+		if m.Name == mod.Name && (modLine == 0 || m.StartLine == modLine) {
 			modObj = m
 			break
 		}
 	}
 	if modObj == nil {
+		cgb.addIdentityDiagnostic(mod.Name, modLine,
+			"modifier AST could not be matched inside its exact contract")
 		return
 	}
 
-	cgb.currentFunctionObj = nil
+	cgb.currentFunction = nil
 	cgb.symbolTypes = make(map[string]types.TypeInfo)
-	for _, sv := range contractObj.StateVariables {
+	for _, sv := range cgb.currentContract.StateVariables {
 		cgb.symbolTypes[sv.Name] = cgb.typeInfoFromTypeName(sv.TypeName, "state_var")
 	}
 	for _, param := range mod.Parameters {
@@ -133,10 +164,9 @@ func (cgb *CallGraphBuilder) analyzeModifierDefinition(mod *ast.ModifierDefiniti
 		}
 	}
 
-	cgb.currentFunction = fmt.Sprintf("%s.%s", cgb.currentContract, mod.Name)
-	cgb.currentModifierObj = modObj
+	cgb.currentModifier = modObj
 	cgb.analyzeBlock(mod.Body)
-	cgb.currentModifierObj = nil
+	cgb.currentModifier = nil
 }
 
 // analyzeFunction analyzes a function's body for calls
@@ -150,34 +180,32 @@ func (cgb *CallGraphBuilder) analyzeFunction(fn *ast.FunctionDefinition) {
 		name = "fallback"
 	}
 
-	// Try to find the exact function implementation in the DB to use its selector
-	selector := name
-	contractObj := cgb.db.GetContractByName(cgb.currentContract)
-	cgb.currentFunctionObj = nil
+	if cgb.currentContract == nil {
+		return
+	}
+	// Find the function only inside the exact AST contract. Source line is the
+	// stable bridge between the raw parser node and extracted object when names
+	// are overloaded.
+	cgb.currentFunction = nil
+	cgb.currentModifier = nil
 	cgb.symbolTypes = make(map[string]types.TypeInfo)
-	if contractObj != nil {
-		for _, sv := range contractObj.StateVariables {
-			cgb.symbolTypes[sv.Name] = cgb.typeInfoFromTypeName(sv.TypeName, "state_var")
-		}
-		for _, f := range contractObj.Functions {
-			if f.Name == name && f.StartLine == fn.Loc.Start.Line {
-				cgb.currentFunctionObj = f
-				if f.Selector != "" {
-					selector = f.Selector
-				}
-				break
-			}
+	for _, sv := range cgb.currentContract.StateVariables {
+		cgb.symbolTypes[sv.Name] = cgb.typeInfoFromTypeName(sv.TypeName, "state_var")
+	}
+	// Tolerant error recovery can produce a definition without a location;
+	// sourceLocator.span is nil-safe and keeps the match deterministic.
+	fnSpan := cgb.locator.span(fn)
+	cgb.currentFunction = cgb.functionObjectForAST(fn, name, fnSpan)
+	if cgb.currentFunction == nil {
+		cgb.addIdentityDiagnostic(name, fnSpan.startLine,
+			"function AST could not be matched inside its exact contract")
+		return
+	}
+	for _, param := range cgb.currentFunction.Parameters {
+		if param.Name != "" {
+			cgb.symbolTypes[param.Name] = cgb.typeInfoFromTypeName(param.TypeName, "parameter")
 		}
 	}
-	if cgb.currentFunctionObj != nil {
-		for _, param := range cgb.currentFunctionObj.Parameters {
-			if param.Name != "" {
-				cgb.symbolTypes[param.Name] = cgb.typeInfoFromTypeName(param.TypeName, "parameter")
-			}
-		}
-	}
-
-	cgb.currentFunction = fmt.Sprintf("%s.%s", cgb.currentContract, selector)
 
 	// Analyze function body
 	if fn.Body != nil {
@@ -186,6 +214,47 @@ func (cgb *CallGraphBuilder) analyzeFunction(fn *ast.FunctionDefinition) {
 
 	// Analyze modifiers applied to this function
 	cgb.analyzeModifiers(fn.Modifiers)
+	cgb.currentFunction = nil
+}
+
+func (cgb *CallGraphBuilder) functionObjectForAST(raw *ast.FunctionDefinition, name string, span sourceSpan) *types.Function {
+	if raw == nil || cgb.currentContract == nil {
+		return nil
+	}
+
+	// Exact byte ranges uniquely identify declarations even when several
+	// overloads are written on one physical line.
+	if span.startByte > 0 || span.endByte > 0 {
+		for _, fn := range cgb.currentContract.Functions {
+			if fn.StartByte == span.startByte && fn.EndByte == span.endByte {
+				return fn
+			}
+		}
+	}
+
+	// Legacy/location-less fallback: match the complete raw parameter type list,
+	// never just name+line or name+arity.
+	var matched *types.Function
+	for _, fn := range cgb.currentContract.Functions {
+		if fn.Name != name || len(fn.Parameters) != len(raw.Parameters) {
+			continue
+		}
+		exact := true
+		for i, parameter := range raw.Parameters {
+			if comparableType(fn.Parameters[i].TypeName) != comparableType(getTypeName(parameter.TypeName)) {
+				exact = false
+				break
+			}
+		}
+		if !exact || matched != nil {
+			if exact {
+				return nil
+			}
+			continue
+		}
+		matched = fn
+	}
+	return matched
 }
 
 // analyzeBlock analyzes a block of statements
@@ -247,53 +316,19 @@ func (cgb *CallGraphBuilder) analyzeNode(node ast.Node) {
 		cgb.analyzeNode(n.RevertCall)
 
 	case *ast.VariableDeclarationStatement:
-		for _, decl := range n.Variables {
-			if decl == nil || decl.Name == "" {
-				continue
-			}
-			ti := cgb.typeInfoFromTypeName(getTypeName(decl.TypeName), "local_var")
-			if !ti.IsKnown() && n.InitialValue != nil {
-				ti = cgb.expressionType(n.InitialValue)
-			}
-			if ti.IsKnown() {
-				cgb.symbolTypes[decl.Name] = ti
-			}
-		}
-		cgb.analyzeNode(n.InitialValue)
+		cgb.analyzeVariableDeclaration(n)
 
 	case *ast.TryStatement:
-		cgb.analyzeNode(n.Expression)
-		// Success body — previously dropped, so calls in the try body (the common
-		// case, e.g. processing the call result) were invisible to the call graph.
-		if n.Body != nil {
-			cgb.analyzeBlock(n.Body)
-		}
-		for _, clause := range n.CatchClauses {
-			if clause.Body != nil {
-				cgb.analyzeBlock(clause.Body)
-			}
-		}
+		cgb.analyzeTryStatement(n)
 
 	case *ast.FunctionCall:
-		cgb.analyzeFunctionCall(n)
-		// Also analyze arguments
-		for _, arg := range n.Arguments {
-			cgb.analyzeNode(arg)
-		}
+		cgb.analyzeCallAndArguments(n)
 
 	case *ast.MemberAccess:
 		cgb.analyzeNode(n.Expression)
 
 	case *ast.BinaryOperation:
-		if isAssignmentOperator(n.Operator) {
-			if id, ok := n.Left.(*ast.Identifier); ok {
-				if ti := cgb.expressionType(n.Right); ti.IsKnown() {
-					cgb.symbolTypes[id.Name] = ti
-				}
-			}
-		}
-		cgb.analyzeNode(n.Left)
-		cgb.analyzeNode(n.Right)
+		cgb.analyzeBinaryOperation(n)
 
 	case *ast.UnaryOperation:
 		cgb.analyzeNode(n.SubExpression)
@@ -308,222 +343,307 @@ func (cgb *CallGraphBuilder) analyzeNode(node ast.Node) {
 		cgb.analyzeNode(n.Index)
 
 	case *ast.TupleExpression:
-		for _, comp := range n.Components {
-			cgb.analyzeNode(comp)
-		}
+		cgb.analyzeTupleExpression(n)
 
 	case *ast.FunctionCallOptions:
-		// Handle calls with options like to.call{value: ...}("")
-		cgb.analyzeNode(n.Expression)
-		for _, opt := range n.Options {
-			cgb.analyzeNode(opt)
+		cgb.analyzeFunctionCallOptions(n)
+	}
+}
+
+func (cgb *CallGraphBuilder) analyzeVariableDeclaration(stmt *ast.VariableDeclarationStatement) {
+	for _, decl := range stmt.Variables {
+		if decl == nil || decl.Name == "" {
+			continue
 		}
+		typeInfo := cgb.typeInfoFromTypeName(getTypeName(decl.TypeName), "local_var")
+		if !typeInfo.IsKnown() && stmt.InitialValue != nil {
+			typeInfo = cgb.expressionType(stmt.InitialValue)
+		}
+		if typeInfo.IsKnown() {
+			cgb.symbolTypes[decl.Name] = typeInfo
+		}
+	}
+	cgb.analyzeNode(stmt.InitialValue)
+}
+
+func (cgb *CallGraphBuilder) analyzeTryStatement(stmt *ast.TryStatement) {
+	cgb.analyzeNode(stmt.Expression)
+	// The success body and every catch body are distinct call-bearing regions.
+	if stmt.Body != nil {
+		cgb.analyzeBlock(stmt.Body)
+	}
+	for _, clause := range stmt.CatchClauses {
+		if clause.Body != nil {
+			cgb.analyzeBlock(clause.Body)
+		}
+	}
+}
+
+func (cgb *CallGraphBuilder) analyzeCallAndArguments(call *ast.FunctionCall) {
+	cgb.analyzeFunctionCall(call)
+	for _, arg := range call.Arguments {
+		cgb.analyzeNode(arg)
+	}
+}
+
+func (cgb *CallGraphBuilder) analyzeBinaryOperation(operation *ast.BinaryOperation) {
+	if isAssignmentOperator(operation.Operator) {
+		if identifier, ok := operation.Left.(*ast.Identifier); ok {
+			if typeInfo := cgb.expressionType(operation.Right); typeInfo.IsKnown() {
+				cgb.symbolTypes[identifier.Name] = typeInfo
+			}
+		}
+	}
+	cgb.analyzeNode(operation.Left)
+	cgb.analyzeNode(operation.Right)
+}
+
+func (cgb *CallGraphBuilder) analyzeTupleExpression(tuple *ast.TupleExpression) {
+	for _, component := range tuple.Components {
+		cgb.analyzeNode(component)
+	}
+}
+
+func (cgb *CallGraphBuilder) analyzeFunctionCallOptions(options *ast.FunctionCallOptions) {
+	// Handle calls with options like to.call{value: ...}("").
+	cgb.analyzeNode(options.Expression)
+	for _, option := range options.Options {
+		cgb.analyzeNode(option)
 	}
 }
 
 // analyzeFunctionCall processes a function call and adds it to the call graph
 func (cgb *CallGraphBuilder) analyzeFunctionCall(call *ast.FunctionCall) {
-	callType := types.CallTypeInternal
-	calledName := ""
-	targetContract := ""
-
-	switch expr := call.Expression.(type) {
-	case *ast.Identifier:
-		// Simple internal call: _internalFunc()
-		calledName = expr.Name
-
-		// Skip built-in Solidity functions (require, assert, etc.)
-		if isBuiltinFunction(calledName) {
-			return
-		}
-
-		targetContract = cgb.currentContract
-		callType = types.CallTypeInternal
-
-	case *ast.MemberAccess:
-		calledName = expr.MemberName
-		isResolved := false
-		receiverType := cgb.expressionType(expr.Expression)
-
-		// Check for specific bases (Identifier)
-		if inner, ok := expr.Expression.(*ast.Identifier); ok {
-			name := inner.Name
-
-			// Skip built-in objects
-			if name == "abi" || name == "msg" {
-				return
-			}
-
-			if name == "this" {
-				// this.func()
-				callType = types.CallTypeSelf
-				targetContract = cgb.currentContract
-				isResolved = true
-			} else if name == "super" {
-				// super.func()
-				callType = types.CallTypeSuper
-				targetContract = cgb.currentContract
-				isResolved = true
-			} else if cgb.isContract(name) {
-				// Contract.func()
-				callType = types.CallTypeExternal
-				targetContract = name
-				isResolved = true
-			} else if cgb.isLibrary(name) {
-				// Library.func()
-				callType = types.CallTypeLibrary
-				targetContract = name
-				isResolved = true
-			} else if receiverType.IsPrimitiveAddress() && (calledName == "transfer" || calledName == "send") {
-				callType = types.CallTypeTransferETH
-				targetContract = name
-				isResolved = false
-			} else if receiverType.IsKnown() && !receiverType.IsPrimitiveAddress() && receiverType.BaseName != "" {
-				targetContract = receiverType.BaseName
-				if receiverType.Kind == types.TypeKindLibrary {
-					callType = types.CallTypeLibrary
-				} else {
-					callType = types.CallTypeExternal
-				}
-				isResolved = true
-			} else {
-				// Variable.func() - default to external, allow library check later
-				// e.g. token.transfer()
-				callType = types.CallTypeExternal
-				targetContract = name
-			}
-		} else if callExpr, ok := expr.Expression.(*ast.FunctionCall); ok {
-			// Cast: IERC20(addr).transfer()
-			if castType := cgb.expressionType(callExpr); castType.IsKnown() && castType.BaseName != "" {
-				if castType.IsPrimitiveAddress() && (calledName == "transfer" || calledName == "send") {
-					callType = types.CallTypeTransferETH
-					targetContract = ""
-					isResolved = false
-				} else {
-					callType = types.CallTypeExternal
-					targetContract = castType.BaseName
-					isResolved = true
-				}
-			} else if id, ok := callExpr.Expression.(*ast.Identifier); ok {
-				// We want the name of the function being called in that expression: "IERC20"
-				callType = types.CallTypeExternal
-				targetContract = id.Name
-				isResolved = true // Treat cast as resolved target type
-			}
-		}
-
-		// Check for Library "Using For" if not a direct library/contract call
-		// This handles variable.add() (SafeMath) or _balances[to].add()
-		if !isResolved {
-			if libContract := cgb.resolveLibraryCall(calledName); libContract != nil {
-				callType = types.CallTypeLibrary
-				targetContract = libContract.Name
-			}
-		}
-
-		// Check for low-level calls which override everything
-		callType = cgb.checkLowLevelCall(calledName, callType)
-
-	case *ast.FunctionCallOptions:
-		// Handle calls with options like to.call{value: ...}("")
-		// The Expression is typically a MemberAccess like "to.call"
-		if ma, ok := expr.Expression.(*ast.MemberAccess); ok {
-			calledName = ma.MemberName
-
-			// Check for low-level calls
-			if calledName == "call" || calledName == "delegatecall" || calledName == "staticcall" {
-				callType = cgb.getLowLevelCallType(calledName)
-				// Get the target (variable being called on)
-				if id, ok := ma.Expression.(*ast.Identifier); ok {
-					targetContract = id.Name
-				}
-			}
-		}
-
-	case *ast.NewExpression:
-		// `new Contract(args)` — deploying runs the created contract's constructor
-		// (untrusted code execution). Record an external creation edge so call-graph
-		// consumers and reachability see it. resolveTarget will bind it to the
-		// created contract's constructor when that contract is in scope.
-		calledName = getTypeName(expr.TypeName)
-		callType = types.CallTypeExternal
-		targetContract = calledName
+	if call == nil || cgb.currentContract == nil || cgb.currentFile == nil {
+		return
+	}
+	descriptor, ok := cgb.classifyFunctionCall(call)
+	if !ok {
+		return
+	}
+	span := cgb.locator.span(call)
+	line, col, byteOff := span.startLine, span.startCol, span.startByte
+	argCount := len(call.Arguments)
+	target := cgb.resolveTarget(descriptor.calledName, descriptor.targetContract, descriptor.callType, call.Arguments, descriptor.libraryExtension, descriptor.receiverType)
+	if descriptor.identityRequired && descriptor.targetContract == nil {
+		cgb.addTargetIdentityDiagnostic(descriptor.targetContractName, descriptor.calledName, line)
 	}
 
-	// Skip if we couldn't determine the target
-	if calledName == "" {
+	to := descriptor.calledName
+	resolvedFunction := ""
+	if target.function != nil {
+		resolvedFunction = functionKey(target.function)
+	}
+	if target.contract != nil {
+		key := descriptor.calledName
+		if target.function != nil {
+			key = functionKey(target.function)
+		}
+		to = types.MakeFunctionID(target.contract.SourceFile, target.contract.Name, key)
+	}
+	from := cgb.currentCallerID()
+	if from == "" {
+		cgb.addIdentityDiagnostic(descriptor.calledName, line, "call site has no exact caller identity")
 		return
 	}
 
-	// Get line/column/byte-offset of the call site
-	line, _, col, _, byteOff, _ := spanFields(call)
-
-	// Resolve the actual target function and contract
-	// Pass argument count so overloaded functions are disambiguated correctly
-	argCount := len(call.Arguments)
-	resolvedContract, resolvedFunc, targetKind, resolved := cgb.resolveTarget(
-		calledName, targetContract, callType, argCount,
-	)
-
-	// Build "To" identifier
-	to := calledName
-	resolvedFuncName := ""
-	if resolvedFunc != nil {
-		resolvedFuncName = resolvedFunc.Selector
-		if resolvedFuncName == "" {
-			resolvedFuncName = resolvedFunc.Name
-		}
-	}
-
-	if resolvedContract != "" {
-		// Try to find the contract to get its source file
-		if targetContractObj := cgb.db.GetContractByName(resolvedContract); targetContractObj != nil {
-			// use resolvedFunc selector if available, otherwise calledName
-			fnKey := calledName
-			if resolvedFunc != nil && resolvedFunc.Selector != "" {
-				fnKey = resolvedFunc.Selector
-			} else if resolvedFunc != nil {
-				fnKey = resolvedFunc.Name
-			}
-			to = types.MakeFunctionID(targetContractObj.SourceFile, resolvedContract, fnKey)
-		} else {
-			// Fallback if contract object not found
-			to = fmt.Sprintf("%s.%s", resolvedContract, calledName)
-		}
-	}
-
-	// Create the full "From" identifier with file path.
-	// cgb.currentFunction is formatted as Contract.Selector (or Contract.modifier).
-	parts := strings.SplitN(cgb.currentFunction, ".", 2)
-	fromContract := parts[0]
-	fromSelector := ""
-	if len(parts) == 2 {
-		fromSelector = parts[1] // Join via SplitN keeps dotted selectors intact
-	}
-	from := types.MakeFunctionID(cgb.currentFile, fromContract, fromSelector)
-	if cgb.currentModifierObj != nil {
-		from = types.MakeModifierID(cgb.currentFile, fromContract, cgb.currentModifierObj.Name)
-	}
-
-	// Add edge to call graph
 	edge := &types.CallEdge{
 		From:             from,
 		To:               to,
-		CalledName:       calledName,
-		Type:             callType,
+		CalledName:       descriptor.calledName,
+		Type:             descriptor.callType,
 		Line:             line,
 		Col:              col,
 		Byte:             byteOff,
-		Resolved:         resolved,
-		ResolvedContract: resolvedContract,
-		ResolvedFunction: resolvedFuncName,
-		TargetKind:       targetKind,
+		Resolved:         target.resolved,
+		ResolvedFunction: resolvedFunction,
+		TargetKind:       target.kind,
+	}
+	if target.contract != nil {
+		edge.ResolvedContract = target.contract.Name
+		edge.ResolvedContractID = target.contract.ID
+	}
+	cgb.db.CallGraph.AddEdge(edge)
+	cgb.addCallToCurrent(descriptor.calledName, descriptor.targetContractName, target, resolvedFunction, descriptor.callType, line, col, byteOff, argCount)
+}
+
+type functionCallDescriptor struct {
+	callType           types.CallType
+	calledName         string
+	targetContractName string
+	targetContract     *types.Contract
+	identityRequired   bool
+	libraryExtension   bool
+	receiverType       types.TypeInfo
+}
+
+func (cgb *CallGraphBuilder) classifyFunctionCall(call *ast.FunctionCall) (functionCallDescriptor, bool) {
+	descriptor := functionCallDescriptor{callType: types.CallTypeInternal}
+	switch expression := call.Expression.(type) {
+	case *ast.Identifier:
+		return cgb.classifyIdentifierCall(call, expression, descriptor)
+	case *ast.MemberAccess:
+		return cgb.classifyMemberCall(call, expression, descriptor)
+	case *ast.FunctionCallOptions:
+		return cgb.classifyCallWithOptions(expression, descriptor)
+	case *ast.NewExpression:
+		descriptor.calledName = getTypeName(expression.TypeName)
+		descriptor.callType = types.CallTypeExternal
+		descriptor.targetContractName = descriptor.calledName
+		descriptor.targetContract, _ = cgb.db.ResolveContractNameExact(descriptor.calledName, cgb.currentFile.Path)
+		descriptor.identityRequired = true
+		return descriptor, descriptor.calledName != ""
+	default:
+		return descriptor, false
+	}
+}
+
+func (cgb *CallGraphBuilder) classifyIdentifierCall(call *ast.FunctionCall, identifier *ast.Identifier, descriptor functionCallDescriptor) (functionCallDescriptor, bool) {
+	descriptor.calledName = identifier.Name
+	// Primitive/user-defined type conversions are expressions, not call edges.
+	if isBuiltinFunction(descriptor.calledName) {
+		return descriptor, false
+	}
+	if candidates := cgb.db.FindContractsByName(descriptor.calledName); len(candidates) > 0 {
+		if _, exact := cgb.db.ResolveContractNameExact(descriptor.calledName, cgb.currentFile.Path); !exact {
+			cgb.addTargetIdentityDiagnostic(descriptor.calledName, descriptor.calledName, cgb.locator.span(call).startLine)
+		}
+		return descriptor, false
+	}
+	descriptor.targetContractName = cgb.currentContract.Name
+	descriptor.targetContract = cgb.currentContract
+	return descriptor, true
+}
+
+func (cgb *CallGraphBuilder) classifyMemberCall(call *ast.FunctionCall, member *ast.MemberAccess, descriptor functionCallDescriptor) (functionCallDescriptor, bool) {
+	descriptor.calledName = member.MemberName
+	descriptor.receiverType = cgb.expressionType(member.Expression)
+	switch receiver := member.Expression.(type) {
+	case *ast.Identifier:
+		if receiver.Name == "abi" || receiver.Name == "msg" {
+			return descriptor, false
+		}
+		descriptor = cgb.classifyIdentifierReceiver(receiver.Name, descriptor)
+	case *ast.FunctionCall:
+		descriptor = cgb.classifyCallReceiver(receiver, descriptor)
+	}
+	if descriptor.targetContract == nil && !descriptor.identityRequired {
+		descriptor = cgb.classifyLibraryExtension(call, descriptor)
+	}
+	descriptor.callType = cgb.checkLowLevelCall(descriptor.calledName, descriptor.callType)
+	return descriptor, true
+}
+
+func (cgb *CallGraphBuilder) classifyIdentifierReceiver(name string, descriptor functionCallDescriptor) functionCallDescriptor {
+	switch name {
+	case "this":
+		descriptor.callType = types.CallTypeSelf
+		descriptor.targetContractName, descriptor.targetContract = cgb.currentContract.Name, cgb.currentContract
+		return descriptor
+	case "super":
+		descriptor.callType = types.CallTypeSuper
+		descriptor.targetContractName, descriptor.targetContract = cgb.currentContract.Name, cgb.currentContract
+		return descriptor
 	}
 
-	cgb.db.CallGraph.AddEdge(edge)
+	if typed := cgb.contractFromType(descriptor.receiverType); typed != nil {
+		descriptor.targetContract = typed
+		descriptor.targetContractName = typed.Name
+		descriptor.identityRequired = true
+	} else if len(cgb.db.FindContractsByName(name)) > 0 {
+		descriptor.targetContractName = name
+		descriptor.targetContract, _ = cgb.db.ResolveContractNameExact(name, cgb.currentFile.Path)
+		descriptor.identityRequired = true
+	}
 
-	// Also add call to the function object
-	cgb.addCallToFunction(calledName, targetContract, resolvedContract, resolvedFuncName, callType, targetKind, line, col, byteOff, resolved, argCount)
+	switch {
+	case descriptor.targetContract != nil:
+		if descriptor.targetContract.Kind == types.ContractKindLibrary {
+			descriptor.callType = types.CallTypeLibrary
+		} else {
+			descriptor.callType = types.CallTypeExternal
+		}
+	case descriptor.receiverType.IsPrimitiveAddress() && isETHTransferName(descriptor.calledName):
+		descriptor.callType = types.CallTypeTransferETH
+		descriptor.targetContractName = name
+	case descriptor.receiverType.IsKnown() && descriptor.receiverType.Kind != types.TypeKindPrimitive && descriptor.receiverType.BaseName != "":
+		descriptor.targetContractName = descriptor.receiverType.BaseName
+		descriptor.identityRequired = true
+		if descriptor.receiverType.Kind == types.TypeKindLibrary {
+			descriptor.callType = types.CallTypeLibrary
+		} else {
+			descriptor.callType = types.CallTypeExternal
+		}
+	default:
+		descriptor.callType = types.CallTypeExternal
+		descriptor.targetContractName = name
+	}
+	return descriptor
+}
+
+func (cgb *CallGraphBuilder) classifyCallReceiver(call *ast.FunctionCall, descriptor functionCallDescriptor) functionCallDescriptor {
+	castType := cgb.expressionType(call)
+	switch {
+	case castType.IsPrimitiveAddress() && isETHTransferName(descriptor.calledName):
+		descriptor.callType = types.CallTypeTransferETH
+	case castType.BaseName != "":
+		descriptor.callType = types.CallTypeExternal
+		descriptor.targetContractName = castType.BaseName
+		descriptor.targetContract = cgb.contractFromType(castType)
+		descriptor.identityRequired = true
+	default:
+		if identifier, ok := call.Expression.(*ast.Identifier); ok {
+			descriptor.callType = types.CallTypeExternal
+			descriptor.targetContractName = identifier.Name
+			descriptor.targetContract, _ = cgb.db.ResolveContractNameExact(identifier.Name, cgb.currentFile.Path)
+			descriptor.identityRequired = true
+		}
+	}
+	return descriptor
+}
+
+func (cgb *CallGraphBuilder) classifyLibraryExtension(call *ast.FunctionCall, descriptor functionCallDescriptor) functionCallDescriptor {
+	library := cgb.resolveLibraryCall(descriptor.calledName, descriptor.receiverType, len(call.Arguments))
+	switch {
+	case library.contract != nil:
+		descriptor.callType = types.CallTypeLibrary
+		descriptor.targetContractName, descriptor.targetContract = library.contract.Name, library.contract
+		descriptor.identityRequired = true
+		descriptor.libraryExtension = true
+	case library.identityAmbiguous != "":
+		descriptor.callType = types.CallTypeLibrary
+		descriptor.targetContractName = library.identityAmbiguous
+		descriptor.identityRequired = true
+		descriptor.libraryExtension = true
+	case library.ambiguous:
+		descriptor.callType = types.CallTypeLibrary
+		descriptor.libraryExtension = true
+	}
+	return descriptor
+}
+
+func (cgb *CallGraphBuilder) classifyCallWithOptions(options *ast.FunctionCallOptions, descriptor functionCallDescriptor) (functionCallDescriptor, bool) {
+	member, ok := options.Expression.(*ast.MemberAccess)
+	if !ok {
+		return descriptor, false
+	}
+	descriptor.calledName = member.MemberName
+	descriptor.callType = cgb.getLowLevelCallType(descriptor.calledName)
+	if identifier, ok := member.Expression.(*ast.Identifier); ok {
+		descriptor.targetContractName = identifier.Name
+	}
+	return descriptor, true
+}
+
+func isETHTransferName(name string) bool {
+	return name == "transfer" || name == "send"
+}
+
+type resolvedTarget struct {
+	contract *types.Contract
+	function *types.Function
+	kind     types.ContractKind
+	resolved bool
 }
 
 // superSite is a single `super.g()` call discovered during call-graph building:
@@ -532,6 +652,7 @@ type superSite struct {
 	contract   *types.Contract
 	fn         *types.Function
 	calledName string
+	selector   string
 	argCount   int
 	line       int
 	col        int
@@ -577,6 +698,7 @@ func (cgb *CallGraphBuilder) ResolveSuperAcrossLeaves() {
 						contract:   c,
 						fn:         fn,
 						calledName: call.Target,
+						selector:   call.ResolvedFunction,
 						argCount:   call.ArgCount,
 						line:       call.Line,
 						col:        call.Col,
@@ -603,24 +725,24 @@ func (cgb *CallGraphBuilder) ResolveSuperAcrossLeaves() {
 	//    each hosted super site to the next defining contract in that MRO.
 	for _, leafID := range contractIDs {
 		leaf := cgb.db.Contracts[leafID]
-		mro := leaf.LinearizedBases
+		mro := cgb.db.LinearizedContracts(leaf)
 		if len(mro) < 2 {
 			continue
 		}
-		// Position of each MRO name (first occurrence) for O(1) host lookup.
+		// Position of each exact MRO identity for O(1) host lookup.
 		pos := make(map[string]int, len(mro))
-		for i, name := range mro {
-			if _, ok := pos[name]; !ok {
-				pos[name] = i
+		for i, contract := range mro {
+			if _, ok := pos[contract.ID]; !ok {
+				pos[contract.ID] = i
 			}
 		}
 
 		for _, site := range sites {
-			i, ok := pos[site.contract.Name]
+			i, ok := pos[site.contract.ID]
 			if !ok {
 				continue // this site's host is not part of this leaf's hierarchy
 			}
-			target, targetContract := cgb.nextDefInMRO(mro, i+1, site.calledName, site.argCount)
+			target, targetContract := cgb.nextDefInMRO(mro, i+1, site.calledName, site.selector, site.argCount)
 			if target == nil {
 				continue
 			}
@@ -643,32 +765,34 @@ func (cgb *CallGraphBuilder) ResolveSuperAcrossLeaves() {
 			existing[key] = true
 
 			cgb.db.CallGraph.AddEdge(&types.CallEdge{
-				From:             from,
-				To:               to,
-				CalledName:       site.calledName,
-				Type:             types.CallTypeSuper,
-				Line:             site.line,
-				Col:              site.col,
-				Byte:             site.byteOff,
-				Resolved:         true,
-				ResolvedContract: targetContract.Name,
-				ResolvedFunction: toSelector,
-				TargetKind:       targetContract.Kind,
+				From:               from,
+				To:                 to,
+				CalledName:         site.calledName,
+				Type:               types.CallTypeSuper,
+				Line:               site.line,
+				Col:                site.col,
+				Byte:               site.byteOff,
+				Resolved:           true,
+				ResolvedContract:   targetContract.Name,
+				ResolvedContractID: targetContract.ID,
+				ResolvedFunction:   toSelector,
+				TargetKind:         targetContract.Kind,
 			})
 			// Mirror onto the host function's Calls so AST/reachability consumers
 			// that read fn.Calls see the in-leaf target too (deduped above).
 			site.fn.Calls = append(site.fn.Calls, &types.FunctionCall{
-				Target:           site.calledName,
-				ContractName:     targetContract.Name,
-				ResolvedContract: targetContract.Name,
-				ResolvedFunction: toSelector,
-				CallType:         types.CallTypeSuper,
-				TargetKind:       targetContract.Kind,
-				Line:             site.line,
-				Col:              site.col,
-				Byte:             site.byteOff,
-				Resolved:         true,
-				ArgCount:         site.argCount,
+				Target:             site.calledName,
+				ContractName:       targetContract.Name,
+				ResolvedContract:   targetContract.Name,
+				ResolvedContractID: targetContract.ID,
+				ResolvedFunction:   toSelector,
+				CallType:           types.CallTypeSuper,
+				TargetKind:         targetContract.Kind,
+				Line:               site.line,
+				Col:                site.col,
+				Byte:               site.byteOff,
+				Resolved:           true,
+				ArgCount:           site.argCount,
 			})
 		}
 	}
@@ -678,31 +802,31 @@ func (cgb *CallGraphBuilder) ResolveSuperAcrossLeaves() {
 // that defines a function named funcName, preferring an exact arity match
 // (argCount >= 0) and falling back to name-only. Returns the function and its
 // owning contract, or (nil, nil) when no base in the remaining MRO defines it.
-func (cgb *CallGraphBuilder) nextDefInMRO(mro []string, start int, funcName string, argCount int) (*types.Function, *types.Contract) {
-	// Pass 1: exact arity.
-	if argCount >= 0 {
-		for j := start; j < len(mro); j++ {
-			base := cgb.db.GetContractByName(mro[j])
-			if base == nil {
-				continue
-			}
-			for _, fn := range base.Functions {
-				if fn.Name == funcName && len(fn.Parameters) == argCount {
-					return fn, base
-				}
-			}
-		}
-	}
-	// Pass 2: name-only.
+func (cgb *CallGraphBuilder) nextDefInMRO(mro []*types.Contract, start int, funcName, selector string, argCount int) (*types.Function, *types.Contract) {
 	for j := start; j < len(mro); j++ {
-		base := cgb.db.GetContractByName(mro[j])
+		base := mro[j]
 		if base == nil {
 			continue
 		}
-		for _, fn := range base.Functions {
-			if fn.Name == funcName {
-				return fn, base
+		if selector != "" {
+			for _, fn := range base.Functions {
+				if functionKey(fn) == selector {
+					return fn, base
+				}
 			}
+			continue
+		}
+		var matches []*types.Function
+		for _, fn := range base.Functions {
+			if fn.Name == funcName && (argCount < 0 || len(fn.Parameters) == argCount) {
+				matches = append(matches, fn)
+			}
+		}
+		if len(matches) == 1 {
+			return matches[0], base
+		}
+		if len(matches) > 1 {
+			return nil, nil
 		}
 	}
 	return nil, nil
@@ -740,257 +864,291 @@ func (cgb *CallGraphBuilder) getLowLevelCallType(memberName string) types.CallTy
 // this fallback still checks whether a matching function exists in any active
 // using-library because `using X for *` and extension-style calls can be broader
 // than a single receiver type.
-func (cgb *CallGraphBuilder) resolveLibraryCall(funcName string) *types.Contract {
-	// Get the current contract to check its using directives
-	currentContract := cgb.db.GetContractByName(cgb.currentContract)
-	if currentContract == nil {
-		return nil
-	}
+type libraryResolution struct {
+	contract          *types.Contract
+	identityAmbiguous string
+	ambiguous         bool
+}
 
-	// Check using directives - match by function existence in library
-	for _, ud := range currentContract.UsingDirectives {
-		// Get the library contract
-		libContract := cgb.db.GetContractByName(ud.Library)
-		if libContract != nil && libContract.Kind == types.ContractKindLibrary {
-			// Check if library has a function with this name
-			for _, fn := range libContract.Functions {
-				if fn.Name == funcName {
-					return libContract
-				}
+func (cgb *CallGraphBuilder) resolveLibraryCall(funcName string, receiverType types.TypeInfo, argCount int) libraryResolution {
+	if cgb.currentContract == nil {
+		return libraryResolution{}
+	}
+	matched := make(map[string]*types.Contract)
+	for _, scope := range cgb.db.LinearizedContracts(cgb.currentContract) {
+		for _, directive := range scope.UsingDirectives {
+			if !usingDirectiveMatches(directive.ForType, receiverType) {
+				continue
 			}
-		}
-	}
-
-	// Also check linearized bases for inherited using directives
-	for _, baseName := range currentContract.LinearizedBases {
-		if baseName == currentContract.Name {
-			continue
-		}
-		baseContract := cgb.db.GetContractByName(baseName)
-		if baseContract == nil {
-			continue
-		}
-		for _, ud := range baseContract.UsingDirectives {
-			libContract := cgb.db.GetContractByName(ud.Library)
-			if libContract != nil && libContract.Kind == types.ContractKindLibrary {
-				for _, fn := range libContract.Functions {
-					if fn.Name == funcName {
-						return libContract
+			library, exact := cgb.db.ResolveContractNameExact(directive.Library, scope.SourceFile)
+			if !exact {
+				for _, candidate := range cgb.db.FindContractsByName(directive.Library) {
+					if libraryHasExtensionCandidate(candidate, funcName, receiverType, argCount) {
+						return libraryResolution{identityAmbiguous: directive.Library}
 					}
 				}
+				continue
+			}
+			if libraryHasExtensionCandidate(library, funcName, receiverType, argCount) {
+				matched[library.ID] = library
 			}
 		}
 	}
+	if len(matched) == 1 {
+		for _, library := range matched {
+			return libraryResolution{contract: library}
+		}
+	}
+	return libraryResolution{ambiguous: len(matched) > 1}
+}
 
-	return nil
+func usingDirectiveMatches(forType string, receiverType types.TypeInfo) bool {
+	forType = comparableType(forType)
+	if forType == "" || forType == "*" {
+		return true
+	}
+	return receiverType.IsKnown() && typeInfoMatchesParameter(receiverType, forType)
+}
+
+func libraryHasExtensionCandidate(library *types.Contract, funcName string, receiverType types.TypeInfo, argCount int) bool {
+	if library == nil || library.Kind != types.ContractKindLibrary {
+		return false
+	}
+	for _, fn := range library.Functions {
+		if fn.Name != funcName || len(fn.Parameters) != argCount+1 {
+			continue
+		}
+		if !receiverType.IsKnown() || typeInfoMatchesParameter(receiverType, fn.Parameters[0].TypeName) {
+			return true
+		}
+	}
+	return false
 }
 
 // resolveTarget resolves the actual target contract and function using inheritance.
-// argCount is the number of arguments at the call site; it is used to disambiguate
-// overloaded functions that share the same name but differ in parameter count.
-// Pass -1 to skip overload disambiguation.
-func (cgb *CallGraphBuilder) resolveTarget(funcName, contractName string, callType types.CallType, argCount int) (resolvedContract string, resolvedFunc *types.Function, targetKind types.ContractKind, resolved bool) {
-	// For low-level calls, we can't resolve
-	if callType == types.CallTypeTransferETH {
-		return "", nil, "", false
-	}
-	if callType == types.CallTypeLowLevel || callType == types.CallTypeLowLevelCall ||
+// Argument types are used when known. Same-arity overloads remain unresolved
+// when the lightweight semantic layer cannot select one exact selector.
+func (cgb *CallGraphBuilder) resolveTarget(funcName string, targetContract *types.Contract, callType types.CallType, args []ast.Node, libraryExtension bool, receiverType types.TypeInfo) resolvedTarget {
+	if targetContract == nil || callType == types.CallTypeTransferETH ||
+		callType == types.CallTypeLowLevel || callType == types.CallTypeLowLevelCall ||
 		callType == types.CallTypeLowLevelDelegate || callType == types.CallTypeLowLevelStatic {
-		return contractName, nil, "", false
+		return resolvedTarget{contract: targetContract}
 	}
 
-	// Get the target contract
-	targetContractObj := cgb.db.GetContractByName(contractName)
-	if targetContractObj == nil {
-		return contractName, nil, "", false
+	result := resolvedTarget{contract: targetContract, kind: targetContract.Kind}
+	mro := cgb.db.LinearizedContracts(targetContract)
+	if callType == types.CallTypeLibrary {
+		mro = []*types.Contract{targetContract}
+	} else if callType == types.CallTypeSuper && len(mro) > 0 {
+		mro = mro[1:]
+	}
+	lookupName := funcName
+	if funcName == targetContract.Name {
+		lookupName = "constructor"
 	}
 
-	targetKind = targetContractObj.Kind
+	seenSelectors := make(map[string]bool)
+	var named []callCandidate
+	for _, contract := range mro {
+		for _, fn := range contract.Functions {
+			if fn.Name != lookupName {
+				continue
+			}
+			key := functionOverloadKey(fn)
+			if seenSelectors[key] {
+				continue // most-derived implementation already won this selector
+			}
+			seenSelectors[key] = true
+			offset := 0
+			if libraryExtension {
+				offset = 1
+			}
+			named = append(named, callCandidate{contract: contract, function: fn, parameterOffset: offset})
+		}
+	}
+	if len(named) == 0 {
+		return result
+	}
 
-	// matchFn returns true when a function is a good candidate.
-	// It first tries an exact parameter-count match; if argCount < 0 it always matches.
-	matchFn := func(fn *types.Function) bool {
-		if fn.Name != funcName {
+	arity := make([]callCandidate, 0, len(named))
+	for _, candidate := range named {
+		if len(candidate.function.Parameters)-candidate.parameterOffset == len(args) {
+			arity = append(arity, candidate)
+		}
+	}
+	if len(arity) == 1 {
+		return resolvedCallTarget(arity[0])
+	}
+	if len(arity) > 1 {
+		compatible := make([]callCandidate, 0, len(arity))
+		for _, candidate := range arity {
+			if cgb.argumentsMatch(candidate, args, receiverType) {
+				compatible = append(compatible, candidate)
+			}
+		}
+		if len(compatible) == 1 {
+			return resolvedCallTarget(compatible[0])
+		}
+		return result
+	}
+	if len(named) == 1 {
+		// Compatibility fallback for malformed/tolerantly-parsed code where the
+		// call arity is unavailable or inconsistent but only one target exists.
+		return resolvedCallTarget(named[0])
+	}
+	return result
+}
+
+type callCandidate struct {
+	contract        *types.Contract
+	function        *types.Function
+	parameterOffset int
+}
+
+func resolvedCallTarget(candidate callCandidate) resolvedTarget {
+	return resolvedTarget{
+		contract: candidate.contract,
+		function: candidate.function,
+		kind:     candidate.contract.Kind,
+		resolved: true,
+	}
+}
+
+func (cgb *CallGraphBuilder) argumentsMatch(candidate callCandidate, args []ast.Node, receiverType types.TypeInfo) bool {
+	if candidate.parameterOffset == 1 {
+		if !receiverType.IsKnown() || !typeInfoMatchesParameter(receiverType, candidate.function.Parameters[0].TypeName) {
 			return false
 		}
-		if argCount < 0 {
-			return true
-		}
-		return len(fn.Parameters) == argCount
 	}
-
-	// resolveFallbackFn matches by name only (used as a second pass when no
-	// exact arity match is found, e.g. in contracts without overloads).
-	resolveFallbackFn := func(fn *types.Function) bool {
-		return fn.Name == funcName
-	}
-
-	// For library calls, look directly in the library
-	if callType == types.CallTypeLibrary {
-		for _, fn := range targetContractObj.Functions {
-			if matchFn(fn) {
-				return targetContractObj.Name, fn, targetKind, true
-			}
-		}
-		// Fallback: name-only
-		for _, fn := range targetContractObj.Functions {
-			if resolveFallbackFn(fn) {
-				return targetContractObj.Name, fn, targetKind, true
-			}
-		}
-		return contractName, nil, targetKind, false
-	}
-
-	// For super calls, look in base contracts (skip current contract)
-	// LinearizedBases is derived-first: [CurrentContract, Parent1, Parent2, ...]
-	// super.func() should find the next-most-derived parent's implementation
-	if callType == types.CallTypeSuper {
-		currentContract := cgb.db.GetContractByName(cgb.currentContract)
-		if currentContract != nil && len(currentContract.LinearizedBases) > 1 {
-			// First pass: exact arity match
-			for i := 1; i < len(currentContract.LinearizedBases); i++ {
-				baseName := currentContract.LinearizedBases[i]
-				baseContract := cgb.db.GetContractByName(baseName)
-				if baseContract != nil {
-					for _, fn := range baseContract.Functions {
-						if matchFn(fn) {
-							return baseContract.Name, fn, baseContract.Kind, true
-						}
-					}
-				}
-			}
-			// Second pass: name-only fallback
-			for i := 1; i < len(currentContract.LinearizedBases); i++ {
-				baseName := currentContract.LinearizedBases[i]
-				baseContract := cgb.db.GetContractByName(baseName)
-				if baseContract != nil {
-					for _, fn := range baseContract.Functions {
-						if resolveFallbackFn(fn) {
-							return baseContract.Name, fn, baseContract.Kind, true
-						}
-					}
-				}
-			}
-		}
-		return contractName, nil, targetKind, false
-	}
-
-	// For internal/self calls, walk the linearization to find the function.
-	// LinearizedBases is derived-first: [MostDerived, ..., MostBase].
-	//
-	// We do TWO passes:
-	//   Pass 1 – prefer an overload whose parameter count exactly matches argCount.
-	//            This correctly routes _approve(a,b,c) → _approve(a,b,c,flag) instead
-	//            of looping back to _approve(a,b,c) in the same contract.
-	//   Pass 2 – fall back to name-only matching for non-overloaded cases.
-
-	for _, baseName := range targetContractObj.LinearizedBases {
-		baseContract := cgb.db.GetContractByName(baseName)
-		if baseContract != nil {
-			for _, fn := range baseContract.Functions {
-				if matchFn(fn) {
-					return baseContract.Name, fn, baseContract.Kind, true
-				}
-			}
+	for i, arg := range args {
+		info := cgb.expressionType(arg)
+		if !info.IsKnown() || !typeInfoMatchesParameter(info, candidate.function.Parameters[i+candidate.parameterOffset].TypeName) {
+			return false
 		}
 	}
-
-	for _, baseName := range targetContractObj.LinearizedBases {
-		baseContract := cgb.db.GetContractByName(baseName)
-		if baseContract != nil {
-			for _, fn := range baseContract.Functions {
-				if resolveFallbackFn(fn) {
-					return baseContract.Name, fn, baseContract.Kind, true
-				}
-			}
-		}
-	}
-
-	// Check directly in the target contract
-	for _, fn := range targetContractObj.Functions {
-		if resolveFallbackFn(fn) {
-			return targetContractObj.Name, fn, targetKind, true
-		}
-	}
-
-	return contractName, nil, targetKind, false
+	return true
 }
 
-// addCallToFunction adds a call reference to the function object, or to the
-// modifier object when analyzing a modifier body.
-func (cgb *CallGraphBuilder) addCallToFunction(target, targetContract, resolvedContract, resolvedFunc string, callType types.CallType, targetKind types.ContractKind, line, col, byteOff int, resolved bool, argCount int) {
-	if cgb.currentModifierObj != nil {
-		cgb.currentModifierObj.Calls = append(cgb.currentModifierObj.Calls, &types.FunctionCall{
-			Target:           target,
-			ContractName:     targetContract,
-			ResolvedContract: resolvedContract,
-			ResolvedFunction: resolvedFunc,
-			CallType:         callType,
-			TargetKind:       targetKind,
-			Line:             line,
-			Col:              col,
-			Byte:             byteOff,
-			Resolved:         resolved,
-			ArgCount:         argCount,
-		})
-		return
+func typeInfoMatchesParameter(info types.TypeInfo, parameterType string) bool {
+	want := comparableType(parameterType)
+	return comparableType(info.Name) == want || comparableType(info.BaseName) == want
+}
+
+func functionOverloadKey(fn *types.Function) string {
+	if fn.Selector != "" {
+		return fn.Selector
 	}
-
-	// Find the current function in the database using the selector
-	parts := strings.Split(cgb.currentFunction, ".")
-	if len(parts) < 2 {
-		return
+	params := make([]string, len(fn.Parameters))
+	for i, parameter := range fn.Parameters {
+		params[i] = comparableType(parameter.TypeName)
 	}
+	return fn.Name + "(" + strings.Join(params, ",") + ")"
+}
 
-	contractName := parts[0]
-	funcSelector := strings.Join(parts[1:], ".")
-
-	contract := cgb.db.GetContractByName(contractName)
-	if contract == nil {
-		return
-	}
-
-	for _, fn := range contract.Functions {
-		// match by selector, fallback to name if selector is empty
-		key := fn.Selector
-		if key == "" {
-			key = fn.Name
-		}
-		if key == funcSelector {
-			fn.Calls = append(fn.Calls, &types.FunctionCall{
-				Target:           target,
-				ContractName:     targetContract,
-				ResolvedContract: resolvedContract,
-				ResolvedFunction: resolvedFunc,
-				CallType:         callType,
-				TargetKind:       targetKind,
-				Line:             line,
-				Col:              col,
-				Byte:             byteOff,
-				Resolved:         resolved,
-				ArgCount:         argCount,
-			})
-			break
-		}
+func comparableType(typeName string) string {
+	clean := types.CleanTypeName(typeName)
+	clean = strings.Join(strings.Fields(clean), " ")
+	switch clean {
+	case "uint":
+		return "uint256"
+	case "int":
+		return "int256"
+	case "byte":
+		return "bytes1"
+	case "address payable":
+		return "address"
+	default:
+		return clean
 	}
 }
 
-// isContract checks if a name refers to a known contract (not library)
-func (cgb *CallGraphBuilder) isContract(name string) bool {
-	c := cgb.db.GetContractByName(name)
-	if c == nil {
-		return false
+func (cgb *CallGraphBuilder) addCallToCurrent(targetName, targetContractName string, target resolvedTarget, resolvedFunction string, callType types.CallType, line, col, byteOff, argCount int) {
+	call := &types.FunctionCall{
+		Target:           targetName,
+		ContractName:     targetContractName,
+		ResolvedFunction: resolvedFunction,
+		CallType:         callType,
+		TargetKind:       target.kind,
+		Line:             line,
+		Col:              col,
+		Byte:             byteOff,
+		Resolved:         target.resolved,
+		ArgCount:         argCount,
 	}
-	return c.Kind == types.ContractKindContract || c.Kind == types.ContractKindInterface || c.Kind == types.ContractKindAbstract
+	if target.contract != nil {
+		call.ResolvedContract = target.contract.Name
+		call.ResolvedContractID = target.contract.ID
+	}
+	if cgb.currentModifier != nil {
+		cgb.currentModifier.Calls = append(cgb.currentModifier.Calls, call)
+	} else if cgb.currentFunction != nil {
+		cgb.currentFunction.Calls = append(cgb.currentFunction.Calls, call)
+	}
 }
 
-// isLibrary checks if a name refers to a library
-func (cgb *CallGraphBuilder) isLibrary(name string) bool {
-	c := cgb.db.GetContractByName(name)
-	if c == nil {
-		return false
+func (cgb *CallGraphBuilder) currentCallerID() string {
+	if cgb.currentContract == nil || cgb.currentFile == nil {
+		return ""
 	}
-	return c.Kind == types.ContractKindLibrary
+	if cgb.currentModifier != nil {
+		return types.MakeModifierID(cgb.currentFile.Path, cgb.currentContract.Name, cgb.currentModifier.Name)
+	}
+	if cgb.currentFunction != nil {
+		return types.MakeFunctionID(cgb.currentFile.Path, cgb.currentContract.Name, functionKey(cgb.currentFunction))
+	}
+	return ""
+}
+
+func functionKey(fn *types.Function) string {
+	if fn == nil {
+		return ""
+	}
+	if fn.Selector != "" {
+		return fn.Selector
+	}
+	return fn.Name
+}
+
+func (cgb *CallGraphBuilder) contractFromType(typeInfo types.TypeInfo) *types.Contract {
+	if cgb == nil || cgb.db == nil {
+		return nil
+	}
+	if typeInfo.ContractID != "" {
+		return cgb.db.GetContractByID(typeInfo.ContractID)
+	}
+	if typeInfo.BaseName != "" && cgb.currentFile != nil {
+		contract, _ := cgb.db.ResolveContractNameExact(typeInfo.BaseName, cgb.currentFile.Path)
+		return contract
+	}
+	return nil
+}
+
+func (cgb *CallGraphBuilder) addTargetIdentityDiagnostic(contractName, functionName string, line int) {
+	if contractName == "" {
+		contractName = functionName
+	}
+	message := "explicit call target contract could not be resolved"
+	if len(cgb.db.FindContractsByName(contractName)) > 1 {
+		message = "explicit call target contract is ambiguous in source scope"
+	}
+	cgb.addIdentityDiagnostic(contractName, line, message)
+}
+
+func (cgb *CallGraphBuilder) addIdentityDiagnostic(symbol string, line int, message string) {
+	file := ""
+	if cgb.currentFile != nil {
+		file = cgb.currentFile.Path
+	}
+	cgb.db.AddDiagnostic(types.Diagnostic{
+		Code:       types.DiagnosticIdentity,
+		Severity:   types.DiagnosticWarning,
+		Phase:      "builder",
+		Message:    message,
+		File:       file,
+		Line:       line,
+		Symbol:     symbol,
+		Incomplete: true,
+	})
 }
 
 // builtinFunctions is the set of Solidity built-in functions to exclude from callgraph
@@ -1053,116 +1211,96 @@ func isBuiltinFunction(name string) bool {
 
 // analyzeModifiers analyzes the modifiers applied to a function
 func (cgb *CallGraphBuilder) analyzeModifiers(modifiers []*ast.ModifierInvocation) {
+	if cgb.currentContract == nil || cgb.currentFunction == nil {
+		return
+	}
 	for _, modInv := range modifiers {
 		if modInv.Name == "" {
 			continue
 		}
 
 		// Get line/column/byte-offset if available
-		line, _, col, _, byteOff, _ := spanFields(modInv)
+		span := cgb.locator.span(modInv)
+		line, col, byteOff := span.startLine, span.startCol, span.startByte
 
-		// Resolve the modifier in the contract's inheritance chain
-		resolvedContract, resolvedModifier, resolved := cgb.resolveModifier(modInv.Name, cgb.currentContract)
-
-		// Create the call target ID
-		target := modInv.Name
-		if resolved && resolvedContract != "" {
-			// Get the contract object to find source file
-			if targetContractObj := cgb.db.GetContractByName(resolvedContract); targetContractObj != nil {
-				target = types.MakeModifierID(targetContractObj.SourceFile, resolvedContract, resolvedModifier)
+		resolvedContract, resolvedModifier := cgb.resolveModifier(modInv.Name)
+		resolved := resolvedContract != nil && resolvedModifier != nil
+		if !resolved {
+			resolvedContract = cgb.baseConstructorContract(modInv.Name)
+			if resolvedContract == nil {
+				cgb.addIdentityDiagnostic(modInv.Name, line, "modifier target could not be resolved in the exact contract hierarchy")
 			}
 		}
 
-		// Create full "From" identifier with file path. Use SplitN/Join so a
-		// selector containing dots (e.g. setConfig(MyLib.Config)) is not truncated.
-		fromParts := strings.SplitN(cgb.currentFunction, ".", 2)
-		fromSelector := ""
-		if len(fromParts) == 2 {
-			fromSelector = fromParts[1]
+		// Create the call target ID
+		target := modInv.Name
+		if resolved {
+			target = types.MakeModifierID(resolvedContract.SourceFile, resolvedContract.Name, resolvedModifier.Name)
 		}
-		from := types.MakeFunctionID(cgb.currentFile, cgb.currentContract, fromSelector)
+
+		from := cgb.currentCallerID()
 
 		// Add edge to call graph
 		edge := &types.CallEdge{
-			From:             from,
-			To:               target,
-			CalledName:       modInv.Name,
-			Type:             types.CallTypeModifier,
-			Line:             line,
-			Col:              col,
-			Byte:             byteOff,
-			Resolved:         resolved,
-			ResolvedContract: resolvedContract,
-			ResolvedFunction: resolvedModifier,
-			TargetKind:       types.ContractKindContract, // Modifiers are part of contracts
+			From:       from,
+			To:         target,
+			CalledName: modInv.Name,
+			Type:       types.CallTypeModifier,
+			Line:       line,
+			Col:        col,
+			Byte:       byteOff,
+			Resolved:   resolved,
+			TargetKind: types.ContractKindContract,
+		}
+		if resolvedContract != nil {
+			edge.ResolvedContract = resolvedContract.Name
+			edge.ResolvedContractID = resolvedContract.ID
+		}
+		if resolvedModifier != nil {
+			edge.ResolvedFunction = resolvedModifier.Name
 		}
 
 		cgb.db.CallGraph.AddEdge(edge)
 
-		// Also add modifier call to the function object
-		cgb.addModifierCallToFunction(modInv.Name, resolvedContract, resolvedModifier, line, col, byteOff, resolved)
+		call := &types.FunctionCall{
+			Target:       modInv.Name,
+			ContractName: cgb.currentContract.Name,
+			CallType:     types.CallTypeModifier,
+			TargetKind:   types.ContractKindContract,
+			Line:         line,
+			Col:          col,
+			Byte:         byteOff,
+			Resolved:     resolved,
+		}
+		if resolvedContract != nil {
+			call.ResolvedContract = resolvedContract.Name
+			call.ResolvedContractID = resolvedContract.ID
+		}
+		if resolvedModifier != nil {
+			call.ResolvedFunction = resolvedModifier.Name
+		}
+		cgb.currentFunction.Calls = append(cgb.currentFunction.Calls, call)
 	}
 }
 
 // resolveModifier resolves a modifier in the contract's inheritance chain
-// Returns (resolvedContract, resolvedModifier, resolved)
-func (cgb *CallGraphBuilder) resolveModifier(modifierName, contractName string) (string, string, bool) {
-	// Get the target contract
-	targetContract := cgb.db.GetContractByName(contractName)
-	if targetContract == nil {
-		return contractName, modifierName, false
-	}
-
-	// Walk the linearization to find the modifier
-	// LinearizedBases is derived-first: [MostDerived, ..., MostBase]
-	// Iterate forward to find most-derived implementation first
-	for _, baseName := range targetContract.LinearizedBases {
-		baseContract := cgb.db.GetContractByName(baseName)
-		if baseContract != nil {
-			for _, mod := range baseContract.Modifiers {
-				if mod.Name == modifierName {
-					// Found the modifier
-					return baseContract.Name, mod.Name, true
-				}
+func (cgb *CallGraphBuilder) resolveModifier(modifierName string) (*types.Contract, *types.Modifier) {
+	for _, contract := range cgb.db.LinearizedContracts(cgb.currentContract) {
+		for _, modifier := range contract.Modifiers {
+			if modifier.Name == modifierName {
+				return contract, modifier
 			}
 		}
 	}
-
-	// Not found in linearized bases, return unresolved
-	return contractName, modifierName, false
+	return nil, nil
 }
 
-// addModifierCallToFunction adds a modifier call reference to the function object
-func (cgb *CallGraphBuilder) addModifierCallToFunction(modifierName, resolvedContract, resolvedModifier string, line, col, byteOff int, resolved bool) {
-	// Find the current function in the database
-	parts := strings.SplitN(cgb.currentFunction, ".", 2)
-	if len(parts) != 2 {
-		return
-	}
-
-	contractName := parts[0]
-	funcName := parts[1]
-
-	contract := cgb.db.GetContractByName(contractName)
-	if contract == nil {
-		return
-	}
-
-	for _, fn := range contract.Functions {
-		if fn.Name == funcName {
-			fn.Calls = append(fn.Calls, &types.FunctionCall{
-				Target:           modifierName,
-				ContractName:     contractName,
-				ResolvedContract: resolvedContract,
-				ResolvedFunction: resolvedModifier,
-				CallType:         types.CallTypeModifier,
-				TargetKind:       types.ContractKindContract,
-				Line:             line,
-				Col:              col,
-				Byte:             byteOff,
-				Resolved:         resolved,
-			})
-			break
+func (cgb *CallGraphBuilder) baseConstructorContract(name string) *types.Contract {
+	mro := cgb.db.LinearizedContracts(cgb.currentContract)
+	for i := 1; i < len(mro); i++ {
+		if mro[i].Name == name {
+			return mro[i]
 		}
 	}
+	return nil
 }

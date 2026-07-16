@@ -8,6 +8,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/th13vn/w3goaudit/pkg/engine"
 	"github.com/th13vn/w3goaudit/pkg/types"
@@ -17,6 +18,16 @@ import (
 type BundleOptions struct {
 	// HTML additionally emits overview.html + findings.html mirrors.
 	HTML bool
+	// Now supplies the one UTC timestamp shared by every generated artifact in
+	// this bundle. Nil uses time.Now.
+	Now func() time.Time
+}
+
+func bundleNow(opts BundleOptions) time.Time {
+	if opts.Now != nil {
+		return opts.Now().UTC()
+	}
+	return time.Now().UTC()
 }
 
 // WriteBundle renders a complete result folder for a scan:
@@ -27,7 +38,7 @@ type BundleOptions struct {
 //	├── overview.md        # metrics + in-scope contract index
 //	├── findings.md        # full findings
 //	├── results.sarif
-//	├── data/{manifest.json,findings.json,overview.json,database.json}
+//	├── data/{manifest.json,findings.json,overview.json,diagnostics.json,database.json,nav.json,explorer.json}
 //	└── contracts/<relative-source-path-without-ext>/<ContractName>/
 //	    ├── README.md          # per-contract landing (findings + detail)
 //	    ├── state-changes.md
@@ -38,11 +49,52 @@ type BundleOptions struct {
 // under data/ (reusable via --db). The contracts/ tree is regenerated wholesale
 // on every run so a re-scan is idempotent.
 func WriteBundle(dir string, db *types.Database, summary *SummaryReport, findings []*engine.Finding, tool ToolMeta, opts BundleOptions) error {
+	if db == nil {
+		return fmt.Errorf("writing report bundle: nil database")
+	}
+	if summary == nil {
+		return fmt.Errorf("writing report bundle: nil summary")
+	}
+	now := bundleNow(opts)
+	summary, diagnostics := prepareBundleSummary(db, summary, now)
+
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return fmt.Errorf("creating output folder %s: %w", dir, err)
 	}
+	if err := writeBundleReports(dir, db, summary, findings, tool); err != nil {
+		return err
+	}
+	contractRefs := buildContractRefs(summary, findings)
+	if err := writeBundleData(dir, db, summary, findings, contractRefs, diagnostics, tool, now, opts.HTML); err != nil {
+		return err
+	}
+	if err := writeBundleHTML(dir, db, summary, findings, opts.HTML); err != nil {
+		return err
+	}
+	if err := writeBundleContractFolders(dir, db, summary, findings, contractRefs); err != nil {
+		return err
+	}
 
-	// Top-level human reports.
+	return nil
+}
+
+func prepareBundleSummary(db *types.Database, summary *SummaryReport, now time.Time) (*SummaryReport, []types.Diagnostic) {
+	diagnostics := diagnosticSnapshot(db)
+	bundleSummary := *summary
+	bundleSummary.GeneratedAt = now
+	if db.ProjectRoot != "" || bundleSummary.ProjectRoot == "" {
+		bundleSummary.ProjectRoot = db.ProjectRoot
+	}
+	bundleSummary.ScanTarget = scanTarget(bundleSummary.ProjectRoot, db.ScanTarget)
+	bundleSummary.AnalysisComplete = analysisComplete(diagnostics, true)
+	bundleSummary.DiagnosticCounts = countDiagnostics(diagnostics)
+	if bundleSummary.Stats == nil {
+		bundleSummary.Stats = db.GetStats()
+	}
+	return &bundleSummary, diagnostics
+}
+
+func writeBundleReports(dir string, db *types.Database, summary *SummaryReport, findings []*engine.Finding, tool ToolMeta) error {
 	if err := writeFile(filepath.Join(dir, "README.md"), FormatFolderReadme(tool, summary, findings)); err != nil {
 		return err
 	}
@@ -55,98 +107,89 @@ func WriteBundle(dir string, db *types.Database, summary *SummaryReport, finding
 	if err := writeFile(filepath.Join(dir, "findings.md"), FormatFindingsAsMarkdown(findings, db)); err != nil {
 		return err
 	}
-
-	// SARIF (always).
-	sarifStr, err := FormatFindingsAsSARIF(findings, tool, db.ProjectRoot)
+	sarif, err := FormatFindingsAsSARIF(findings, tool, summary.ProjectRoot)
 	if err != nil {
 		return fmt.Errorf("encoding SARIF: %w", err)
 	}
-	if err := writeFile(filepath.Join(dir, "results.sarif"), sarifStr); err != nil {
-		return err
-	}
+	return writeFile(filepath.Join(dir, "results.sarif"), sarif)
+}
 
-	// Pre-compute each in-scope contract's mirrored folder + finding tally so the
-	// manifest can index them before the folders themselves are written.
-	contractRefs := make([]ContractRef, len(summary.MainContracts))
-	for i, mc := range summary.MainContracts {
-		contractRefs[i] = ContractRef{
-			Name:     mc.Name,
-			Source:   filepath.ToSlash(relPathForReport(mc.SourceFile)),
-			Dir:      contractFolderRel(mc),
-			Findings: len(findingsForContract(findings, mc)),
+func buildContractRefs(summary *SummaryReport, findings []*engine.Finding) []ContractRef {
+	refs := make([]ContractRef, len(summary.MainContracts))
+	for i, contract := range summary.MainContracts {
+		refs[i] = ContractRef{
+			Name:     contract.Name,
+			Source:   filepath.ToSlash(relPathForReport(summary.ProjectRoot, contract.SourceFile)),
+			Dir:      contractFolderRel(summary.ProjectRoot, contract),
+			Findings: len(findingsForContract(findings, contract)),
 		}
 	}
+	return refs
+}
 
-	// Machine-readable data/ (canonical DB + JSON report mirror + manifest index).
-	// Remove any legacy corpus/ folder from an older layout so re-scans migrate.
+func writeBundleData(dir string, db *types.Database, summary *SummaryReport, findings []*engine.Finding, refs []ContractRef, diagnostics []types.Diagnostic, tool ToolMeta, now time.Time, html bool) error {
+	// Remove the pre-v0.4 location so re-scans migrate to the canonical data/ tree.
 	_ = os.RemoveAll(filepath.Join(dir, "corpus"))
-	data := filepath.Join(dir, "data")
-	if err := os.MkdirAll(data, 0755); err != nil {
+	dataDir := filepath.Join(dir, "data")
+	if err := os.MkdirAll(dataDir, 0755); err != nil {
 		return fmt.Errorf("creating data folder: %w", err)
 	}
-	if dbJSON, err := json.MarshalIndent(db, "", "  "); err != nil {
-		return fmt.Errorf("encoding database JSON: %w", err)
-	} else if err := writeFile(filepath.Join(data, "database.json"), string(dbJSON)); err != nil {
+	databaseForOutput := *db
+	databaseForOutput.Diagnostics = diagnostics
+	if err := writeJSONFile(filepath.Join(dataDir, "database.json"), &databaseForOutput, "database"); err != nil {
 		return err
 	}
-	if ovJSON, err := json.MarshalIndent(BuildOverviewJSON(tool, summary, summary.Stats), "", "  "); err != nil {
-		return fmt.Errorf("encoding overview JSON: %w", err)
-	} else if err := writeFile(filepath.Join(data, "overview.json"), string(ovJSON)); err != nil {
+	if err := writeJSONFile(filepath.Join(dataDir, "overview.json"), BuildOverviewJSONAt(now, tool, summary, summary.Stats), "overview"); err != nil {
 		return err
 	}
-	if fdJSON, err := json.MarshalIndent(BuildFindingsJSON(tool, findings), "", "  "); err != nil {
-		return fmt.Errorf("encoding findings JSON: %w", err)
-	} else if err := writeFile(filepath.Join(data, "findings.json"), string(fdJSON)); err != nil {
+	if err := writeJSONFile(filepath.Join(dataDir, "findings.json"), BuildFindingsJSONAt(now, tool, findings), "findings"); err != nil {
 		return err
 	}
-	if mfJSON, err := json.MarshalIndent(BuildManifest(tool, summary, findings, contractRefs), "", "  "); err != nil {
-		return fmt.Errorf("encoding manifest JSON: %w", err)
-	} else if err := writeFile(filepath.Join(data, "manifest.json"), string(mfJSON)); err != nil {
+	if err := writeJSONFile(filepath.Join(dataDir, "diagnostics.json"), BuildDiagnosticsJSONAt(now, db), "diagnostics"); err != nil {
 		return err
 	}
-	// Extension navigation index.
-	if navJSON, err := json.MarshalIndent(BuildNavJSON(db), "", "  "); err != nil {
-		return fmt.Errorf("encoding nav JSON: %w", err)
-	} else if err := writeFile(filepath.Join(data, "nav.json"), string(navJSON)); err != nil {
+	if err := writeJSONFile(filepath.Join(dataDir, "manifest.json"), BuildManifestAt(now, tool, summary, findings, refs, db, html), "manifest"); err != nil {
 		return err
 	}
-	// Extension explorer model.
-	if expJSON, err := json.MarshalIndent(BuildExplorerJSON(db), "", "  "); err != nil {
-		return fmt.Errorf("encoding explorer JSON: %w", err)
-	} else if err := writeFile(filepath.Join(data, "explorer.json"), string(expJSON)); err != nil {
+	if err := writeJSONFile(filepath.Join(dataDir, "nav.json"), BuildNavJSON(db), "nav"); err != nil {
 		return err
 	}
+	return writeJSONFile(filepath.Join(dataDir, "explorer.json"), BuildExplorerJSON(db), "explorer")
+}
 
-	// Optional HTML mirror.
-	if opts.HTML {
-		if err := writeFile(filepath.Join(dir, "overview.html"), summary.ToHTML()); err != nil {
-			return err
-		}
-		if err := writeFile(filepath.Join(dir, "findings.html"), FormatFindingsAsHTML(findings, db)); err != nil {
-			return err
-		}
+func writeJSONFile(path string, value interface{}, context string) error {
+	encoded, err := json.MarshalIndent(value, "", "  ")
+	if err != nil {
+		return fmt.Errorf("encoding %s JSON: %w", context, err)
 	}
+	return writeFile(path, string(encoded))
+}
 
-	// Per-main-contract folders under contracts/, mirroring source paths. The
-	// whole tree is regenerated each run, so drop the previous one first.
+func writeBundleHTML(dir string, db *types.Database, summary *SummaryReport, findings []*engine.Finding, enabled bool) error {
+	if !enabled {
+		return nil
+	}
+	if err := writeFile(filepath.Join(dir, "overview.html"), summary.ToHTML()); err != nil {
+		return err
+	}
+	return writeFile(filepath.Join(dir, "findings.html"), FormatFindingsAsHTML(findings, db))
+}
+
+func writeBundleContractFolders(dir string, db *types.Database, summary *SummaryReport, findings []*engine.Finding, refs []ContractRef) error {
 	if err := os.RemoveAll(filepath.Join(dir, "contracts")); err != nil {
 		return fmt.Errorf("clearing contracts folder: %w", err)
 	}
-	for i, mc := range summary.MainContracts {
-		// Resolve the summary back to its database contract so we can attach the
-		// reachability-aware state matrix and per-function effects. When it can't
-		// be resolved we still emit the folder with the basic (effects-free) view.
-		var smb *stateMatrixBuilder
-		if c := db.GetContract(types.MakeContractID(mc.SourceFile, mc.Name)); c != nil {
-			smb = newStateMatrixBuilder(db, c)
+	for i, contract := range summary.MainContracts {
+		var matrix *stateMatrixBuilder
+		if resolved := db.GetContract(types.MakeContractID(contract.SourceFile, contract.Name)); resolved != nil {
+			matrix = newStateMatrixBuilder(db, resolved)
 		}
-		cdir := filepath.Join(dir, filepath.FromSlash(contractRefs[i].Dir))
-		rootPrefix := rootPrefixFor(contractRefs[i].Dir)
-		if err := writeContractFolder(cdir, db, mc, smb, findings, summary.GitInfo, db.ProjectRoot, rootPrefix); err != nil {
+		contractDir := filepath.Join(dir, filepath.FromSlash(refs[i].Dir))
+		rootPrefix := rootPrefixFor(refs[i].Dir)
+		if err := writeContractFolder(contractDir, db, contract, matrix, findings, summary.GitInfo, summary.ProjectRoot, rootPrefix); err != nil {
 			return err
 		}
 	}
-
 	return nil
 }
 

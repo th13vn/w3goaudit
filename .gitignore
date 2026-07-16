@@ -13,6 +13,7 @@
 /web/
 __pycache__/
 
-# Ephemeral default benchmark output (overwritten each run). Named runs
-# created with --out benchmarks/results/<name> are intentionally kept.
-benchmarks/results/latest/
+# Benchmark runs are generated host artifacts. Keep only the directory marker;
+# default and named runs must never be tracked.
+benchmarks/results/*
+!benchmarks/results/.gitkeep

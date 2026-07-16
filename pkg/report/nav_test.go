@@ -138,6 +138,134 @@ func TestBuildNavJSON_InterfaceImpl(t *testing.T) {
 	}
 }
 
+func TestInterfaceImplementationUsesExactInterfaceIdentity(t *testing.T) {
+	db := types.NewDatabase()
+	aIface := &types.Contract{
+		ID: "/a/I.sol#I", Name: "I", SourceFile: "/a/I.sol", Kind: types.ContractKindInterface,
+		LinearizedBases: []string{"I"}, LinearizedBaseIDs: []string{"/a/I.sol#I"},
+		Functions: []*types.Function{{Name: "ping", ContractName: "I", SourceFile: "/a/I.sol", Selector: "ping()"}},
+	}
+	zIface := &types.Contract{
+		ID: "/z/I.sol#I", Name: "I", SourceFile: "/z/I.sol", Kind: types.ContractKindInterface,
+		LinearizedBases: []string{"I"}, LinearizedBaseIDs: []string{"/z/I.sol#I"},
+		Functions: []*types.Function{{Name: "ping", ContractName: "I", SourceFile: "/z/I.sol", Selector: "ping()"}},
+	}
+	body := types.NewASTNode(types.KindDeclFunction)
+	impl := &types.Contract{
+		ID: "/z/C.sol#C", Name: "C", SourceFile: "/z/C.sol", Kind: types.ContractKindContract,
+		BaseContracts: []string{"I"}, LinearizedBases: []string{"C", "I"},
+		LinearizedBaseIDs: []string{"/z/C.sol#C", "/z/I.sol#I"},
+		Functions:         []*types.Function{{Name: "ping", ContractName: "C", SourceFile: "/z/C.sol", Selector: "ping()", AST: body}},
+	}
+	db.AddContract(aIface)
+	db.AddContract(zIface)
+	db.AddContract(impl)
+
+	var aMapped, zMapped bool
+	for _, mapping := range BuildNavJSON(db).InterfaceImpl {
+		if mapping.Interface == aIface.ID {
+			aMapped = true
+		}
+		if mapping.Interface == zIface.ID && mapping.Implementation == "/z/C.sol#C.ping()" {
+			zMapped = true
+		}
+	}
+	if aMapped || !zMapped {
+		t.Fatalf("interface mappings crossed duplicate identities: %#v", BuildNavJSON(db).InterfaceImpl)
+	}
+}
+
+func TestDuplicateNamesStayExactInReportArtifacts(t *testing.T) {
+	db := buildReportFixture(t, "../../test-data/core/identity-collision")
+	root, err := filepath.Abs("../../test-data/core/identity-collision")
+	if err != nil {
+		t.Fatal(err)
+	}
+	zFile := filepath.Join(root, "z", "Token.sol")
+	aFile := filepath.Join(root, "a", "Token.sol")
+	zRun := types.MakeFunctionID(zFile, "Token", "run()")
+	zDanger := types.MakeFunctionID(zFile, "Token", "danger()")
+
+	var found bool
+	for _, caller := range BuildNavJSON(db).Callers {
+		if caller.Caller != zRun {
+			continue
+		}
+		if caller.Callee == zDanger {
+			found = true
+		}
+		if strings.HasPrefix(caller.Callee, aFile+"#") {
+			t.Fatalf("z.Token.run caller edge crossed into a.Token: %#v", caller)
+		}
+	}
+	if !found {
+		t.Fatal("missing exact z.Token.run -> z.Token.danger navigation edge")
+	}
+
+	summary := NewGenerator(db).GenerateSummary()
+	var zSummary *ContractSummary
+	for _, mc := range summary.MainContracts {
+		if mc.SourceFile == zFile && mc.Name == "Token" {
+			zSummary = mc
+			break
+		}
+	}
+	if zSummary == nil {
+		t.Fatal("z.Token summary missing")
+	}
+
+	out := t.TempDir()
+	if err := WriteBundle(out, db, summary, nil, ToolMeta{Name: "w3goaudit", Version: "test"}, BundleOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	zDir := filepath.Join(out, filepath.FromSlash(contractFolderRel(db.ProjectRoot, zSummary)))
+	state, err := os.ReadFile(filepath.Join(zDir, "state-changes.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(state), "destroyed") || strings.Contains(string(state), "safeCount") {
+		t.Fatalf("z.Token state matrix crossed identities:\n%s", state)
+	}
+
+	workflowFiles, err := filepath.Glob(filepath.Join(zDir, "workflows", "*.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var workflows strings.Builder
+	for _, path := range workflowFiles {
+		b, readErr := os.ReadFile(path)
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		workflows.Write(b)
+	}
+	workflow := workflows.String()
+	if !strings.Contains(workflow, "danger") || !strings.Contains(workflow, "destroyed") || strings.Contains(workflow, "safeCount") || strings.Contains(workflow, aFile) {
+		t.Fatalf("z.Token workflow crossed identities:\n%s", workflow)
+	}
+}
+
+func TestNavKeepsFallbackAndReceiveIDsDistinct(t *testing.T) {
+	db := types.NewDatabase()
+	c := &types.Contract{
+		ID: "/C.sol#C", Name: "C", SourceFile: "/C.sol", Kind: types.ContractKindContract,
+		Functions: []*types.Function{
+			{Name: "fallback", ContractName: "C", SourceFile: "/C.sol", IsFallback: true},
+			{Name: "receive", ContractName: "C", SourceFile: "/C.sol", IsReceive: true},
+		},
+	}
+	db.AddContract(c)
+	ids := map[string]bool{}
+	for _, symbol := range BuildNavJSON(db).Symbols {
+		if symbol.Kind == "function" {
+			ids[symbol.ID] = true
+		}
+	}
+	if !ids["/C.sol#C.fallback"] || !ids["/C.sol#C.receive"] || len(ids) != 2 {
+		t.Fatalf("function IDs = %v", ids)
+	}
+}
+
 func TestWriteBundleEmitsNavAndExplorer(t *testing.T) {
 	db := navFixtureDB()
 	dir := t.TempDir()

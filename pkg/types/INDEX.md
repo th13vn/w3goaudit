@@ -13,6 +13,8 @@ Central database structure.
 ```go
 type Database struct {
     ProjectRoot   string
+    ScanTarget    string
+    Diagnostics   []Diagnostic
     SourceFiles   map[string]*SourceFile
     Contracts     map[string]*Contract
     MainContracts map[string]*MainContractEntry  // contractID → entry with funcs + linearization
@@ -22,13 +24,15 @@ type Database struct {
 }
 
 type MainContractEntry struct {
-    EntryFunctions  []string  // resolved entry function IDs
-    LinearizedBases []string  // C3 linearization (most derived first)
+    EntryFunctions    []string  // resolved entry function IDs
+    LinearizedBases   []string  // compatibility/display names, derived first
+    LinearizedBaseIDs []string  // exact file#Contract C3 identities
 }
 ```
 
 **Key Functions:**
 - `NewDatabase()` - Create empty database and instantiate `DataFlow` and `Semantics`
+- `NewDatabaseWithOptions(DatabaseOptions{Logger})` - Create a database with scan-local logging
 - `AddContract(contract)` - Add contract with auto-ID generation
 - `GetContract(id)` - Get by ID (format: `path#ContractName`)
 - `GetContractByID(id)` - Exact O(1) lookup by fully-qualified ID
@@ -37,15 +41,53 @@ type MainContractEntry struct {
   candidate in the same file, same directory, or one a relative import in
   `fromFile` resolves to, before falling back to lex-min. Used by inheritance and
   internal-call resolution so duplicate names pick the in-scope definition.
+- `ResolveContractNameExact(name, fromFile)` - Same source-scope search but
+  returns `(nil, false)` instead of choosing a lexicographic candidate when the
+  identity remains ambiguous.
+- `LinearizedContracts(contract)` - Returns exact contract objects in C3 order
+  from `LinearizedBaseIDs`; old schema-2.0.0 caches without IDs use exact self
+  plus source-scoped name fallback. The lookup is read-only and never appends
+  diagnostics while reports/navigation consume the database.
 - `FindContractsByName(name)` - Returns every contract sharing a name (explicit collision handling)
 - `UnresolvedBases()` - Sorted base-contract names referenced in inheritance but absent from the DB (unresolved imports); surfaced by the CLI as "⚠ Unresolved references"
 - `CalculateMainContracts()` - Identify deployable contracts
 - `GetStats()` - Database statistics
 - `LoadFromJSON(path)` - Load pre-built database from JSON file (for caching) and restore serialized AST parent pointers
+- `LoadFromJSONWithOptions(path, LoadOptions{Logger})` - Load a cache with scan-local logging retained for later database lookups
 - `GetFunctionSource(fn)` - Extract raw Solidity source lines for a function (see source.go)
 - `RestoreASTParents()` - Rebuild `ASTNode.Parent` links after JSON round-trips so `inside`, guard, and taint helpers behave the same with `--db`
+- `AddDiagnostic(diagnostic)` - Append a durable structured analysis-quality record
+- `NormalizeDiagnostics()` - Enrich legacy name-only MRO ambiguity before
+  reporting, deduplicate exact records, and sort by the stable serialized total order
+- `AnalysisComplete()` - False when any diagnostic records known incomplete analysis
+
+### diagnostic.go
+
+Durable analysis-quality diagnostics shared by reader, builder, cache loading,
+and later report/CLI surfaces. `Diagnostic` carries a stable code, severity,
+phase, message, optional file/line/import/symbol context, and an `Incomplete`
+flag. These are distinct from security findings: they explain what source or
+semantic coverage the analyzer could not establish.
+
+Stable codes include `import.unresolved`, `parse.skipped`, `parse.recovered`,
+`inheritance.base_unresolved`, `location.invalid`, and `identity.unresolved`.
+`SortDiagnostics` orders records by severity, code, file, line, import path,
+symbol, message, then deterministic tie-breakers. `Database.NormalizeDiagnostics`
+also removes records identical across every serialized field. Cache loading
+calls normalization after legacy field backfills, so ambiguous name-only MROs
+produce `identity.unresolved` before any read-only `LinearizedContracts` caller
+builds summaries, navigation, or reports.
+
+`Database.ScanTarget` persists the original source file/directory separately
+from `ProjectRoot`. Both it and `Diagnostics` are additive JSON fields, so old
+cache files load with an empty target and diagnostic collection.
 
 **Contract lookup hardening:**
+
+**Logging:** the database stores an unexported, non-serialized logger. Builder
+and cache-load option constructors inject it, so ambiguity/fallback diagnostics
+stay in the owning scan's log after construction or JSON load. Legacy
+constructors still use the deprecated package-global writer.
 
 Duplicate contract names are common (e.g., `/src/Token.sol#Token` AND
 `/test/mocks/Token.sol#Token`). The original `GetContractByName` returned
@@ -56,14 +98,24 @@ lex-min fully-qualified ID; ambiguities emit a verbose log. Prefer
 unambiguous. Use `FindContractsByName` when you need to handle the
 collision explicitly.
 
-When the caller has a *referring* file (the contract whose base or callee is
-being resolved), prefer `ResolveContractName(name, fromFile)`: it disambiguates
-collisions by scope — same file, then same directory, then a relative import in
-`fromFile` that resolves exactly to a candidate — and only falls back to lex-min
-when scope is unavailable. C3 linearization (`pkg/builder/inheritance.go`) and
-internal-call resolution (`pkg/engine`) use it so a project's real `Token` is not
-confused with a `test/mocks/Token`. It is a heuristic, not full import-scope
-resolution (remapped imports such as `@openzeppelin/...` are not resolved here).
+`ResolveContractName(name, fromFile)` remains a deterministic compatibility
+helper for callers that knowingly accept name-only fallback (same file,
+same-directory/relative-import hints, then lex-min). Identity-sensitive C3,
+call-graph, engine, report, navigation, workflow/state, and extract paths use
+exact objects, `ResolveContractNameExact`, `ResolvedContractID`, and
+`LinearizedBaseIDs` instead.
+
+Identity-sensitive code uses `ResolveContractNameExact` instead: it never turns
+an unresolved collision into a plausible but wrong contract. The builder emits
+`identity.unresolved` only when an AST/type/base identity genuinely cannot be
+mapped to one exact contract; dynamic/low-level external calls are expected to
+remain unresolved and do not produce this diagnostic.
+
+`ResolveContractNameExact` checks the caller's canonical
+`SourceFile.ResolvedImports` before directory proximity, so `../vendor/Token.sol`
+or a remapped dependency wins over an unrelated `src/Token.sol` beside the
+caller. Older caches without provenance reconstruct only relative raw imports,
+and otherwise remain ambiguous; exact resolution never uses directory proximity.
 
 **ID Formats:**
 - Contract ID: `absPath#ContractName`
@@ -83,9 +135,22 @@ func (db *Database) GetFunctionSourceByName(contractName, funcName string) (stri
 ```
 
 **Lookup chain:**
-1. Resolve `fn.ContractName` → `*Contract` → `contract.SourceFile`
+1. Use `fn.SourceFile` (recorded at build time) — unambiguous under name
+   collisions. Only fall back to resolving `fn.ContractName` → `*Contract` →
+   `contract.SourceFile` for databases built before `SourceFile` existed.
 2. Check `db.SourceFiles[path].Content` (in-memory, set during build)
 3. Fallback: `os.ReadFile(path)` (disk read for JSON-cached databases)
+
+> `Function.SourceFile` is the absolute path of the defining file, stamped by
+> the builder. Prefer it over name-based contract resolution for any per-function
+> file lookup. `DataFlowGraph.GetSourcesFor`/`GetDestinationsFor` call
+> `EnsureIndex()` so the adjacency maps are rebuilt after a `--db` round-trip
+> (they are unexported and lost during JSON serialization), mirroring `CallGraph`.
+
+When loading legacy caches where nested `Function.SourceFile` is absent,
+`LoadFromJSON` backfills it from the exact owning `Contract.SourceFile` object.
+It never re-resolves the contract by short name, so duplicate contract names
+remain separated.
 
 ### SourceFile (defined in database.go)
 Source file metadata.
@@ -98,6 +163,7 @@ type SourceFile struct {
     Checksum string  // SHA256 of content
     Contracts []string
     Imports   []string
+    ResolvedImports []string // canonical files actually selected by reader
     AST       interface{}   // NOT serialized (json:"-"); holds the Phase-1 *ast.SourceUnit
 }
 ```
@@ -132,7 +198,8 @@ type Contract struct {
     Structs           []*Struct
     Events            []*Event
     BaseContracts     []string
-    LinearizedBases   []string  // C3 linearization (derived-first order)
+    LinearizedBases   []string  // compatibility/display C3 names
+    LinearizedBaseIDs []string  // exact derived-first file#Contract IDs
     InheritanceWeight int
     StartLine, EndLine, StartCol, EndCol, StartByte, EndByte int  // see ast.go note above
 }
@@ -140,6 +207,12 @@ type Contract struct {
 
 **LinearizedBases Order:**
 - Most derived (current contract) first, most base contract last
+- `LinearizedBaseIDs` has the same order for every resolvable contract and is
+  canonical for identity-sensitive consumers. `LinearizedBases` remains for
+  schema-2.0.0 compatibility and human-readable output.
+- For legacy caches without exact IDs, `Database.LinearizedContracts` uses
+  strict source-scoped resolution. Ambiguous bases are omitted and record one
+  `identity.unresolved`; it never calls the lexicographic compatibility lookup.
 
 **Contract Kinds:**
 - `contract` - Regular deployable contract
@@ -166,23 +239,23 @@ type Function struct {
     Calls           []*FunctionCall
     StartLine       int
     EndLine         int
-    StartCol        int  // 1-based column of StartLine
-    EndCol          int  // 1-based column of EndLine
-    StartByte       int  // character offset into the source file
-    EndByte         int  // character offset into the source file
+    StartCol        int  // 1-based Unicode-code-point column of StartLine
+    EndCol          int  // 1-based Unicode-code-point column of EndLine
+    StartByte       int  // 0-based UTF-8 byte offset into the source file
+    EndByte         int  // 0-based UTF-8 byte offset into the source file
 }
 ```
 
 > **Precise locations (v0.4):** `StartCol`/`EndCol`/`StartByte`/`EndByte` are new
-> alongside the pre-existing `StartLine`/`EndLine`. Columns are 1-based;
-> byte offsets are character offsets (not UTF-8 byte offsets) into the
-> source file's `Content`. All four are zero for synthetic nodes that have
+> alongside the pre-existing `StartLine`/`EndLine`. Columns are 1-based
+> Unicode-code-point counts; byte offsets are 0-based UTF-8 offsets into the
+> source file's `Content`, with half-open `[start, end)` ranges. All four are zero for synthetic nodes that have
 > no source counterpart (e.g. the engine's synthetic `decl.contract` roots).
 > The same six fields (`StartLine/EndLine/StartCol/EndCol/StartByte/EndByte`)
 > also exist on `Modifier`, `Contract`, `StateVariable`, `Event`, `Struct`,
 > `Enum`, and `Parameter` (declared in `contract.go`/`function.go`) — not
 > repeated verbatim below. They are populated by the builder via
-> `pkg/builder/location.go`'s `spanFields`/`applySpan` helpers; see
+> `pkg/builder/location.go`'s cached `sourceLocator`; see
 > [`pkg/builder/INDEX.md`](../builder/INDEX.md#locationgo).
 
 > **Naming caveat:** these field names are inverted relative to common industry
@@ -195,12 +268,13 @@ type Function struct {
 - `IsEntrypoint()` - true for public/external functions that are not view/pure and not the constructor
 - `GetSelector(structDefs)` - Calculate canonical signature text (with struct→tuple resolution)
 - `GetSignature(structDefs)` - Generate the 4-byte hash
-- `IsAccessControlled(db)` - Detect **privileged** access control: auth modifiers, recursive internal auth checks, and caller-identity guards. Recognized role-style modifiers include owner/admin/operator/role/guardian/governance/manager/controller/minter/pauser variants. When a modifier name matches the auth pattern, the helper additionally validates the modifier's **body** — resolving the definition through the contract's linearized bases and requiring at least one auth-shaped signal (a guard, an `if`/ternary, or a `msg.sender`/`tx.origin` reference) before trusting the name. This catches the empty-decoy bypass (`modifier auth() { _; }`) while preserving compatibility with synthetic tests where no body is available (falls back to trusting the name when the definition can't be resolved). The internal-auth-call fallback recognizes verb+noun helper names — a guard verb (`check`/`require`/`verify`/`validate`/`enforce`) followed by an auth noun (`owner`/`auth`/`admin`/`role`/`sender`/`access`/`permission`), joined directly or by underscores — so both camelCase (`_checkOwner`) and snake_case (`_check_owner`) helpers match.
+- `IsAccessControlled(db)` - Detect **privileged** access control: auth modifiers, recursive internal auth checks, and caller-identity guards. Recognized role-style modifiers include owner/admin/operator/role/guardian/governance/manager/controller/minter/pauser variants. Modifier and recursive-callee lookup starts from the function's exact `SourceFile#ContractName` owner and walks `Database.LinearizedContracts`; duplicate short names cannot lend each other modifiers or auth helpers. When a modifier name matches the auth pattern, the helper additionally validates the modifier's **body** and requires at least one auth-shaped signal (a guard, an `if`/ternary, or a `msg.sender`/`tx.origin` reference) before trusting the name. This catches the empty-decoy bypass (`modifier auth() { _; }`) while preserving compatibility with synthetic tests where no body is available (falls back to trusting the name when the definition can't be resolved). The internal-auth-call fallback recognizes verb+noun helper names — a guard verb (`check`/`require`/`verify`/`validate`/`enforce`) followed by an auth noun (`owner`/`auth`/`admin`/`role`/`sender`/`access`/`permission`), joined directly or by underscores — so both camelCase (`_checkOwner`) and snake_case (`_check_owner`) helpers match.
   - **Caller-identity guard rule (storage-anchored):** a comparison of a caller identity (`msg.sender`/`tx.origin`/`_msgSender()`) counts as access control **only** when the other operand is a **contract-fixed authority** the caller cannot control — a state variable, a fixed getter (`owner()`, `getOwner()`), a role check (`hasRole(ROLE, msg.sender)`), a state mapping/struct, an immutable, a constant, `address(this)`, or a **hardcoded literal address** (`require(msg.sender == 0xAbC…)`). Comparing against a **function argument** (or an argument-derived local) is *self-authorization*, not a privileged gate, and does NOT count — e.g. `require(from == msg.sender)` where `from` is a parameter is permissionless. Provenance is read from the AST node's `RefKind` (`parameter`/`state_var`/`local_var`) and `TaintSources` (a local is caller-controlled only when tainted solely from `parameter`), with the function's parameter set as a backstop. `_msgSender()` (all forms, including custom calldata-decoding overrides) is accepted as a caller-identity source; an insecure custom `_msgSender()` is a separate concern for a WQL template, not this heuristic.
     - **Privileged access control vs. owner-of-item check:** these are distinct and must not be conflated. `msg.sender == owner()` / `hasRole(ROLE, msg.sender)` gate to a **contract-fixed principal** → access control. `ownerOf(tokenId) == msg.sender` only asserts *"you own the item you named"* — a getter the **caller indexes with a resource id of their own choosing** → **item-ownership self-scoping**, the NFT analogue of `require(from == msg.sender)`. It does NOT restrict *who* can call (anyone holding some token qualifies), so it is treated as caller-controlled (`getterIsResourceScoped`) and does **not** count toward `IsAccessControlled`. It belongs to `ComparesCallerIdentity` instead.
     - **Getter vs. type-cast operand:** the authority operand is unwrapped only for genuine *type casts* (`address(x)`, `payable(x)`, `uintN`/`bytesN`, …, via `isTypeCastName`). A single-argument call to a non-type callee is a **getter, not a cast** — `ownerOf(tokenId)` is kept intact (then classified as resource-scoped per above) rather than collapsed to its `tokenId` argument.
-    - **Forwarded caller identity (interprocedural):** when the recursive descent follows an internal call, parameters bound to a caller-identity argument at the call site (`_withdraw(msg.sender, …)`) are tracked (`forwardedCallerParams`) and treated as caller-identity sources inside the callee. A forwarded caller compared to a **contract-fixed authority** (`owner() == caller`) counts as access control; compared to a **caller-selected resource getter** (`ownerOf(tokenId) != caller`) it is self-scoping (see `ComparesCallerIdentity`), not access control. The descent resolves the callee by its **bare** name extracted from the stored selector (`resolveInternalCallee`/`calleeNameMatches`/`bareFuncName`); a raw `Name == "_withdraw(address,…)"` comparison silently never matched and left this path dead for resolved calls.
+    - **Forwarded caller identity (interprocedural):** when the recursive descent follows an internal call, parameters bound to a caller-identity argument at the call site (`_withdraw(msg.sender, …)`) are tracked (`forwardedCallerParams`) and treated as caller-identity sources inside the callee. A forwarded caller compared to a **contract-fixed authority** (`owner() == caller`) counts as access control; compared to a **caller-selected resource getter** (`ownerOf(tokenId) != caller`) it is self-scoping (see `ComparesCallerIdentity`), not access control. The descent matches the stored full selector exactly when built data provides one and uses a bare-name compatibility fallback only for legacy/synthetic functions without materialized selectors (`resolveInternalCallee`/`calleeNameMatches`/`bareFuncName`).
 - `ComparesCallerIdentity(db)` - Detect caller **self-scoping**: a caller identity compared (inside a guard/condition) against any operand — `require(from == msg.sender)`, `if (from != msg.sender) revert`, and **item-ownership** scopes like `ownerOf(tokenId) == msg.sender`. **Interprocedural:** it follows the same forwarded-caller-identity descent as `IsAccessControlled` (`resolveInternalCallee` + `forwardedCallerParams`), so an entry point that forwards `msg.sender` into a helper which checks `ownerOf(tokenId) != caller` is recognized. This is NOT privileged access control — it binds the action to the caller's own resource ("you can only act on your own behalf/asset"). Used by the `unCheckedSender` preset (arbitrary `transferFrom`, arbitrary-send-eth) that treats self-scoping as a valid mitigation. Keep distinct from `IsAccessControlled` so entry-point classification still treats self-scoped functions as permissionless.
+- `UniqueID(structDefs)` hashes the exact `MakeFunctionID(SourceFile, ContractName, selector)` identity; selector-less declarations fall back to their function name. Legacy/synthetic functions without `SourceFile` retain the old short-name-compatible behavior.
 
 ### ast.go
 AST node structure for queries.
@@ -217,10 +291,10 @@ type ASTNode struct {
     RefKind    string  // parameter|state_var|local_var (for taint)
     StartLine  int
     EndLine    int
-    StartCol   int  // 1-based column of StartLine
-    EndCol     int  // 1-based column of EndLine
-    StartByte  int  // character offset into the source file
-    EndByte    int  // character offset into the source file
+    StartCol   int  // 1-based Unicode-code-point column of StartLine
+    EndCol     int  // 1-based Unicode-code-point column of EndLine
+    StartByte  int  // 0-based UTF-8 byte offset into the source file
+    EndByte    int  // 0-based UTF-8 byte offset into the source file
 }
 ```
 
@@ -358,19 +432,20 @@ type FunctionCall struct {
     Target           string
     ContractName     string
     ResolvedContract string
+    ResolvedContractID string      // exact file#Contract identity
     ResolvedFunction string
     Signature        string       // 4-byte selector, when applicable
     CallType         CallType
     TargetKind       ContractKind
     Line             int
-    Col              int          // 1-based column of the call site (v0.4)
-    Byte             int          // character offset of the call site (v0.4)
+    Col              int          // 1-based Unicode-code-point column (v0.4)
+    Byte             int          // 0-based UTF-8 byte offset (v0.4)
     Resolved         bool
     ArgCount         int          // -1 means unknown (old JSON)
 }
 
-// CallEdge (callgraph.go) carries the same Col/Byte pair as FunctionCall,
-// sourced from the same call-site location.
+// CallEdge (callgraph.go) carries the same ResolvedContractID and Col/Byte
+// fields as FunctionCall, sourced from the same resolved target/call site.
 type CallGraph struct {
     Edges    []*CallEdge          // serialized
     outgoing map[string][]*CallEdge // caller -> callees (rebuilt via EnsureIndex)
@@ -381,6 +456,11 @@ type CallGraph struct {
 > `outgoing`/`incoming` are unexported and not serialized; after loading a
 > database from JSON, call `CallGraph.EnsureIndex()` before using
 > `GetCallees`/`GetCallers`.
+
+`ResolvedContract` remains the short display/compatibility name.
+`ResolvedContractID` is additive JSON (`resolvedContractId`) and is populated
+only when the resolver has one exact contract object. Older schema-2.0.0 cache
+files load with it empty and retain their existing name fields.
 
 **Call Types:**
 

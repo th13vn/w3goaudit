@@ -31,8 +31,8 @@ import (
 // e.g. src/vault/Vault.sol :: VulnerableVault ->
 //
 //	contracts/src/vault/Vault/VulnerableVault
-func contractFolderRel(mc *ContractSummary) string {
-	rel := relPathForReport(mc.SourceFile)
+func contractFolderRel(projectRoot string, mc *ContractSummary) string {
+	rel := relPathForReport(projectRoot, mc.SourceFile)
 	rel = strings.TrimSuffix(rel, filepath.Ext(rel))
 	return path.Join("contracts", filepath.ToSlash(rel), sanitizeName(mc.Name))
 }
@@ -88,12 +88,42 @@ func renderSeverityCounts(sb *strings.Builder, findings []*engine.Finding) {
 	sb.WriteString("\n")
 }
 
+// renderAnalysisStatus writes the durable analysis-completeness summary and a
+// link to the full structured diagnostics artifact.
+func renderAnalysisStatus(sb *strings.Builder, summary *SummaryReport) {
+	if summary == nil {
+		return
+	}
+	counts := summary.DiagnosticCounts
+	sb.WriteString("## Analysis Completeness\n\n")
+	if summaryAnalysisComplete(summary) {
+		fmt.Fprintf(sb, "**Analysis complete.** %d warning(s), %d error(s), %d informational diagnostic(s), %d unknown-severity diagnostic(s).\n\n",
+			counts.Warning, counts.Error, counts.Info, counts.Unknown)
+	} else {
+		fmt.Fprintf(sb, "**Analysis incomplete.** %d warning(s), %d error(s), %d informational diagnostic(s), %d unknown-severity diagnostic(s) may affect coverage.\n\n",
+			counts.Warning, counts.Error, counts.Info, counts.Unknown)
+	}
+	sb.WriteString("See [data/diagnostics.json](data/diagnostics.json) for the durable diagnostic records.\n\n")
+}
+
 // sevTitle title-cases a canonical severity label (CRITICAL -> Critical).
 func sevTitle(sev string) string {
 	if sev == "" {
 		return sev
 	}
 	return strings.ToUpper(sev[:1]) + strings.ToLower(sev[1:])
+}
+
+// mdCell escapes a value for use inside a Markdown table cell. A `|` in a
+// template-authored title (e.g. "A|B") would otherwise start a new column and
+// break the row; newlines would break the table entirely.
+func mdCell(s string) string {
+	s = strings.ReplaceAll(s, "\\", "\\\\")
+	s = strings.ReplaceAll(s, "|", "\\|")
+	s = strings.ReplaceAll(s, "\r\n", " ")
+	s = strings.ReplaceAll(s, "\n", " ")
+	s = strings.ReplaceAll(s, "\r", " ")
+	return s
 }
 
 // header writes the shared document header block (generated time, repo/branch).
@@ -128,6 +158,7 @@ func FormatFolderReadme(tool ToolMeta, summary *SummaryReport, findings []*engin
 	fmt.Fprintf(&sb, "**%d findings** — %d critical, %d high, %d medium, %d low, %d info.\n\n",
 		len(findings), c["CRITICAL"], c["HIGH"], c["MEDIUM"], c["LOW"], c["INFO"])
 	renderSeverityCounts(&sb, findings)
+	renderAnalysisStatus(&sb, summary)
 
 	sb.WriteString("## Contents\n\n")
 	sb.WriteString("| File | What's inside |\n")
@@ -137,7 +168,8 @@ func FormatFolderReadme(tool ToolMeta, summary *SummaryReport, findings []*engin
 	sb.WriteString("| [overview.md](overview.md) | Project metrics and the in-scope contract index |\n")
 	sb.WriteString("| [results.sarif](results.sarif) | SARIF 2.1.0 for CI / GitHub Code Scanning |\n")
 	sb.WriteString("| [contracts/](contracts/) | Per-contract detail (README, state-changes, workflows) mirroring source paths |\n")
-	sb.WriteString("| [data/](data/) | Machine-readable output (manifest, findings, overview, database) |\n")
+	sb.WriteString("| [data/diagnostics.json](data/diagnostics.json) | Analysis completeness and durable diagnostics |\n")
+	sb.WriteString("| [data/](data/) | Machine-readable output (manifest, findings, overview, diagnostics, database, navigation) |\n")
 	sb.WriteString("| run.log | Full scan log |\n")
 	sb.WriteString("\n")
 
@@ -210,7 +242,7 @@ func renderRulesHit(sb *strings.Builder, findings []*engine.Finding) {
 		if id == "" {
 			id = "—"
 		}
-		fmt.Fprintf(sb, "| %s | `%s` | %s | %d |\n", sevTitle(r.severity), id, r.title, r.count)
+		fmt.Fprintf(sb, "| %s | `%s` | %s | %d |\n", sevTitle(r.severity), id, mdCell(r.title), r.count)
 	}
 	sb.WriteString("\n")
 }
@@ -223,6 +255,7 @@ func FormatOverviewMarkdown(summary *SummaryReport, findings []*engine.Finding, 
 	sb.WriteString("# Project Overview\n\n")
 	writeDocHeader(&sb, summary)
 	renderProjectMetrics(&sb, summary)
+	renderAnalysisStatus(&sb, summary)
 
 	sb.WriteString("## Contracts\n\n")
 	if len(summary.MainContracts) == 0 {
@@ -233,14 +266,14 @@ func FormatOverviewMarkdown(summary *SummaryReport, findings []*engine.Finding, 
 	sb.WriteString("| Contract | Source | Version | Entry Pts | State Vars | Findings | Detail |\n")
 	sb.WriteString("|----------|--------|---------|-----------|------------|----------|--------|\n")
 	for _, mc := range summary.MainContracts {
-		src := relPathForReport(mc.SourceFile)
+		src := relPathForReport(summary.ProjectRoot, mc.SourceFile)
 		src = filepath.ToSlash(src)
 		version := mc.Version
 		if version == "" {
 			version = "—"
 		}
 		nf := len(findingsForContract(findings, mc))
-		link := contractFolderRel(mc) + "/README.md"
+		link := contractFolderRel(summary.ProjectRoot, mc) + "/README.md"
 		fmt.Fprintf(&sb, "| `%s` | `%s` | `%s` | %d | %d | %d | [detail](%s) |\n",
 			mc.Name, src, version, mc.EntryFunctionCount, mc.StateVariableCount, nf, link)
 	}
@@ -261,11 +294,17 @@ func FormatContractReadme(mc *ContractSummary, findings []*engine.Finding, gitIn
 	fmt.Fprintf(&sb, "# %s\n\n", mc.Name)
 
 	// File path — link to the repo when a git URL is available.
-	fileDisplay := relPathForReport(mc.SourceFile)
+	fileDisplay := relPathForReport(projectRoot, mc.SourceFile)
 	if gitInfo != nil && gitInfo.RemoteURL != "" && projectRoot != "" {
 		if relPath, err := filepath.Rel(projectRoot, mc.SourceFile); err == nil {
 			relPath = filepath.ToSlash(relPath)
-			gitURL := gitInfo.RemoteURL + "/blob/" + gitInfo.Branch + "/" + relPath
+			// Fall back to a sensible default ref when the branch is unknown, so
+			// the link isn't a broken `…/blob//path`.
+			ref := gitInfo.Branch
+			if ref == "" {
+				ref = "HEAD"
+			}
+			gitURL := gitInfo.RemoteURL + "/blob/" + ref + "/" + relPath
 			fileDisplay = fmt.Sprintf("[%s](%s)", relPath, gitURL)
 		}
 	}
@@ -302,7 +341,7 @@ func FormatContractReadme(mc *ContractSummary, findings []*engine.Finding, gitIn
 				title = f.TemplateID
 			}
 			fmt.Fprintf(&sb, "| %s | %s | `%s` | %d |\n",
-				sevTitle(normalizeSeverity(f.Severity)), title, fn, f.Location.Line)
+				sevTitle(normalizeSeverity(f.Severity)), mdCell(title), fn, f.Location.Line)
 		}
 		fmt.Fprintf(&sb, "\nSee [findings.md](%sfindings.md) for full detail.\n\n", rootPrefix)
 	}

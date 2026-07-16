@@ -2,30 +2,46 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 
 	"github.com/th13vn/w3goaudit/pkg/engine"
+	"github.com/th13vn/w3goaudit/pkg/logging"
 	"github.com/th13vn/w3goaudit/pkg/report"
 	"github.com/th13vn/w3goaudit/templates"
 )
 
-// loadScanTemplates loads the templates for a scan: an explicit --template path
-// (file or directory) when given, otherwise the official pack embedded in the
-// binary. Returns the templates and a short human-readable source description.
-func loadScanTemplates() ([]*engine.Template, string, error) {
-	opts := engine.TemplateLoadOptions{IgnoreInvalid: ignoreInvalidTemplates}
+type scanTemplateOptions struct {
+	TemplatePath           string
+	TemplateHomeDir        string
+	IgnoreInvalidTemplates bool
+	Logger                 *logging.Logger
+}
+
+type findingFilterOptions struct {
+	Severity    string
+	MinSeverity string
+	Include     string
+	Exclude     string
+}
+
+func loadScanTemplatesWithOptions(scanOpts scanTemplateOptions) ([]*engine.Template, string, error) {
+	opts := engine.TemplateLoadOptions{
+		IgnoreInvalid: scanOpts.IgnoreInvalidTemplates,
+		Logger:        scanOpts.Logger,
+	}
 
 	// Precedence: explicit --template > ~/.w3goaudit/templates (when populated)
 	// > the embedded official pack (always available offline fallback).
-	if templatePath == "" {
-		if templateHomeDir != "" {
-			tmpls, err := engine.LoadTemplatesWithOptions(templateHomeDir, opts)
+	if scanOpts.TemplatePath == "" {
+		if scanOpts.TemplateHomeDir != "" {
+			tmpls, err := engine.LoadTemplatesWithOptions(scanOpts.TemplateHomeDir, opts)
 			if err != nil {
-				return nil, "", fmt.Errorf("loading templates from %s: %w", templateHomeDir, err)
+				return nil, "", fmt.Errorf("loading templates from %s: %w", scanOpts.TemplateHomeDir, err)
 			}
-			return tmpls, "template home (" + templateHomeDir + ")", nil
+			return tmpls, "template home (" + scanOpts.TemplateHomeDir + ")", nil
 		}
 		tmpls, err := engine.LoadTemplatesFromFS(templates.Official, templates.OfficialDir, opts)
 		if err != nil {
@@ -34,30 +50,28 @@ func loadScanTemplates() ([]*engine.Template, string, error) {
 		return tmpls, "built-in official pack", nil
 	}
 
-	info, err := os.Stat(templatePath)
+	info, err := os.Stat(scanOpts.TemplatePath)
 	if err != nil {
 		return nil, "", fmt.Errorf("error loading template: %w", err)
 	}
 
 	if info.IsDir() {
-		tmpls, err := engine.LoadTemplatesWithOptions(templatePath, opts)
+		tmpls, err := engine.LoadTemplatesWithOptions(scanOpts.TemplatePath, opts)
 		if err != nil {
 			return nil, "", fmt.Errorf("error loading templates: %w", err)
 		}
-		return tmpls, templatePath, nil
+		return tmpls, scanOpts.TemplatePath, nil
 	}
 
-	tmpl, err := engine.LoadTemplate(templatePath)
+	tmpl, err := engine.LoadTemplate(scanOpts.TemplatePath)
 	if err != nil {
 		return nil, "", fmt.Errorf("error loading templates: %w", err)
 	}
-	return []*engine.Template{tmpl}, templatePath, nil
+	return []*engine.Template{tmpl}, scanOpts.TemplatePath, nil
 }
 
-// printTemplateList prints the rule inventory (id, severity, confidence, title),
-// sorted by severity then id, for the --list-templates flag.
-func printTemplateList(tmpls []*engine.Template, source string) {
-	fmt.Printf("Templates (%s): %d\n\n", source, len(tmpls))
+func printTemplateListTo(w io.Writer, tmpls []*engine.Template, source string) {
+	fmt.Fprintf(w, "Templates (%s): %d\n\n", source, len(tmpls))
 	sorted := make([]*engine.Template, len(tmpls))
 	copy(sorted, tmpls)
 	sortTemplates(sorted)
@@ -66,7 +80,7 @@ func printTemplateList(tmpls []*engine.Template, source string) {
 		if conf == "" {
 			conf = "-"
 		}
-		fmt.Printf("  %-9s %-7s %-28s %s\n",
+		fmt.Fprintf(w, "  %-9s %-7s %-28s %s\n",
 			strings.ToUpper(t.Meta.Severity), conf, t.Meta.ID, t.Meta.Title)
 	}
 }
@@ -93,12 +107,21 @@ func sortTemplates(tmpls []*engine.Template) {
 // (filepath.Match syntax); a finding must match at least one include (if any)
 // and no exclude.
 func filterFindings(findings []*engine.Finding) ([]*engine.Finding, error) {
-	includes := splitGlobs(includeTemplates)
-	excludes := splitGlobs(excludeTemplates)
+	return filterFindingsWithOptions(findings, findingFilterOptions{
+		Severity:    severityList,
+		MinSeverity: minSeverity,
+		Include:     includeTemplates,
+		Exclude:     excludeTemplates,
+	})
+}
+
+func filterFindingsWithOptions(findings []*engine.Finding, opts findingFilterOptions) ([]*engine.Finding, error) {
+	includes := splitGlobs(opts.Include)
+	excludes := splitGlobs(opts.Exclude)
 
 	// Build the exact-severity set (lowercased) for --severity.
 	sevSet := make(map[string]bool)
-	for _, s := range splitGlobs(severityList) {
+	for _, s := range splitGlobs(opts.Severity) {
 		sevSet[strings.ToLower(s)] = true
 	}
 
@@ -107,7 +130,7 @@ func filterFindings(findings []*engine.Finding) ([]*engine.Finding, error) {
 		if len(sevSet) > 0 && !sevSet[strings.ToLower(f.Severity)] {
 			continue
 		}
-		if minSeverity != "" && !report.SeverityAtLeast(f.Severity, minSeverity) {
+		if opts.MinSeverity != "" && !report.SeverityAtLeast(f.Severity, opts.MinSeverity) {
 			continue
 		}
 		if len(includes) > 0 {

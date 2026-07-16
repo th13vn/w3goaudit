@@ -4,6 +4,7 @@ import (
 	"time"
 
 	"github.com/th13vn/w3goaudit/pkg/engine"
+	"github.com/th13vn/w3goaudit/pkg/types"
 )
 
 // ManifestJSON is the machine-readable index of a result folder. A consumer
@@ -11,20 +12,27 @@ import (
 // scope, the finding tally, and the relative path of every other artifact —
 // without having to walk the tree.
 type ManifestJSON struct {
-	SchemaVersion string         `json:"schemaVersion"`
-	Tool          ToolMeta       `json:"tool"`
-	GeneratedAt   time.Time      `json:"generatedAt"`
-	Target        string         `json:"target,omitempty"`
-	Counts        FindingsCounts `json:"counts"`
-	Stats         ManifestStats  `json:"stats"`
-	Files         ManifestFiles  `json:"files"`
-	Contracts     []ContractRef  `json:"contracts"`
+	SchemaVersion    string           `json:"schemaVersion"`
+	Tool             ToolMeta         `json:"tool"`
+	GeneratedAt      time.Time        `json:"generatedAt"`
+	Target           string           `json:"target,omitempty"`
+	ProjectRoot      string           `json:"projectRoot,omitempty"`
+	ScanTarget       string           `json:"scanTarget,omitempty"`
+	AnalysisComplete bool             `json:"analysisComplete"`
+	DiagnosticCounts DiagnosticCounts `json:"diagnosticCounts"`
+	Counts           FindingsCounts   `json:"counts"`
+	Stats            ManifestStats    `json:"stats"`
+	Files            ManifestFiles    `json:"files"`
+	Contracts        []ContractRef    `json:"contracts"`
 }
 
 // ManifestStats is a compact project tally (the full stats live in overview.json).
 type ManifestStats struct {
 	Files         int `json:"files"`
 	Contracts     int `json:"contracts"`
+	Interfaces    int `json:"interfaces"`
+	Libraries     int `json:"libraries"`
+	Declarations  int `json:"declarations"`
 	Functions     int `json:"functions"`
 	MainContracts int `json:"mainContracts"`
 }
@@ -37,12 +45,17 @@ type ManifestFiles struct {
 	Overview string `json:"overview"`
 	Sarif    string `json:"sarif"`
 	Log      string `json:"log"`
-	Data     struct {
-		Findings string `json:"findings"`
-		Overview string `json:"overview"`
-		Database string `json:"database"`
-		Nav      string `json:"nav,omitempty"`
-		Explorer string `json:"explorer,omitempty"`
+	// OverviewHTML and FindingsHTML are present only when BundleOptions.HTML
+	// caused those optional artifacts to be emitted.
+	OverviewHTML string `json:"overviewHtml,omitempty"`
+	FindingsHTML string `json:"findingsHtml,omitempty"`
+	Data         struct {
+		Findings    string `json:"findings"`
+		Overview    string `json:"overview"`
+		Diagnostics string `json:"diagnostics"`
+		Database    string `json:"database"`
+		Nav         string `json:"nav,omitempty"`
+		Explorer    string `json:"explorer,omitempty"`
 	} `json:"data"`
 }
 
@@ -55,25 +68,65 @@ type ContractRef struct {
 	Findings int    `json:"findings"`
 }
 
-// BuildManifest assembles the manifest from the summary, findings, and the
-// pre-computed per-contract folder references.
+// BuildManifest assembles a compatibility manifest using the current UTC time.
+// Use BuildManifestAt with the database when exact scan scope, diagnostics,
+// declaration categories, and optional artifact indexing are required.
 func BuildManifest(tool ToolMeta, summary *SummaryReport, findings []*engine.Finding, contracts []ContractRef) *ManifestJSON {
-	fj := BuildFindingsJSON(tool, findings)
+	return BuildManifestAt(time.Now().UTC(), tool, summary, findings, contracts, nil, false)
+}
+
+// BuildManifestAt assembles the manifest from the summary, findings, database,
+// and pre-computed per-contract folder references at a caller-supplied time.
+func BuildManifestAt(now time.Time, tool ToolMeta, summary *SummaryReport, findings []*engine.Finding, contracts []ContractRef, db *types.Database, html bool) *ManifestJSON {
+	if contracts == nil {
+		contracts = []ContractRef{}
+	}
+	projectRoot, selectedTarget := "", ""
+	complete := false
+	var diagnosticCounts DiagnosticCounts
+	var stats *types.DatabaseStats
+	mainContracts := 0
+	if summary != nil {
+		projectRoot = summary.ProjectRoot
+		selectedTarget = scanTarget(projectRoot, summary.ScanTarget)
+		complete = summaryAnalysisComplete(summary)
+		diagnosticCounts = summary.DiagnosticCounts
+		stats = summary.Stats
+		mainContracts = len(summary.MainContracts)
+	}
+	if db != nil {
+		if db.ProjectRoot != "" || projectRoot == "" {
+			projectRoot = db.ProjectRoot
+		}
+		selectedTarget = scanTarget(projectRoot, db.ScanTarget)
+		diagnostics := diagnosticSnapshot(db)
+		complete = analysisComplete(diagnostics, true)
+		diagnosticCounts = countDiagnostics(diagnostics)
+		stats = db.GetStats()
+		mainContracts = len(db.MainContracts)
+	}
 
 	m := &ManifestJSON{
-		SchemaVersion: SchemaVersion,
-		Tool:          tool,
-		GeneratedAt:   time.Now().UTC(),
-		Target:        summary.ProjectRoot,
-		Counts:        fj.Counts,
-		Contracts:     contracts,
+		SchemaVersion:    SchemaVersion,
+		Tool:             tool,
+		GeneratedAt:      now.UTC(),
+		Target:           selectedTarget,
+		ProjectRoot:      projectRoot,
+		ScanTarget:       selectedTarget,
+		AnalysisComplete: complete,
+		DiagnosticCounts: diagnosticCounts,
+		Counts:           buildFindingsCounts(findings),
+		Contracts:        contracts,
 	}
-	if summary.Stats != nil {
+	if stats != nil {
 		m.Stats = ManifestStats{
-			Files:         summary.Stats.TotalFiles,
-			Contracts:     summary.Stats.TotalContracts + summary.Stats.TotalInterfaces + summary.Stats.TotalLibraries,
-			Functions:     summary.Stats.TotalFunctions,
-			MainContracts: len(summary.MainContracts),
+			Files:         stats.TotalFiles,
+			Contracts:     stats.TotalContracts,
+			Interfaces:    stats.TotalInterfaces,
+			Libraries:     stats.TotalLibraries,
+			Declarations:  stats.TotalContracts + stats.TotalInterfaces + stats.TotalLibraries,
+			Functions:     stats.TotalFunctions,
+			MainContracts: mainContracts,
 		}
 	}
 	m.Files.Readme = "README.md"
@@ -84,8 +137,13 @@ func BuildManifest(tool ToolMeta, summary *SummaryReport, findings []*engine.Fin
 	m.Files.Log = "run.log"
 	m.Files.Data.Findings = "data/findings.json"
 	m.Files.Data.Overview = "data/overview.json"
+	m.Files.Data.Diagnostics = "data/diagnostics.json"
 	m.Files.Data.Database = "data/database.json"
 	m.Files.Data.Nav = "data/nav.json"
 	m.Files.Data.Explorer = "data/explorer.json"
+	if html {
+		m.Files.OverviewHTML = "overview.html"
+		m.Files.FindingsHTML = "findings.html"
+	}
 	return m
 }

@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 
 	"github.com/spf13/cobra"
+	"github.com/th13vn/w3goaudit/pkg/home"
 	"github.com/th13vn/w3goaudit/pkg/types"
 )
 
@@ -26,29 +27,40 @@ Examples:
 }
 
 var (
-	buildOutputPath string
-	buildVerbose    string
-	buildDbPath     string
+	buildOutputPath    string
+	buildVerbose       string
+	buildDbPath        string
+	buildStrictImports bool
 )
 
 func init() {
 	buildCmd.Flags().StringVarP(&buildOutputPath, "output", "o", "", "Output JSON file path (required)")
 	buildCmd.Flags().StringVar(&buildVerbose, "verbose", "", "Enable verbose logging (optional: path to log file)")
+	// A string flag normally consumes the next token. Mark the no-value form as
+	// "true" so `w3goaudit build SRC -o db.json --verbose` does not swallow
+	// `-o` as the log path; `--verbose=/path/to/log` remains supported.
+	buildCmd.Flags().Lookup("verbose").NoOptDefVal = "true"
 	buildCmd.Flags().StringVar(&buildDbPath, "db", "", "Load existing database instead of rebuilding")
+	buildCmd.Flags().BoolVar(&buildStrictImports, "strict-imports", false, "Fail when any Solidity import cannot be resolved")
 	buildCmd.MarkFlagRequired("output")
 }
 
 func runBuild(cmd *cobra.Command, args []string) error {
 	isVerbose := cmd.Flags().Changed("verbose")
-	if isVerbose {
-		verbosePath := buildVerbose
-		if verbosePath == "" {
-			verbosePath = "true"
+	logger, closeLog, err := setupBuildLogger(isVerbose, buildVerbose, os.Stdout, os.Stderr)
+	if err != nil {
+		return fmt.Errorf("error setting up verbose logging: %w", err)
+	}
+	defer func() { _ = closeLog() }()
+
+	strict := buildStrictImports
+	if !cmd.Flags().Changed("strict-imports") {
+		cfg, cfgErr := home.Load()
+		if cfgErr != nil {
+			fmt.Fprintf(os.Stderr, "warning: %v\n", cfgErr)
+		} else if cfg != nil {
+			strict = cfg.Scan.StrictImports
 		}
-		if err := setupVerboseLogging(verbosePath); err != nil {
-			return fmt.Errorf("error setting up verbose logging: %w", err)
-		}
-		defer closeVerboseFile()
 	}
 
 	inputPath := args[0]
@@ -60,17 +72,30 @@ func runBuild(cmd *cobra.Command, args []string) error {
 		if isVerbose {
 			fmt.Printf("Loading existing database from %s\n", buildDbPath)
 		}
-		var err error
-		db, err = types.LoadFromJSON(buildDbPath)
+		db, err = loadOrBuildDatabaseWithOptions(databaseLoadOptions{
+			InputPath: inputPath,
+			DBPath:    buildDbPath,
+			Logger:    logger,
+			Stdout:    os.Stdout,
+			Stderr:    os.Stderr,
+		})
 		if err != nil {
 			return fmt.Errorf("error loading database: %w", err)
 		}
 	} else {
-		var err error
-		db, err = buildDatabase(inputPath, isVerbose)
+		db, err = buildDatabaseWithOptions(databaseLoadOptions{
+			InputPath: inputPath,
+			Logger:    logger,
+			Stdout:    os.Stdout,
+			Stderr:    os.Stderr,
+		})
 		if err != nil {
 			return err
 		}
+		emitImportDiagnostics(os.Stderr, db)
+	}
+	if err := enforceStrictImports(db, strict); err != nil {
+		return err
 	}
 
 	// Output database as JSON

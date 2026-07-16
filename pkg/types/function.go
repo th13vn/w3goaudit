@@ -48,6 +48,11 @@ type Function struct {
 	// ContractName is the contract this function belongs to
 	ContractName string `json:"contractName"`
 
+	// SourceFile is the absolute path of the file that defines this function.
+	// Recorded at build time so source lookups never have to re-resolve the
+	// owning contract by name (which is ambiguous under name collisions).
+	SourceFile string `json:"sourceFile,omitempty"`
+
 	// Visibility of the function
 	Visibility Visibility `json:"visibility"`
 
@@ -126,6 +131,10 @@ type FunctionCall struct {
 	// ResolvedContract is the actual contract where function is defined
 	ResolvedContract string `json:"resolvedContract,omitempty"`
 
+	// ResolvedContractID is the exact file#Contract identity. It is additive;
+	// ResolvedContract remains the compatibility/display name.
+	ResolvedContractID string `json:"resolvedContractId,omitempty"`
+
 	// ResolvedFunction is the actual function name (after resolution)
 	ResolvedFunction string `json:"resolvedFunction,omitempty"`
 
@@ -141,7 +150,8 @@ type FunctionCall struct {
 	// Line where the call occurs
 	Line int `json:"line,omitempty"`
 
-	// Col is the 1-based column of the call site; Byte is its character offset.
+	// Col is the 1-based Unicode-code-point column of the call site; Byte is its
+	// 0-based UTF-8 byte offset.
 	Col  int `json:"col,omitempty"`
 	Byte int `json:"byte,omitempty"`
 
@@ -354,9 +364,45 @@ func isValidIntSize(s string) bool {
 
 // UniqueID generates a unique ID for the function based on contract and selector
 func (f *Function) UniqueID(structDefs map[string]*Struct) string {
-	data := fmt.Sprintf("%s.%s", f.ContractName, f.GetSelector(structDefs))
+	selector := f.GetSelector(structDefs)
+	if selector == "" {
+		selector = f.Name
+	}
+	data := fmt.Sprintf("%s.%s", f.ContractName, selector)
+	if f.SourceFile != "" {
+		data = MakeFunctionID(f.SourceFile, f.ContractName, selector)
+	}
 	hash := sha256.Sum256([]byte(data))
 	return hex.EncodeToString(hash[:8])
+}
+
+// ownerContract resolves f's declaring contract without collapsing duplicate
+// short names. SourceFile is present on newly built databases; the name-only
+// lookup is retained solely for old/synthetic schema-2.0.0 values.
+func (f *Function) ownerContract(db *Database) *Contract {
+	if f == nil || db == nil {
+		return nil
+	}
+	if f.SourceFile != "" {
+		if contract := db.GetContractByID(MakeContractID(f.SourceFile, f.ContractName)); contract != nil {
+			return contract
+		}
+	}
+	return db.GetContractByName(f.ContractName)
+}
+
+func functionIdentityKey(f *Function) string {
+	if f == nil {
+		return ""
+	}
+	selector := f.Selector
+	if selector == "" {
+		selector = f.Name
+	}
+	if f.SourceFile != "" {
+		return MakeFunctionID(f.SourceFile, f.ContractName, selector)
+	}
+	return f.ContractName + "." + selector
 }
 
 // modifierLooksProtective walks the function's contract and its linearized
@@ -368,25 +414,21 @@ func (f *Function) UniqueID(structDefs map[string]*Struct) string {
 // captured during build), the function returns true so callers fall back to
 // trusting the modifier's name. It returns false only when the modifier is
 // definitely a no-op decoy.
-func modifierLooksProtective(db *Database, contractName, modName string) bool {
+func modifierLooksProtective(db *Database, fn *Function, modName string) bool {
 	if db == nil {
 		return true
 	}
-	chain := []string{contractName}
-	if c := db.GetContractByName(contractName); c != nil {
-		chain = append(chain, c.LinearizedBases...)
+	owner := fn.ownerContract(db)
+	if owner == nil {
+		return true
 	}
 	seen := make(map[string]bool)
-	for _, cname := range chain {
-		if cname == "" || seen[cname] {
+	for _, contract := range db.LinearizedContracts(owner) {
+		if contract == nil || seen[contract.ID] {
 			continue
 		}
-		seen[cname] = true
-		c := db.GetContractByName(cname)
-		if c == nil {
-			continue
-		}
-		for _, mod := range c.Modifiers {
+		seen[contract.ID] = true
+		for _, mod := range contract.Modifiers {
 			if mod == nil || mod.Name != modName {
 				continue
 			}
@@ -403,25 +445,21 @@ func modifierLooksProtective(db *Database, contractName, modName string) bool {
 // and reports whether the modifier's body calls an auth-shaped helper
 // (e.g. _checkOwner, requireAuth). Relies on Modifier.Calls being populated by
 // the call-graph builder's modifier-body analysis.
-func modifierCallsAuthHelper(db *Database, contractName, modName string) bool {
+func modifierCallsAuthHelper(db *Database, fn *Function, modName string) bool {
 	if db == nil {
 		return false
 	}
-	chain := []string{contractName}
-	if c := db.GetContractByName(contractName); c != nil {
-		chain = append(chain, c.LinearizedBases...)
+	owner := fn.ownerContract(db)
+	if owner == nil {
+		return false
 	}
 	seen := make(map[string]bool)
-	for _, cname := range chain {
-		if cname == "" || seen[cname] {
+	for _, contract := range db.LinearizedContracts(owner) {
+		if contract == nil || seen[contract.ID] {
 			continue
 		}
-		seen[cname] = true
-		c := db.GetContractByName(cname)
-		if c == nil {
-			continue
-		}
-		for _, mod := range c.Modifiers {
+		seen[contract.ID] = true
+		for _, mod := range contract.Modifiers {
 			if mod == nil || mod.Name != modName {
 				continue
 			}
@@ -444,7 +482,7 @@ func modifierBodyHasAuthSignal(root *ASTNode) bool {
 		return false
 	}
 	found := false
-	root.WalkDescendants(func(n *ASTNode) bool {
+	inspect := func(n *ASTNode) bool {
 		if n == nil {
 			return true
 		}
@@ -463,7 +501,11 @@ func modifierBodyHasAuthSignal(root *ASTNode) bool {
 			}
 		}
 		return true
-	})
+	}
+	if !inspect(root) {
+		return true
+	}
+	root.WalkDescendants(inspect)
 	return found
 }
 
@@ -488,7 +530,7 @@ func (f *Function) IsAccessControlled(db *Database) bool {
 // top-level entry (no forwarding).
 func (f *Function) isAccessControlledRecursive(db *Database, visited map[string]bool, callerParams map[string]bool) bool {
 	// 0. Cycle detection
-	key := f.ContractName + "." + f.Name
+	key := functionIdentityKey(f)
 	if visited[key] {
 		return false
 	}
@@ -507,7 +549,7 @@ func (f *Function) isAccessControlledRecursive(db *Database, visited map[string]
 		// msg.sender / tx.origin reference) before trusting the name. When
 		// the definition cannot be resolved (synthetic tests, inherited from
 		// an out-of-scope base), fall back to trusting the name.
-		if db != nil && !modifierLooksProtective(db, f.ContractName, modName) {
+		if db != nil && !modifierLooksProtective(db, f, modName) {
 			continue
 		}
 		return true
@@ -519,7 +561,7 @@ func (f *Function) isAccessControlledRecursive(db *Database, visited map[string]
 	// walked into Modifier.Calls, detect that case.
 	if db != nil {
 		for _, modName := range f.Modifiers {
-			if modifierCallsAuthHelper(db, f.ContractName, modName) {
+			if modifierCallsAuthHelper(db, f, modName) {
 				return true
 			}
 		}
@@ -608,15 +650,10 @@ func (f *Function) resolveInternalCallee(db *Database, call *FunctionCall) *Func
 
 	for _, mainContractID := range mainIDs {
 		mainContract := db.GetContract(mainContractID)
-		if mainContract == nil || !contractHierarchyContains(mainContract, f.ContractName) {
+		if mainContract == nil || !contractHierarchyContains(db, mainContract, f) {
 			continue
 		}
-		// LinearizedBases is derived-first: [MostDerived, ..., MostBase].
-		for _, baseName := range mainContract.LinearizedBases {
-			baseContract := db.GetContractByName(baseName)
-			if baseContract == nil {
-				continue
-			}
+		for _, baseContract := range db.LinearizedContracts(mainContract) {
 			for _, baseFn := range baseContract.Functions {
 				if calleeNameMatches(baseFn, call, targetFuncName) {
 					return baseFn
@@ -626,8 +663,13 @@ func (f *Function) resolveInternalCallee(db *Database, call *FunctionCall) *Func
 	}
 
 	// Fallback: statically resolved contract.
-	if call.ResolvedContract != "" && call.ResolvedFunction != "" {
-		if targetContract := db.GetContractByName(call.ResolvedContract); targetContract != nil {
+	if call.ResolvedFunction != "" {
+		targetContract := db.GetContractByID(call.ResolvedContractID)
+		if targetContract == nil && call.ResolvedContract != "" {
+			// Compatibility for caches written before ResolvedContractID.
+			targetContract = db.ResolveContractName(call.ResolvedContract, f.SourceFile)
+		}
+		if targetContract != nil {
 			for _, targetFn := range targetContract.Functions {
 				if calleeNameMatches(targetFn, call, call.ResolvedFunction) {
 					return targetFn
@@ -666,7 +708,7 @@ func (f *Function) comparesCallerIdentityRecursive(db *Database, visited, caller
 	if f == nil {
 		return false
 	}
-	key := f.ContractName + "." + f.Name
+	key := functionIdentityKey(f)
 	if visited[key] {
 		return false
 	}
@@ -733,15 +775,22 @@ func hasComparisonOperand(n *ASTNode) bool {
 // deployment context of mainContract — either as the contract itself or
 // anywhere in its C3 linearization. Used to scope internal-call resolution to
 // the hierarchy that actually contains the caller.
-func contractHierarchyContains(mainContract *Contract, contractName string) bool {
-	if mainContract == nil || contractName == "" {
+func contractHierarchyContains(db *Database, mainContract *Contract, fn *Function) bool {
+	if db == nil || mainContract == nil || fn == nil || fn.ContractName == "" {
 		return false
 	}
-	if mainContract.Name == contractName {
-		return true
+	if fn.SourceFile != "" {
+		ownerID := MakeContractID(fn.SourceFile, fn.ContractName)
+		for _, contract := range db.LinearizedContracts(mainContract) {
+			if contract != nil && contract.ID == ownerID {
+				return true
+			}
+		}
+		return false
 	}
-	for _, base := range mainContract.LinearizedBases {
-		if base == contractName {
+	// Compatibility for old/synthetic functions without SourceFile.
+	for _, contract := range db.LinearizedContracts(mainContract) {
+		if contract != nil && contract.Name == fn.ContractName {
 			return true
 		}
 	}
@@ -771,6 +820,17 @@ func (f *Function) hasParameterNamed(name string) bool {
 // bare name taken from the resolved selector, then fall back to the call target.
 func calleeNameMatches(fn *Function, call *FunctionCall, resolved string) bool {
 	if fn == nil {
+		return false
+	}
+	if resolved != "" && strings.Contains(resolved, "(") {
+		if fn.Selector != "" {
+			return fn.Selector == resolved
+		}
+		// Compatibility for synthetic/legacy functions whose selector was never
+		// materialized. Newly built functions always take the exact branch above.
+		return fn.Name == bareFuncName(resolved)
+	}
+	if call != nil && call.ArgCount >= 0 && len(fn.Parameters) != call.ArgCount {
 		return false
 	}
 	if bare := bareFuncName(resolved); bare != "" && fn.Name == bare {

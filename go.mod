@@ -1,8 +1,9 @@
 module github.com/th13vn/w3goaudit
 
-go 1.24.2
+go 1.26.5
 
 require (
+	github.com/pelletier/go-toml/v2 v2.4.3
 	github.com/spf13/cobra v1.10.2
 	github.com/th13vn/solast-go v0.1.7
 	golang.org/x/crypto v0.46.0

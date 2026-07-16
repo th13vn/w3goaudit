@@ -45,9 +45,9 @@ type ASTNode struct {
 	StartLine int `json:"startLine,omitempty"`
 	EndLine   int `json:"endLine,omitempty"`
 
-	// StartCol/EndCol are 1-based columns; StartByte/EndByte are character
-	// offsets into the source file. Populated by the builder from solast-go's
-	// Loc/Range. Zero when the node is synthetic (no source counterpart).
+	// StartCol/EndCol are 1-based Unicode-code-point columns;
+	// StartByte/EndByte are 0-based UTF-8 byte offsets. Zero when the node is
+	// synthetic (no source counterpart).
 	StartCol  int `json:"startCol,omitempty"`
 	EndCol    int `json:"endCol,omitempty"`
 	StartByte int `json:"startByte,omitempty"`

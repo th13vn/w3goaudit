@@ -16,11 +16,15 @@ const SchemaVersion = "2.0.0"
 // Mirrors the markdown/HTML overview: project stats, contracts, inheritance,
 // call graphs — no findings.
 type OverviewJSON struct {
-	SchemaVersion string               `json:"schemaVersion"`
-	Tool          ToolMeta             `json:"tool"`
-	GeneratedAt   time.Time            `json:"generatedAt"`
-	Stats         *types.DatabaseStats `json:"stats"`
-	Overview      *SummaryReport       `json:"overview"`
+	SchemaVersion    string               `json:"schemaVersion"`
+	Tool             ToolMeta             `json:"tool"`
+	GeneratedAt      time.Time            `json:"generatedAt"`
+	ProjectRoot      string               `json:"projectRoot,omitempty"`
+	ScanTarget       string               `json:"scanTarget,omitempty"`
+	AnalysisComplete bool                 `json:"analysisComplete"`
+	DiagnosticCounts DiagnosticCounts     `json:"diagnosticCounts"`
+	Stats            *types.DatabaseStats `json:"stats"`
+	Overview         *SummaryReport       `json:"overview"`
 }
 
 // FindingsJSON is the schema-stable shape of the findings half of the report.
@@ -52,19 +56,48 @@ type FindingsCounts struct {
 	Unknown     int `json:"unknown,omitempty"`
 }
 
-// BuildOverviewJSON constructs the overview JSON document.
+// BuildOverviewJSON constructs the overview JSON document using the current
+// UTC time. Use BuildOverviewJSONAt when deterministic output is required.
 func BuildOverviewJSON(tool ToolMeta, summary *SummaryReport, stats *types.DatabaseStats) *OverviewJSON {
-	return &OverviewJSON{
-		SchemaVersion: SchemaVersion,
-		Tool:          tool,
-		GeneratedAt:   time.Now().UTC(),
-		Stats:         stats,
-		Overview:      summary,
-	}
+	return BuildOverviewJSONAt(time.Now().UTC(), tool, summary, stats)
 }
 
-// BuildFindingsJSON constructs the findings JSON document with computed counts.
-func BuildFindingsJSON(tool ToolMeta, findings []*engine.Finding) *FindingsJSON {
+// BuildOverviewJSONAt constructs the overview JSON document at a
+// caller-supplied timestamp.
+func BuildOverviewJSONAt(now time.Time, tool ToolMeta, summary *SummaryReport, stats *types.DatabaseStats) *OverviewJSON {
+	now = now.UTC()
+	var overview *SummaryReport
+	if summary != nil {
+		copySummary := *summary
+		copySummary.GeneratedAt = now
+		overview = &copySummary
+	}
+	doc := &OverviewJSON{
+		SchemaVersion: SchemaVersion,
+		Tool:          tool,
+		GeneratedAt:   now,
+		Stats:         stats,
+		Overview:      overview,
+	}
+	if overview != nil {
+		doc.ProjectRoot = overview.ProjectRoot
+		doc.ScanTarget = scanTarget(overview.ProjectRoot, overview.ScanTarget)
+		doc.AnalysisComplete = summaryAnalysisComplete(overview)
+		doc.DiagnosticCounts = overview.DiagnosticCounts
+	}
+	return doc
+}
+
+func summaryAnalysisComplete(summary *SummaryReport) bool {
+	if summary == nil {
+		return false
+	}
+	// Compatibility for callers that construct SummaryReport literals without
+	// the additive completeness fields: zero diagnostics means complete.
+	return summary.AnalysisComplete || diagnosticCountTotal(summary.DiagnosticCounts) == 0
+}
+
+func buildFindingsCounts(findings []*engine.Finding) FindingsCounts {
 	counts := FindingsCounts{
 		Total:       len(findings),
 		UniqueRules: countUniqueIssues(findings),
@@ -85,13 +118,26 @@ func BuildFindingsJSON(tool ToolMeta, findings []*engine.Finding) *FindingsJSON 
 			counts.Unknown += n
 		}
 	}
+	return counts
+}
+
+// BuildFindingsJSON constructs the findings JSON document using the current
+// UTC time. Use BuildFindingsJSONAt when deterministic output is required.
+func BuildFindingsJSON(tool ToolMeta, findings []*engine.Finding) *FindingsJSON {
+	return BuildFindingsJSONAt(time.Now().UTC(), tool, findings)
+}
+
+// BuildFindingsJSONAt constructs the findings JSON document with computed
+// counts at a caller-supplied timestamp.
+func BuildFindingsJSONAt(now time.Time, tool ToolMeta, findings []*engine.Finding) *FindingsJSON {
+	counts := buildFindingsCounts(findings)
 	if findings == nil {
 		findings = []*engine.Finding{}
 	}
 	return &FindingsJSON{
 		SchemaVersion: SchemaVersion,
 		Tool:          tool,
-		GeneratedAt:   time.Now().UTC(),
+		GeneratedAt:   now.UTC(),
 		Counts:        counts,
 		Findings:      findings,
 	}

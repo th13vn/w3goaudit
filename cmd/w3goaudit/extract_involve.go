@@ -62,14 +62,12 @@ Examples:
 		if err != nil {
 			return err
 		}
-		funcName := args[0]
-
-		// Collect every function ID matching the requested name. Same name
-		// across multiple contracts → multiple targets to chase from any entry.
-		targets := findFunctionIDsByName(db, funcName)
-		if len(targets) == 0 {
-			return fmt.Errorf("function %q not found in any contract", funcName)
+		fn, contract, err := resolveFunctionQuery(db, args[0], "")
+		if err != nil {
+			return err
 		}
+		funcName := fn.Name
+		targets := []string{exactFunctionID(contract, fn)}
 		targetSet := make(map[string]bool, len(targets))
 		for _, t := range targets {
 			targetSet[t] = true
@@ -121,33 +119,6 @@ func init() {
 	extractInvolveCmd.Flags().String("db", "", "Path to a pre-built database JSON (optional; or pass a source path)")
 	extractInvolveCmd.Flags().StringP("output", "o", "", "Output file path (default: stdout)")
 	addExtractFormatFlag(extractInvolveCmd)
-}
-
-// findFunctionIDsByName returns every fully-qualified function ID matching
-// the given simple function name. The ID format matches what CallGraph
-// edges store: `absPath#Contract.selector(args)` — the full selector
-// including the parameter tuple, not just the short name. Without this
-// match we'd build IDs like `Contract.foo` that never appear in the graph
-// and `involve` would report zero workflows for every query.
-func findFunctionIDsByName(db *types.Database, name string) []string {
-	var out []string
-	for _, contract := range db.Contracts {
-		for _, fn := range contract.Functions {
-			if fn.Name != name {
-				continue
-			}
-			// Selector carries `foo(uint256)` form; fall back to Name when
-			// the function has no selector (constructor / receive / fallback).
-			key := fn.Selector
-			if key == "" {
-				key = fn.Name
-			}
-			out = append(out, fmt.Sprintf("%s#%s.%s",
-				contract.SourceFile, contract.Name, key))
-		}
-	}
-	sort.Strings(out)
-	return out
 }
 
 // collectEntryFuncIDs returns every entry-point function ID in the database,

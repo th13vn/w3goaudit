@@ -19,12 +19,9 @@ func (r *SummaryReport) ToHTML() string {
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>W3GoAudit Report</title>
-    <!-- Pinned to an exact version (was floating ":latest", a supply-chain risk
-         for a report that embeds the reviewer's source). TODO(maintainer): add a
-         real Subresource-Integrity hash — compute with:
-         curl -s https://unpkg.com/vis-network@9.1.9/standalone/umd/vis-network.min.js | openssl dgst -sha384 -binary | openssl base64 -A
-         then set integrity="sha384-..." crossorigin="anonymous". -->
-    <script type="text/javascript" src="https://unpkg.com/vis-network@9.1.9/standalone/umd/vis-network.min.js"></script>
+    <!-- vis-network (v9.1.9) is embedded inline (see pkg/report/assets.go) so
+         the report is fully offline: no CDN request, no supply-chain exposure. -->
+    <script type="text/javascript">` + visNetworkJS + `</script>
     <style>
         :root {
             --bg-color: #1a1b26;

@@ -2,37 +2,236 @@ package builder
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/th13vn/solast-go/pkg/ast"
 	"github.com/th13vn/w3goaudit/pkg/types"
 )
 
-func TestSpanFieldsFromNode(t *testing.T) {
+func TestSourceLocatorConvertsByteRangesToUnicodeColumns(t *testing.T) {
+	content := "12345678→😀tail"
+	db := types.NewDatabase()
+	locator := newSourceLocator(&types.SourceFile{Path: "/Unicode.sol", Content: content}, db)
 	src := &ast.Identifier{
 		BaseNode: ast.BaseNode{
-			Loc:   &ast.Location{Start: ast.Position{Line: 5, Column: 8}, End: ast.Position{Line: 5, Column: 12}},
-			Range: &ast.Range{100, 104},
+			// The parser columns are byte-oriented and intentionally wrong here;
+			// sourceLocator must use Range + source content instead.
+			Loc:   &ast.Location{Start: ast.Position{Line: 1, Column: 8}, End: ast.Position{Line: 1, Column: 15}},
+			Range: &ast.Range{8, 15},
 		},
 	}
-	sl, el, sc, ec, sb, eb := spanFields(src)
-	if sl != 5 || el != 5 || sc != 8 || ec != 12 || sb != 100 || eb != 104 {
-		t.Fatalf("spanFields = (%d,%d,%d,%d,%d,%d), want (5,5,8,12,100,104)", sl, el, sc, ec, sb, eb)
+	span := locator.span(src)
+	if span.startLine != 1 || span.endLine != 1 || span.startCol != 9 || span.endCol != 11 || span.startByte != 8 || span.endByte != 15 {
+		t.Fatalf("span = %#v, want lines 1..1 cols 9..11 bytes 8..15", span)
 	}
 
 	dst := types.NewASTNode(types.KindExprIdentifier)
-	applySpan(dst, src)
-	if dst.StartCol != 8 || dst.EndCol != 12 || dst.StartByte != 100 || dst.EndByte != 104 {
-		t.Fatalf("applySpan cols/bytes = (%d,%d,%d,%d)", dst.StartCol, dst.EndCol, dst.StartByte, dst.EndByte)
+	locator.apply(dst, src)
+	if dst.StartCol != 9 || dst.EndCol != 11 || dst.StartByte != 8 || dst.EndByte != 15 {
+		t.Fatalf("apply cols/bytes = (%d,%d,%d,%d), want (9,11,8,15)", dst.StartCol, dst.EndCol, dst.StartByte, dst.EndByte)
 	}
 }
 
-func TestSpanFieldsNilSafe(t *testing.T) {
-	sl, _, sc, _, sb, _ := spanFields(&ast.Identifier{})
-	if sl != 0 || sc != 0 || sb != 0 {
-		t.Fatalf("nil-loc node should yield zeros, got line=%d col=%d byte=%d", sl, sc, sb)
+// TestColumnsAreOneBasedParserBacked drives the real parser (not a synthetic
+// ast.Location) to lock the 1-based column convention end-to-end, including the
+// first-column case that omitempty would otherwise hide.
+func TestColumnsAreOneBasedParserBacked(t *testing.T) {
+	// "contract C" — the contract keyword starts in the first source column.
+	src := "contract C {\n    uint256 x;\n}\n"
+	db := buildFromSource(t, src)
+	c := db.GetContractByName("C")
+	if c == nil {
+		t.Fatal("contract C not found")
 	}
-	applySpan(nil, nil) // must not panic
+	if c.StartCol != 1 {
+		t.Errorf("contract at first column should report StartCol 1 (1-based), got %d", c.StartCol)
+	}
+	if len(c.StateVariables) == 0 {
+		t.Fatal("expected a state variable")
+	}
+	sv := c.StateVariables[0]
+	// "    uint256 x;" — 'uint256' begins at 1-based column 5.
+	if sv.StartCol != 5 {
+		t.Errorf("state var StartCol = %d, want 5 (1-based)", sv.StartCol)
+	}
+}
+
+func TestSourceLocatorNilSafe(t *testing.T) {
+	var locator *sourceLocator
+	span := locator.span(&ast.Identifier{})
+	if span.startLine != 0 || span.startCol != 0 || span.startByte != 0 {
+		t.Fatalf("nil-loc node should yield zeros, got %#v", span)
+	}
+	locator.apply(nil, nil) // must not panic
+}
+
+func TestUnicodeColumnsUseCodePointsForDeclarationsASTAndCallEdges(t *testing.T) {
+	src := `contract C {
+    /* →😀 */ function run(address target, bytes memory data) external {
+        string memory marker = "→😀"; target.delegatecall(data);
+    }
+}`
+	db := buildFromSource(t, src)
+	fn := funcByName(t, db, "C", "run")
+	for _, diagnostic := range db.Diagnostics {
+		if diagnostic.Code == types.DiagnosticInvalidLocation {
+			t.Fatalf("valid Unicode source produced location diagnostic: %#v", diagnostic)
+		}
+	}
+
+	fnByte := strings.Index(src, "function run")
+	fnLineStart := strings.LastIndex(src[:fnByte], "\n") + 1
+	wantFnCol := utf8.RuneCountInString(src[fnLineStart:fnByte]) + 1
+	if fn.StartCol != wantFnCol || fn.StartByte != fnByte {
+		t.Fatalf("function start = col %d byte %d, want col %d byte %d", fn.StartCol, fn.StartByte, wantFnCol, fnByte)
+	}
+
+	calls := fn.AST.CollectDescendants(func(n *types.ASTNode) bool {
+		return n.Kind == types.KindCallLowlevelDelegate
+	})
+	if len(calls) != 1 {
+		t.Fatalf("delegatecall nodes = %d, want 1", len(calls))
+	}
+	callByte := strings.Index(src, "target.delegatecall")
+	callLineStart := strings.LastIndex(src[:callByte], "\n") + 1
+	wantCallCol := utf8.RuneCountInString(src[callLineStart:callByte]) + 1
+	if calls[0].StartCol != wantCallCol || calls[0].StartByte != callByte {
+		t.Fatalf("AST call start = col %d byte %d, want col %d byte %d", calls[0].StartCol, calls[0].StartByte, wantCallCol, callByte)
+	}
+
+	var callRef *types.FunctionCall
+	for _, call := range fn.Calls {
+		if call.Target == "delegatecall" {
+			callRef = call
+			break
+		}
+	}
+	if callRef == nil {
+		t.Fatal("delegatecall FunctionCall not found")
+	}
+	if callRef.Col != wantCallCol || callRef.Byte != callByte {
+		t.Fatalf("FunctionCall = col %d byte %d, want col %d byte %d", callRef.Col, callRef.Byte, wantCallCol, callByte)
+	}
+
+	var edge *types.CallEdge
+	for _, candidate := range db.CallGraph.Edges {
+		if candidate.CalledName == "delegatecall" {
+			edge = candidate
+			break
+		}
+	}
+	if edge == nil {
+		t.Fatal("delegatecall CallEdge not found")
+	}
+	if edge.Col != wantCallCol || edge.Byte != callByte {
+		t.Fatalf("CallEdge = col %d byte %d, want col %d byte %d", edge.Col, edge.Byte, wantCallCol, callByte)
+	}
+}
+
+func TestUnicodeColumnsOnEndingLineOfMultilineNode(t *testing.T) {
+	src := `contract C {
+    function run() external {
+        string memory marker =
+            "→😀";
+    }
+}`
+	db := buildFromSource(t, src)
+	fn := funcByName(t, db, "C", "run")
+	assignments := fn.AST.CollectDescendants(func(n *types.ASTNode) bool {
+		return n.Kind == types.KindStmtAssign && n.StartLine != n.EndLine
+	})
+	if len(assignments) != 1 {
+		t.Fatalf("multiline assignments = %d, want 1", len(assignments))
+	}
+	wantEndCol := utf8.RuneCountInString(`            "→😀";`) + 1
+	if assignments[0].EndCol != wantEndCol {
+		t.Fatalf("multiline assignment EndCol = %d, want %d", assignments[0].EndCol, wantEndCol)
+	}
+}
+
+func TestInvalidUnicodeBoundaryOmitsColumnsAndRecordsOneDiagnostic(t *testing.T) {
+	db := types.NewDatabase()
+	locator := newSourceLocator(&types.SourceFile{Path: "/Invalid.sol", Content: "a😀b"}, db)
+	invalidBoundary := &ast.Identifier{BaseNode: ast.BaseNode{
+		Loc:   &ast.Location{Start: ast.Position{Line: 1}, End: ast.Position{Line: 1}},
+		Range: &ast.Range{2, 3}, // both endpoints split the four-byte emoji
+	}}
+	invalidLine := &ast.Identifier{BaseNode: ast.BaseNode{
+		Loc:   &ast.Location{Start: ast.Position{Line: 2}, End: ast.Position{Line: 2}},
+		Range: &ast.Range{0, 1},
+	}}
+
+	first := locator.span(invalidBoundary)
+	second := locator.span(invalidLine)
+	if first.startCol != 0 || first.endCol != 0 || first.startByte != 2 || first.endByte != 3 {
+		t.Fatalf("invalid-boundary span = %#v, want raw bytes with omitted columns", first)
+	}
+	if second.startCol != 0 || second.endCol != 0 {
+		t.Fatalf("invalid-line span = %#v, want omitted columns", second)
+	}
+	db.NormalizeDiagnostics()
+	if len(db.Diagnostics) != 1 {
+		t.Fatalf("diagnostics = %#v, want exactly one", db.Diagnostics)
+	}
+	diagnostic := db.Diagnostics[0]
+	if diagnostic.Code != types.DiagnosticInvalidLocation || diagnostic.File != "/Invalid.sol" || !diagnostic.Incomplete {
+		t.Fatalf("diagnostic = %#v", diagnostic)
+	}
+}
+
+func TestSourceLocatorUsesSparseIndexForLongMinifiedLine(t *testing.T) {
+	const asciiBytes = 1 << 20
+	content := strings.Repeat("a", asciiBytes) + "→😀"
+	locator := newSourceLocator(&types.SourceFile{Path: "/Minified.sol", Content: content}, nil)
+	if len(locator.lines) != 1 {
+		t.Fatalf("indexed lines = %d, want 1", len(locator.lines))
+	}
+	if got := len(locator.lines[0].nonASCII); got != 2 {
+		t.Fatalf("non-ASCII index entries = %d, want 2 (one per multibyte rune, not one per byte)", got)
+	}
+
+	tests := []struct {
+		offset  int
+		wantCol int
+		wantOK  bool
+	}{
+		{offset: 0, wantCol: 1, wantOK: true},
+		{offset: asciiBytes / 2, wantCol: asciiBytes/2 + 1, wantOK: true},
+		{offset: asciiBytes, wantCol: asciiBytes + 1, wantOK: true},
+		{offset: asciiBytes + len("→"), wantCol: asciiBytes + 2, wantOK: true},
+		{offset: len(content), wantCol: asciiBytes + 3, wantOK: true},
+		{offset: asciiBytes + 1, wantOK: false},
+		{offset: asciiBytes + len("→") + 1, wantOK: false},
+	}
+	for _, tt := range tests {
+		gotCol, gotOK := locator.column(1, tt.offset)
+		if gotCol != tt.wantCol || gotOK != tt.wantOK {
+			t.Errorf("column(offset=%d) = (%d,%v), want (%d,%v)", tt.offset, gotCol, gotOK, tt.wantCol, tt.wantOK)
+		}
+	}
+}
+
+func BenchmarkSourceLocatorColumnLongMinifiedLine(b *testing.B) {
+	const asciiBytes = 1 << 20
+	content := strings.Repeat("a", asciiBytes) + "→😀"
+	locator := newSourceLocator(&types.SourceFile{Path: "/Minified.sol", Content: content}, nil)
+	offsets := [...]int{asciiBytes / 2, asciiBytes, asciiBytes + len("→"), len(content)}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	var total int
+	for i := 0; i < b.N; i++ {
+		col, ok := locator.column(1, offsets[i%len(offsets)])
+		if !ok {
+			b.Fatalf("valid indexed endpoint rejected at iteration %d", i)
+		}
+		total += col
+	}
+	if total == 0 {
+		b.Fatal("unexpected zero result")
+	}
 }
 
 func TestFunctionHasColumnAndByte(t *testing.T) {

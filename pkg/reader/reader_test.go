@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/th13vn/w3goaudit/pkg/types"
 )
 
 // TestReadDirectoryBuildDatabaseFixtures verifies ReadDirectory discovers the
@@ -161,6 +163,50 @@ func TestReadFileDeduplicates(t *testing.T) {
 
 	if n := len(r.GetAllSources()); n != 1 {
 		t.Errorf("expected 1 source after duplicate read, got %d", n)
+	}
+}
+
+func TestResolveImportsRecordsDurableDiagnostic(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "Main.sol")
+	mustWrite(t, path, `pragma solidity ^0.8.20;
+import "./Missing.sol";
+import "./Missing.sol";
+contract Main is Missing {}
+`)
+
+	r := New()
+	sources, err := r.Read(path)
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	canonicalPath := sources[0].Path
+	if err := r.ResolveImports(root); err != nil {
+		t.Fatalf("ResolveImports: %v", err)
+	}
+
+	diagnostics := r.Diagnostics()
+	if len(diagnostics) != 1 {
+		t.Fatalf("Diagnostics() = %#v, want one deduplicated unresolved import", diagnostics)
+	}
+	d := diagnostics[0]
+	if d.Code != types.DiagnosticUnresolvedImport || d.Severity != types.DiagnosticWarning || d.Phase != "reader" {
+		t.Fatalf("diagnostic identity = %#v", d)
+	}
+	if d.File != canonicalPath || d.ImportPath != "./Missing.sol" || !d.Incomplete || d.Message == "" {
+		t.Fatalf("diagnostic detail = %#v", d)
+	}
+
+	// Preserve the legacy compatibility view over the same durable records.
+	unresolved := r.UnresolvedImports()
+	if len(unresolved) != 1 || unresolved[0].FromFile != canonicalPath || unresolved[0].ImportPath != "./Missing.sol" {
+		t.Fatalf("UnresolvedImports() = %#v", unresolved)
+	}
+
+	// Both accessors return defensive values.
+	diagnostics[0].Message = "mutated"
+	if got := r.Diagnostics()[0].Message; got == "mutated" {
+		t.Fatal("Diagnostics returned mutable reader-owned state")
 	}
 }
 
@@ -409,6 +455,174 @@ func TestResolverMonorepoSubProject(t *testing.T) {
 	if gotReal != wantReal {
 		t.Errorf("monorepo sub-project resolved = %q, want %q", gotReal, wantReal)
 	}
+}
+
+func TestResolverUsesMostSpecificExistingRemapping(t *testing.T) {
+	root := t.TempDir()
+	want := filepath.Join(root, "vendor", "oz", "Token.sol")
+	if err := os.MkdirAll(filepath.Dir(want), 0o755); err != nil {
+		t.Fatalf("mkdir remapping target: %v", err)
+	}
+	mustWrite(t, want, "contract Token {}\n")
+
+	res := NewResolver(root)
+	res.Remappings = []Remapping{
+		{From: "@oz/", To: "missing/"},
+		{From: "@oz/contracts/", To: "vendor/oz/"},
+	}
+
+	got, err := res.Resolve("@oz/contracts/Token.sol", filepath.Join(root, "src", "A.sol"))
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if filepath.Clean(got) != filepath.Clean(want) {
+		t.Fatalf("Resolve = %q, want most-specific existing remapping %q", got, want)
+	}
+}
+
+func TestResolverFallsThroughMissingSpecificRemapping(t *testing.T) {
+	root := t.TempDir()
+	want := filepath.Join(root, "vendor", "contracts", "Token.sol")
+	if err := os.MkdirAll(filepath.Dir(want), 0o755); err != nil {
+		t.Fatalf("mkdir remapping target: %v", err)
+	}
+	mustWrite(t, want, "contract Token {}\n")
+
+	res := NewResolver(root)
+	res.Remappings = []Remapping{
+		{From: "@oz/", To: "vendor/"},
+		{From: "@oz/contracts/", To: "missing/"},
+	}
+
+	got, err := res.Resolve("@oz/contracts/Token.sol", filepath.Join(root, "src", "A.sol"))
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if filepath.Clean(got) != filepath.Clean(want) {
+		t.Fatalf("Resolve = %q, want less-specific existing remapping %q", got, want)
+	}
+}
+
+func TestResolverFallsThroughMissingRemappingToStandardLocations(t *testing.T) {
+	for _, dir := range []string{"node_modules", "lib", ""} {
+		name := dir
+		if name == "" {
+			name = "root"
+		}
+		t.Run(name, func(t *testing.T) {
+			root := t.TempDir()
+			want := filepath.Join(root, dir, "pkg", "Token.sol")
+			if err := os.MkdirAll(filepath.Dir(want), 0o755); err != nil {
+				t.Fatalf("mkdir fallback target: %v", err)
+			}
+			mustWrite(t, want, "contract Token {}\n")
+
+			res := NewResolver(root)
+			res.Remappings = []Remapping{{From: "pkg/", To: "missing/"}}
+
+			got, err := res.Resolve("pkg/Token.sol", filepath.Join(root, "src", "A.sol"))
+			if err != nil {
+				t.Fatalf("Resolve: %v", err)
+			}
+			if filepath.Clean(got) != filepath.Clean(want) {
+				t.Fatalf("Resolve = %q, want fallback %q", got, want)
+			}
+		})
+	}
+}
+
+func TestResolverPreservesDeclarationOrderForEqualPrefixes(t *testing.T) {
+	root := t.TempDir()
+	first := filepath.Join(root, "first", "Token.sol")
+	second := filepath.Join(root, "second", "Token.sol")
+	if err := os.MkdirAll(filepath.Dir(first), 0o755); err != nil {
+		t.Fatalf("mkdir first remapping target: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(second), 0o755); err != nil {
+		t.Fatalf("mkdir second remapping target: %v", err)
+	}
+	mustWrite(t, first, "contract First {}\n")
+	mustWrite(t, second, "contract Second {}\n")
+
+	res := NewResolver(root)
+	res.Remappings = []Remapping{
+		{From: "pkg/", To: "first/"},
+		{From: "pkg/", To: "second/"},
+	}
+
+	got, err := res.Resolve("pkg/Token.sol", filepath.Join(root, "src", "A.sol"))
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if filepath.Clean(got) != filepath.Clean(first) {
+		t.Fatalf("Resolve = %q, want first equal-prefix remapping %q", got, first)
+	}
+}
+
+func TestResolverFallsThroughNonRegularCandidates(t *testing.T) {
+	root := t.TempDir()
+	remappedDir := filepath.Join(root, "mapped", "Token.sol")
+	nodeModulesDir := filepath.Join(root, "node_modules", "pkg", "Token.sol")
+	if err := os.MkdirAll(remappedDir, 0o755); err != nil {
+		t.Fatalf("mkdir remapping candidate: %v", err)
+	}
+	if err := os.MkdirAll(nodeModulesDir, 0o755); err != nil {
+		t.Fatalf("mkdir node_modules candidate: %v", err)
+	}
+	want := filepath.Join(root, "lib", "pkg", "Token.sol")
+	if err := os.MkdirAll(filepath.Dir(want), 0o755); err != nil {
+		t.Fatalf("mkdir lib target: %v", err)
+	}
+	mustWrite(t, want, "contract Token {}\n")
+
+	res := NewResolver(root)
+	res.Remappings = []Remapping{{From: "pkg/", To: "mapped/"}}
+
+	got, err := res.Resolve("pkg/Token.sol", filepath.Join(root, "src", "A.sol"))
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if filepath.Clean(got) != filepath.Clean(want) {
+		t.Fatalf("Resolve = %q, want first regular-file candidate %q", got, want)
+	}
+}
+
+func TestResolverRejectsNonRegularLibAndRootCandidates(t *testing.T) {
+	t.Run("lib falls through to root", func(t *testing.T) {
+		root := t.TempDir()
+		if err := os.MkdirAll(filepath.Join(root, "lib", "pkg", "Token.sol"), 0o755); err != nil {
+			t.Fatalf("mkdir lib candidate: %v", err)
+		}
+		want := filepath.Join(root, "pkg", "Token.sol")
+		if err := os.MkdirAll(filepath.Dir(want), 0o755); err != nil {
+			t.Fatalf("mkdir root target: %v", err)
+		}
+		mustWrite(t, want, "contract Token {}\n")
+
+		got, err := NewResolver(root).Resolve("pkg/Token.sol", filepath.Join(root, "src", "A.sol"))
+		if err != nil {
+			t.Fatalf("Resolve: %v", err)
+		}
+		if filepath.Clean(got) != filepath.Clean(want) {
+			t.Fatalf("Resolve = %q, want root regular file %q", got, want)
+		}
+	})
+
+	t.Run("root remains unresolved", func(t *testing.T) {
+		root := t.TempDir()
+		if err := os.MkdirAll(filepath.Join(root, "pkg", "Token.sol"), 0o755); err != nil {
+			t.Fatalf("mkdir root candidate: %v", err)
+		}
+
+		const importPath = "pkg/Token.sol"
+		got, err := NewResolver(root).Resolve(importPath, filepath.Join(root, "src", "A.sol"))
+		if err != nil {
+			t.Fatalf("Resolve: %v", err)
+		}
+		if got != importPath {
+			t.Fatalf("Resolve = %q, want unresolved import %q", got, importPath)
+		}
+	})
 }
 
 // TestGitRemoteToWebURL verifies SSH/HTTPS remote normalization (pure function,

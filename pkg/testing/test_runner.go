@@ -16,19 +16,19 @@ import (
 
 // TestCase represents a single test case
 type TestCase struct {
-	Name           string           `json:"name"`
-	SolFile        string           `json:"sol_file"`
-	Template       string           `json:"template"`
-	ExpectedCount  int              `json:"expected_count"`
-	ExpectedIDs    []string         `json:"expected_ids,omitempty"`
-	ShouldNotMatch []string         `json:"should_not_match,omitempty"`
-	Assertions     []TestAssertion  `json:"assertions,omitempty"`
+	Name           string          `json:"name"`
+	SolFile        string          `json:"sol_file"`
+	Template       string          `json:"template"`
+	ExpectedCount  int             `json:"expected_count"`
+	ExpectedIDs    []string        `json:"expected_ids,omitempty"`
+	ShouldNotMatch []string        `json:"should_not_match,omitempty"`
+	Assertions     []TestAssertion `json:"assertions,omitempty"`
 }
 
 // TestAssertion represents a specific assertion to check
 type TestAssertion struct {
-	Type     string `json:"type"`     // "main_contract", "linearization", "entry_points"
-	Contract string `json:"contract,omitempty"`
+	Type     string      `json:"type"` // "main_contract", "linearization", "entry_points"
+	Contract string      `json:"contract,omitempty"`
 	Expected interface{} `json:"expected"`
 }
 
@@ -43,9 +43,9 @@ type TestResult struct {
 
 // TestRunner executes test cases
 type TestRunner struct {
-	testDataDir  string
-	templateDir  string
-	verbose      bool
+	testDataDir string
+	templateDir string
+	verbose     bool
 }
 
 // NewTestRunner creates a new test runner
@@ -138,7 +138,7 @@ func (r *TestRunner) assertDatabase(db *types.Database, result *TestResult) erro
 	// Check that contracts have linearization
 	for name, contract := range db.Contracts {
 		if len(contract.LinearizedBases) == 0 && len(contract.BaseContracts) > 0 {
-			result.Errors = append(result.Errors, 
+			result.Errors = append(result.Errors,
 				fmt.Sprintf("contract %s has bases but no linearization", name))
 		}
 	}

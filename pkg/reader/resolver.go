@@ -1,11 +1,11 @@
 package reader
 
 import (
-	"bufio"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
+
+	"github.com/th13vn/w3goaudit/pkg/logging"
 )
 
 // Remapping represents an import remapping
@@ -34,19 +34,31 @@ type Resolver struct {
 	ProjectRoot string
 	Remappings  []Remapping
 	Framework   Framework
+	logger      *logging.Logger
+	legacy      bool
 
 	// subCache memoizes per-sub-project remappings keyed by the sub-project root.
 	subCache map[string]*subProject
 }
 
-// NewResolver creates a new import resolver
+// NewResolver creates an import resolver using the legacy package-global
+// verbose configuration.
 func NewResolver(projectRoot string) *Resolver {
+	return newResolver(projectRoot, nil, true)
+}
+
+func newResolver(projectRoot string, logger *logging.Logger, legacy bool) *Resolver {
+	if logger == nil && !legacy {
+		logger = logging.Disabled()
+	}
 	framework := DetectFramework(projectRoot)
 	r := &Resolver{
 		ProjectRoot: projectRoot,
 		Framework:   framework,
 		Remappings:  make([]Remapping, 0),
 		subCache:    make(map[string]*subProject),
+		logger:      logger,
+		legacy:      legacy,
 	}
 
 	// Auto-load remappings for the top-level root.
@@ -55,10 +67,20 @@ func NewResolver(projectRoot string) *Resolver {
 	return r
 }
 
+func (r *Resolver) logf(format string, args ...any) {
+	if r != nil && r.legacy {
+		VerboseLog(format, args...)
+		return
+	}
+	if r != nil {
+		r.logger.Printf(format, args...)
+	}
+}
+
 // loadRemappings loads remappings for the top-level project root.
 func (r *Resolver) loadRemappings() {
-	r.Remappings = append(r.Remappings, loadRemappingsFor(r.ProjectRoot, r.Framework)...)
-	VerboseLog("Loaded %d remappings for root %s (framework: %v)", len(r.Remappings), r.ProjectRoot, r.Framework)
+	r.Remappings = append(r.Remappings, loadRemappingsFor(r.ProjectRoot, r.Framework, r.logf)...)
+	r.logf("Loaded %d remappings for root %s (framework: %v)", len(r.Remappings), r.ProjectRoot, r.Framework)
 }
 
 // loadRemappingsFor gathers all remappings that apply within a single project
@@ -66,85 +88,31 @@ func (r *Resolver) loadRemappings() {
 // framework-derived defaults (forge-std, lib/*, node_modules/@openzeppelin).
 // Targets are kept as written (often relative to root); Resolve joins them
 // against the owning root.
-func loadRemappingsFor(root string, framework Framework) []Remapping {
+func loadRemappingsFor(root string, framework Framework, logf func(string, ...any)) []Remapping {
 	var out []Remapping
 
 	// remappings.txt (Foundry style)
 	remappingsPath := filepath.Join(root, "remappings.txt")
 	if remappings, err := parseRemappingsFile(remappingsPath); err == nil {
-		VerboseLog("  Loaded %d remappings from %s", len(remappings), remappingsPath)
+		logf("  Loaded %d remappings from %s", len(remappings), remappingsPath)
 		out = append(out, remappings...)
+	} else if !os.IsNotExist(err) {
+		logf("  Could not parse remappings from %s: %v", remappingsPath, err)
 	}
 
 	// foundry.toml `remappings = [...]` array (used when auto_detect_remappings
 	// is off and there is no remappings.txt — common in modern Foundry repos).
 	foundryToml := filepath.Join(root, "foundry.toml")
 	if remappings, err := parseFoundryTomlRemappings(foundryToml); err == nil && len(remappings) > 0 {
-		VerboseLog("  Loaded %d remappings from %s", len(remappings), foundryToml)
+		logf("  Loaded %d remappings from %s", len(remappings), foundryToml)
 		out = append(out, remappings...)
+	} else if err != nil && !os.IsNotExist(err) {
+		logf("  Could not parse remappings from %s: %v", foundryToml, err)
 	}
 
 	// Framework-derived defaults.
 	out = append(out, defaultRemappings(root, framework)...)
 	return out
-}
-
-// parseRemappingsFile parses a remappings.txt file
-func parseRemappingsFile(path string) ([]Remapping, error) {
-	file, err := os.Open(path)
-	if err != nil {
-		return nil, err
-	}
-	defer file.Close()
-
-	var remappings []Remapping
-	scanner := bufio.NewScanner(file)
-
-	// Pattern: context:from=to or from=to
-	pattern := regexp.MustCompile(`^(?:([^:]*):)?([^=]+)=(.+)$`)
-
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-
-		matches := pattern.FindStringSubmatch(line)
-		if matches != nil {
-			remappings = append(remappings, Remapping{
-				Context: matches[1],
-				From:    matches[2],
-				To:      matches[3],
-			})
-		}
-	}
-
-	return remappings, scanner.Err()
-}
-
-// parseFoundryTomlRemappings extracts the `remappings = [...]` entries from a
-// foundry.toml file. It collects every remappings array in the file (across
-// profiles) and parses each quoted "from=to" entry. Returns an empty slice if
-// the file has no remappings; an error only if the file cannot be read.
-func parseFoundryTomlRemappings(path string) ([]Remapping, error) {
-	content, err := os.ReadFile(path)
-	if err != nil {
-		return nil, err
-	}
-
-	var remappings []Remapping
-	// Match `remappings = [ ... ]`, possibly spanning multiple lines.
-	arrayPattern := regexp.MustCompile(`(?s)remappings\s*=\s*\[(.*?)\]`)
-	entryPattern := regexp.MustCompile(`["']([^"']+)["']`)
-	for _, block := range arrayPattern.FindAllStringSubmatch(string(content), -1) {
-		for _, entry := range entryPattern.FindAllStringSubmatch(block[1], -1) {
-			line := strings.TrimSpace(entry[1])
-			if from, to, ok := strings.Cut(line, "="); ok {
-				remappings = append(remappings, Remapping{From: from, To: to})
-			}
-		}
-	}
-	return remappings, nil
 }
 
 // defaultRemappings returns framework-specific default remappings rooted at root.
@@ -198,21 +166,78 @@ func hasProjectConfig(dir string) bool {
 // returned. This is what makes monorepos work: a file in
 // packages/eip-3/src/Foo.sol resolves against packages/eip-3, not the git root.
 func (r *Resolver) findSubRoot(fromFile string) string {
-	dir := filepath.Dir(fromFile)
+	rootBoundary, err := canonicalBoundaryPath(r.ProjectRoot)
+	if err != nil {
+		return r.ProjectRoot
+	}
+	dir, err := filepath.Abs(filepath.Dir(fromFile))
+	if err != nil {
+		return r.ProjectRoot
+	}
+	dir = filepath.Clean(dir)
+	dirBoundary, err := canonicalBoundaryPath(dir)
+	if err != nil || !pathWithinRoot(rootBoundary, dirBoundary) {
+		return r.ProjectRoot
+	}
+
 	for {
+		if dirBoundary == rootBoundary {
+			return r.ProjectRoot
+		}
 		if hasProjectConfig(dir) {
 			return dir
 		}
-		if dir == r.ProjectRoot {
-			return r.ProjectRoot
-		}
 		parent := filepath.Dir(dir)
 		if parent == dir {
-			// Walked above the scan root without finding a config.
+			return r.ProjectRoot
+		}
+		parentBoundary, err := canonicalBoundaryPath(parent)
+		if err != nil || !pathWithinRoot(rootBoundary, parentBoundary) {
 			return r.ProjectRoot
 		}
 		dir = parent
+		dirBoundary = parentBoundary
 	}
+}
+
+// canonicalBoundaryPath resolves symlinks in the nearest existing ancestor and
+// then reattaches any missing suffix. This keeps containment comparisons stable
+// on systems where temporary paths such as /var resolve through /private/var.
+func canonicalBoundaryPath(path string) (string, error) {
+	absPath, err := filepath.Abs(path)
+	if err != nil {
+		return "", err
+	}
+	absPath = filepath.Clean(absPath)
+
+	current := absPath
+	var suffix []string
+	for {
+		resolved, resolveErr := filepath.EvalSymlinks(current)
+		if resolveErr == nil {
+			for i := len(suffix) - 1; i >= 0; i-- {
+				resolved = filepath.Join(resolved, suffix[i])
+			}
+			return filepath.Clean(resolved), nil
+		}
+		if !os.IsNotExist(resolveErr) {
+			return "", resolveErr
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			return absPath, nil
+		}
+		suffix = append(suffix, filepath.Base(current))
+		current = parent
+	}
+}
+
+func pathWithinRoot(root, candidate string) bool {
+	relative, err := filepath.Rel(root, candidate)
+	if err != nil || filepath.IsAbs(relative) {
+		return false
+	}
+	return relative == "." || (relative != ".." && !strings.HasPrefix(relative, ".."+string(os.PathSeparator)))
 }
 
 // subProjectFor returns the sub-project (root + remappings) that owns fromFile.
@@ -227,26 +252,26 @@ func (r *Resolver) subProjectFor(fromFile string) *subProject {
 	if sp, ok := r.subCache[root]; ok {
 		return sp
 	}
-	sp := &subProject{Root: root, Remappings: loadRemappingsFor(root, DetectFramework(root))}
-	VerboseLog("Discovered sub-project %s with %d remappings", root, len(sp.Remappings))
+	sp := &subProject{Root: root, Remappings: loadRemappingsFor(root, DetectFramework(root), r.logf)}
+	r.logf("Discovered sub-project %s with %d remappings", root, len(sp.Remappings))
 	r.subCache[root] = sp
 	return sp
 }
 
 // Resolve resolves an import path to an absolute file path
 func (r *Resolver) Resolve(importPath string, fromFile string) (string, error) {
-	VerboseLog("Resolving import: '%s' from file: %s", importPath, fromFile)
+	r.logf("Resolving import: '%s' from file: %s", importPath, fromFile)
 
 	// Handle relative imports (independent of any project root).
 	if strings.HasPrefix(importPath, "./") || strings.HasPrefix(importPath, "../") {
 		baseDir := filepath.Dir(fromFile)
 		resolved := filepath.Join(baseDir, importPath)
 		absPath, err := filepath.Abs(resolved)
-		VerboseLog("  → Relative import resolved to: %s", absPath)
+		r.logf("  → Relative import resolved to: %s", absPath)
 		if _, statErr := os.Stat(absPath); statErr == nil {
-			VerboseLog("  ✓ File exists")
+			r.logf("  ✓ File exists")
 		} else {
-			VerboseLog("  ✗ File NOT found")
+			r.logf("  ✗ File NOT found")
 		}
 		return absPath, err
 	}
@@ -254,53 +279,59 @@ func (r *Resolver) Resolve(importPath string, fromFile string) (string, error) {
 	// Resolve against the sub-project that owns fromFile so that per-package
 	// remappings and per-package lib/ directories are honored in monorepos.
 	sub := r.subProjectFor(fromFile)
-	VerboseLog("  Sub-project root: %s (%d remappings)", sub.Root, len(sub.Remappings))
+	r.logf("  Sub-project root: %s (%d remappings)", sub.Root, len(sub.Remappings))
 
-	// Try remappings (targets are relative to the sub-project root).
-	for i, remap := range sub.Remappings {
-		VerboseLog("  Trying remapping [%d]: '%s' → '%s'", i, remap.From, remap.To)
-		if strings.HasPrefix(importPath, remap.From) {
-			resolved := strings.Replace(importPath, remap.From, remap.To, 1)
-			if !filepath.IsAbs(resolved) {
-				resolved = filepath.Join(sub.Root, resolved)
-			}
-			absPath, err := filepath.Abs(resolved)
-			VerboseLog("  → Remapped to: %s", absPath)
-			if _, statErr := os.Stat(absPath); statErr == nil {
-				VerboseLog("  ✓ File exists - using this remapping")
-			} else {
-				VerboseLog("  ✗ File NOT found: %v", statErr)
-			}
-			return absPath, err
+	// Context specificity takes precedence over import-prefix specificity;
+	// declaration order breaks exact ties without mutating configured mappings.
+	matchingRemappings := applicableRemappings(sub.Remappings, sub.Root, fromFile, importPath)
+	for i, remap := range matchingRemappings {
+		r.logf("  Trying remapping [%d]: context '%s', '%s' → '%s'", i, remap.Context, remap.From, remap.To)
+		resolved := strings.Replace(importPath, remap.From, remap.To, 1)
+		if !filepath.IsAbs(resolved) {
+			resolved = filepath.Join(sub.Root, resolved)
+		}
+		absPath, err := filepath.Abs(resolved)
+		if err != nil {
+			r.logf("  ✗ Could not make remapped path absolute: %v", err)
+			continue
+		}
+		r.logf("  → Remapped to: %s", absPath)
+		if info, statErr := os.Stat(absPath); statErr == nil && info.Mode().IsRegular() {
+			r.logf("  ✓ Regular file exists - using this remapping")
+			return absPath, nil
+		} else if statErr != nil {
+			r.logf("  ✗ File NOT found: %v", statErr)
+		} else {
+			r.logf("  ✗ Candidate is not a regular file")
 		}
 	}
 
 	// Try node_modules
 	nodeModulesPath := filepath.Join(sub.Root, "node_modules", importPath)
-	VerboseLog("  Trying node_modules: %s", nodeModulesPath)
-	if _, err := os.Stat(nodeModulesPath); err == nil {
-		VerboseLog("  ✓ Found in node_modules")
+	r.logf("  Trying node_modules: %s", nodeModulesPath)
+	if info, err := os.Stat(nodeModulesPath); err == nil && info.Mode().IsRegular() {
+		r.logf("  ✓ Found in node_modules")
 		return filepath.Abs(nodeModulesPath)
 	}
 
 	// Try lib directory (Foundry)
 	libPath := filepath.Join(sub.Root, "lib", importPath)
-	VerboseLog("  Trying lib directory: %s", libPath)
-	if _, err := os.Stat(libPath); err == nil {
-		VerboseLog("  ✓ Found in lib")
+	r.logf("  Trying lib directory: %s", libPath)
+	if info, err := os.Stat(libPath); err == nil && info.Mode().IsRegular() {
+		r.logf("  ✓ Found in lib")
 		return filepath.Abs(libPath)
 	}
 
 	// Try relative to the sub-project root
 	rootPath := filepath.Join(sub.Root, importPath)
-	VerboseLog("  Trying project root: %s", rootPath)
-	if _, err := os.Stat(rootPath); err == nil {
-		VerboseLog("  ✓ Found in project root")
+	r.logf("  Trying project root: %s", rootPath)
+	if info, err := os.Stat(rootPath); err == nil && info.Mode().IsRegular() {
+		r.logf("  ✓ Found in project root")
 		return filepath.Abs(rootPath)
 	}
 
 	// Return as-is if nothing found
-	VerboseLog("  ✗ Import NOT resolved, returning as-is: %s", importPath)
+	r.logf("  ✗ Import NOT resolved, returning as-is: %s", importPath)
 	return importPath, nil
 }
 

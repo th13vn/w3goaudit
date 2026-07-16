@@ -8,6 +8,7 @@ import (
 // ContractExtractor extracts contracts from AST
 type ContractExtractor struct {
 	sourceFile      string
+	locator         *sourceLocator
 	contracts       []*types.Contract
 	currentContract *types.Contract
 	functionASTs    map[*types.Function]*ast.FunctionDefinition // Store AST nodes for later processing
@@ -86,7 +87,8 @@ func (ce *ContractExtractor) visitContract(node *ast.ContractDefinition) {
 		}
 	}
 
-	contract.StartLine, contract.EndLine, contract.StartCol, contract.EndCol, contract.StartByte, contract.EndByte = spanFields(node)
+	span := ce.locator.span(node)
+	contract.StartLine, contract.EndLine, contract.StartCol, contract.EndCol, contract.StartByte, contract.EndByte = span.startLine, span.endLine, span.startCol, span.endCol, span.startByte, span.endByte
 
 	ce.contracts = append(ce.contracts, contract)
 	ce.currentContract = nil
@@ -113,6 +115,7 @@ func (ce *ContractExtractor) extractFunction(node *ast.FunctionDefinition) *type
 	fn := &types.Function{
 		Name:            node.Name,
 		ContractName:    ce.currentContract.Name,
+		SourceFile:      ce.currentContract.SourceFile,
 		Visibility:      types.Visibility(node.Visibility),
 		StateMutability: types.StateMutability(node.StateMutability),
 		IsConstructor:   node.IsConstructor,
@@ -155,7 +158,8 @@ func (ce *ContractExtractor) extractFunction(node *ast.FunctionDefinition) *type
 	}
 
 	// Extract full source location (line + column + byte offset)
-	fn.StartLine, fn.EndLine, fn.StartCol, fn.EndCol, fn.StartByte, fn.EndByte = spanFields(node)
+	span := ce.locator.span(node)
+	fn.StartLine, fn.EndLine, fn.StartCol, fn.EndCol, fn.StartByte, fn.EndByte = span.startLine, span.endLine, span.startCol, span.endCol, span.startByte, span.endByte
 
 	// Note: Selector and signature are calculated in a separate phase
 	// after all structs are extracted (see builder.calculateFunctionSelectors)
@@ -171,7 +175,8 @@ func (ce *ContractExtractor) extractParameter(node *ast.VariableDeclaration) *ty
 		Name:     node.Name,
 		TypeName: typeName,
 	}
-	p.StartLine, p.EndLine, p.StartCol, p.EndCol, p.StartByte, p.EndByte = spanFields(node)
+	span := ce.locator.span(node)
+	p.StartLine, p.EndLine, p.StartCol, p.EndCol, p.StartByte, p.EndByte = span.startLine, span.endLine, span.startCol, span.endCol, span.startByte, span.endByte
 	return p
 }
 
@@ -186,7 +191,8 @@ func (ce *ContractExtractor) extractStateVariable(node *ast.VariableDeclaration)
 		IsConstant:  node.IsDeclaredConst,
 		IsImmutable: node.IsImmutable,
 	}
-	sv.StartLine, sv.EndLine, sv.StartCol, sv.EndCol, sv.StartByte, sv.EndByte = spanFields(node)
+	span := ce.locator.span(node)
+	sv.StartLine, sv.EndLine, sv.StartCol, sv.EndCol, sv.StartByte, sv.EndByte = span.startLine, span.endLine, span.startCol, span.endCol, span.startByte, span.endByte
 	return sv
 }
 
@@ -202,7 +208,8 @@ func (ce *ContractExtractor) extractEvent(node *ast.EventDefinition) *types.Even
 		ev.Parameters = append(ev.Parameters, p)
 	}
 
-	ev.StartLine, ev.EndLine, ev.StartCol, ev.EndCol, ev.StartByte, ev.EndByte = spanFields(node)
+	span := ce.locator.span(node)
+	ev.StartLine, ev.EndLine, ev.StartCol, ev.EndCol, ev.StartByte, ev.EndByte = span.startLine, span.endLine, span.startCol, span.endCol, span.startByte, span.endByte
 
 	return ev
 }
@@ -218,7 +225,8 @@ func (ce *ContractExtractor) extractModifier(node *ast.ModifierDefinition) *type
 	}
 
 	// Extract full source location (line + column + byte offset)
-	mod.StartLine, mod.EndLine, mod.StartCol, mod.EndCol, mod.StartByte, mod.EndByte = spanFields(node)
+	span := ce.locator.span(node)
+	mod.StartLine, mod.EndLine, mod.StartCol, mod.EndCol, mod.StartByte, mod.EndByte = span.startLine, span.endLine, span.startCol, span.endCol, span.startByte, span.endByte
 
 	return mod
 }
@@ -237,7 +245,8 @@ func (ce *ContractExtractor) extractStruct(node *ast.StructDefinition) *types.St
 		})
 	}
 
-	st.StartLine, st.EndLine, st.StartCol, st.EndCol, st.StartByte, st.EndByte = spanFields(node)
+	span := ce.locator.span(node)
+	st.StartLine, st.EndLine, st.StartCol, st.EndCol, st.StartByte, st.EndByte = span.startLine, span.endLine, span.startCol, span.endCol, span.startByte, span.endByte
 
 	return st
 }
@@ -252,7 +261,8 @@ func (ce *ContractExtractor) extractEnum(node *ast.EnumDefinition) *types.Enum {
 		en.Values = append(en.Values, value.Name)
 	}
 
-	en.StartLine, en.EndLine, en.StartCol, en.EndCol, en.StartByte, en.EndByte = spanFields(node)
+	span := ce.locator.span(node)
+	en.StartLine, en.EndLine, en.StartCol, en.EndCol, en.StartByte, en.EndByte = span.startLine, span.endLine, span.startCol, span.endCol, span.startByte, span.endByte
 
 	return en
 }

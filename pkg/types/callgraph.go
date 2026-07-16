@@ -47,7 +47,8 @@ type CallEdge struct {
 	// Line where the call occurs
 	Line int `json:"line,omitempty"`
 
-	// Col is the 1-based column of the call site; Byte is its character offset.
+	// Col is the 1-based Unicode-code-point column of the call site; Byte is its
+	// 0-based UTF-8 byte offset.
 	Col  int `json:"col,omitempty"`
 	Byte int `json:"byte,omitempty"`
 
@@ -56,6 +57,10 @@ type CallEdge struct {
 
 	// ResolvedContract is the resolved contract name where function is defined
 	ResolvedContract string `json:"resolvedContract,omitempty"`
+
+	// ResolvedContractID is the exact file#Contract identity. The short name is
+	// retained for schema-2.0.0 compatibility and display.
+	ResolvedContractID string `json:"resolvedContractId,omitempty"`
 
 	// ResolvedFunction is the resolved function name
 	ResolvedFunction string `json:"resolvedFunction,omitempty"`
@@ -103,7 +108,7 @@ func (cg *CallGraph) AddEdge(edge *CallEdge) {
 // EnsureIndex rebuilds the adjacency maps from Edges.
 // Called automatically by GetCallees/GetCallers after JSON load (maps are not exported).
 func (cg *CallGraph) EnsureIndex() {
-	if cg.outgoing != nil && len(cg.outgoing) > 0 {
+	if len(cg.outgoing) > 0 {
 		return
 	}
 	cg.outgoing = make(map[string][]*CallEdge)
