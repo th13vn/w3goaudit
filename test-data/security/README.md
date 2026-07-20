@@ -14,8 +14,8 @@ duplicate aggregate `test-*` fixtures.
 
 Interprocedural transfer-from coverage is folded into the deep matrix below.
 Slither- and 4naly3er-derived benchmark fixtures are maintained as split cases
-under [`../../benchmarks/fixtures/`](../../benchmarks/fixtures/), not as
-aggregate files in this directory.
+under [`../../scripts/benchmark/fixtures/`](../../scripts/benchmark/fixtures/),
+not as aggregate files in this directory.
 
 ### Fixture inventory
 
