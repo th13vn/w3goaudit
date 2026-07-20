@@ -997,9 +997,22 @@ func repoRoot(t *testing.T) string {
 // benchmarkHarnessAvailable reports whether the competitive benchmark harness
 // (scripts/benchmark/) is present on disk. The harness is dev-only tooling that
 // is intentionally git-ignored, so it is absent on a fresh clone / CI checkout.
+//
+// It probes concrete harness files, not just a parent directory: a partial tree
+// (e.g. empty subdirectories left behind by `git clean`) must read as absent so
+// the dependent tests skip rather than fail on missing fixtures/templates.
 func benchmarkHarnessAvailable(root string) bool {
-	_, err := os.Stat(filepath.Join(root, "scripts", "benchmark", "templates"))
-	return err == nil
+	base := filepath.Join(root, "scripts", "benchmark")
+	for _, sentinel := range []string{
+		"run_benchmark.py",
+		filepath.Join("templates", "slither-inspired", "unprotected-upgrade.yaml"),
+		filepath.Join("fixtures", "slither-detectors", "unprotected-upgrade.sol"),
+	} {
+		if info, err := os.Stat(filepath.Join(base, sentinel)); err != nil || info.IsDir() {
+			return false
+		}
+	}
+	return true
 }
 
 // skipWithoutBenchmarkHarness skips a benchmark-dependent regression test when
