@@ -360,8 +360,8 @@
     {
       "id": "slither-detectors",
       "title": "Slither-inspired detector parity fixtures",
-      "target": "benchmarks/fixtures/slither-detectors/",
-      "templates": "benchmarks/templates/slither-inspired",
+      "target": "scripts/benchmark/fixtures/slither-detectors/",
+      "templates": "scripts/benchmark/templates/slither-inspired",
       "requires_compilation": false,
       "expected": [
         {

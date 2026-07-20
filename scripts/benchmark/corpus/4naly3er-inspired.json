@@ -1,7 +1,7 @@
 {
   "schema_version": "1.0",
   "name": "4naly3er-inspired detector parity",
-  "description": "Parity benchmark comparing benchmarks/templates/4naly3er-inspired (W3GoAudit's 4naly3er port) against the real 4naly3er tool on the per-detector fixtures in benchmarks/fixtures/4naly3er-detectors/. Scope is 4naly3er's High/Medium security issues; gas (GAS-) and non-critical (NC-) issues are out of scope.",
+  "description": "Parity benchmark comparing scripts/benchmark/templates/4naly3er-inspired (W3GoAudit's 4naly3er port) against the real 4naly3er tool on the per-detector fixtures in scripts/benchmark/fixtures/4naly3er-detectors/. Scope is 4naly3er's High/Medium security issues; gas (GAS-) and non-critical (NC-) issues are out of scope.",
   "categories": {
     "comparison-outside-condition": {
       "title": "Comparison operator result used outside a condition",
@@ -110,8 +110,8 @@
     {
       "id": "4naly3er-detectors",
       "title": "4naly3er per-detector fixtures",
-      "target": "benchmarks/fixtures/4naly3er-detectors/",
-      "templates": "benchmarks/templates/4naly3er-inspired",
+      "target": "scripts/benchmark/fixtures/4naly3er-detectors/",
+      "templates": "scripts/benchmark/templates/4naly3er-inspired",
       "requires_compilation": true,
       "expected": [
         { "category": "comparison-outside-condition", "contract": "Vulnerable_ComparisonOutsideCondition", "function": "setValue" },
