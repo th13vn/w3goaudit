@@ -23,8 +23,8 @@ func TestRepositoryUserControlledTemplatesMatchCallerIdentity(t *testing.T) {
 			name: "delegatecall",
 			templates: []string{
 				"templates/official/critical/delegatecall-user-input.yaml",
-				"benchmarks/templates/slither-inspired/controlled-delegatecall.yaml",
-				"benchmarks/templates/decurity-semgrep-inspired/delegatecall-to-arbitrary-address.yaml",
+				"scripts/benchmark/templates/slither-inspired/controlled-delegatecall.yaml",
+				"scripts/benchmark/templates/decurity-semgrep-inspired/delegatecall-to-arbitrary-address.yaml",
 			},
 			want: []string{
 				"CallerIdentityDelegatecall.execute",
@@ -45,7 +45,7 @@ func TestRepositoryUserControlledTemplatesMatchCallerIdentity(t *testing.T) {
 			name: "arbitrary low-level call",
 			templates: []string{
 				"templates/official/high/arbitrary-low-level-call.yaml",
-				"benchmarks/templates/decurity-semgrep-inspired/arbitrary-low-level-call.yaml",
+				"scripts/benchmark/templates/decurity-semgrep-inspired/arbitrary-low-level-call.yaml",
 			},
 			want: []string{
 				"CallerIdentityLowLevelCall.execute",
@@ -60,7 +60,7 @@ func TestRepositoryUserControlledTemplatesMatchCallerIdentity(t *testing.T) {
 			name: "unrestricted transferOwnership",
 			templates: []string{
 				"templates/official/high/unrestricted-transferownership.yaml",
-				"benchmarks/templates/decurity-semgrep-inspired/unrestricted-transferownership.yaml",
+				"scripts/benchmark/templates/decurity-semgrep-inspired/unrestricted-transferownership.yaml",
 			},
 			want: []string{
 				"CallerIdentityTransferOwnership.transferOwnership",
@@ -74,7 +74,7 @@ func TestRepositoryUserControlledTemplatesMatchCallerIdentity(t *testing.T) {
 		{
 			name: "accessible selfdestruct",
 			templates: []string{
-				"benchmarks/templates/decurity-semgrep-inspired/accessible-selfdestruct.yaml",
+				"scripts/benchmark/templates/decurity-semgrep-inspired/accessible-selfdestruct.yaml",
 			},
 			want: []string{
 				"CallerIdentitySelfdestruct.destroy",

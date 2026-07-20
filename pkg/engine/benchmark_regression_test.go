@@ -18,26 +18,26 @@ func TestNamedCompetitiveMisses(t *testing.T) {
 		safe       string
 	}{
 		{
-			fixture:    "../../benchmarks/fixtures/4naly3er-detectors/centralization-risk.sol",
-			template:   "../../benchmarks/templates/4naly3er-inspired/M-centralization-risk.yaml",
+			fixture:    "../../scripts/benchmark/fixtures/4naly3er-detectors/centralization-risk.sol",
+			template:   "../../scripts/benchmark/templates/4naly3er-inspired/M-centralization-risk.yaml",
 			vulnerable: "Vulnerable_CentralizationRisk.setFee",
 			safe:       "Safe_CentralizationRisk.getFee",
 		},
 		{
-			fixture:    "../../benchmarks/fixtures/decurity-semgrep-inspired/accessible-selfdestruct-asm.sol",
-			template:   "../../benchmarks/templates/decurity-semgrep-inspired/accessible-selfdestruct.yaml",
+			fixture:    "../../scripts/benchmark/fixtures/decurity-semgrep-inspired/accessible-selfdestruct-asm.sol",
+			template:   "../../scripts/benchmark/templates/decurity-semgrep-inspired/accessible-selfdestruct.yaml",
 			vulnerable: "VulnerableAccessibleSelfdestructAsm.destroy",
 			safe:       "SafeAccessibleSelfdestructAsm.destroy",
 		},
 		{
-			fixture:    "../../benchmarks/fixtures/slither-detectors/incorrect-equality.sol",
-			template:   "../../benchmarks/templates/slither-inspired/incorrect-equality.yaml",
+			fixture:    "../../scripts/benchmark/fixtures/slither-detectors/incorrect-equality.sol",
+			template:   "../../scripts/benchmark/templates/slither-inspired/incorrect-equality.yaml",
 			vulnerable: "Vulnerable_IncorrectEquality.goalReached",
 			safe:       "Safe_IncorrectEquality.goalReached",
 		},
 		{
-			fixture:    "../../benchmarks/fixtures/slither-detectors/divide-before-multiply.sol",
-			template:   "../../benchmarks/templates/slither-inspired/divide-before-multiply.yaml",
+			fixture:    "../../scripts/benchmark/fixtures/slither-detectors/divide-before-multiply.sol",
+			template:   "../../scripts/benchmark/templates/slither-inspired/divide-before-multiply.yaml",
 			vulnerable: "Vulnerable_DivideBeforeMultiply.calculate",
 			safe:       "Safe_DivideBeforeMultiply.calculate",
 		},

@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased – Benchmark harness relocation
+
+- Moved the competitive benchmark harness (runner, scoring, adapters, corpora,
+  fixtures, WQL ports, Docker files, threshold gate) from `benchmarks/` to
+  `scripts/benchmark/`. `benchmarks/` now stores results only: tracked dated
+  reports named `yyyy-mm-dd-<commit-slug>.md` plus the Git-ignored
+  `benchmarks/results/` run-output scratch directory.
+- The w3goaudit quality gate now runs via the local CLI
+  (`scripts/benchmark/run_benchmark.py` + `assert_thresholds.py`); Docker
+  Compose remains only for the multi-tool comparison against
+  Slither/Semgrep/4naly3er.
+
 ## Unreleased – Project 1 correctness closure
 
 - Corrected Solidity `for` AST order to initialization, condition, body, then

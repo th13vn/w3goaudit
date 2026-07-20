@@ -1,0 +1,15 @@
+services:
+  benchmark:
+    platform: linux/amd64
+    build:
+      context: ../..
+      dockerfile: scripts/benchmark/Dockerfile
+    environment:
+      RUN_NAME: ${RUN_NAME:-latest}
+      SUITE: ${SUITE:-competitive}
+      TOOLS: ${TOOLS:-w3goaudit,slither,semgrep,4naly3er}
+    read_only: true
+    tmpfs:
+      - /tmp:rw,exec,nosuid,nodev,mode=1777,size=4g
+    volumes:
+      - ../../benchmarks/results:/workspace/benchmarks/results

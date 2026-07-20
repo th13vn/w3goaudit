@@ -11,14 +11,14 @@ import (
 	"github.com/th13vn/w3goaudit/pkg/types"
 )
 
-const proxyStorageCollisionFixture = "benchmarks/fixtures/decurity-semgrep-inspired/proxy-storage-collision.sol"
+const proxyStorageCollisionFixture = "scripts/benchmark/fixtures/decurity-semgrep-inspired/proxy-storage-collision.sol"
 
 func TestRepositoryInitializerTemplatesPreserveIndependentSafetyPredicates(t *testing.T) {
 	root := repoRoot(t)
 
 	t.Run("benchmark fixture", func(t *testing.T) {
-		db := buildRepositoryFixtureDatabase(t, root, "benchmarks/fixtures/slither-detectors/unprotected-upgrade.sol")
-		got := executeRepositoryTemplate(t, root, db, "benchmarks/templates/slither-inspired/unprotected-upgrade.yaml")
+		db := buildRepositoryFixtureDatabase(t, root, "scripts/benchmark/fixtures/slither-detectors/unprotected-upgrade.sol")
+		got := executeRepositoryTemplate(t, root, db, "scripts/benchmark/templates/slither-inspired/unprotected-upgrade.yaml")
 		assertFindingSetContains(t, got, []string{"Vulnerable_UnprotectedUpgrade.initialize"})
 		assertFindingSetExcludes(t, got, []string{"Safe_UnprotectedUpgrade.initialize"})
 	})
@@ -26,7 +26,7 @@ func TestRepositoryInitializerTemplatesPreserveIndependentSafetyPredicates(t *te
 	t.Run("official focused fixture", func(t *testing.T) {
 		db := buildRepositoryFixtureDatabase(t, root, "test-data/security/unprotected-initializer.sol")
 		for _, templatePath := range []string{
-			"benchmarks/templates/slither-inspired/unprotected-upgrade.yaml",
+			"scripts/benchmark/templates/slither-inspired/unprotected-upgrade.yaml",
 			"templates/official/high/unprotected-initializer.yaml",
 		} {
 			t.Run(templatePath, func(t *testing.T) {
@@ -44,21 +44,21 @@ func TestRepositoryInitializerTemplatesPreserveIndependentSafetyPredicates(t *te
 
 func TestRepositoryUniswapCallbackTemplatePreservesOnlyPoolManagerExclusion(t *testing.T) {
 	root := repoRoot(t)
-	templatePath := "benchmarks/templates/decurity-semgrep-inspired/uniswap-v4-callback-not-protected.yaml"
+	templatePath := "scripts/benchmark/templates/decurity-semgrep-inspired/uniswap-v4-callback-not-protected.yaml"
 
-	vulnerableDB := buildRepositoryFixtureDatabase(t, root, "benchmarks/fixtures/decurity-semgrep-inspired/uniswap-v4-callback-not-protected.sol")
+	vulnerableDB := buildRepositoryFixtureDatabase(t, root, "scripts/benchmark/fixtures/decurity-semgrep-inspired/uniswap-v4-callback-not-protected.sol")
 	vulnerable := executeRepositoryTemplate(t, root, vulnerableDB, templatePath)
 	assertFindingSetContains(t, vulnerable, []string{"VulnerableUniswapV4CallbackNotProtected.beforeSwap"})
 
-	safeDB := buildRepositoryFixtureDatabase(t, root, "benchmarks/fixtures/decurity-semgrep-inspired/uniswap-v4-callback-only-manager.sol")
+	safeDB := buildRepositoryFixtureDatabase(t, root, "scripts/benchmark/fixtures/decurity-semgrep-inspired/uniswap-v4-callback-only-manager.sol")
 	safe := executeRepositoryTemplate(t, root, safeDB, templatePath)
 	assertFindingSetExcludes(t, safe, []string{"SafeUniswapV4CallbackOnlyManager.beforeSwap"})
 }
 
 func TestRepositoryBasicArithmeticUnderflowUsesRangeGuards(t *testing.T) {
 	root := repoRoot(t)
-	db := buildRepositoryFixtureDatabase(t, root, "benchmarks/fixtures/decurity-semgrep-inspired/basic-arithmetic-underflow.sol")
-	tmpl, err := LoadTemplate(filepath.Join(root, "benchmarks/templates/decurity-semgrep-inspired/basic-arithmetic-underflow.yaml"))
+	db := buildRepositoryFixtureDatabase(t, root, "scripts/benchmark/fixtures/decurity-semgrep-inspired/basic-arithmetic-underflow.sol")
+	tmpl, err := LoadTemplate(filepath.Join(root, "scripts/benchmark/templates/decurity-semgrep-inspired/basic-arithmetic-underflow.yaml"))
 	if err != nil {
 		t.Fatalf("load basic-arithmetic-underflow template: %v", err)
 	}
@@ -109,7 +109,7 @@ func TestRepositoryBasicArithmeticUnderflowUsesRangeGuards(t *testing.T) {
 func TestRepositoryBasicArithmeticUnderflowRequiresEnforcedOperandBound(t *testing.T) {
 	root := repoRoot(t)
 	db := buildRepositoryFixtureDatabase(t, root, "test-data/security/unchecked-arithmetic.sol")
-	got := executeRepositoryTemplate(t, root, db, "benchmarks/templates/decurity-semgrep-inspired/basic-arithmetic-underflow.yaml")
+	got := executeRepositoryTemplate(t, root, db, "scripts/benchmark/templates/decurity-semgrep-inspired/basic-arithmetic-underflow.yaml")
 
 	var found []string
 	for key := range got {
@@ -153,16 +153,16 @@ func TestRepositoryBasicArithmeticUnderflowRequiresEnforcedOperandBound(t *testi
 
 func TestRepositoryBasicArithmeticUnderflowRequiresUncheckedSolidity08(t *testing.T) {
 	root := repoRoot(t)
-	templatePath := "benchmarks/templates/decurity-semgrep-inspired/basic-arithmetic-underflow.yaml"
+	templatePath := "scripts/benchmark/templates/decurity-semgrep-inspired/basic-arithmetic-underflow.yaml"
 
-	checkedDB := buildRepositoryFixtureDatabase(t, root, "benchmarks/fixtures/4naly3er-detectors/mint-burn-zero.sol")
+	checkedDB := buildRepositoryFixtureDatabase(t, root, "scripts/benchmark/fixtures/4naly3er-detectors/mint-burn-zero.sol")
 	checked := executeRepositoryTemplate(t, root, checkedDB, templatePath)
 	assertFindingSetExcludes(t, checked, []string{
 		"Vulnerable_MintBurnZero.burn",
 		"Safe_MintBurnZero.burn",
 	})
 
-	aliasPath := "benchmarks/fixtures/decurity-semgrep-inspired/basic-arithmetic-underflow-alias.sol"
+	aliasPath := "scripts/benchmark/fixtures/decurity-semgrep-inspired/basic-arithmetic-underflow-alias.sol"
 	aliasDB := buildRepositoryFixtureDatabase(t, root, aliasPath)
 	aliasFindings := executeRepositoryTemplate(t, root, aliasDB, templatePath)
 	assertFindingSetContains(t, aliasFindings, []string{"VulnerableBasicArithmeticUnderflowAlias.redeem"})
@@ -177,27 +177,27 @@ func TestRepositoryBasicArithmeticUnderflowRequiresUncheckedSolidity08(t *testin
 
 func TestRepositoryAccessibleSelfdestructMatchesUnauthenticatedReachableForms(t *testing.T) {
 	root := repoRoot(t)
-	templatePath := "benchmarks/templates/decurity-semgrep-inspired/accessible-selfdestruct.yaml"
+	templatePath := "scripts/benchmark/templates/decurity-semgrep-inspired/accessible-selfdestruct.yaml"
 	cases := []struct {
 		fixture string
 		want    []string
 		reject  []string
 	}{
 		{
-			fixture: "benchmarks/fixtures/decurity-semgrep-inspired/accessible-selfdestruct.sol",
+			fixture: "scripts/benchmark/fixtures/decurity-semgrep-inspired/accessible-selfdestruct.sol",
 			want:    []string{"VulnerableAccessibleSelfdestruct.destroy"},
 		},
 		{
-			fixture: "benchmarks/fixtures/decurity-semgrep-inspired/accessible-selfdestruct-helper.sol",
+			fixture: "scripts/benchmark/fixtures/decurity-semgrep-inspired/accessible-selfdestruct-helper.sol",
 			want:    []string{"VulnerableAccessibleSelfdestructHelper.destroy"},
 		},
 		{
-			fixture: "benchmarks/fixtures/decurity-semgrep-inspired/accessible-selfdestruct-cast.sol",
+			fixture: "scripts/benchmark/fixtures/decurity-semgrep-inspired/accessible-selfdestruct-cast.sol",
 			want:    []string{"VulnerableAccessibleSelfdestructCast.destroy"},
 			reject:  []string{"SafeAccessibleSelfdestructCast.destroy"},
 		},
 		{
-			fixture: "benchmarks/fixtures/decurity-semgrep-inspired/accessible-selfdestruct-asm.sol",
+			fixture: "scripts/benchmark/fixtures/decurity-semgrep-inspired/accessible-selfdestruct-asm.sol",
 			want:    []string{"VulnerableAccessibleSelfdestructAsm.destroy"},
 			reject:  []string{"SafeAccessibleSelfdestructAsm.destroy"},
 		},
@@ -215,16 +215,16 @@ func TestRepositoryAccessibleSelfdestructMatchesUnauthenticatedReachableForms(t 
 
 func TestRepositoryReentrancyNoEthExcludesFixedSelfReceiver(t *testing.T) {
 	root := repoRoot(t)
-	templatePath := "benchmarks/templates/slither-inspired/reentrancy-no-eth.yaml"
+	templatePath := "scripts/benchmark/templates/slither-inspired/reentrancy-no-eth.yaml"
 
-	selfCallDB := buildRepositoryFixtureDatabase(t, root, "benchmarks/fixtures/4naly3er-detectors/this-external.sol")
+	selfCallDB := buildRepositoryFixtureDatabase(t, root, "scripts/benchmark/fixtures/4naly3er-detectors/this-external.sol")
 	selfCallFindings := executeRepositoryTemplate(t, root, selfCallDB, templatePath)
 	assertFindingSetExcludes(t, selfCallFindings, []string{
 		"Vulnerable_ThisExternal.incrementTwice",
 		"Safe_ThisExternal.incrementTwice",
 	})
 
-	legacyCacheDB := buildRepositoryFixtureDatabase(t, root, "benchmarks/fixtures/4naly3er-detectors/this-external.sol")
+	legacyCacheDB := buildRepositoryFixtureDatabase(t, root, "scripts/benchmark/fixtures/4naly3er-detectors/this-external.sol")
 	for _, contract := range legacyCacheDB.Contracts {
 		for _, fn := range contract.Functions {
 			if fn == nil || fn.AST == nil {
@@ -255,7 +255,7 @@ func TestRepositoryReentrancyNoEthExcludesFixedSelfReceiver(t *testing.T) {
 		"Safe_ThisExternal.incrementTwice",
 	})
 
-	externalDB := buildRepositoryFixtureDatabase(t, root, "benchmarks/fixtures/slither-detectors/reentrancy-no-eth.sol")
+	externalDB := buildRepositoryFixtureDatabase(t, root, "scripts/benchmark/fixtures/slither-detectors/reentrancy-no-eth.sol")
 	externalFindings := executeRepositoryTemplate(t, root, externalDB, templatePath)
 	assertFindingSetContains(t, externalFindings, []string{"Vulnerable_ReentrancyNoEth.claim"})
 	assertFindingSetExcludes(t, externalFindings, []string{"Safe_ReentrancyNoEth.claim"})
@@ -295,7 +295,7 @@ contract NestedSelfArgument {
 
 func TestRepositoryProxyStorageCollisionKeepsLocationlessMatchAtContractScope(t *testing.T) {
 	root := repoRoot(t)
-	templatePath := filepath.Join(root, "benchmarks/templates/decurity-semgrep-inspired/proxy-storage-collision.yaml")
+	templatePath := filepath.Join(root, "scripts/benchmark/templates/decurity-semgrep-inspired/proxy-storage-collision.yaml")
 	tmpl, err := LoadTemplate(templatePath)
 	if err != nil {
 		t.Fatalf("load proxy-storage-collision template: %v", err)
@@ -314,7 +314,7 @@ func TestRepositoryProxyStorageCollisionKeepsLocationlessMatchAtContractScope(t 
 		t.Fatalf("location = %+v, want contract/file-only VulnerableProxyStorageCollision at %s with no source span", loc, wantFile)
 	}
 
-	safeDB := buildRepositoryFixtureDatabase(t, root, "benchmarks/fixtures/decurity-semgrep-inspired/proxy-storage-no-collision.sol")
+	safeDB := buildRepositoryFixtureDatabase(t, root, "scripts/benchmark/fixtures/decurity-semgrep-inspired/proxy-storage-no-collision.sol")
 	if safe := New(safeDB).Execute(tmpl); len(safe) != 0 {
 		t.Fatalf("safe no-collision fixture findings = %d, want 0: %+v", len(safe), safe)
 	}

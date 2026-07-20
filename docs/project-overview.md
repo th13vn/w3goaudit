@@ -160,7 +160,7 @@ w3goaudit/
 ├── templates/              # WQL detection templates (embed.go embeds official/)
 │   ├── official/           # 25 curated WQL detectors, embedded as the default
 │   └── test/               # 5 WQL engine feature-exercise templates
-├── benchmarks/             # Docker Compose benchmark
+├── scripts/benchmark/             # Docker Compose benchmark
 │   ├── compose.yaml        # Only supported host entry point
 │   ├── run_benchmark.py    # CLI and sequential orchestration
 │   ├── benchmark_core.py   # Paths, indexes, process I/O, aliases, manifests
@@ -512,7 +512,7 @@ distorted by CPU, memory, compiler-cache, or disk contention. The only
 supported multi-tool host workflow remains:
 
 ```bash
-docker compose -f benchmarks/compose.yaml run --rm benchmark
+docker compose -f scripts/benchmark/compose.yaml run --rm benchmark
 ```
 
 Fallback Semgrep/4naly3er source attribution uses one length- and
@@ -520,7 +520,7 @@ newline-preserving Solidity sanitizer for declaration matching and brace
 counting. Comments, quoted strings, and escapes are masked so fake declarations
 and quoted braces cannot move a finding to the wrong scope.
 
-**Code:** [benchmarks/](../benchmarks)
+**Code:** [scripts/benchmark/](../benchmarks)
 
 ---
 
@@ -863,7 +863,7 @@ go test ./pkg/...
 
 # Docker Compose is the only supported benchmark host workflow. The image
 # derives and verifies Go directly from go.mod.
-docker compose -f benchmarks/compose.yaml run --rm benchmark
+docker compose -f scripts/benchmark/compose.yaml run --rm benchmark
 ```
 
 The image verifies the reviewed generated-lock hash for the pinned 4naly3er

@@ -755,7 +755,7 @@ only when exactly one matching object is present in that contract's exact MRO.
 (downloaded from `th13vn/w3goaudit-templates` on first run) > the embedded
 `official/` pack (`templates/embed.go`). The retained lanes are
 `templates/official/` (25 distributable detectors), `templates/test/` (5 engine
-feature templates), and `benchmarks/templates/` (76 competitive detector
+feature templates), and `scripts/benchmark/templates/` (76 competitive detector
 ports), all WQL.
 
 ---

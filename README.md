@@ -380,7 +380,8 @@ w3goaudit/
 ├── templates/              # WQL detection templates (official/ embedded via go:embed)
 │   ├── official/              # Curated official pack (embedded fallback; split by severity: critical/ high/ medium/)
 │   └── test/                  # Engine feature-exercise templates
-├── benchmarks/             # Docker Compose benchmark, 76 WQL ports, corpora, fixtures, results/
+├── scripts/benchmark/      # Benchmark harness (local CLI; Docker only for multi-tool), 76 WQL ports, corpora, fixtures
+├── benchmarks/             # Stored dated benchmark reports + Git-ignored results/ scratch
 ├── test-data/              # Test contracts (core/, security/)
 └── docs/                   # Comprehensive documentation
 ```
@@ -460,12 +461,17 @@ w3goaudit test-data/security/ --template templates/official/ -o scan-report/
 w3goaudit test-data/core/build-database/ -o overview-out/
 
 # Competitive quality gate: precision >= 0.65, recall >= 0.95, failed cases = 0.
-# Docker Compose is the only supported host entry point. The Dockerfile derives
-# and verifies the Go version directly from go.mod.
-docker compose -f benchmarks/compose.yaml run --rm benchmark
+# Runs via the local CLI — no Docker required.
+go build -o /tmp/w3goaudit ./cmd/w3goaudit
+python3 scripts/benchmark/run_benchmark.py --suite competitive --tools w3goaudit \
+  --w3goaudit-bin /tmp/w3goaudit --out benchmarks/results/latest
+python3 scripts/benchmark/assert_thresholds.py benchmarks/results/latest/benchmark.json
+
+# Docker Compose only for the multi-tool comparison (Slither/Semgrep/4naly3er).
+docker compose -f scripts/benchmark/compose.yaml run --rm benchmark
 ```
 
-See [benchmarks/README.md](./benchmarks/README.md) for suites, tool selection,
+See [scripts/benchmark/README.md](./scripts/benchmark/README.md) for suites, tool selection,
 output ownership, and the fail-closed contract.
 
 Test contracts are documented in:

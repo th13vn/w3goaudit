@@ -35,19 +35,30 @@ locally or in user-owned external automation: `gofmt`, `go mod tidy -diff`,
 `go vet`, staticcheck v0.6.1 and gocyclo v0.6.0 (`-over 35 cmd pkg` must be
 empty), Markdown link validation plus its unit tests, normal/race/shuffled Go
 tests, host and Linux ARM64 builds, govulncheck v1.1.4, an official-template
-scan with manifest/JSON/SARIF/offline-HTML artifact validation, and the Docker
-Compose competitive benchmark.
+scan with manifest/JSON/SARIF/offline-HTML artifact validation, and the
+competitive benchmark quality gate.
 
 ```bash
-docker compose -f benchmarks/compose.yaml run --rm benchmark
+go build -o /tmp/w3goaudit ./cmd/w3goaudit
+python3 scripts/benchmark/run_benchmark.py --suite competitive --tools w3goaudit \
+  --w3goaudit-bin /tmp/w3goaudit --out benchmarks/results/latest
+python3 scripts/benchmark/assert_thresholds.py benchmarks/results/latest/benchmark.json
 ```
 
-Docker Compose is the only supported benchmark host entry point; the image
-contains the pinned scanners and derives and verifies its Go version directly
-from `go.mod`. The gate recomputes metrics from raw counts and requires
-precision at least 0.65, recall at least 0.95, and zero failed cases. The
-Dockerfile also verifies the reviewed generated-lock hash for its pinned
-4naly3er commit.
+The quality gate runs via the local CLI — no Docker required. Docker Compose is
+used only for the multi-tool comparison against the pinned scanners
+(Slither/Semgrep/4naly3er) and derives and verifies its Go version directly
+from `go.mod`:
+
+```bash
+docker compose -f scripts/benchmark/compose.yaml run --rm benchmark
+```
+
+The gate recomputes metrics from raw counts and requires precision at least
+0.65, recall at least 0.95, and zero failed cases. The Dockerfile also verifies
+the reviewed generated-lock hash for its pinned 4naly3er commit. Store each
+release-relevant run as a tracked dated report at
+`benchmarks/yyyy-mm-dd-<commit-slug>.md` (copy of the run's `benchmark.md`).
 
 ## Write your first detector in 5 minutes
 

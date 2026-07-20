@@ -10,7 +10,7 @@ self-contained detector. The `official/` pack is embedded in the binary
 
 **A WQL document is meta plus one query: block.** All templates under
 `official/` and `test/` (this directory), plus every
-benchmark template under `../benchmarks/templates/` (slither-inspired,
+benchmark template under `../scripts/benchmark/templates/` (slither-inspired,
 decurity-semgrep-inspired, 4naly3er-inspired) — 106 templates total — are
 written in WQL (`query:` containing `select`/`from`/`where` or composition). See
 [`../docs/wql-syntax.md`](../docs/wql-syntax.md) for the full language
@@ -50,8 +50,8 @@ templates/
 ```
 
 (The 76 benchmark templates — Decurity/Slither/4naly3er-inspired — live under
-`../benchmarks/templates/`, outside this directory; see
-[`../benchmarks/README.md`](../benchmarks/README.md).)
+`../scripts/benchmark/templates/`, outside this directory; see
+[`../scripts/benchmark/README.md`](../scripts/benchmark/README.md).)
 
 > **`official/` is the pack you scan with.** It is the curated, best-of-breed
 > set of hand-written W3GoAudit-native detectors. It is embedded in the binary,
@@ -348,7 +348,7 @@ zero failed cases; the threshold tool recomputes metrics from TP/FP/FN instead
 of trusting rounded report fields.
 
 ```bash
-docker compose -f benchmarks/compose.yaml run --rm benchmark
+docker compose -f scripts/benchmark/compose.yaml run --rm benchmark
 ```
 
 Docker Compose is the only supported benchmark host entry point. Its Dockerfile
