@@ -380,8 +380,8 @@ w3goaudit/
 ├── templates/              # WQL detection templates (official/ embedded via go:embed)
 │   ├── official/              # Curated official pack (embedded fallback; split by severity: critical/ high/ medium/)
 │   └── test/                  # Engine feature-exercise templates
-├── scripts/benchmark/      # Benchmark harness (local CLI; Docker only for multi-tool), 76 WQL ports, corpora, fixtures
 ├── benchmarks/             # Stored dated benchmark reports + Git-ignored results/ scratch
+                            # (the benchmark harness itself lives in the git-ignored, dev-only scripts/)
 ├── test-data/              # Test contracts (core/, security/)
 └── docs/                   # Comprehensive documentation
 ```
@@ -460,8 +460,10 @@ w3goaudit test-data/security/ --template templates/official/ -o scan-report/
 # Project overview (always part of the scan — see overview.md in the folder)
 w3goaudit test-data/core/build-database/ -o overview-out/
 
-# Competitive quality gate: precision >= 0.65, recall >= 0.95, failed cases = 0.
-# Runs via the local CLI — no Docker required.
+# Competitive quality gate (maintainer-only): the benchmark harness under
+# scripts/ is dev-only and git-ignored, so these commands run only where the
+# harness is checked out; a fresh clone does not include it.
+# Gate: precision >= 0.65, recall >= 0.95, failed cases = 0. Local CLI, no Docker.
 go build -o /tmp/w3goaudit ./cmd/w3goaudit
 python3 scripts/benchmark/run_benchmark.py --suite competitive --tools w3goaudit \
   --w3goaudit-bin /tmp/w3goaudit --out benchmarks/results/latest
@@ -471,8 +473,8 @@ python3 scripts/benchmark/assert_thresholds.py benchmarks/results/latest/benchma
 docker compose -f scripts/benchmark/compose.yaml run --rm benchmark
 ```
 
-See [scripts/benchmark/README.md](./scripts/benchmark/README.md) for suites, tool selection,
-output ownership, and the fail-closed contract.
+Stored, tracked benchmark reports live under `benchmarks/` as dated
+`yyyy-mm-dd-<commit-slug>.md` files; the harness that produces them is dev-only.
 
 Test contracts are documented in:
 - [test-data/security/README.md](./test-data/security/README.md)

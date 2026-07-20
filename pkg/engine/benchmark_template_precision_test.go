@@ -15,6 +15,7 @@ const proxyStorageCollisionFixture = "scripts/benchmark/fixtures/decurity-semgre
 
 func TestRepositoryInitializerTemplatesPreserveIndependentSafetyPredicates(t *testing.T) {
 	root := repoRoot(t)
+	skipWithoutBenchmarkHarness(t, root)
 
 	t.Run("benchmark fixture", func(t *testing.T) {
 		db := buildRepositoryFixtureDatabase(t, root, "scripts/benchmark/fixtures/slither-detectors/unprotected-upgrade.sol")
@@ -44,6 +45,7 @@ func TestRepositoryInitializerTemplatesPreserveIndependentSafetyPredicates(t *te
 
 func TestRepositoryUniswapCallbackTemplatePreservesOnlyPoolManagerExclusion(t *testing.T) {
 	root := repoRoot(t)
+	skipWithoutBenchmarkHarness(t, root)
 	templatePath := "scripts/benchmark/templates/decurity-semgrep-inspired/uniswap-v4-callback-not-protected.yaml"
 
 	vulnerableDB := buildRepositoryFixtureDatabase(t, root, "scripts/benchmark/fixtures/decurity-semgrep-inspired/uniswap-v4-callback-not-protected.sol")
@@ -57,6 +59,7 @@ func TestRepositoryUniswapCallbackTemplatePreservesOnlyPoolManagerExclusion(t *t
 
 func TestRepositoryBasicArithmeticUnderflowUsesRangeGuards(t *testing.T) {
 	root := repoRoot(t)
+	skipWithoutBenchmarkHarness(t, root)
 	db := buildRepositoryFixtureDatabase(t, root, "scripts/benchmark/fixtures/decurity-semgrep-inspired/basic-arithmetic-underflow.sol")
 	tmpl, err := LoadTemplate(filepath.Join(root, "scripts/benchmark/templates/decurity-semgrep-inspired/basic-arithmetic-underflow.yaml"))
 	if err != nil {
@@ -108,6 +111,7 @@ func TestRepositoryBasicArithmeticUnderflowUsesRangeGuards(t *testing.T) {
 
 func TestRepositoryBasicArithmeticUnderflowRequiresEnforcedOperandBound(t *testing.T) {
 	root := repoRoot(t)
+	skipWithoutBenchmarkHarness(t, root)
 	db := buildRepositoryFixtureDatabase(t, root, "test-data/security/unchecked-arithmetic.sol")
 	got := executeRepositoryTemplate(t, root, db, "scripts/benchmark/templates/decurity-semgrep-inspired/basic-arithmetic-underflow.yaml")
 
@@ -153,6 +157,7 @@ func TestRepositoryBasicArithmeticUnderflowRequiresEnforcedOperandBound(t *testi
 
 func TestRepositoryBasicArithmeticUnderflowRequiresUncheckedSolidity08(t *testing.T) {
 	root := repoRoot(t)
+	skipWithoutBenchmarkHarness(t, root)
 	templatePath := "scripts/benchmark/templates/decurity-semgrep-inspired/basic-arithmetic-underflow.yaml"
 
 	checkedDB := buildRepositoryFixtureDatabase(t, root, "scripts/benchmark/fixtures/4naly3er-detectors/mint-burn-zero.sol")
@@ -177,6 +182,7 @@ func TestRepositoryBasicArithmeticUnderflowRequiresUncheckedSolidity08(t *testin
 
 func TestRepositoryAccessibleSelfdestructMatchesUnauthenticatedReachableForms(t *testing.T) {
 	root := repoRoot(t)
+	skipWithoutBenchmarkHarness(t, root)
 	templatePath := "scripts/benchmark/templates/decurity-semgrep-inspired/accessible-selfdestruct.yaml"
 	cases := []struct {
 		fixture string
@@ -215,6 +221,7 @@ func TestRepositoryAccessibleSelfdestructMatchesUnauthenticatedReachableForms(t 
 
 func TestRepositoryReentrancyNoEthExcludesFixedSelfReceiver(t *testing.T) {
 	root := repoRoot(t)
+	skipWithoutBenchmarkHarness(t, root)
 	templatePath := "scripts/benchmark/templates/slither-inspired/reentrancy-no-eth.yaml"
 
 	selfCallDB := buildRepositoryFixtureDatabase(t, root, "scripts/benchmark/fixtures/4naly3er-detectors/this-external.sol")
@@ -295,6 +302,7 @@ contract NestedSelfArgument {
 
 func TestRepositoryProxyStorageCollisionKeepsLocationlessMatchAtContractScope(t *testing.T) {
 	root := repoRoot(t)
+	skipWithoutBenchmarkHarness(t, root)
 	templatePath := filepath.Join(root, "scripts/benchmark/templates/decurity-semgrep-inspired/proxy-storage-collision.yaml")
 	tmpl, err := LoadTemplate(templatePath)
 	if err != nil {
@@ -322,6 +330,7 @@ func TestRepositoryProxyStorageCollisionKeepsLocationlessMatchAtContractScope(t 
 
 func TestContractScopePreciseMatchKeepsFunctionAndSpan(t *testing.T) {
 	root := repoRoot(t)
+	skipWithoutBenchmarkHarness(t, root)
 	db := buildRepositoryFixtureDatabase(t, root, proxyStorageCollisionFixture)
 	tmpl, err := ParseTemplate(`
 meta: {id: contract-precise-control, severity: LOW}

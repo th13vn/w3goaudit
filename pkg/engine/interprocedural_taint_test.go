@@ -993,3 +993,20 @@ func repoRoot(t *testing.T) string {
 	}
 	return filepath.Clean(filepath.Join(filepath.Dir(file), "../.."))
 }
+
+// benchmarkHarnessAvailable reports whether the competitive benchmark harness
+// (scripts/benchmark/) is present on disk. The harness is dev-only tooling that
+// is intentionally git-ignored, so it is absent on a fresh clone / CI checkout.
+func benchmarkHarnessAvailable(root string) bool {
+	_, err := os.Stat(filepath.Join(root, "scripts", "benchmark", "templates"))
+	return err == nil
+}
+
+// skipWithoutBenchmarkHarness skips a benchmark-dependent regression test when
+// the git-ignored scripts/benchmark/ harness is not checked out.
+func skipWithoutBenchmarkHarness(t *testing.T, root string) {
+	t.Helper()
+	if !benchmarkHarnessAvailable(root) {
+		t.Skip("scripts/benchmark harness not present (dev-only, git-ignored); skipping benchmark-dependent test")
+	}
+}

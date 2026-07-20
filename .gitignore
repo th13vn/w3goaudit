@@ -12,10 +12,9 @@
 /web/
 __pycache__/
 
-# scripts/ holds dev-only tooling and is not published, EXCEPT the competitive
-# benchmark harness, which is a tracked, reviewable part of the release.
-/scripts/*
-!/scripts/benchmark/
+# scripts/ holds dev-only tooling (benchmark harness, template forge, helpers)
+# and is not published. Benchmark-dependent Go tests skip when it is absent.
+/scripts/
 
 # Benchmark runs are generated host artifacts. Keep only the directory marker;
 # default and named runs must never be tracked.

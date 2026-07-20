@@ -11,6 +11,7 @@ import (
 
 func TestRepositoryUserControlledTemplatesMatchCallerIdentity(t *testing.T) {
 	root := repoRoot(t)
+	skipWithoutBenchmarkHarness(t, root)
 	db := buildRepositoryFixtureDatabase(t, root, "test-data/security/user-controlled-caller-identity.sol")
 
 	groups := []struct {

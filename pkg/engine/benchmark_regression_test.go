@@ -11,6 +11,7 @@ import (
 )
 
 func TestNamedCompetitiveMisses(t *testing.T) {
+	skipWithoutBenchmarkHarness(t, repoRoot(t))
 	cases := []struct {
 		fixture    string
 		template   string
