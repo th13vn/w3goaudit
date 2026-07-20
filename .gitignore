@@ -12,6 +12,11 @@
 /web/
 __pycache__/
 
+# scripts/ holds dev-only tooling and is not published, EXCEPT the competitive
+# benchmark harness, which is a tracked, reviewable part of the release.
+/scripts/*
+!/scripts/benchmark/
+
 # Benchmark runs are generated host artifacts. Keep only the directory marker;
 # default and named runs must never be tracked.
 benchmarks/results/*
