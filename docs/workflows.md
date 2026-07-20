@@ -487,7 +487,7 @@ graph LR
 **Command:**
 
 ```bash
-docker compose -f benchmarks/compose.yaml run --rm benchmark
+docker compose -f scripts/benchmark/compose.yaml run --rm benchmark
 ```
 
 Docker Compose is the only supported host entry point. The image contains the

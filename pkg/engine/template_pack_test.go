@@ -17,7 +17,7 @@ func TestRepositoryTemplatePackIsValidWQL(t *testing.T) {
 	}{
 		{path: "templates/official", want: 25},
 		{path: "templates/test", want: 5},
-		{path: "benchmarks/templates", want: 76},
+		{path: "scripts/benchmark/templates", want: 76},
 	}
 
 	total := 0
@@ -147,7 +147,7 @@ func TestAuthoritativeWQLDocsUseCanonicalVocabulary(t *testing.T) {
 	}
 
 	staleText := map[string][]string{
-		"benchmarks/fixtures/decurity-semgrep-inspired/unrestricted-transfer-ownership-fake-modifier.sol": {
+		"scripts/benchmark/fixtures/decurity-semgrep-inspired/unrestricted-transfer-ownership-fake-modifier.sol": {
 			"unAuthenticated",
 		},
 		"templates/INDEX.md": {
@@ -199,7 +199,7 @@ func TestAuthoritativeWQLDocsUseCanonicalVocabulary(t *testing.T) {
 		"docs/project-overview.md": {
 			"token_call",
 		},
-		"benchmarks/templates/4naly3er-inspired/M-erc721-safe-transfer-from.yaml": {
+		"scripts/benchmark/templates/4naly3er-inspired/M-erc721-safe-transfer-from.yaml": {
 			"token_call",
 		},
 		"templates/test/feature-inside.yaml": {

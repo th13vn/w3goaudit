@@ -91,13 +91,13 @@ contains the pinned compared scanners, and its Dockerfile derives and verifies
 the Go version directly from the repository's `go.mod`.
 
 ```bash
-docker compose -f benchmarks/compose.yaml run --rm benchmark
+docker compose -f scripts/benchmark/compose.yaml run --rm benchmark
 ```
 
 The host owns only `benchmarks/results/<RUN_NAME>/`; it does not run the Python
 benchmark runner directly or install scanner toolchains. The image verifies
 the reviewed generated-lock hash for the pinned 4naly3er commit. See
-[`benchmarks/README.md`](../benchmarks/README.md) for suites and tool selection.
+[`scripts/benchmark/README.md`](../scripts/benchmark/README.md) for suites and tool selection.
 
 ---
 

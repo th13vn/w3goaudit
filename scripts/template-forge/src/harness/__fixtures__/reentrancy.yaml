@@ -1,0 +1,20 @@
+meta:
+  id: HIGH-REENTRANCY-PATTERN
+  title: Potential Reentrancy - State Variable Modification
+  severity: HIGH
+  confidence: MEDIUM
+  description: >
+    Detects functions where external calls occur before state variable updates.
+  recommendation: >
+    Apply the Check-Effects-Interactions pattern or use a ReentrancyGuard.
+
+query:
+  scope: entrypoint
+  filter:
+    preset: unLocked
+  match:
+    sequence:
+      - any:
+          - kind: eth_transfer
+          - kind: delegatecall
+      - kind: state_write

@@ -38,7 +38,8 @@ finished `Database`/`Findings`, independent of the WQL template surface.
 | `pkg/report/` | Markdown/HTML/SARIF/JSON output, result folder, state matrix, workflow files, source excerpts | `pkg/report/INDEX.md` |
 | `pkg/home/` | `~/.w3goaudit` config/template-home management and release download | `pkg/home/INDEX.md` |
 | `templates/` | Official embedded WQL detector pack plus benchmark and feature-test templates | `templates/INDEX.md` |
-| `benchmarks/` | Docker-only competitive analyzer benchmark, corpora, fixtures, adapters, and quality threshold gate | `benchmarks/README.md` |
+| `scripts/benchmark/` | Competitive analyzer benchmark harness, corpora, fixtures, adapters, and quality threshold gate (local CLI for w3goaudit; Docker Compose only for multi-tool comparison) | `scripts/benchmark/README.md` |
+| `benchmarks/` | Stored benchmark results: tracked dated reports (`yyyy-mm-dd-<commit-slug>.md`) plus the Git-ignored `results/` run-output scratch directory | `benchmarks/README.md` |
 | `test-data/` | Canonical Solidity fixtures: security matrices plus core builder/engine/extract/identity cases | `test-data/README.md` |
 
 ## Benchmark Harness Map
@@ -48,19 +49,33 @@ with the Python harness divided into focused modules:
 
 | Path | Responsibility |
 |---|---|
-| `benchmarks/run_benchmark.py` | CLI and sequential orchestration. |
-| `benchmarks/benchmark_core.py` | Paths, source indexes, process I/O, aliases, and manifests. |
-| `benchmarks/benchmark_adapters.py` | Scanner commands and native-output normalization. |
-| `benchmarks/benchmark_scoring.py` | Exact/call-chain-relaxed matching and metrics. |
-| `benchmarks/benchmark_reporting.py` | `benchmark.md` rendering. |
-| `benchmarks/call_chain.py` | Internal-call reachability helper. |
-| `benchmarks/assert_thresholds.py` | Release-quality threshold gate. |
+| `scripts/benchmark/run_benchmark.py` | CLI and sequential orchestration. |
+| `scripts/benchmark/benchmark_core.py` | Paths, source indexes, process I/O, aliases, and manifests. |
+| `scripts/benchmark/benchmark_adapters.py` | Scanner commands and native-output normalization. |
+| `scripts/benchmark/benchmark_scoring.py` | Exact/call-chain-relaxed matching and metrics. |
+| `scripts/benchmark/benchmark_reporting.py` | `benchmark.md` rendering. |
+| `scripts/benchmark/call_chain.py` | Internal-call reachability helper. |
+| `scripts/benchmark/assert_thresholds.py` | Release-quality threshold gate. |
 
-The only supported multi-tool host workflow remains:
+The primary workflow is the local CLI (no Docker):
 
 ```bash
-docker compose -f benchmarks/compose.yaml run --rm benchmark
+go build -o /tmp/w3goaudit ./cmd/w3goaudit
+python3 scripts/benchmark/run_benchmark.py --suite competitive --tools w3goaudit \
+  --w3goaudit-bin /tmp/w3goaudit --out benchmarks/results/latest
+python3 scripts/benchmark/assert_thresholds.py benchmarks/results/latest/benchmark.json
 ```
+
+Docker Compose is used only when comparing against the other scanners
+(Slither/Semgrep/4naly3er):
+
+```bash
+docker compose -f scripts/benchmark/compose.yaml run --rm benchmark
+```
+
+Durable results are stored as tracked dated reports in `benchmarks/`
+(`yyyy-mm-dd-<commit-slug>.md`); `benchmarks/results/` remains the Git-ignored
+run-output scratch directory.
 
 ## Core Invariants
 
@@ -68,8 +83,10 @@ docker compose -f benchmarks/compose.yaml run --rm benchmark
   security floor: the standard-library fixes required by govulncheck need
   Go >=1.25.12. Local and external build automation should read `go.mod`
   directly rather than duplicating the version.
-- The only supported multi-tool benchmark workflow runs through
-  `benchmarks/compose.yaml` on `linux/amd64`, fails before output when any
+- The w3goaudit-only benchmark quality gate runs through the local CLI
+  (`scripts/benchmark/run_benchmark.py` + `assert_thresholds.py`). The only
+  supported multi-tool benchmark workflow runs through
+  `scripts/benchmark/compose.yaml` on `linux/amd64`, fails before output when any
   requested scanner is unavailable, and writes only beneath the mounted,
   Git-ignored `benchmarks/results/` directory. The Dockerfile verifies the
   reviewed generated-lock hash for its pinned 4naly3er commit, so the canonical
@@ -327,7 +344,13 @@ go test ./pkg/... -count=1
 go build -o w3goaudit ./cmd/w3goaudit
 ./w3goaudit test-data/security/ --template templates/official/ --verbose
 
-# Docker Compose is the only supported competitive-benchmark host workflow.
+# Competitive quality gate via the local CLI (no Docker).
+go build -o /tmp/w3goaudit ./cmd/w3goaudit
+python3 scripts/benchmark/run_benchmark.py --suite competitive --tools w3goaudit \
+  --w3goaudit-bin /tmp/w3goaudit --out benchmarks/results/latest
+python3 scripts/benchmark/assert_thresholds.py benchmarks/results/latest/benchmark.json
+
+# Docker Compose only for the multi-tool comparison (Slither/Semgrep/4naly3er).
 # The Dockerfile derives and verifies the Go version directly from go.mod.
-docker compose -f benchmarks/compose.yaml run --rm benchmark
+docker compose -f scripts/benchmark/compose.yaml run --rm benchmark
 ```
