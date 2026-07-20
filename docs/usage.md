@@ -997,10 +997,15 @@ official pack (always available, offline fallback).
 
 On first run, if `~/.w3goaudit/templates/` is empty, w3goaudit downloads the
 `zipball` of the latest release of `th13vn/w3goaudit-templates`
-(https://github.com/th13vn/w3goaudit-templates — release `v1.0.0`, 25 templates),
+(https://github.com/th13vn/w3goaudit-templates — release `v2.0.0`, 25 templates),
 extracts the `.yaml`/`.yml`/`.md` files into the home, and records the tag in
 `templates/.version`. If the download fails (offline, repo/release unreachable),
 it falls back to the embedded pack — no hard failure, just a notice.
+
+> **Compatibility:** w3goaudit v0.4 uses canonical WQL (`select`/`from`/`where`).
+> Fetch **w3goaudit-templates v2.0.0+**, which is authored in that syntax; the
+> older `v1.0.x` pack (`scope`/`filter`/`match`) will not load on v0.4. The
+> embedded fallback pack always matches the engine.
 
 Archive handling is resource-limited: 64 MiB compressed, 8 MiB per extracted
 file, 128 MiB total decompressed, 4,096 accepted files, and 8,192 total ZIP

@@ -1,6 +1,20 @@
 # Changelog
 
-## Unreleased – Benchmark harness relocation
+All notable changes to w3goaudit are documented here. This project adheres to
+[Semantic Versioning](https://semver.org/). Output changes note the `data/*.json`
+`schemaVersion`.
+
+## v0.4.0 - 2026-07-20
+
+Major release. Precise source locations (**output schema 2.0.0**, breaking), the
+canonical WQL query language with `and:` / `or:` composition, a full
+correctness-closure and hardening pass, and the competitive benchmark moved to a
+local-CLI quality gate (`scripts/benchmark/`). The gate passes at TP 109 / FP 41
+/ FN 0 — precision 72.67%, recall 100%. Pairs with the **w3goaudit-templates
+v2.0.0** canonical-WQL pack.
+
+### Benchmark harness (local CLI + relocation)
+
 
 - Moved the competitive benchmark harness (runner, scoring, adapters, corpora,
   fixtures, WQL ports, Docker files, threshold gate) from `benchmarks/` to
@@ -12,7 +26,7 @@
   Compose remains only for the multi-tool comparison against
   Slither/Semgrep/4naly3er.
 
-## Unreleased – Project 1 correctness closure
+### Correctness closure (Project 1)
 
 - Corrected Solidity `for` AST order to initialization, condition, body, then
   post, and completed state-write coverage for dynamic-storage-array
@@ -33,7 +47,7 @@
   four-byte `Function.Signature`, location units, location-source behavior,
   report indexing, cached source content, and extension output examples.
 
-## Unreleased — canonical WQL and query composition
+### Canonical WQL and query composition
 
 A WQL document is meta plus one query: block. All 106 repository templates use
 that canonical shape. The final competitive benchmark gate passes with TP 109,
@@ -161,7 +175,7 @@ FP 41, FN 0, precision 72.6666666667%, recall 100%, and zero failed cases.
   the exported evaluator IR gains `Template.Queries` and `Rule.ArgAny`;
   `ReachStep.File` and precise `NodeRef` spans are documented.
 
-## Unreleased — Full correctness and release hardening
+### Full correctness and release hardening
 
 - Added immutable scan-local logging/options across the reader, builder,
   database loader, engine, template loader, and report generator. Deprecated
@@ -196,19 +210,20 @@ FP 41, FN 0, precision 72.6666666667%, recall 100%, and zero failed cases.
   `go.mod`'s Go version, raised to 1.26.5 because govulncheck found reachable
   standard-library advisories in older supported toolchains (fixes require
   >=1.25.12).
-- Made Docker Compose the only supported competitive-benchmark host workflow.
-  The image derives and verifies Go directly from `go.mod`, requested scanners
-  fail closed, and output is confined to `benchmarks/results/`. The threshold
-  checker enforces precision >= 65%, recall >= 95%, and zero failed cases from
-  recomputed raw counts. The reviewed generated-lock hash for the pinned
-  4naly3er commit is built into the Dockerfile, so the canonical Compose command
-  requires no external build argument.
+- Hardened the competitive benchmark (later relocated to `scripts/benchmark/`,
+  see above). The multi-tool Docker image derives and verifies Go directly from
+  `go.mod`, requested scanners fail closed, and output is confined to
+  `benchmarks/results/`. The threshold checker enforces precision >= 65%,
+  recall >= 95%, and zero failed cases from recomputed raw counts. The reviewed
+  generated-lock hash for the pinned 4naly3er commit is built into the
+  Dockerfile, so the canonical Compose command requires no external build
+  argument.
 - Template YAML is strictly `meta` plus `query:`; unknown keys are rejected
   at every level. The obsolete `templates/security/` lane was deleted; the
   retained inventory is 25 official + 5 feature-test + 76 benchmark = 106 WQL
   templates.
 
-## v0.4.0 - 2026-07-13: Precise source locations (breaking output schema)
+### Precise source locations (breaking output schema 2.0.0)
 
 AST nodes and declarations now carry column and byte-offset ranges, not just
 line numbers, closing the gap between "which line" and "which exact span" for
@@ -247,7 +262,7 @@ edits):
   official/benchmark/feature-test templates use it. See
   [`docs/wql-syntax.md`](docs/wql-syntax.md).
 
-### Fixes (v0.4.0)
+#### Fixes
 
 - **Deterministic finding output.** `ExecuteAll` now applies a total-order sort
   (`SortFindings`) before returning, so `findings.json`, `results.sarif`, and
@@ -279,7 +294,7 @@ edits):
   comments and word-boundary function matching; nav.json symbol IDs and ordering
   are collision-free. `--version` is wired and the CLI version is `0.4.0`.
 
-## Unreleased — Standardized result-folder layout (output tree)
+### Standardized result-folder layout (output tree)
 
 The result folder was reorganized from a flat pile (an all-contracts
 `overview.md` dump plus one per-contract folder at the top level) into a
@@ -306,7 +321,7 @@ navigable, tool-conventional tree:
 - Reuse a pre-built DB via `--db data/database.json` (was `--db
   corpus/database.json`).
 
-## Unreleased — Engine quality & correctness cleanups
+### Engine quality & correctness cleanups
 
 Internal hardening from a self-review of the precision work (no template-syntax
 changes):
@@ -332,7 +347,7 @@ changes):
 - Renamed the Go field `Rule.SourceRegex` → `Rule.Regex` to match the `regex:`
   keyword (no YAML change).
 
-## Unreleased — WQL keyword simplification (breaking template syntax)
+### WQL keyword simplification (historical)
 
 Historical record. These evaluator-facing YAML keywords are not accepted by
 the current loader; see `docs/wql-syntax.md` for the current syntax. The
@@ -350,12 +365,12 @@ sibling fields in `and:`), a complete Node Kinds reference (incl. the Declaratio
 group), and a fuller attributes table (`call_receiver`, `has_value`, `has_gas`,
 `has_salt`, `call_option`, `parent`, …).
 
-## Unreleased — Detector precision & access-control accuracy
+### Detector precision & access-control accuracy
 
 False-positive reduction across the official pack, validated on a real on-chain
 target (SpiceFiNFT4626) and the competitive benchmark.
 
-### Engine / access-control analysis (`pkg/types/function.go`)
+#### Engine / access-control analysis
 
 - **Privileged access control vs. item ownership are now distinguished.**
   `ownerOf(tokenId) == msg.sender` (a getter the caller indexes with a resource
@@ -373,7 +388,7 @@ target (SpiceFiNFT4626) and the competitive benchmark.
   (`calleeNameMatches`) — previously it compared against the full selector and
   silently never matched.
 
-### New WQL predicates (`pkg/engine`)
+#### New WQL predicates
 
 - `unchecked_var` — on arithmetic `binary_op`, matches only when operands were not
   range-checked by a preceding `require`/`assert`/`if` guard.
@@ -383,11 +398,11 @@ target (SpiceFiNFT4626) and the competitive benchmark.
   incorrect-exp to exclude a `^` that shares a statement with another bitwise op.
 - `label` — optional name on a `Rule.All` branch, surfaced in `Finding.Related`.
 
-### Builder
+#### Builder
 
 - A `0x…` number literal is now tagged `subtype: hex` (not `number`).
 
-### Official templates
+#### Official templates
 
 - `arbitrary-send-eth` uses `not: { preset: caller_checked }` (clears owner-gated
   NFT-vault withdrawals while still flagging genuine arbitrary sends).
@@ -396,11 +411,11 @@ target (SpiceFiNFT4626) and the competitive benchmark.
 - `unchecked-arithmetic`: scoped to state-mutating functions and `unchecked_var`
   arithmetic; excludes pure library math and range-checked subtraction.
 
-### Benchmark
+#### Benchmark
 
-- Competitive corpus is now governed by the Unreleased quality gate above; the
-  previous 105/109, 60.0%-precision snapshot is retained only in repository
-  history rather than documented as the current baseline.
+- Competitive corpus is now governed by the release quality gate above (TP 109 /
+  FP 41 / FN 0); the previous 105/109, 60.0%-precision snapshot is retained only
+  in repository history rather than documented as the current baseline.
 
 ## v0.3.1 - 2026-06-22
 
