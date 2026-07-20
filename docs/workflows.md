@@ -9,7 +9,7 @@ W3GoAudit has three product workflows plus one release-quality workflow:
 1. **Scan Workflow** - Analyze contracts with security templates
 2. **Build Workflow** - Construct contract database
 3. **Default Scan Workflow** - Scan + generate project reports (combined)
-4. **Competitive Benchmark Workflow** - Docker Compose-only multi-tool quality gate
+4. **Competitive Benchmark Workflow** - local-CLI quality gate for w3goaudit; Docker Compose for multi-tool comparison
 
 All workflows share a common foundation: **Reader → Builder → Database**. The
 CLI snapshots flags/config into immutable scan options and injects one
@@ -484,18 +484,28 @@ graph LR
 
 ## 4. Competitive Benchmark Workflow
 
-**Command:**
+**Command (w3goaudit-only quality gate, local CLI — no Docker):**
+
+```bash
+go build -o /tmp/w3goaudit ./cmd/w3goaudit
+python3 scripts/benchmark/run_benchmark.py --suite competitive --tools w3goaudit \
+  --w3goaudit-bin /tmp/w3goaudit --out benchmarks/results/latest
+python3 scripts/benchmark/assert_thresholds.py benchmarks/results/latest/benchmark.json
+```
+
+**Command (multi-tool comparison against Slither/Semgrep/4naly3er, Docker):**
 
 ```bash
 docker compose -f scripts/benchmark/compose.yaml run --rm benchmark
 ```
 
-Docker Compose is the only supported host entry point. The image contains the
-pinned compared scanners, and its Dockerfile reads and verifies the Go version
-directly from `go.mod`; the host does not run the Python benchmark runner or
-install scanner toolchains. Requested tools fail closed before output is
-replaced, and the only host-owned output is
-`benchmarks/results/<RUN_NAME>/`.
+Docker Compose is the only supported host entry point **for the multi-tool
+comparison**. In that lane the image contains the pinned compared scanners, and
+its Dockerfile reads and verifies the Go version directly from `go.mod`; the
+host does not install scanner toolchains. Requested tools fail closed before
+output is replaced, and the only host-owned output is
+`benchmarks/results/<RUN_NAME>/`. Durable results are stored as tracked dated
+reports in `benchmarks/` (`yyyy-mm-dd-<commit-slug>.md`).
 
 Fallback contract/function attribution masks Solidity comments, quoted strings,
 and escapes with a length- and newline-preserving lexer. Declaration matching

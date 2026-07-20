@@ -8,8 +8,8 @@ core pipeline — parser/builder, WQL engine, and the CLI — rather than securi
 detection.
 
 Each behavior has one canonical fixture lane. Benchmark-family fixtures live
-under [`../benchmarks/fixtures/`](../benchmarks/fixtures/) instead of being
-duplicated as aggregate files here.
+under [`../scripts/benchmark/fixtures/`](../scripts/benchmark/fixtures/) instead
+of being duplicated as aggregate files here.
 
 | Group | What it holds | Used by |
 |---|---|---|
