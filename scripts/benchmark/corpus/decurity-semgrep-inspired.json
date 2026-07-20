@@ -472,9 +472,9 @@
     {
       "id": "decurity-semgrep-inspired",
       "title": "One focused vulnerable fixture for each Decurity Solidity security rule",
-      "target": "benchmarks/fixtures/decurity-semgrep-inspired/",
-      "templates": "benchmarks/templates/decurity-semgrep-inspired",
-      "semgrep_config": "benchmarks/config/semgrep-decurity",
+      "target": "scripts/benchmark/fixtures/decurity-semgrep-inspired/",
+      "templates": "scripts/benchmark/templates/decurity-semgrep-inspired",
+      "semgrep_config": "scripts/benchmark/config/semgrep-decurity",
       "requires_compilation": false,
       "expected": [
         {

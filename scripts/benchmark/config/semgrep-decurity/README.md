@@ -11,7 +11,7 @@ verbatim.
 | Source | https://github.com/Decurity/semgrep-smart-contracts |
 | Path in source | `security/` |
 | Rules vendored | 42 `.yaml` files |
-| Used by | `run_benchmark.py` Semgrep adapter (`--semgrep-config benchmarks/config/semgrep-decurity`) and the `decurity` / `competitive` corpora |
+| Used by | `run_benchmark.py` Semgrep adapter (`--semgrep-config scripts/benchmark/config/semgrep-decurity`) and the `decurity` / `competitive` corpora |
 
 Each rule's `id` is what Semgrep emits as `check_id` in its JSON output; the
 corpus `categories[].aliases.semgrep` and the benchmark's substring matching map

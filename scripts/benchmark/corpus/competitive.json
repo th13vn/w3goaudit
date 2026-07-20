@@ -950,8 +950,8 @@
     {
       "id": "slither-detectors",
       "title": "Slither-inspired detector parity fixtures",
-      "target": "benchmarks/fixtures/slither-detectors/",
-      "templates": "benchmarks/templates",
+      "target": "scripts/benchmark/fixtures/slither-detectors/",
+      "templates": "scripts/benchmark/templates",
       "requires_compilation": false,
       "expected": [
         {
@@ -1129,9 +1129,9 @@
     {
       "id": "decurity-semgrep-inspired",
       "title": "One focused vulnerable fixture for each Decurity Solidity security rule",
-      "target": "benchmarks/fixtures/decurity-semgrep-inspired/",
-      "templates": "benchmarks/templates",
-      "semgrep_config": "benchmarks/config/semgrep-decurity",
+      "target": "scripts/benchmark/fixtures/decurity-semgrep-inspired/",
+      "templates": "scripts/benchmark/templates",
+      "semgrep_config": "scripts/benchmark/config/semgrep-decurity",
       "requires_compilation": false,
       "expected": [
         {
@@ -1439,8 +1439,8 @@
     {
       "id": "4naly3er-detectors",
       "title": "4naly3er per-detector fixtures",
-      "target": "benchmarks/fixtures/4naly3er-detectors/",
-      "templates": "benchmarks/templates",
+      "target": "scripts/benchmark/fixtures/4naly3er-detectors/",
+      "templates": "scripts/benchmark/templates",
       "requires_compilation": true,
       "expected": [
         {
