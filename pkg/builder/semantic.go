@@ -411,16 +411,6 @@ func (b *ASTBuilder) refIDForSymbol(name, kind string) string {
 	}
 }
 
-func (b *ASTBuilder) functionIdentityText() string {
-	if b == nil || b.function == nil {
-		return ""
-	}
-	if b.function.Selector != "" {
-		return b.function.Selector
-	}
-	return ""
-}
-
 func (b *ASTBuilder) semanticFunctionID() string {
 	if b == nil || b.contract == nil || b.function == nil || b.function.Selector == "" {
 		return ""

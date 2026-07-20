@@ -158,68 +158,13 @@ func (a *semanticAnalyzer) lowerNode(node *types.ASTNode, ctx lowerContext) []se
 		return a.lowerChildren(node.Children, ctx)
 
 	case types.KindStmtAssign:
-		operations := a.lowerAssignmentEffects(node, ctx)
-		assignmentOps, ok := a.lowerAssignmentOps(node, ctx)
-		if !ok {
-			a.recordUnsupportedWithReason(node, ctx, "exact assignment LHS, tuple metadata, or lvalue path is unavailable")
-			operations = append(operations, semanticOp{Kind: semanticOpUnknown, Provenance: semanticRef{Node: node}})
-			return operations
-		}
-		operations = append(operations, assignmentOps...)
-		return operations
+		return a.lowerAssignStatement(node, ctx)
 
 	case types.KindDeclVariable:
-		childCount := len(node.Children)
-		if childCount == 0 {
-			return nil
-		}
-		if !semanticAttributePresent(node, "assignment_lhs_count") {
-			a.recordUnsupportedWithReason(node, ctx, "declaration assignment LHS count is unavailable")
-			return []semanticOp{{Kind: semanticOpUnknown, Provenance: semanticRef{Node: node}}}
-		}
-		lhsCount, lhsCountExact := semanticAttributeIntExact(node, "assignment_lhs_count")
-		if !lhsCountExact {
-			a.recordUnsupportedWithReason(node, ctx, "declaration assignment LHS count is malformed")
-			return []semanticOp{{Kind: semanticOpUnknown, Provenance: semanticRef{Node: node}}}
-		}
-		if lhsCount == childCount {
-			return nil
-		}
-		if lhsCount <= 0 || lhsCount > childCount {
-			a.recordUnsupportedWithReason(node, ctx, "declaration assignment LHS count is outside the valid range")
-			return []semanticOp{{Kind: semanticOpUnknown, Provenance: semanticRef{Node: node}}}
-		}
-		if lhsCount < childCount {
-			operations := a.lowerAssignmentEffects(node, ctx)
-			assignmentOps, ok := a.lowerAssignmentOps(node, ctx)
-			if !ok {
-				a.recordUnsupportedWithReason(node, ctx, "exact declaration assignment metadata is unavailable")
-				return append(operations, semanticOp{Kind: semanticOpUnknown, Provenance: semanticRef{Node: node}})
-			}
-			operations = append(operations, assignmentOps...)
-			return operations
-		}
-		a.recordUnsupportedWithReason(node, ctx, "declaration assignment LHS count is impossible")
-		return []semanticOp{{Kind: semanticOpUnknown, Provenance: semanticRef{Node: node}}}
+		return a.lowerVariableDeclaration(node, ctx)
 
 	case types.KindExprIdentifier, types.KindExprMemberAccess, types.KindExprIndexAccess:
-		var operations []semanticOp
-		if node.Kind == types.KindExprMemberAccess || node.Kind == types.KindExprIndexAccess {
-			operations = a.lowerNestedEffects(node.Children, ctx, nestedEffectsOnly)
-		} else {
-			operations = a.lowerNestedEffects(node.Children, ctx, nestedEffectsOwnInexact)
-		}
-		if path, ok := a.pathForNode(node, ctx); ok {
-			operations = append(operations, semanticOp{
-				Kind:       semanticOpRead,
-				Provenance: semanticRef{Node: node},
-				Reads:      []accessPath{path},
-				Inputs:     []semanticValue{a.valueForNode(node, ctx)},
-			})
-			return operations
-		}
-		a.recordUnsupportedWithReason(node, ctx, "exact access root or lvalue structure is unavailable")
-		return append(operations, semanticOp{Kind: semanticOpUnknown, Provenance: semanticRef{Node: node}})
+		return a.lowerAccessExpression(node, ctx)
 
 	case types.KindExprTuple:
 		return a.lowerTuple(node, ctx)
@@ -228,75 +173,13 @@ func (a *semanticAnalyzer) lowerNode(node *types.ASTNode, ctx lowerContext) []se
 		return a.lowerChildren(node.Children, ctx)
 
 	case types.KindExprUnaryOp:
-		operator := node.GetAttributeString("operator")
-		if operator == "delete" || operator == "++" || operator == "--" {
-			operations := a.lowerNestedEffects(node.Children, ctx, nestedEffectsOnly)
-			target := firstSemanticChild(node)
-			write, exactTarget := a.requiredWritePath(target, ctx)
-			if !exactTarget {
-				a.recordUnsupportedWithReason(target, ctx, "mutation target lacks an exact write path")
-				return append(operations, semanticOp{Kind: semanticOpUnknown, Provenance: semanticRef{Node: node}})
-			}
-			inputs, malformedTuple := a.valuesForChildren(node.Children, ctx)
-			if malformedTuple != nil {
-				return a.failMalformedTupleValue(node, malformedTuple, ctx, operations)
-			}
-			reads := []accessPath(nil)
-			if operator != "delete" {
-				reads = []accessPath{cloneAccessPath(write)}
-			}
-			operations = append(operations, semanticOp{
-				Kind:       semanticOpWrite,
-				Provenance: semanticRef{Node: node},
-				Reads:      reads,
-				Writes:     []accessPath{write},
-				Inputs:     inputs,
-			})
-			return operations
-		}
-		return a.lowerChildren(node.Children, ctx)
+		return a.lowerUnaryOperation(node, ctx)
 
 	case types.KindStmtStateMutation:
-		operations := a.lowerNestedEffects(node.Children, ctx, nestedEffectsOnly)
-		target := firstSemanticChild(node)
-		write, exactTarget := a.requiredWritePath(target, ctx)
-		if !exactTarget {
-			a.recordUnsupportedWithReason(target, ctx, "state mutation receiver lacks an exact write path")
-			return append(operations, semanticOp{Kind: semanticOpUnknown, Provenance: semanticRef{Node: node}})
-		}
-		inputs, malformedTuple := a.valuesForChildren(node.Children, ctx)
-		if malformedTuple != nil {
-			return a.failMalformedTupleValue(node, malformedTuple, ctx, operations)
-		}
-		operations = append(operations, semanticOp{
-			Kind:       semanticOpWrite,
-			Provenance: semanticRef{Node: node},
-			Reads:      a.readPathsForChildren(node.Children, ctx),
-			Writes:     []accessPath{write},
-			Inputs:     inputs,
-		})
-		return operations
+		return a.lowerStateMutation(node, ctx)
 
 	case types.KindStmtReturn:
-		operations := a.lowerNestedEffects(node.Children, ctx, nestedEffectsOnly)
-		inputs, malformedTuple := a.valuesForChildren(node.Children, ctx)
-		if malformedTuple != nil {
-			return a.failMalformedTupleValue(node, malformedTuple, ctx, operations)
-		}
-		reads := a.readPathsForChildren(node.Children, ctx)
-		if len(node.Children) == 1 && node.Children[0] != nil && node.Children[0].Kind == types.KindExprTuple {
-			reads = nil
-			for _, input := range inputs {
-				reads = append(reads, cloneAccessPaths(input.Sources)...)
-			}
-		}
-		operations = append(operations, semanticOp{
-			Kind:       semanticOpReturn,
-			Provenance: semanticRef{Node: node},
-			Reads:      reads,
-			Inputs:     inputs,
-		})
-		return operations
+		return a.lowerReturnStatement(node, ctx)
 
 	case types.KindCheckRequire, types.KindCheckAssert:
 		return a.lowerCallWithKind(node, ctx, semanticOpCheck)
@@ -317,49 +200,13 @@ func (a *semanticAnalyzer) lowerNode(node *types.ASTNode, ctx lowerContext) []se
 		return a.lowerCallWithKind(node, ctx, semanticOpCall)
 
 	case types.KindAsmSstore:
-		slot := firstSemanticChild(node)
-		if slot == nil || !exactExpressionIdentity(slot) {
-			operations := a.lowerNestedEffects(node.Children, ctx, nestedEffectsOnly)
-			a.recordUnsupportedWithReason(node, ctx, "Yul storage offset lacks exact expression identity")
-			return append(operations, semanticOp{Kind: semanticOpUnknown, Provenance: semanticRef{Node: node}})
-		}
-		operations := a.lowerNestedEffects(node.Children, ctx, nestedEffectsOnly)
-		inputs, malformedTuple := a.valuesForChildren(node.Children, ctx)
-		if malformedTuple != nil {
-			return a.failMalformedTupleValue(node, malformedTuple, ctx, operations)
-		}
-		reads := a.readPathsForChildren(node.Children, ctx)
-		path, _ := yulOffsetPath(slot, ctx, storagePersistent, "yul-storage")
-		writes := []accessPath{path}
-		operations = append(operations, semanticOp{Kind: semanticOpWrite, Provenance: semanticRef{Node: node}, Reads: reads, Writes: writes, Inputs: inputs})
-		return operations
+		return a.lowerYulStorageAccess(node, ctx, semanticOpWrite)
 
 	case types.KindAsmSload:
-		slot := firstSemanticChild(node)
-		if slot == nil || !exactExpressionIdentity(slot) {
-			operations := a.lowerNestedEffects(node.Children, ctx, nestedEffectsOnly)
-			a.recordUnsupportedWithReason(node, ctx, "Yul storage offset lacks exact expression identity")
-			return append(operations, semanticOp{Kind: semanticOpUnknown, Provenance: semanticRef{Node: node}})
-		}
-		operations := a.lowerNestedEffects(node.Children, ctx, nestedEffectsOnly)
-		inputs, malformedTuple := a.valuesForChildren(node.Children, ctx)
-		if malformedTuple != nil {
-			return a.failMalformedTupleValue(node, malformedTuple, ctx, operations)
-		}
-		reads := a.readPathsForChildren(node.Children, ctx)
-		path, _ := yulOffsetPath(slot, ctx, storagePersistent, "yul-storage")
-		reads = append(reads, path)
-		operations = append(operations, semanticOp{Kind: semanticOpRead, Provenance: semanticRef{Node: node}, Reads: reads, Inputs: inputs})
-		return operations
+		return a.lowerYulStorageAccess(node, ctx, semanticOpRead)
 
 	case types.KindAsmRevert, types.KindAsmReturn, types.KindAsmSelfdestruct:
-		operations := a.lowerNestedEffects(node.Children, ctx, nestedEffectsOnly)
-		inputs, malformedTuple := a.valuesForChildren(node.Children, ctx)
-		if malformedTuple != nil {
-			return a.failMalformedTupleValue(node, malformedTuple, ctx, operations)
-		}
-		operations = append(operations, semanticOp{Kind: semanticOpTerminal, Provenance: semanticRef{Node: node}, Reads: a.readPathsForChildren(node.Children, ctx), Inputs: inputs})
-		return operations
+		return a.lowerYulTerminal(node, ctx)
 
 	case types.KindAsmOperation:
 		return a.lowerYulOperation(node, ctx)
@@ -371,6 +218,181 @@ func (a *semanticAnalyzer) lowerNode(node *types.ASTNode, ctx lowerContext) []se
 		a.recordUnsupported(node, ctx)
 		return []semanticOp{{Kind: semanticOpUnknown, Provenance: semanticRef{Node: node}}}
 	}
+}
+
+func (a *semanticAnalyzer) lowerAssignStatement(node *types.ASTNode, ctx lowerContext) []semanticOp {
+	operations := a.lowerAssignmentEffects(node, ctx)
+	assignmentOps, ok := a.lowerAssignmentOps(node, ctx)
+	if !ok {
+		a.recordUnsupportedWithReason(node, ctx, "exact assignment LHS, tuple metadata, or lvalue path is unavailable")
+		operations = append(operations, semanticOp{Kind: semanticOpUnknown, Provenance: semanticRef{Node: node}})
+		return operations
+	}
+	operations = append(operations, assignmentOps...)
+	return operations
+}
+
+func (a *semanticAnalyzer) lowerVariableDeclaration(node *types.ASTNode, ctx lowerContext) []semanticOp {
+	childCount := len(node.Children)
+	if childCount == 0 {
+		return nil
+	}
+	if !semanticAttributePresent(node, "assignment_lhs_count") {
+		a.recordUnsupportedWithReason(node, ctx, "declaration assignment LHS count is unavailable")
+		return []semanticOp{{Kind: semanticOpUnknown, Provenance: semanticRef{Node: node}}}
+	}
+	lhsCount, lhsCountExact := semanticAttributeIntExact(node, "assignment_lhs_count")
+	if !lhsCountExact {
+		a.recordUnsupportedWithReason(node, ctx, "declaration assignment LHS count is malformed")
+		return []semanticOp{{Kind: semanticOpUnknown, Provenance: semanticRef{Node: node}}}
+	}
+	if lhsCount == childCount {
+		return nil
+	}
+	if lhsCount <= 0 || lhsCount > childCount {
+		a.recordUnsupportedWithReason(node, ctx, "declaration assignment LHS count is outside the valid range")
+		return []semanticOp{{Kind: semanticOpUnknown, Provenance: semanticRef{Node: node}}}
+	}
+	if lhsCount < childCount {
+		operations := a.lowerAssignmentEffects(node, ctx)
+		assignmentOps, ok := a.lowerAssignmentOps(node, ctx)
+		if !ok {
+			a.recordUnsupportedWithReason(node, ctx, "exact declaration assignment metadata is unavailable")
+			return append(operations, semanticOp{Kind: semanticOpUnknown, Provenance: semanticRef{Node: node}})
+		}
+		operations = append(operations, assignmentOps...)
+		return operations
+	}
+	a.recordUnsupportedWithReason(node, ctx, "declaration assignment LHS count is impossible")
+	return []semanticOp{{Kind: semanticOpUnknown, Provenance: semanticRef{Node: node}}}
+}
+
+func (a *semanticAnalyzer) lowerAccessExpression(node *types.ASTNode, ctx lowerContext) []semanticOp {
+	var operations []semanticOp
+	if node.Kind == types.KindExprMemberAccess || node.Kind == types.KindExprIndexAccess {
+		operations = a.lowerNestedEffects(node.Children, ctx, nestedEffectsOnly)
+	} else {
+		operations = a.lowerNestedEffects(node.Children, ctx, nestedEffectsOwnInexact)
+	}
+	if path, ok := a.pathForNode(node, ctx); ok {
+		operations = append(operations, semanticOp{
+			Kind:       semanticOpRead,
+			Provenance: semanticRef{Node: node},
+			Reads:      []accessPath{path},
+			Inputs:     []semanticValue{a.valueForNode(node, ctx)},
+		})
+		return operations
+	}
+	a.recordUnsupportedWithReason(node, ctx, "exact access root or lvalue structure is unavailable")
+	return append(operations, semanticOp{Kind: semanticOpUnknown, Provenance: semanticRef{Node: node}})
+}
+
+func (a *semanticAnalyzer) lowerUnaryOperation(node *types.ASTNode, ctx lowerContext) []semanticOp {
+	operator := node.GetAttributeString("operator")
+	if operator != "delete" && operator != "++" && operator != "--" {
+		return a.lowerChildren(node.Children, ctx)
+	}
+	operations := a.lowerNestedEffects(node.Children, ctx, nestedEffectsOnly)
+	target := firstSemanticChild(node)
+	write, exactTarget := a.requiredWritePath(target, ctx)
+	if !exactTarget {
+		a.recordUnsupportedWithReason(target, ctx, "mutation target lacks an exact write path")
+		return append(operations, semanticOp{Kind: semanticOpUnknown, Provenance: semanticRef{Node: node}})
+	}
+	inputs, malformedTuple := a.valuesForChildren(node.Children, ctx)
+	if malformedTuple != nil {
+		return a.failMalformedTupleValue(node, malformedTuple, ctx, operations)
+	}
+	reads := []accessPath(nil)
+	if operator != "delete" {
+		reads = []accessPath{cloneAccessPath(write)}
+	}
+	operations = append(operations, semanticOp{
+		Kind:       semanticOpWrite,
+		Provenance: semanticRef{Node: node},
+		Reads:      reads,
+		Writes:     []accessPath{write},
+		Inputs:     inputs,
+	})
+	return operations
+}
+
+func (a *semanticAnalyzer) lowerStateMutation(node *types.ASTNode, ctx lowerContext) []semanticOp {
+	operations := a.lowerNestedEffects(node.Children, ctx, nestedEffectsOnly)
+	target := firstSemanticChild(node)
+	write, exactTarget := a.requiredWritePath(target, ctx)
+	if !exactTarget {
+		a.recordUnsupportedWithReason(target, ctx, "state mutation receiver lacks an exact write path")
+		return append(operations, semanticOp{Kind: semanticOpUnknown, Provenance: semanticRef{Node: node}})
+	}
+	inputs, malformedTuple := a.valuesForChildren(node.Children, ctx)
+	if malformedTuple != nil {
+		return a.failMalformedTupleValue(node, malformedTuple, ctx, operations)
+	}
+	operations = append(operations, semanticOp{
+		Kind:       semanticOpWrite,
+		Provenance: semanticRef{Node: node},
+		Reads:      a.readPathsForChildren(node.Children, ctx),
+		Writes:     []accessPath{write},
+		Inputs:     inputs,
+	})
+	return operations
+}
+
+func (a *semanticAnalyzer) lowerReturnStatement(node *types.ASTNode, ctx lowerContext) []semanticOp {
+	operations := a.lowerNestedEffects(node.Children, ctx, nestedEffectsOnly)
+	inputs, malformedTuple := a.valuesForChildren(node.Children, ctx)
+	if malformedTuple != nil {
+		return a.failMalformedTupleValue(node, malformedTuple, ctx, operations)
+	}
+	reads := a.readPathsForChildren(node.Children, ctx)
+	if len(node.Children) == 1 && node.Children[0] != nil && node.Children[0].Kind == types.KindExprTuple {
+		reads = nil
+		for _, input := range inputs {
+			reads = append(reads, cloneAccessPaths(input.Sources)...)
+		}
+	}
+	operations = append(operations, semanticOp{
+		Kind:       semanticOpReturn,
+		Provenance: semanticRef{Node: node},
+		Reads:      reads,
+		Inputs:     inputs,
+	})
+	return operations
+}
+
+func (a *semanticAnalyzer) lowerYulStorageAccess(node *types.ASTNode, ctx lowerContext, kind semanticOpKind) []semanticOp {
+	slot := firstSemanticChild(node)
+	if slot == nil || !exactExpressionIdentity(slot) {
+		operations := a.lowerNestedEffects(node.Children, ctx, nestedEffectsOnly)
+		a.recordUnsupportedWithReason(node, ctx, "Yul storage offset lacks exact expression identity")
+		return append(operations, semanticOp{Kind: semanticOpUnknown, Provenance: semanticRef{Node: node}})
+	}
+	operations := a.lowerNestedEffects(node.Children, ctx, nestedEffectsOnly)
+	inputs, malformedTuple := a.valuesForChildren(node.Children, ctx)
+	if malformedTuple != nil {
+		return a.failMalformedTupleValue(node, malformedTuple, ctx, operations)
+	}
+	reads := a.readPathsForChildren(node.Children, ctx)
+	path, _ := yulOffsetPath(slot, ctx, storagePersistent, "yul-storage")
+	operation := semanticOp{Kind: kind, Provenance: semanticRef{Node: node}, Reads: reads, Inputs: inputs}
+	if kind == semanticOpWrite {
+		operation.Writes = []accessPath{path}
+	} else {
+		operation.Reads = append(operation.Reads, path)
+	}
+	operations = append(operations, operation)
+	return operations
+}
+
+func (a *semanticAnalyzer) lowerYulTerminal(node *types.ASTNode, ctx lowerContext) []semanticOp {
+	operations := a.lowerNestedEffects(node.Children, ctx, nestedEffectsOnly)
+	inputs, malformedTuple := a.valuesForChildren(node.Children, ctx)
+	if malformedTuple != nil {
+		return a.failMalformedTupleValue(node, malformedTuple, ctx, operations)
+	}
+	operations = append(operations, semanticOp{Kind: semanticOpTerminal, Provenance: semanticRef{Node: node}, Reads: a.readPathsForChildren(node.Children, ctx), Inputs: inputs})
+	return operations
 }
 
 func (a *semanticAnalyzer) lowerYulOperation(node *types.ASTNode, ctx lowerContext) []semanticOp {
@@ -459,14 +481,6 @@ func (a *semanticAnalyzer) lowerChildren(children []*types.ASTNode, ctx lowerCon
 		operations = append(operations, a.lowerNode(child, ctx)...)
 	}
 	return operations
-}
-
-func (a *semanticAnalyzer) lowerAssignment(node *types.ASTNode, ctx lowerContext) semanticOp {
-	operations, _ := a.lowerAssignmentOps(node, ctx)
-	if len(operations) == 0 {
-		return semanticOp{Kind: semanticOpUnknown, Provenance: semanticRef{Node: node}}
-	}
-	return operations[0]
 }
 
 func (a *semanticAnalyzer) lowerAssignmentOps(node *types.ASTNode, ctx lowerContext) ([]semanticOp, bool) {
@@ -1293,7 +1307,7 @@ func parseDecimalRational(value string) (*big.Rat, bool) {
 	}
 	exponent := int64(0)
 	if marker := strings.IndexAny(value, "eE"); marker >= 0 {
-		if strings.IndexAny(value[marker+1:], "eE") >= 0 {
+		if strings.ContainsAny(value[marker+1:], "eE") {
 			return nil, false
 		}
 		exponentText := value[marker+1:]
