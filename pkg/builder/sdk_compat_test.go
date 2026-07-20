@@ -6,3 +6,4 @@ import (
 )
 
 var _ func(*ast.ModifierDefinition) *types.ASTNode = BuildModifierAST
+var _ func(*InheritanceBuilder, string) []*types.Function = (*InheritanceBuilder).GetInheritedFunctions

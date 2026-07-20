@@ -11,6 +11,7 @@ import (
 
 	"github.com/th13vn/w3goaudit/pkg/builder"
 	"github.com/th13vn/w3goaudit/pkg/reader"
+	"github.com/th13vn/w3goaudit/pkg/types"
 )
 
 func TestInterproceduralTaintForInternalTransferFrom(t *testing.T) {
@@ -170,6 +171,146 @@ func TestInterproceduralSequenceFindsCallsInsideInternalHelpers(t *testing.T) {
 	}
 }
 
+func TestInterproceduralSequenceExecutionOrder(t *testing.T) {
+	src := `// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.0;
+
+interface ISequenceInputs {
+    function optionValue() external returns (uint256);
+    function argumentValue() external returns (uint256);
+}
+
+contract InterproceduralOrder {
+    uint256 private stored;
+    ISequenceInputs private inputs;
+
+    function run() external {
+        this.helper{value: inputs.optionValue()}(inputs.argumentValue());
+    }
+
+    function helper(uint256 value) external payable {
+        stored = value;
+    }
+}
+`
+	db := buildDBFromSource(t, src).GetDatabase()
+	contract := db.GetContractByName("InterproceduralOrder")
+	if contract == nil {
+		t.Fatal("InterproceduralOrder not found")
+	}
+	var run *types.Function
+	for _, fn := range contract.Functions {
+		if fn.Name == "run" {
+			run = fn
+			break
+		}
+	}
+	if run == nil {
+		t.Fatal("run function not found")
+	}
+
+	call := func(name string) Rule {
+		return Rule{Kind: types.KindCallExternal, Name: "^" + name + "$"}
+	}
+	write := Rule{Kind: "state_write"}
+	cases := []struct {
+		name  string
+		rules []Rule
+		want  bool
+	}{
+		{
+			name:  "option before outer call and callee write",
+			rules: []Rule{call("optionValue"), call("helper"), write},
+			want:  true,
+		},
+		{
+			name:  "argument before outer call and callee write",
+			rules: []Rule{call("argumentValue"), call("helper"), write},
+			want:  true,
+		},
+		{
+			name:  "pre-call siblings may execute option then argument",
+			rules: []Rule{call("optionValue"), call("argumentValue"), call("helper"), write},
+			want:  true,
+		},
+		{
+			name:  "pre-call siblings may execute argument then option",
+			rules: []Rule{call("argumentValue"), call("optionValue"), call("helper"), write},
+			want:  true,
+		},
+		{
+			name:  "outer call cannot precede option",
+			rules: []Rule{call("helper"), call("optionValue")},
+			want:  false,
+		},
+		{
+			name:  "callee write cannot precede argument",
+			rules: []Rule{write, call("argumentValue")},
+			want:  false,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := New(db).VerifyAtFunctionWithCallees(run, Rule{Sequence: tc.rules}, contract)
+			if got != tc.want {
+				t.Fatalf("VerifyAtFunctionWithCallees(sequence) = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestArgAnyInterproceduralSequenceUsesContextSensitiveRouting(t *testing.T) {
+	src := `// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.0;
+
+contract ArgAnySequence {
+    address private last;
+
+    function safe() external {
+        helper(address(this));
+    }
+
+    function vulnerable(address recipient) external {
+        helper(recipient);
+    }
+
+    function helper(address recipient) internal {
+        sink(recipient);
+        last = recipient;
+    }
+
+    function sink(address) internal pure {}
+}
+`
+	tmpl, err := ParseTemplate(`
+meta: {id: T, severity: HIGH}
+query:
+  from: entry_function
+  where:
+    - sequence:
+        - block: internal_call
+          name: ^sink$
+          arg.any: {tainted: user_controlled}
+        - block: state_write
+`)
+	if err != nil {
+		t.Fatalf("ParseTemplate: %v", err)
+	}
+
+	db := buildDBFromSource(t, src).GetDatabase()
+	findings := New(db).Execute(tmpl)
+	got := make([]string, 0, len(findings))
+	for _, finding := range findings {
+		got = append(got, finding.Location.Function)
+	}
+	sort.Strings(got)
+	want := []string{"vulnerable"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("entrypoint findings = %v, want %v", got, want)
+	}
+}
+
 func TestUncheckedArithmeticTemplateSeesUncheckedBlocks(t *testing.T) {
 	root := repoRoot(t)
 	rdr := reader.New()
@@ -202,6 +343,11 @@ func TestUncheckedArithmeticTemplateSeesUncheckedBlocks(t *testing.T) {
 	// `balances[user] + amount`.
 	want := []string{
 		"Safe_BoundedUncheckedArithmetic.incrementSmall",
+		"UncheckedSubtractionGuardMatrix.dominatedArmEffectfulSibling",
+		"UncheckedSubtractionGuardMatrix.dominatedArmExternalEffectfulSibling",
+		"UncheckedSubtractionGuardMatrix.requireEffectfulSibling",
+		"UncheckedSubtractionGuardMatrix.reversedRequire",
+		"UncheckedSubtractionGuardMatrix.unrelatedOrdering",
 		"Vulnerable_NonOrderingGuard.pay",
 		"Vulnerable_UncheckedArithmetic.credit",
 	}
@@ -344,6 +490,498 @@ contract TryCatchSeq {
 	}
 	if !hit["g"] {
 		t.Errorf("g must match: state_write and outgoing_call are in the same try body")
+	}
+}
+
+func TestResolveInternalCalleeUsesExactRecordedSelectorForResolvedCallTypes(t *testing.T) {
+	db := types.NewDatabase()
+	wrong := &types.Function{Name: "helper", Selector: "helper(address)", Parameters: []*types.Parameter{{TypeName: "address"}}}
+	want := &types.Function{Name: "helper", Selector: "helper(uint256)", Parameters: []*types.Parameter{{TypeName: "uint256"}}}
+	base := &types.Contract{Name: "Base", SourceFile: "/repo/Base.sol", Functions: []*types.Function{wrong, want}}
+	derived := &types.Contract{Name: "Derived", SourceFile: "/repo/Derived.sol"}
+	db.AddContract(base)
+	db.AddContract(derived)
+	derived.LinearizedBaseIDs = []string{derived.ID, base.ID}
+
+	callTypes := []types.CallType{
+		types.CallTypeInternal,
+		types.CallTypeInherited,
+		types.CallTypeSelf,
+		types.CallTypeSuper,
+		types.CallTypeLibrary,
+	}
+	for i, callType := range callTypes {
+		t.Run(string(callType), func(t *testing.T) {
+			byteOffset := 100 + i*20
+			call := &types.FunctionCall{
+				Target:             "helper",
+				ResolvedContract:   base.Name,
+				ResolvedContractID: base.ID,
+				ResolvedFunction:   want.Selector,
+				CallType:           callType,
+				Line:               8,
+				Col:                9 + i,
+				Byte:               byteOffset,
+				Resolved:           true,
+				ArgCount:           1,
+			}
+			node := locatedNode(types.KindCallInternal, "helper", 8, 9+i, 8, 20+i, byteOffset, byteOffset+6)
+			node.AddChild(types.NewASTNode(types.KindExprLiteral))
+			e := New(db)
+			e.currentFunction = &types.Function{Name: "run", Calls: []*types.FunctionCall{call}}
+			got, owner := e.resolveInternalCallee(derived, node)
+			if got != want || owner != base {
+				t.Fatalf("resolved %s call = (%p, %p), want exact selector (%p, %p)", callType, got, owner, want, base)
+			}
+		})
+	}
+
+	t.Run("resolved internal target outside runtime MRO fails closed", func(t *testing.T) {
+		unrelated := &types.Contract{Name: "Unrelated", SourceFile: "/repo/Unrelated.sol", Functions: []*types.Function{want}}
+		db.AddContract(unrelated)
+		call := &types.FunctionCall{
+			Target:             "helper",
+			ResolvedContractID: unrelated.ID,
+			ResolvedFunction:   want.Selector,
+			CallType:           types.CallTypeInternal,
+			Line:               20,
+			Col:                4,
+			Byte:               240,
+			Resolved:           true,
+			ArgCount:           1,
+		}
+		node := locatedNode(types.KindCallInternal, "helper", 20, 4, 20, 12, 240, 248)
+		node.AddChild(types.NewASTNode(types.KindExprLiteral))
+		e := New(db)
+		e.currentFunction = &types.Function{Calls: []*types.FunctionCall{call}}
+		if got, owner := e.resolveInternalCallee(derived, node); got != nil || owner != nil {
+			t.Fatalf("resolved out-of-MRO call = (%p, %p), want nil", got, owner)
+		}
+	})
+
+	t.Run("ambiguous super metadata without exact host fails closed", func(t *testing.T) {
+		db := types.NewDatabase()
+		baseFn := &types.Function{Name: "helper", Selector: "helper(uint256)", Parameters: []*types.Parameter{{TypeName: "uint256"}}}
+		grandFn := &types.Function{Name: "helper", Selector: "helper(uint256)", Parameters: []*types.Parameter{{TypeName: "uint256"}}}
+		grand := &types.Contract{Name: "Grand", SourceFile: "/repo/Grand.sol", Functions: []*types.Function{grandFn}}
+		base := &types.Contract{Name: "Base", SourceFile: "/repo/Base.sol", Functions: []*types.Function{baseFn}}
+		derived := &types.Contract{Name: "Derived", SourceFile: "/repo/Derived.sol"}
+		db.AddContract(grand)
+		db.AddContract(base)
+		db.AddContract(derived)
+		derived.LinearizedBaseIDs = []string{derived.ID, base.ID, grand.ID}
+		calls := []*types.FunctionCall{
+			{Target: "helper", ResolvedContractID: base.ID, ResolvedFunction: baseFn.Selector, CallType: types.CallTypeSuper, Line: 30, Col: 5, Byte: 300, Resolved: true, ArgCount: 1},
+			{Target: "helper", ResolvedContractID: grand.ID, ResolvedFunction: grandFn.Selector, CallType: types.CallTypeSuper, Line: 30, Col: 5, Byte: 300, Resolved: true, ArgCount: 1},
+		}
+		node := locatedNode(types.KindCallInternal, "helper", 30, 5, 30, 12, 300, 307)
+		node.AddChild(types.NewASTNode(types.KindExprLiteral))
+		e := New(db)
+		e.currentFunction = &types.Function{Name: "run", Calls: calls}
+		if got, owner := e.resolveInternalCallee(derived, node); got != nil || owner != nil {
+			t.Fatalf("ambiguous host-less super metadata = (%p, %p), want nil", got, owner)
+		}
+	})
+}
+
+func TestResolveInternalCalleeLegacyFallbackRequiresUniqueSelectorAndArity(t *testing.T) {
+	newCall := func(argCount int) *types.ASTNode {
+		node := types.NewASTNode(types.KindCallInternal)
+		node.Name = "helper"
+		for i := 0; i < argCount; i++ {
+			node.AddChild(types.NewASTNode(types.KindExprLiteral))
+		}
+		return node
+	}
+
+	t.Run("same-arity overload ambiguity", func(t *testing.T) {
+		db := types.NewDatabase()
+		contract := &types.Contract{Name: "C", SourceFile: "/repo/C.sol", Functions: []*types.Function{
+			{Name: "helper", Selector: "helper(address)", Parameters: []*types.Parameter{{TypeName: "address"}}},
+			{Name: "helper", Selector: "helper(uint256)", Parameters: []*types.Parameter{{TypeName: "uint256"}}},
+		}}
+		db.AddContract(contract)
+		contract.LinearizedBaseIDs = []string{contract.ID}
+		if got, owner := New(db).resolveInternalCallee(contract, newCall(1)); got != nil || owner != nil {
+			t.Fatalf("ambiguous fallback = (%p, %p), want nil", got, owner)
+		}
+	})
+
+	t.Run("arity mismatch", func(t *testing.T) {
+		db := types.NewDatabase()
+		contract := &types.Contract{Name: "C", SourceFile: "/repo/C.sol", Functions: []*types.Function{
+			{Name: "helper", Selector: "helper(address)", Parameters: []*types.Parameter{{TypeName: "address"}}},
+		}}
+		db.AddContract(contract)
+		contract.LinearizedBaseIDs = []string{contract.ID}
+		if got, owner := New(db).resolveInternalCallee(contract, newCall(2)); got != nil || owner != nil {
+			t.Fatalf("arity-mismatch fallback = (%p, %p), want nil", got, owner)
+		}
+	})
+
+	t.Run("missing exact metadata uses unique compatibility fallback", func(t *testing.T) {
+		db := types.NewDatabase()
+		fn := &types.Function{Name: "helper", Selector: "helper(address)", Parameters: []*types.Parameter{{TypeName: "address"}}}
+		contract := &types.Contract{Name: "C", SourceFile: "/repo/C.sol", Functions: []*types.Function{fn}}
+		db.AddContract(contract)
+		contract.LinearizedBaseIDs = []string{contract.ID}
+		call := &types.FunctionCall{Target: "helper", CallType: types.CallTypeInternal, Line: 4, Col: 3, Byte: 40, Resolved: true, ArgCount: 1}
+		node := newCall(1)
+		node.StartLine, node.StartCol, node.StartByte = 4, 3, 40
+		e := New(db)
+		e.currentFunction = &types.Function{Calls: []*types.FunctionCall{call}}
+		if got, owner := e.resolveInternalCallee(contract, node); got != fn || owner != contract {
+			t.Fatalf("incomplete resolved metadata fallback = (%p, %p), want unique candidate (%p, %p)", got, owner, fn, contract)
+		}
+	})
+
+	t.Run("override selector is one runtime candidate", func(t *testing.T) {
+		db := types.NewDatabase()
+		baseFn := &types.Function{Name: "helper", Selector: "helper(address)", Parameters: []*types.Parameter{{TypeName: "address"}}}
+		derivedFn := &types.Function{Name: "helper", Selector: "helper(address)", Parameters: []*types.Parameter{{TypeName: "address"}}}
+		base := &types.Contract{Name: "Base", SourceFile: "/repo/Base.sol", Functions: []*types.Function{baseFn}}
+		derived := &types.Contract{Name: "Derived", SourceFile: "/repo/Derived.sol", Functions: []*types.Function{derivedFn}}
+		db.AddContract(base)
+		db.AddContract(derived)
+		derived.LinearizedBaseIDs = []string{derived.ID, base.ID}
+		if got, owner := New(db).resolveInternalCallee(derived, newCall(1)); got != derivedFn || owner != derived {
+			t.Fatalf("override fallback = (%p, %p), want derived implementation (%p, %p)", got, owner, derivedFn, derived)
+		}
+	})
+}
+
+func TestNestedSameArityOverloadTraversalUsesExactCallerMetadata(t *testing.T) {
+	const src = `pragma solidity ^0.8.20;
+contract NestedOverloadTraversal {
+    uint256 private state;
+
+    function entry(address target, bytes memory data) external {
+        dispatch(target, data);
+    }
+
+    function dispatch(address target, bytes memory data) internal {
+        helper(target, data);
+    }
+
+    function helper(address target, bytes memory data) internal {
+        target.call(data);
+        state = 1;
+    }
+
+    function helper(uint256 amount, bytes memory data) internal {
+        state = amount;
+        data;
+    }
+}`
+	db := buildDBFromSource(t, src).GetDatabase()
+	contract := mustContractByName(t, db, "NestedOverloadTraversal")
+	entry := mustFunctionByName(t, contract, "entry")
+
+	taintRule := Rule{Contains: &Rule{
+		Kind:     types.KindCallLowlevelCall,
+		Contains: &Rule{TaintedFrom: "parameter"},
+	}}
+	if !New(db).VerifyAtFunctionWithCallees(entry, taintRule, contract) {
+		t.Fatal("VerifyAtFunctionWithCallees did not follow the exact nested helper(address,bytes) overload")
+	}
+
+	sequenceRule := Rule{Sequence: []Rule{
+		{Kind: types.KindCallLowlevelCall},
+		{Kind: "state_write"},
+	}}
+	if !New(db).VerifyAtFunction(entry, sequenceRule, contract) {
+		t.Fatal("nested interprocedural sequence did not follow exact same-arity overload metadata")
+	}
+
+	tmpl := &Template{
+		Meta:  TemplateMeta{ID: "nested-overload", Severity: "HIGH"},
+		Query: QueryBlock{Scope: ScopeEntrypoint, Match: taintRule},
+	}
+	findings := New(db).Execute(tmpl)
+	var finding *Finding
+	for _, candidate := range findings {
+		if candidate.Location.Function == "entry" {
+			finding = candidate
+			break
+		}
+	}
+	if finding == nil {
+		t.Fatalf("entry finding missing: %+v", findings)
+	}
+	if finding.Reachability == nil || len(finding.Reachability.Steps) != 3 {
+		t.Fatalf("reachability = %+v, want entry -> dispatch -> helper", finding.Reachability)
+	}
+}
+
+func TestRealMemberCallTraversalUsesRecordedCallTypesAndSolidityArguments(t *testing.T) {
+	const src = `pragma solidity ^0.8.20;
+library TraverseLib {
+    function libraryHop(address target, bytes memory data) internal {
+        target.call(data);
+    }
+}
+
+contract MemberBase {
+    function inheritedHop(address target, bytes memory data) internal {
+        target.call(data);
+    }
+
+    function superHop(address target, bytes memory data) internal virtual {
+        target.call(data);
+    }
+}
+
+contract MemberMid is MemberBase {
+    function superHop(address target, bytes memory data) internal virtual override {
+        super.superHop(target, data);
+    }
+
+    function selfHop(address target, bytes memory data) external {
+        target.call(data);
+    }
+}
+
+contract MemberLeaf is MemberMid {
+    function viaInherited(address target, bytes memory data) external {
+        inheritedHop(target, data);
+    }
+
+    function viaSelf(address target, bytes memory data) external {
+        this.selfHop(target, data);
+    }
+
+    function viaSuper(address target, bytes memory data) external {
+        superHop(target, data);
+    }
+
+    function viaLibrary(address target, bytes memory data) external {
+        TraverseLib.libraryHop(target, data);
+    }
+}`
+	db := buildDBFromSource(t, src).GetDatabase()
+	leaf := mustContractByName(t, db, "MemberLeaf")
+	rule := Rule{Contains: &Rule{
+		Kind:     types.KindCallLowlevelCall,
+		Contains: &Rule{TaintedFrom: "parameter"},
+	}}
+
+	wantDepth := map[string]int{
+		"viaInherited": 2,
+		"viaSelf":      2,
+		"viaSuper":     3,
+		"viaLibrary":   2,
+	}
+	for name := range wantDepth {
+		fn := mustFunctionByName(t, leaf, name)
+		if !New(db).VerifyAtFunctionWithCallees(fn, rule, leaf) {
+			t.Errorf("VerifyAtFunctionWithCallees did not follow %s", name)
+		}
+	}
+
+	tmpl := &Template{
+		Meta:  TemplateMeta{ID: "member-traversal", Severity: "HIGH"},
+		Query: QueryBlock{Scope: ScopeEntrypoint, Match: rule},
+	}
+	findings := New(db).Execute(tmpl)
+	seen := make(map[string]*Finding)
+	for _, finding := range findings {
+		seen[finding.Location.Function] = finding
+	}
+	for name, depth := range wantDepth {
+		finding := seen[name]
+		if finding == nil {
+			t.Errorf("missing end-to-end finding for %s; findings=%+v", name, findings)
+			continue
+		}
+		if finding.Reachability == nil || len(finding.Reachability.Steps) != depth {
+			t.Errorf("%s reachability = %+v, want %d steps", name, finding.Reachability, depth)
+		}
+	}
+}
+
+func TestInterproceduralSequenceInlinesReceiverAndOptionHelpersBeforeOuterCall(t *testing.T) {
+	const source = `pragma solidity ^0.8.20;
+interface PreludeSink { function ping() external; }
+contract PreludeCalls {
+    uint256 private stored;
+    function receiverHelper(address target) internal returns (PreludeSink) { stored = 1; return PreludeSink(target); }
+    function receiverHelper(uint160 target) internal returns (PreludeSink) { stored = 9; return PreludeSink(address(target)); }
+    function optionHelper(address value) internal returns (uint256) { stored = 2; value; return gasleft(); }
+    function optionHelper(uint160 value) internal returns (uint256) { stored = 8; value; return gasleft(); }
+    function viaReceiver(address target) external { receiverHelper(target).ping(); }
+    function viaOption(address target) external { PreludeSink(target).ping{gas: optionHelper(address(this))}(); }
+}`
+	db := buildDBFromSource(t, source).GetDatabase()
+	contract := mustContractByName(t, db, "PreludeCalls")
+	forward := Rule{Sequence: []Rule{
+		{Kind: "state_write"},
+		{Kind: types.KindCallExternal, Name: "^ping$"},
+	}}
+	reverse := Rule{Sequence: []Rule{
+		{Kind: types.KindCallExternal, Name: "^ping$"},
+		{Kind: "state_write"},
+	}}
+	for _, name := range []string{"viaReceiver", "viaOption"} {
+		t.Run(name, func(t *testing.T) {
+			fn := mustFunctionByName(t, contract, name)
+			if !New(db).VerifyAtFunction(fn, forward, contract) {
+				t.Fatalf("%s did not inline its nested helper operation before the outer ping call", name)
+			}
+			if New(db).VerifyAtFunction(fn, reverse, contract) {
+				t.Fatalf("%s allowed the outer ping call before its nested helper operation", name)
+			}
+		})
+	}
+}
+
+func TestInterproceduralSequencePreservesSelectedInlineOccurrenceReachability(t *testing.T) {
+	const source = `pragma solidity ^0.8.20;
+contract ReusedLeafSequence {
+    uint256 private stored;
+
+    function entry(address target) external {
+        firstHop(target);
+        stored = 1;
+        secondHop(target);
+    }
+
+    function firstHop(address target) internal {
+        leaf(target);
+    }
+
+    function secondHop(address target) internal {
+        leaf(target);
+    }
+
+    function leaf(address target) internal {
+        target.call("");
+    }
+}`
+	db := buildDBFromSource(t, source).GetDatabase()
+	tmpl := &Template{
+		Meta: TemplateMeta{ID: "reused-leaf-sequence", Severity: "HIGH"},
+		Query: QueryBlock{Scope: ScopeEntrypoint, Match: Rule{Sequence: []Rule{
+			{Kind: "outgoing_call"},
+			{Kind: "state_write"},
+		}}},
+	}
+	if err := finalizeTemplate(tmpl, "reused leaf sequence test"); err != nil {
+		t.Fatalf("finalizeTemplate: %v", err)
+	}
+
+	findings := New(db).Execute(tmpl)
+	if len(findings) != 1 {
+		t.Fatalf("findings = %d, want 1", len(findings))
+	}
+	if findings[0].Reachability == nil {
+		t.Fatal("reachability missing")
+	}
+	got := make([]string, 0, len(findings[0].Reachability.Steps))
+	for _, step := range findings[0].Reachability.Steps {
+		got = append(got, step.Function)
+	}
+	want := []string{"entry", "firstHop", "leaf"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("reachability = %v, want selected occurrence %v", got, want)
+	}
+}
+
+func TestInterproceduralSequenceMatchesRepeatedInlineOutgoingCalls(t *testing.T) {
+	const source = `pragma solidity ^0.8.20;
+contract RepeatedInlineLeaf {
+    function entry(address target) external {
+        leaf(target);
+        leaf(target);
+    }
+
+    function leaf(address target) internal {
+        target.call("");
+    }
+}`
+	db := buildDBFromSource(t, source).GetDatabase()
+	tmpl, err := ParseTemplate(`
+meta: {id: repeated-inline-outgoing, severity: HIGH}
+query:
+  from: entry_function
+  where:
+    - sequence:
+        - {block: outgoing_call}
+        - {block: outgoing_call}
+`)
+	if err != nil {
+		t.Fatalf("ParseTemplate: %v", err)
+	}
+
+	findings := New(db).Execute(tmpl)
+	if len(findings) != 1 {
+		t.Fatalf("findings = %d, want 1 from the first and second leaf invocations", len(findings))
+	}
+	if findings[0].PrimaryAST == nil || findings[0].PrimaryAST.Kind != types.KindCallLowlevelCall {
+		t.Fatalf("primary AST = %+v, want the first inline low-level call occurrence", findings[0].PrimaryAST)
+	}
+	if findings[0].Reachability == nil {
+		t.Fatal("reachability missing")
+	}
+	got := make([]string, 0, len(findings[0].Reachability.Steps))
+	for _, step := range findings[0].Reachability.Steps {
+		got = append(got, step.Function)
+	}
+	want := []string{"entry", "leaf"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("reachability = %v, want first selected occurrence %v", got, want)
+	}
+}
+
+func TestInterproceduralSequenceAllowsOppositeArmsAcrossInlineOccurrences(t *testing.T) {
+	const source = `pragma solidity ^0.8.20;
+contract RepeatedConditionalHelper {
+    uint256 private stored;
+
+    function entry(address target) external {
+        helper(target, true);
+        helper(target, false);
+    }
+
+    function helper(address target, bool flag) internal {
+        if (flag) {
+            target.call("");
+        } else {
+            stored = 1;
+        }
+    }
+}`
+	db := buildDBFromSource(t, source).GetDatabase()
+	tmpl, err := ParseTemplate(`
+meta: {id: repeated-inline-opposite-arms, severity: HIGH}
+query:
+  from: entry_function
+  where:
+    - sequence:
+        - {block: outgoing_call}
+        - {block: state_write}
+`)
+	if err != nil {
+		t.Fatalf("ParseTemplate: %v", err)
+	}
+
+	findings := New(db).Execute(tmpl)
+	if len(findings) != 1 {
+		t.Fatalf("findings = %d, want 1 from the first call arm and second write arm", len(findings))
+	}
+	finding := findings[0]
+	if finding.PrimaryAST == nil || finding.PrimaryAST.Kind != types.KindCallLowlevelCall {
+		t.Fatalf("primary AST = %+v, want the selected outgoing-call occurrence", finding.PrimaryAST)
+	}
+	if finding.Reachability == nil {
+		t.Fatal("reachability missing")
+	}
+	got := make([]string, 0, len(finding.Reachability.Steps))
+	for _, step := range finding.Reachability.Steps {
+		got = append(got, step.Function)
+	}
+	want := []string{"entry", "helper"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("reachability = %v, want selected first helper occurrence %v", got, want)
 	}
 }
 

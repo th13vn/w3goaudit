@@ -17,13 +17,12 @@ meta:
     - https://eips.ethereum.org/EIPS/eip-1967
 
 # Contract-scope, no single AST anchor (this is a pure text-shape rule), so
-# `select:` is omitted and the whole match lives in `where:`. `base:` aliases
-# v1 `filter.extends`, evaluated as a contract-scope precondition (Filter),
-# exactly like before.
+# `select:` is omitted and the whole match lives in `where:`. `base:` is
+# evaluated as a contract-scope precondition.
 #
-# The 3-way `all:` (two positive regexes + one negated regex) is wrapped in
-# `has:` per-branch. A bare `regex:` nested under `all:`/`not:` is a "dual"
-# field with no AST-only sibling, so the v2 lowerer classifies it as
+# The 3-way `and:` (two positive regexes + one negated regex) is wrapped in
+# `has:` per branch. A bare `regex:` nested under `and:`/`not:` is a "dual"
+# field with no AST-only sibling, so the lowerer classifies it as
 # context-only and would silently route the whole condition into Filter
 # (leaving Match empty -> load error). Wrapping each branch in `has:`
 # (Contains, an AST-only field) forces AST-layer routing, keeping the
@@ -33,7 +32,7 @@ query:
   from: contract
   where:
     - base: '(UpgradeabilityProxy|AdminUpgradeabilityProxy|OwnedUpgradeabilityProxy|TransparentUpgradeableProxy|ERC1967Proxy)'
-    - all:
+    - and:
         - has:
             regex: '(?m)^\s*[A-Za-z_][A-Za-z0-9_<>,\[\] ]+\s+(?:public|private|internal)?\s*[A-Za-z_][A-Za-z0-9_]*\s*(?:=|;)'
         - has:

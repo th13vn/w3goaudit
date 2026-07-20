@@ -6,17 +6,16 @@ import (
 )
 
 // These tests assert lower()'s output field-for-field against the evaluator
-// IR shape the engine executes, for the worked examples in
-// .vscode/specs/2026-07-09-wql-v2-language-spec.md §11.
+// IR shape the engine executes for the worked examples in docs/wql-syntax.md.
 //
 // NOTE on the delegatecall case: blockKindToIR("delegatecall") resolves to
-// the "delegatecall" semantic group (pkg/engine/wql_v2_catalog.go), not the
+// the "delegatecall" semantic group (pkg/engine/wql_catalog.go), not the
 // exact kind string "call.lowlevel.delegatecall" — the semantic group also
 // covers the asm.delegatecall sibling (see the catalog's doc comment). Tests
 // below assert against the actual catalog mapping, not a literal kind
 // string, so they stay correct if the catalog changes.
 
-const v2DelegatecallLowerYAML = `
+const delegatecallLowerWQL = `
 meta: { id: delegatecall-user-input, severity: CRITICAL, title: Delegatecall to user-controlled target }
 query:
   select: delegatecall
@@ -27,11 +26,11 @@ query:
 `
 
 func TestLower_Delegatecall(t *testing.T) {
-	tv2, err := parseV2([]byte(v2DelegatecallLowerYAML))
+	doc, err := parseWQL([]byte(delegatecallLowerWQL))
 	if err != nil {
-		t.Fatalf("parseV2: %v", err)
+		t.Fatalf("parseWQL: %v", err)
 	}
-	tmpl, err := tv2.lower()
+	tmpl, err := doc.lower()
 	if err != nil {
 		t.Fatalf("lower: %v", err)
 	}
@@ -44,10 +43,10 @@ func TestLower_Delegatecall(t *testing.T) {
 	}
 
 	if tmpl.Query.Filter == nil {
-		t.Fatalf("Filter is nil, want Preset=unAuthenticated")
+		t.Fatalf("Filter is nil, want Not.Preset=access_controlled")
 	}
-	if tmpl.Query.Filter.Preset != "unAuthenticated" {
-		t.Errorf("Filter.Preset = %q, want %q", tmpl.Query.Filter.Preset, "unAuthenticated")
+	if tmpl.Query.Filter.Not == nil || tmpl.Query.Filter.Not.Preset != "access_controlled" {
+		t.Errorf("Filter = %+v, want Not.Preset=%q", tmpl.Query.Filter, "access_controlled")
 	}
 
 	wantKind, ok := blockKindToIR("delegatecall")
@@ -69,7 +68,121 @@ func TestLower_Delegatecall(t *testing.T) {
 	}
 }
 
-const v2ReentrancyLowerYAML = `
+func TestLowerCanonicalPresetWithoutPolarityMapping(t *testing.T) {
+	tmpl, err := ParseTemplate(`
+meta: {id: T, severity: HIGH}
+query:
+  select: delegatecall
+  where:
+    - not: {preset: access_controlled}
+`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tmpl.Query.Filter == nil || tmpl.Query.Filter.Not == nil {
+		t.Fatalf("Filter = %+v, want Not preset", tmpl.Query.Filter)
+	}
+	if got := tmpl.Query.Filter.Not.Preset; got != "access_controlled" {
+		t.Fatalf("Preset = %q, want access_controlled", got)
+	}
+}
+
+func TestWhereOnlyQueryDefaultsToEntryFunction(t *testing.T) {
+	tmpl, err := ParseTemplate(`meta: {id: WHERE-ONLY, severity: LOW}
+query:
+  where:
+    - has: {block: delegatecall}`)
+	if err != nil {
+		t.Fatalf("ParseTemplate: %v", err)
+	}
+	if tmpl.Query.Scope != ScopeEntrypoint {
+		t.Fatalf("scope=%q, want %q", tmpl.Query.Scope, ScopeEntrypoint)
+	}
+	wantKind, ok := blockKindToIR("delegatecall")
+	if !ok {
+		t.Fatal("blockKindToIR(delegatecall) ok=false")
+	}
+	if tmpl.Query.Match.Contains == nil || tmpl.Query.Match.Contains.Kind != wantKind {
+		t.Fatalf("match=%#v, want contains kind %q", tmpl.Query.Match, wantKind)
+	}
+}
+
+func TestWhereOnlyContextPredicateRequiresASTAnchor(t *testing.T) {
+	_, err := ParseTemplate(`meta: {id: WHERE-CONTEXT, severity: LOW}
+query:
+  where:
+    - preset: access_controlled`)
+	if err == nil {
+		t.Fatal("context-only where query loaded")
+	}
+}
+
+func TestLowerRepeatedSiblingNotPredicatesRemainIndependent(t *testing.T) {
+	tmpl, err := ParseTemplate(`
+meta: {id: T, severity: HIGH}
+query:
+  from: entry_function
+  where:
+    - not: {preset: access_controlled}
+    - not: {modifier: '(?i)initializer'}
+    - has: {block: state_write}
+`)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	filter := tmpl.Query.Filter
+	if filter == nil || filter.Not == nil {
+		t.Fatalf("Filter = %+v, want first sibling negation in Filter.Not", filter)
+	}
+	if filter.Not.Preset != "access_controlled" || filter.Not.Modifier != "" {
+		t.Errorf("Filter.Not = %+v, want only Preset=access_controlled", filter.Not)
+	}
+	if len(filter.All) != 1 || filter.All[0].Not == nil {
+		t.Fatalf("Filter.All = %+v, want second sibling negation in Filter.All[0].Not", filter.All)
+	}
+	if filter.All[0].Not.Modifier != "(?i)initializer" || filter.All[0].Not.Preset != "" {
+		t.Errorf("Filter.All[0].Not = %+v, want only Modifier=(?i)initializer", filter.All[0].Not)
+	}
+
+	for _, not := range []*Rule{filter.Not, filter.All[0].Not} {
+		if not.Preset != "" && not.Modifier != "" {
+			t.Errorf("independent sibling negations were merged into one child: %+v", not)
+		}
+	}
+}
+
+func TestLowerRepeatedSiblingNotPredicatesRemainIndependentAtASTLayer(t *testing.T) {
+	tmpl, err := ParseTemplate(`
+meta: {id: T, severity: HIGH}
+query:
+  select: external_call
+  from: entry_function
+  where:
+    - not: {name: '^approve$'}
+    - not: {block: state_write}
+`)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	match := tmpl.Query.Match.Contains
+	if match == nil || match.Not == nil {
+		t.Fatalf("Match.Contains = %+v, want first sibling negation in Not", match)
+	}
+	if match.Not.Name != "^approve$" || match.Not.Kind != "" {
+		t.Errorf("Match.Contains.Not = %+v, want only Name=^approve$", match.Not)
+	}
+	if len(match.All) != 1 || match.All[0].Not == nil {
+		t.Fatalf("Match.Contains.All = %+v, want second sibling negation in All[0].Not", match.All)
+	}
+	wantStateWrite, _ := blockKindToIR("state_write")
+	if match.All[0].Not.Kind != wantStateWrite || match.All[0].Not.Name != "" {
+		t.Errorf("Match.Contains.All[0].Not = %+v, want only Kind=%s", match.All[0].Not, wantStateWrite)
+	}
+}
+
+const reentrancyLowerWQL = `
 meta: { id: reentrancy-eth, severity: HIGH, title: State write after external call }
 query:
   select: external_call
@@ -82,17 +195,17 @@ query:
 `
 
 func TestLower_ReentrancySequence(t *testing.T) {
-	tv2, err := parseV2([]byte(v2ReentrancyLowerYAML))
+	doc, err := parseWQL([]byte(reentrancyLowerWQL))
 	if err != nil {
-		t.Fatalf("parseV2: %v", err)
+		t.Fatalf("parseWQL: %v", err)
 	}
-	tmpl, err := tv2.lower()
+	tmpl, err := doc.lower()
 	if err != nil {
 		t.Fatalf("lower: %v", err)
 	}
 
-	if tmpl.Query.Filter == nil || tmpl.Query.Filter.Preset != "unLocked" {
-		t.Fatalf("Filter.Preset = %+v, want unLocked", tmpl.Query.Filter)
+	if tmpl.Query.Filter == nil || tmpl.Query.Filter.Not == nil || tmpl.Query.Filter.Not.Preset != "reentrancy_guarded" {
+		t.Fatalf("Filter = %+v, want Not.Preset=reentrancy_guarded", tmpl.Query.Filter)
 	}
 
 	if len(tmpl.Query.Match.Sequence) != 2 {
@@ -114,8 +227,82 @@ func TestLower_ReentrancySequence(t *testing.T) {
 	}
 }
 
-const v2BarePresetLowerYAML = `
-meta: { id: v2-bare-preset-assertion, severity: MEDIUM, title: bare preset assertion test }
+func TestSelectlessNestedSequencesRequireActionableFirstStep(t *testing.T) {
+	invalid := map[string]string{
+		"any": `
+    - any:
+        - sequence:
+            - not: {has: {block: state_write}}
+            - block: external_call
+        - has: {block: state_write}`,
+		"and under has": `
+    - has:
+        and:
+          - sequence:
+              - not: {has: {block: state_write}}
+              - block: external_call
+          - block: state_write`,
+		"statement_has": `
+    - statement_has:
+        sequence:
+          - not: {has: {block: state_write}}
+          - block: external_call`,
+		"left arg.N": `
+    - left:
+        arg.0:
+          sequence:
+            - not: {has: {block: state_write}}
+            - block: external_call`,
+		"right arg.any": `
+    - right:
+        arg.any:
+          sequence:
+            - not: {has: {block: state_write}}
+            - block: external_call`,
+	}
+	for name, where := range invalid {
+		t.Run(name, func(t *testing.T) {
+			_, err := ParseTemplate("meta: {id: nested-sequence, severity: HIGH}\nquery:\n  from: entry_function\n  where:" + where + "\n")
+			if err == nil || !strings.Contains(err.Error(), "sequence first step") {
+				t.Fatalf("error = %v, want nested sequence first-step rejection", err)
+			}
+		})
+	}
+
+	for _, tc := range []struct {
+		name  string
+		where string
+	}{
+		{
+			name: "positive nested sequence",
+			where: `
+    - has:
+        arg.any:
+          sequence:
+            - block: external_call
+            - block: state_write`,
+		},
+		{
+			name: "negative-polarity nested sequence",
+			where: `
+    - has: {block: external_call}
+    - not:
+        has:
+          sequence:
+            - not: {has: {block: state_write}}
+            - block: external_call`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := ParseTemplate("meta: {id: nested-sequence-control, severity: HIGH}\nquery:\n  from: entry_function\n  where:" + tc.where + "\n"); err != nil {
+				t.Fatalf("valid nested sequence control rejected: %v", err)
+			}
+		})
+	}
+}
+
+const barePresetLowerWQL = `
+meta: { id: bare-preset-assertion, severity: MEDIUM, title: bare preset assertion test }
 query:
   select: function
   from: entry_function
@@ -124,28 +311,25 @@ query:
 `
 
 func TestLower_BarePresetAssertion(t *testing.T) {
-	tv2, err := parseV2([]byte(v2BarePresetLowerYAML))
+	doc, err := parseWQL([]byte(barePresetLowerWQL))
 	if err != nil {
-		t.Fatalf("parseV2: %v", err)
+		t.Fatalf("parseWQL: %v", err)
 	}
-	tmpl, err := tv2.lower()
+	tmpl, err := doc.lower()
 	if err != nil {
 		t.Fatalf("lower: %v", err)
 	}
 
 	if tmpl.Query.Filter == nil {
-		t.Fatalf("Filter is nil, want Not.Preset=unLocked")
+		t.Fatalf("Filter is nil, want Preset=reentrancy_guarded")
 	}
-	if tmpl.Query.Filter.Not == nil {
-		t.Fatalf("Filter.Not is nil, want Preset=unLocked")
-	}
-	if tmpl.Query.Filter.Not.Preset != "unLocked" {
-		t.Errorf("Filter.Not.Preset = %q, want %q", tmpl.Query.Filter.Not.Preset, "unLocked")
+	if tmpl.Query.Filter.Preset != "reentrancy_guarded" {
+		t.Errorf("Filter.Preset = %q, want %q", tmpl.Query.Filter.Preset, "reentrancy_guarded")
 	}
 	// Bare preset assertion is a pure context (Filter) matcher — Match should
 	// carry no leftover AST content from it.
-	if tmpl.Query.Filter.Preset != "" {
-		t.Errorf("Filter.Preset = %q, want empty (assertion lowers to Not.Preset only)", tmpl.Query.Filter.Preset)
+	if tmpl.Query.Filter.Not != nil {
+		t.Errorf("Filter.Not = %+v, want nil (assertion lowers directly to Preset)", tmpl.Query.Filter.Not)
 	}
 }
 
@@ -157,8 +341,8 @@ func TestLower_BarePresetAssertion(t *testing.T) {
 // AST-bearing, routing it into Match — which finalizeTemplate then rejected
 // with "`has_guard` is a context-level field and cannot appear inside
 // `match:`".
-const v2NotGuardedByLowerYAML = `
-meta: { id: v2-not-guarded-by, severity: MEDIUM, title: missing reentrancy guard modifier }
+const notGuardedByLowerWQL = `
+meta: { id: not-guarded-by, severity: MEDIUM, title: missing reentrancy guard modifier }
 query:
   select: external_call
   from: entry_function
@@ -167,11 +351,11 @@ query:
 `
 
 func TestLower_NotGuardedByRoutesToFilter(t *testing.T) {
-	tv2, err := parseV2([]byte(v2NotGuardedByLowerYAML))
+	doc, err := parseWQL([]byte(notGuardedByLowerWQL))
 	if err != nil {
-		t.Fatalf("parseV2: %v", err)
+		t.Fatalf("parseWQL: %v", err)
 	}
-	tmpl, err := tv2.lower()
+	tmpl, err := doc.lower()
 	if err != nil {
 		t.Fatalf("lower: %v", err)
 	}
@@ -206,8 +390,8 @@ func TestLower_NotGuardedByRoutesToFilter(t *testing.T) {
 // Companion case: an `any:` branch set mixing `guarded_by:` and `func_name:`
 // — both pure context matchers — must route the whole any: into Filter, not
 // Match.
-const v2AnyGuardedByFuncNameLowerYAML = `
-meta: { id: v2-any-guarded-by-func-name, severity: MEDIUM, title: any of guard/func_name test }
+const anyGuardedByFuncNameLowerWQL = `
+meta: { id: any-guarded-by-func-name, severity: MEDIUM, title: any of guard/func_name test }
 query:
   select: external_call
   from: entry_function
@@ -218,11 +402,11 @@ query:
 `
 
 func TestLower_AnyGuardedByOrFuncNameRoutesToFilter(t *testing.T) {
-	tv2, err := parseV2([]byte(v2AnyGuardedByFuncNameLowerYAML))
+	doc, err := parseWQL([]byte(anyGuardedByFuncNameLowerWQL))
 	if err != nil {
-		t.Fatalf("parseV2: %v", err)
+		t.Fatalf("parseWQL: %v", err)
 	}
-	tmpl, err := tv2.lower()
+	tmpl, err := doc.lower()
 	if err != nil {
 		t.Fatalf("lower: %v", err)
 	}
@@ -246,11 +430,10 @@ func TestLower_AnyGuardedByOrFuncNameRoutesToFilter(t *testing.T) {
 	}
 }
 
-// Fix 3 regression: a multi-key `not:` mapping that includes `preset:`
-// alongside another key must be rejected with a clear error instead of
-// silently double-negating the preset.
-const v2NotMultiKeyPresetYAML = `
-meta: { id: v2-not-multikey-preset, severity: MEDIUM, title: multi-key not with preset test }
+// A multi-key `not:` follows normal logical negation. When every nested field
+// is context-level, the complete rule remains a valid context filter.
+const notMultiKeyPresetWQL = `
+meta: { id: not-multikey-preset, severity: MEDIUM, title: multi-key not with preset test }
 query:
   select: external_call
   from: entry_function
@@ -258,24 +441,30 @@ query:
     - not: { preset: access_controlled, base: some-other-rule }
 `
 
-func TestLower_NotMultiKeyPresetRejected(t *testing.T) {
-	tv2, err := parseV2([]byte(v2NotMultiKeyPresetYAML))
+func TestLower_NotMultiKeyPresetUsesGenericNegation(t *testing.T) {
+	doc, err := parseWQL([]byte(notMultiKeyPresetWQL))
 	if err != nil {
-		t.Fatalf("parseV2: %v", err)
+		t.Fatalf("parseWQL: %v", err)
 	}
-	_, err = tv2.lower()
-	if err == nil {
-		t.Fatalf("lower: expected an error for multi-key not: with a preset key, got nil")
+	tmpl, err := doc.lower()
+	if err != nil {
+		t.Fatalf("lower: %v", err)
 	}
-	if !strings.Contains(err.Error(), "preset") {
-		t.Errorf("lower error = %q, want it to mention the preset restriction", err.Error())
+	if tmpl.Query.Filter == nil || tmpl.Query.Filter.Not == nil {
+		t.Fatalf("Filter = %+v, want generic Not rule", tmpl.Query.Filter)
+	}
+	if got := tmpl.Query.Filter.Not.Preset; got != "access_controlled" {
+		t.Errorf("Filter.Not.Preset = %q, want access_controlled", got)
+	}
+	if got := tmpl.Query.Filter.Not.Extends; got != "some-other-rule" {
+		t.Errorf("Filter.Not.Extends = %q, want some-other-rule", got)
 	}
 }
 
 // --- left / right ------------------------------------------------------
 
-const v2LeftRightLowerYAML = `
-meta: { id: v2-left-right, severity: MEDIUM, title: left/right operand test }
+const leftRightLowerWQL = `
+meta: { id: left-right, severity: MEDIUM, title: left/right operand test }
 query:
   select: binary
   from: entry_function
@@ -285,11 +474,11 @@ query:
 `
 
 func TestLower_LeftRight(t *testing.T) {
-	tv2, err := parseV2([]byte(v2LeftRightLowerYAML))
+	doc, err := parseWQL([]byte(leftRightLowerWQL))
 	if err != nil {
-		t.Fatalf("parseV2: %v", err)
+		t.Fatalf("parseWQL: %v", err)
 	}
-	tmpl, err := tv2.lower()
+	tmpl, err := doc.lower()
 	if err != nil {
 		t.Fatalf("lower: %v", err)
 	}
@@ -311,8 +500,8 @@ func TestLower_LeftRight(t *testing.T) {
 
 // --- statement_has -------------------------------------------------------
 
-const v2StatementHasLowerYAML = `
-meta: { id: v2-statement-has, severity: MEDIUM, title: statement_has test }
+const statementHasLowerWQL = `
+meta: { id: statement-has, severity: MEDIUM, title: statement_has test }
 query:
   select: external_call
   from: entry_function
@@ -321,11 +510,11 @@ query:
 `
 
 func TestLower_StatementHas(t *testing.T) {
-	tv2, err := parseV2([]byte(v2StatementHasLowerYAML))
+	doc, err := parseWQL([]byte(statementHasLowerWQL))
 	if err != nil {
-		t.Fatalf("parseV2: %v", err)
+		t.Fatalf("parseWQL: %v", err)
 	}
-	tmpl, err := tv2.lower()
+	tmpl, err := doc.lower()
 	if err != nil {
 		t.Fatalf("lower: %v", err)
 	}
@@ -345,8 +534,8 @@ func TestLower_StatementHas(t *testing.T) {
 
 // --- unchecked_var -------------------------------------------------------
 
-const v2UncheckedVarLowerYAML = `
-meta: { id: v2-unchecked-var, severity: MEDIUM, title: unchecked_var test }
+const uncheckedVarLowerWQL = `
+meta: { id: unchecked-var, severity: MEDIUM, title: unchecked_var test }
 query:
   select: binary
   from: entry_function
@@ -355,11 +544,11 @@ query:
 `
 
 func TestLower_UncheckedVar(t *testing.T) {
-	tv2, err := parseV2([]byte(v2UncheckedVarLowerYAML))
+	doc, err := parseWQL([]byte(uncheckedVarLowerWQL))
 	if err != nil {
-		t.Fatalf("parseV2: %v", err)
+		t.Fatalf("parseWQL: %v", err)
 	}
-	tmpl, err := tv2.lower()
+	tmpl, err := doc.lower()
 	if err != nil {
 		t.Fatalf("lower: %v", err)
 	}
@@ -375,8 +564,8 @@ func TestLower_UncheckedVar(t *testing.T) {
 
 // --- modifier (context layer, filter-only) -------------------------------
 
-const v2ModifierLowerYAML = `
-meta: { id: v2-modifier, severity: MEDIUM, title: modifier filter test }
+const modifierLowerWQL = `
+meta: { id: modifier, severity: MEDIUM, title: modifier filter test }
 query:
   select: external_call
   from: entry_function
@@ -385,11 +574,11 @@ query:
 `
 
 func TestLower_ModifierRoutesToFilter(t *testing.T) {
-	tv2, err := parseV2([]byte(v2ModifierLowerYAML))
+	doc, err := parseWQL([]byte(modifierLowerWQL))
 	if err != nil {
-		t.Fatalf("parseV2: %v", err)
+		t.Fatalf("parseWQL: %v", err)
 	}
-	tmpl, err := tv2.lower()
+	tmpl, err := doc.lower()
 	if err != nil {
 		t.Fatalf("lower: %v", err)
 	}
@@ -412,8 +601,8 @@ func TestLower_ModifierRoutesToFilter(t *testing.T) {
 
 // --- select-absent (structural fix) --------------------------------------
 
-const v2SelectAbsentLowerYAML = `
-meta: { id: v2-select-absent, severity: MEDIUM, title: select-absent regex-at-root test }
+const selectAbsentLowerWQL = `
+meta: { id: select-absent, severity: MEDIUM, title: select-absent regex-at-root test }
 query:
   from: contract
   where:
@@ -421,11 +610,11 @@ query:
 `
 
 func TestLower_SelectAbsentAppliesRegexAtRoot(t *testing.T) {
-	tv2, err := parseV2([]byte(v2SelectAbsentLowerYAML))
+	doc, err := parseWQL([]byte(selectAbsentLowerWQL))
 	if err != nil {
-		t.Fatalf("parseV2: %v", err)
+		t.Fatalf("parseWQL: %v", err)
 	}
-	tmpl, err := tv2.lower()
+	tmpl, err := doc.lower()
 	if err != nil {
 		t.Fatalf("lower: %v", err)
 	}
@@ -450,24 +639,24 @@ func TestLower_SelectAbsentAppliesRegexAtRoot(t *testing.T) {
 // rejected — there is nothing to match on.
 func TestLower_SelectAbsentNoASTMattersErrors(t *testing.T) {
 	const yamlSrc = `
-meta: { id: v2-select-absent-empty, severity: MEDIUM, title: select-absent with no AST matcher }
+meta: { id: select-absent-empty, severity: MEDIUM, title: select-absent with no AST matcher }
 query:
   from: contract
   where:
     - modifier: "(?i)initializer"
 `
-	tv2, err := parseV2([]byte(yamlSrc))
+	doc, err := parseWQL([]byte(yamlSrc))
 	if err != nil {
-		t.Fatalf("parseV2: %v", err)
+		t.Fatalf("parseWQL: %v", err)
 	}
-	_, err = tv2.lower()
+	_, err = doc.lower()
 	if err == nil {
 		t.Fatalf("lower: expected an error (no select, no AST where-matchers), got nil")
 	}
 }
 
 func TestLowerRejectsSelectIgnoredBySequence(t *testing.T) {
-	doc, err := parseV2([]byte(`
+	doc, err := parseWQL([]byte(`
 meta: {id: conflict, severity: HIGH}
 query:
   select: state_write
@@ -486,8 +675,42 @@ query:
 	}
 }
 
+func TestLowerRejectsSelectlessSequenceWithoutActionableFirstStep(t *testing.T) {
+	_, err := ParseTemplate(`
+meta: {id: absence-first-sequence, severity: HIGH}
+query:
+  from: entry_function
+  where:
+    - sequence:
+        - not: {has: {block: state_write}}
+        - {block: external_call}
+`)
+	if err == nil || !strings.Contains(err.Error(), "sequence first step") {
+		t.Fatalf("error = %v, want select-less sequence first-step anchor rejection", err)
+	}
+}
+
+func TestLowerAllowsSelectlessSequenceWithActionableFirstStep(t *testing.T) {
+	tmpl, err := ParseTemplate(`
+meta: {id: positive-first-sequence, severity: HIGH}
+query:
+  from: entry_function
+  where:
+    - sequence:
+        - {block: external_call}
+        - {block: state_write}
+`)
+	if err != nil {
+		t.Fatalf("ParseTemplate rejected actionable first step: %v", err)
+	}
+	want, _ := blockKindToIR("external_call")
+	if got := tmpl.Query.Match.Sequence[0].Kind; got != want {
+		t.Fatalf("sequence first-step kind = %q, want %q", got, want)
+	}
+}
+
 func TestLowerAllowsSelectMatchingSequenceAnchor(t *testing.T) {
-	doc, err := parseV2([]byte(`
+	doc, err := parseWQL([]byte(`
 meta: {id: matching-anchor, severity: HIGH}
 query:
   select: external_call
@@ -511,7 +734,7 @@ query:
 }
 
 func TestLowerSelectFillsUnkindedSequenceAnchor(t *testing.T) {
-	doc, err := parseV2([]byte(`
+	doc, err := parseWQL([]byte(`
 meta: {id: filled-anchor, severity: HIGH}
 query:
   select: external_call
@@ -539,7 +762,7 @@ query:
 }
 
 func TestLowerRejectsSelectWithCompositeSequenceAnchor(t *testing.T) {
-	doc, err := parseV2([]byte(`
+	doc, err := parseWQL([]byte(`
 meta: {id: composite-anchor, severity: HIGH}
 query:
   select: state_write

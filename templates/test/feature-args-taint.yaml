@@ -1,20 +1,18 @@
 meta:
   id: TEST-FEATURE-ARGS-TAINT
-  title: "Feature test: args + tainted_from (positional taint)"
+  title: "Feature test: arg.N + tainted (positional taint)"
   severity: HIGH
   confidence: LOW
   description: >
-    Engine feature fixture combining positional argument matching (`args`)
-    with `tainted_from: parameter`. Matches an ERC20 transferFrom whose first
+    Engine feature fixture combining positional argument matching (`arg.N`)
+    with `tainted: parameter`. Matches an ERC20 transferFrom whose first
     argument is a caller-controlled parameter. Expected to match
     VulnerableTransferFrom.pull and NOT SafeTransferFrom.pull in
     test-data/core/engine-features/04-args-taint.sol.
   recommendation: >
     This is a feature-test template, not a production detector.
 
-# `token_call` (v1) is IsTokenCall(kind) == (kind == call.external) — name
-# filtering for ERC20/ERC721 methods is a separate check either way, so
-# `external_call` + `name:` is behaviorally identical (see
+# `external_call` plus `name:` identifies the ERC20/ERC721 method shape (see
 # templates/official/high/arbitrary-transferfrom.yaml).
 query:
   select: external_call

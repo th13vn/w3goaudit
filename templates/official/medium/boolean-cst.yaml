@@ -26,8 +26,8 @@ query:
 
   where:
     # No single AST anchor kind (branch 1 is a binary_op, branch 2 is a bare
-    # literal), so `select:` is omitted; `has:` reproduces v1's
-    # `match.contains` — "some descendant matches (branch 1 OR branch 2)".
+    # literal), so `select:` is omitted; `has:` expresses
+    # "some descendant matches (branch 1 OR branch 2)".
     - has:
         any:
           # 1. Boolean constant as a DIRECT operand of a comparison or logical

@@ -4,7 +4,7 @@ pragma solidity ^0.8.0;
 // ─── Adversarial bypass: empty `auth`-NAMED modifier ──────────────────────
 // This one is aimed squarely at heuristic detectors. The modifier is NAMED
 // `auth` (a token w3goaudit's IsAccessControlled regex treats as a positive
-// signal for the `unAuthenticated` preset) — but its body is a no-op. So a
+// signal for the `access_controlled` preset) — but its body is a no-op. So a
 // rule that gates on "function lacks an `onlyOwner`/`auth`/… modifier" will
 // see one and skip the function, even though it provides no protection.
 //

@@ -300,7 +300,8 @@ func (r *Reader) ResolveImports(projectRoot string) error {
 
 // processFileImports extracts and loads all imports from a single file
 func (r *Reader) processFileImports(sf *types.SourceFile) error {
-	imports := extractImports(sf.Content)
+	imports := extractImportOccurrences(sf.Content)
+	sf.ImportBindings = nil
 
 	if len(imports) == 0 {
 		return nil
@@ -309,8 +310,10 @@ func (r *Reader) processFileImports(sf *types.SourceFile) error {
 	r.logf("Found %d imports in %s", len(imports), filepath.Base(sf.Path))
 
 	for _, importPath := range imports {
+		binding := types.ImportBinding{ImportPath: importPath}
 		resolvedPath, err := r.loadImport(importPath, sf.Path)
 		if err != nil {
+			sf.ImportBindings = append(sf.ImportBindings, binding)
 			r.logf("  Could not load import '%s': %v", importPath, err)
 			// Record it durably so source and cache scans expose the same known
 			// analysis loss.
@@ -326,6 +329,8 @@ func (r *Reader) processFileImports(sf *types.SourceFile) error {
 			// Continue with other imports
 			continue
 		}
+		binding.ResolvedFile = resolvedPath
+		sf.ImportBindings = append(sf.ImportBindings, binding)
 		recordResolvedImport(sf, resolvedPath)
 	}
 

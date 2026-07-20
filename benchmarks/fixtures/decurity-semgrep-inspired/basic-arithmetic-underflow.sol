@@ -51,8 +51,31 @@ library ECDSA {
 contract UpgradeabilityProxy {}
 
 contract VulnerableBasicArithmeticUnderflow {
-    function withdraw(uint256 amount) external pure returns (uint256) {
-        uint256 balance = 1;
-        return balance - amount;
+    uint256 public balance = 1;
+
+    function withdraw(uint256 balance, uint256 amount) external pure returns (uint256) {
+        unchecked {
+            return balance - amount;
+        }
+    }
+
+    function withdraw(uint256 amount) external {
+        unchecked {
+            balance -= amount;
+        }
+    }
+
+    function guardedBinary(uint256 balance, uint256 amount) external pure returns (uint256) {
+        require(balance >= amount, "bounded");
+        unchecked {
+            return balance - amount;
+        }
+    }
+
+    function guardedAssignment(uint256 amount) external {
+        if (amount > balance) revert();
+        unchecked {
+            balance -= amount;
+        }
     }
 }

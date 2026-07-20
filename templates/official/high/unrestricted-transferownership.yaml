@@ -5,8 +5,9 @@ meta:
   confidence: MEDIUM
   description: >
     A `transferOwnership` entry point writes an owner-like state variable from a
-    user-supplied address with no access control. Any caller can seize ownership
-    of the contract and then reach every `onlyOwner` privileged path.
+    caller-controlled address with no access control. The value may come from a
+    parameter or caller identity, letting any caller seize ownership and then
+    reach every `onlyOwner` privileged path.
   recommendation: >
     Guard `transferOwnership` with an `onlyOwner` (or role-based) modifier, and
     prefer a two-step transfer (`Ownable2Step`) so ownership cannot be handed to
@@ -21,4 +22,4 @@ query:
     - left:
         name: '(?i)owner'
     - right:
-        tainted: parameter
+        tainted: user_controlled

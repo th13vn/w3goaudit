@@ -1,12 +1,31 @@
 # Changelog
 
-## Unreleased — `query:` composition (breaking template syntax)
+## Unreleased – Project 1 correctness closure
 
-Templates are now `meta:` plus one `query:` container — the former top-level
-`select`/`from`/`where` triple moved under `query:` (all 106 repository
-templates migrated; finding output verified byte-identical on the security
-corpus, and the competitive benchmark gate passes: precision 65.27%,
-detection 100%, zero failed cases).
+- Corrected Solidity `for` AST order to initialization, condition, body, then
+  post, and completed state-write coverage for dynamic-storage-array
+  `push`/`pop`, state-targeted `delete`/`++`/`--`, and assembly `sstore`.
+  Storage-array mutations are modeled as `stmt.state_mutation`, not calls.
+- Materialized exact contract, function, variable, parameter, and modifier
+  declaration nodes with exact source spans. Active inherited functions are
+  deduplicated by canonical selector so derived overrides replace base
+  implementations while overloads remain distinct.
+- Made `guarded_by` evaluate inline guards and exact applied modifier bodies.
+  Modifier names remain descriptive and no longer imply access control by
+  themselves.
+- Aligned where-only query defaults and validation: actionable AST evidence
+  defaults to `entry_function`, while context-only queries fail because they
+  cannot anchor a finding. Programmatic evaluator validation rejects the same
+  invalid values as loaded WQL.
+- Corrected public documentation for `Function.Selector` canonical text versus
+  four-byte `Function.Signature`, location units, location-source behavior,
+  report indexing, cached source content, and extension output examples.
+
+## Unreleased — canonical WQL and query composition
+
+A WQL document is meta plus one query: block. All 106 repository templates use
+that canonical shape. The final competitive benchmark gate passes with TP 109,
+FP 41, FN 0, precision 72.6666666667%, recall 100%, and zero failed cases.
 
 - **`query.or:`** — one detector, several alternative shapes: a list of
   complete branch queries under one `meta`. Each branch anchors its own
@@ -14,25 +33,121 @@ detection 100%, zero failed cases).
   the shared default, and cross-scope branches are allowed). Lowered to one
   `QueryBlock` per branch (new `Template.Queries` IR field, additive JSON);
   the engine executes every block and unions the findings, deduplicating
-  identical matched locations.
+  identical matched locations. Unknown-kind results are provisional: the first
+  concrete kind at the same span replaces the unknown result, making
+  unknown-first and unknown-last branch orders identical while preserving
+  distinct concrete kinds.
 - **`query.and:`** — multi-site joined findings: a query-level `from:` names
   the join scope (contract scopes join per contract via the synthetic
   inheritance-aware AST; function scopes per function), and every branch
   (own `select`/`where`/`label:`) must match in the same scope instance.
   Branch sites surface in `Finding.Related` under their labels. Lowered onto
-  the existing contract-scope `all:`-of-branches machinery. Context-level
+  evaluator `Rule.All` branch machinery. Context-level
   matchers are rejected inside `and:` branches (a filter applies to the
-  whole scope instance).
+  whole scope instance); absence-only branches are also rejected because every
+  branch must provide reportable primary/related evidence. Positive synthetic
+  contract-root branches emit contract/file related sites.
 - One composition level; `and:`/`or:` cannot mix with each other or with a
   sibling `select:`/`where:`; malformed shapes fail at load with pointed
   errors.
+- Explicitly authored query/branch scalars and matcher lists must be non-null
+  and non-empty. Vacuous nested matchers, empty required strings,
+  `unchecked_var: false`, and signed/non-decimal `arg.N` keys fail at load;
+  negative programmatic indexes also fail safely instead of panicking. The
+  strict matrix covers null and empty `select`/`from`/`where`/`label` values in
+  both `and:` and `or:` branches.
 - **`arg.any:`** — matches when SOME positional call argument satisfies the
   sub-rule (receivers/call options excluded, as with `arg.N`).
-- **`and:` in `where`** — exact alias of `all:` for logic symmetry.
+- **`and:` in `where`** — the canonical explicit conjunction.
+- **Repeated sibling `not:` correctness** – implicit-conjunction negations are
+  preserved independently as `(not A) and (not B)`, fixing false positives for
+  access-controlled or initializer-modified upgrade functions and
+  `onlyPoolManager`-protected Uniswap v4 callbacks.
+- Contract-scope findings now borrow function ownership and exact spans only
+  from a primary match with a real source line. Location-less contract matches,
+  including proxy storage-collision regex combinations, remain attributed to
+  the verified contract and file instead of a synthetic ancestor function.
+- The Decurity-inspired arithmetic-underflow detector now applies semantic
+  `unchecked_var` range-guard analysis to explicit Solidity 0.8 `unchecked`
+  binary `-` and assignment `-=` subtraction. It clears only exact unsigned
+  operand bounds enforced on the operation's path; reversed/unrelated guards,
+  non-terminating branches, intervening statements, effectful condition
+  operands or additional guard arguments, signed arithmetic, and ordinary
+  checked subtraction remain findings or controls as appropriate.
+- Caller-identity taint recognizes only `msg.sender`, `tx.origin`, and exact
+  zero-argument internal `_msgSender()` helpers confirmed by recorded metadata
+  and exact MRO resolution when available. Empty or unresolvable database state
+  is unavailable context rather than negative proof, so exact synthetic
+  zero-argument internal calls retain the compatibility fallback; once exact
+  owner/MRO context is available, a missing helper or nonzero overload
+  disproves caller identity. Same-named identifiers, state/local/parameter
+  names, and external/self/unresolved calls retain parameter/local/state
+  provenance in both taint and access-control analysis.
+- Sequence backtracking now restores abandoned primary anchors. Name-only
+  member matches and cross-function contract joins retain exact related
+  evidence; matched-node locations use the primary span plus the final trace
+  host; query-union dedup is span-based with optional kind evidence.
+- The canonical accessible-selfdestruct benchmark detector now treats any
+  unauthenticated reachable destruction as vulnerable, including fixed
+  beneficiaries and Solidity/helper/cast/Yul forms; access control remains the
+  safe property.
+- Sequence matching now uses one execution-event partial order locally and
+  interprocedurally. Receiver, call-option, and argument subtrees precede the
+  call; the call precedes an inlined callee; ordinary sibling statements retain
+  source order; distinct pre-call siblings may match either relative order.
+  Per-occurrence reachability and caller/callee arm tokens now reject
+  cross-tree mutually exclusive matches and preserve the selected chain when a
+  callee AST is reused.
+- Select-less sequences now require positive actionable evidence in their first
+  step. Query-level `and:` branches require both a positive reportable anchor
+  and traceable AST evidence, so absence-only and regex-only joins fail at load;
+  regex remains supported as refinement and in simple queries.
+- Programmatic Rule compatibility cloning now applies the depth-64 and active
+  cycle checks to nested `Attr` maps and slices. Self/mixed cycles and depth 65
+  fail closed without caller mutation, while depth 64 and shared DAGs remain
+  valid.
+- Added additive per-occurrence `SourceFile.ImportBindings` JSON with raw and
+  canonical paths, namespace aliases, and named symbol aliases. Exact resolution
+  recognizes `Parent`/`V.Base`, hides aliased original bare names, exposes
+  diagnostic-aware resolution statuses, and preserves behavior across cache
+  round trips.
+- Parsed calls with known arguments no longer resolve a unique same-name target
+  of the wrong arity. Exact target fields stay empty and one durable
+  `identity.unresolved` diagnostic records the observed arity.
+- `FunctionCall.argCount` now distinguishes absent legacy JSON (`-1`) from a
+  genuine zero-argument call, and zero is always serialized. Every unresolved
+  legacy MRO entry now records an incomplete identity diagnostic.
+- Report graphs, state matrices, and workflows share one exact call resolver;
+  navigation publishes only exact resolved callee IDs. `extract diff` now uses
+  source-relative exact contract keys and full selectors across checkout roots.
+- Benchmark fallback attribution now sanitizes Solidity comments and quoted
+  strings with a length- and newline-preserving lexer before both declaration
+  matching and brace counting, preventing fake declarations and quoted braces
+  from corrupting Semgrep/4naly3er locations.
+- Closed five integrated review gaps: `Rule.IsStateVar` containers now share
+  bounded graph cloning; non-call effect operands execute before their enclosing
+  sequence event; receiver/option helper calls receive one exact callgraph edge;
+  nested positive select-less sequences validate step one recursively; and
+  traceable AST evidence supersedes coarse regex provenance in joined findings.
 - Conflicting scalar matchers (two `name:` constraints on one node) now fail
-  with a fix-it error suggesting `all:` branches.
-- SDK: `ParseTemplate`/`LoadTemplate` accept only the new document shape;
-  the exported evaluator IR gains `Template.Queries` and `Rule.ArgAny`.
+  with a fix-it error suggesting `and:` branches.
+- Restored deprecated evaluator-IR Go/JSON fields and SDK method signatures
+  without restoring legacy WQL authoring. Compatibility constraints normalize
+  on recursive deep copies before validation and at every exported evaluator
+  entry point; active Rule-pointer cycles, nesting beyond depth 64, and
+  conflicting values fail closed before later recursive walkers without
+  mutating caller rules or templates.
+- Exact contract/callee resolution now requires source/import provenance,
+  precise call-site metadata, exact IDs, full selectors, and unambiguous legacy
+  fallback. Interprocedural traversal carries exact caller metadata through
+  nested overloads and follows recorded internal, inherited, self, super, and
+  library calls while excluding member receivers from argument binding.
+  Expression findings exclude statement semicolons, derived overrides suppress
+  base SDK results, and extract MRO display entries no longer borrow shifted
+  compact exact IDs.
+- SDK: `ParseTemplate`/`LoadTemplate` accept only the canonical document shape;
+  the exported evaluator IR gains `Template.Queries` and `Rule.ArgAny`;
+  `ReachStep.File` and precise `NodeRef` spans are documented.
 
 ## Unreleased — Full correctness and release hardening
 
@@ -73,9 +188,9 @@ detection 100%, zero failed cases).
   The image derives and verifies Go directly from `go.mod`, requested scanners
   fail closed, and output is confined to `benchmarks/results/`. The threshold
   checker enforces precision >= 65%, recall >= 95%, and zero failed cases from
-  recomputed raw counts. A fresh image/competitive run is not currently claimed:
-  verification remains externally blocked until the completed lockfile hash for
-  the pinned 4naly3er commit is recovered and reviewed.
+  recomputed raw counts. The reviewed generated-lock hash for the pinned
+  4naly3er commit is built into the Dockerfile, so the canonical Compose command
+  requires no external build argument.
 - Template YAML is strictly `meta` plus `query:`; unknown keys are rejected
   at every level. The obsolete `templates/security/` lane was deleted; the
   retained inventory is 25 official + 5 feature-test + 76 benchmark = 106 WQL
@@ -219,7 +334,7 @@ change renamed:
 - `not_bitwise_context:` (interim) → generic `statement_contains:` sub-rule
 
 Docs (`docs/wql-syntax.md`) rewritten: implicit-AND emphasized (no need to wrap
-sibling fields in `all:`), a complete Node Kinds reference (incl. the Declaration
+sibling fields in `and:`), a complete Node Kinds reference (incl. the Declaration
 group), and a fuller attributes table (`call_receiver`, `has_value`, `has_gas`,
 `has_salt`, `call_option`, `parent`, …).
 
@@ -238,7 +353,7 @@ target (SpiceFiNFT4626) and the competitive benchmark.
   and instead feeds `ComparesCallerIdentity`.
 - `ComparesCallerIdentity` is now **interprocedural**: it follows a `msg.sender`
   forwarded into a callee (`_withdraw(msg.sender, …)` → `ownerOf(id) != caller`).
-  The `unCheckedSender` preset therefore treats item-ownership scoping as a valid
+  The `caller_checked` preset therefore treats item-ownership scoping as a valid
   mitigation (the ETH analogue of `require(from == msg.sender)`).
 - Fixed `unwrapTypeCast` to unwrap only genuine type names (`address`, `uintN`, …)
   so a one-arg getter like `ownerOf(id)` is no longer mistaken for a cast.
@@ -254,7 +369,7 @@ target (SpiceFiNFT4626) and the competitive benchmark.
   matched against the node's nearest enclosing statement). The operator
   vocabulary lives in the template; used as `not: { statement_contains: … }` by
   incorrect-exp to exclude a `^` that shares a statement with another bitwise op.
-- `label` — optional name on a `match.all` branch, surfaced in `Finding.Related`.
+- `label` — optional name on a `Rule.All` branch, surfaced in `Finding.Related`.
 
 ### Builder
 
@@ -262,8 +377,8 @@ target (SpiceFiNFT4626) and the competitive benchmark.
 
 ### Official templates
 
-- `arbitrary-send-eth`: `preset: unAuthenticated` → `unCheckedSender` (clears
-  owner-gated NFT-vault withdrawals; still flags genuine arbitrary sends).
+- `arbitrary-send-eth` uses `not: { preset: caller_checked }` (clears owner-gated
+  NFT-vault withdrawals while still flagging genuine arbitrary sends).
 - `incorrect-exp`: flags `base ^ exp` / `2 ^ 8` / `10 ^ 18` (simple operands,
   `not_bitwise_context`); excludes OpenZeppelin `Math.average`/`mulDiv` and hex masks.
 - `unchecked-arithmetic`: scoped to state-mutating functions and `unchecked_var`
@@ -335,7 +450,7 @@ and `--html` for optional HTML files.
 - Access-control detection now separates privileged authorization from
   caller self-scoping. `require(from == msg.sender)` is not treated as owner or
   role access control.
-- Added the `unCheckedSender` preset for detectors where self-scoping is a valid
+- Added the property-true `caller_checked` preset for detectors where self-scoping is a valid
   mitigation, especially arbitrary `transferFrom`.
 - `super` call resolution is now context-aware across all most-derived C3
   linearization leaves, avoiding reachability false negatives in cooperative

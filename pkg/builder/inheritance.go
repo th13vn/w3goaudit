@@ -97,17 +97,21 @@ func (ib *InheritanceBuilder) c3LinearizeIDs(contract *types.Contract) ([]string
 	revBases := make([]*types.Contract, 0, len(contract.BaseContracts))
 	for i := len(contract.BaseContracts) - 1; i >= 0; i-- {
 		baseName := contract.BaseContracts[i]
-		base, exact := ib.db.ResolveContractNameExact(baseName, contract.SourceFile)
-		if exact {
+		base, status := ib.db.ResolveContractNameExactWithStatus(baseName, contract.SourceFile)
+		if status == types.ExactResolutionResolved {
 			revBases = append(revBases, base)
 			continue
 		}
-		if len(ib.db.FindContractsByName(baseName)) > 1 {
+		if status == types.ExactResolutionAmbiguous || status == types.ExactResolutionBindingMissing {
+			message := fmt.Sprintf("base contract %q referenced by %q is ambiguous in source scope", baseName, contract.Name)
+			if status == types.ExactResolutionBindingMissing {
+				message = fmt.Sprintf("base contract alias %q referenced by %q has no exact imported declaration", baseName, contract.Name)
+			}
 			ib.db.AddDiagnostic(types.Diagnostic{
 				Code:       types.DiagnosticIdentity,
 				Severity:   types.DiagnosticWarning,
 				Phase:      "builder",
-				Message:    fmt.Sprintf("base contract %q referenced by %q is ambiguous in source scope", baseName, contract.Name),
+				Message:    message,
 				File:       contract.SourceFile,
 				Symbol:     baseName,
 				Incomplete: true,
@@ -305,4 +309,61 @@ func removeElement(list []string, element string) []string {
 		}
 	}
 	return result
+}
+
+// GetInheritedFunctions returns inherited functions in exact derived-first MRO
+// order. It is retained for SDK source compatibility. Ambiguous contract names
+// fail closed, and overridden selectors are emitted only once.
+func (ib *InheritanceBuilder) GetInheritedFunctions(contractName string) []*types.Function {
+	if ib == nil || ib.db == nil {
+		return nil
+	}
+	candidates := ib.db.FindContractsByName(contractName)
+	if len(candidates) != 1 {
+		return nil
+	}
+	linearized := ib.db.LinearizedContracts(candidates[0])
+	if len(linearized) <= 1 {
+		return nil
+	}
+
+	var functions []*types.Function
+	seen := make(map[string]bool)
+	selectorOf := func(fn *types.Function) string {
+		if fn == nil {
+			return ""
+		}
+		selector := fn.Selector
+		if selector == "" {
+			selector = fn.GetSelector(nil)
+		}
+		if selector == "" {
+			selector = fn.Name
+		}
+		return selector
+	}
+	if derived := linearized[0]; derived != nil {
+		for _, fn := range derived.Functions {
+			if selector := selectorOf(fn); selector != "" {
+				seen[selector] = true
+			}
+		}
+	}
+	for _, base := range linearized[1:] {
+		if base == nil {
+			continue
+		}
+		for _, fn := range base.Functions {
+			if fn == nil {
+				continue
+			}
+			selector := selectorOf(fn)
+			if seen[selector] {
+				continue
+			}
+			seen[selector] = true
+			functions = append(functions, fn)
+		}
+	}
+	return functions
 }

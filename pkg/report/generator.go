@@ -373,34 +373,18 @@ func (g *Generator) generateCallGraphMermaid(contract *types.Contract) string {
 			for _, call := range fn.Calls {
 				// Only include internal calls
 				if g.isInternalCall(contract, call) {
-					calledName := call.Target
-					if call.ResolvedFunction != "" {
-						calledName = call.ResolvedFunction
+					target, ok := resolveReportCall(g.db, contract, baseContract, call)
+					if !ok {
+						continue
 					}
-
 					fromNode := sanitizeMermaidNode(fromID)
-					toContract := baseContract
-					toKey := calledName
-					switch call.CallType {
-					case types.CallTypeInternal, types.CallTypeInherited, types.CallTypeSelf:
-						if implContract, implFn := g.findImplementationContract(contract, calledName, call.ArgCount); implFn != nil {
-							toContract = implContract
-							if implFn.Selector != "" {
-								toKey = implFn.Selector
-							}
-						}
-					default:
-						if exact := g.db.GetContractByID(call.ResolvedContractID); exact != nil {
-							toContract = exact
-						}
-					}
-					toID := types.MakeFunctionID(toContract.SourceFile, toContract.Name, toKey)
+					toID := target.key()
 					toNode := sanitizeMermaidNode(toID)
 
 					edgeKey := fmt.Sprintf("%s --> %s", fromNode, toNode)
 					if !edges[edgeKey] {
 						edges[edgeKey] = true
-						sb.WriteString(fmt.Sprintf("    %s[\"%s\"] --> %s[\"%s\"]\n", fromNode, displayName, toNode, calledName))
+						sb.WriteString(fmt.Sprintf("    %s[\"%s\"] --> %s[\"%s\"]\n", fromNode, displayName, toNode, target.fn.Name))
 					}
 				}
 			}
@@ -453,10 +437,9 @@ func (g *Generator) generateFunctionCallGraph(contract *types.Contract, funcName
 	return sb.String()
 }
 
-// findImplementationContract finds which contract in the hierarchy implements the function.
-// argCount is the number of arguments at the call site (-1 = unknown / skip arity check).
-// When multiple overloads share the same name, the one whose parameter count matches
-// argCount is preferred; name-only matching is used as a fallback.
+// findImplementationContract finds one exact selector in the runtime MRO.
+// Bare legacy names succeed only when the optional arity leaves one distinct
+// selector; ambiguity and mismatch fail closed.
 func (g *Generator) findImplementationContract(startContract *types.Contract, funcName string, argCount ...int) (*types.Contract, *types.Function) {
 	if startContract == nil {
 		return nil, nil
@@ -468,67 +451,11 @@ func (g *Generator) findImplementationContract(startContract *types.Contract, fu
 		expectedArgs = argCount[0]
 	}
 
-	matchFn := func(fn *types.Function) bool {
-		if fn.Selector != funcName && fn.Name != funcName {
-			return false
-		}
-		if expectedArgs < 0 {
-			return true
-		}
-		return len(fn.Parameters) == expectedArgs
+	resolved, ok := resolveReportFunction(g.db.LinearizedContracts(startContract), funcName, expectedArgs)
+	if !ok {
+		return nil, nil
 	}
-	fallbackFn := func(fn *types.Function) bool { return fn.Selector == funcName || fn.Name == funcName }
-
-	// The exact MRO is derived-first: [MostDerived, ..., MostBase]
-	// First pass: exact arity match on non-interface contracts
-	for _, baseContract := range g.db.LinearizedContracts(startContract) {
-		if baseContract.Kind == types.ContractKindInterface {
-			continue
-		}
-		for _, fn := range baseContract.Functions {
-			if matchFn(fn) {
-				return baseContract, fn
-			}
-		}
-	}
-
-	// Second pass: name-only fallback on non-interface contracts
-	for _, baseContract := range g.db.LinearizedContracts(startContract) {
-		if baseContract.Kind == types.ContractKindInterface {
-			continue
-		}
-		for _, fn := range baseContract.Functions {
-			if fallbackFn(fn) {
-				return baseContract, fn
-			}
-		}
-	}
-
-	// Third pass: interfaces (exact arity)
-	for _, baseContract := range g.db.LinearizedContracts(startContract) {
-		if baseContract.Kind != types.ContractKindInterface {
-			continue
-		}
-		for _, fn := range baseContract.Functions {
-			if matchFn(fn) {
-				return baseContract, fn
-			}
-		}
-	}
-
-	// Fourth pass: interfaces name-only
-	for _, baseContract := range g.db.LinearizedContracts(startContract) {
-		if baseContract.Kind != types.ContractKindInterface {
-			continue
-		}
-		for _, fn := range baseContract.Functions {
-			if fallbackFn(fn) {
-				return baseContract, fn
-			}
-		}
-	}
-
-	return nil, nil
+	return resolved.contract, resolved.fn
 }
 
 // traceFunctionCalls recursively traces function calls and adds edges
@@ -539,45 +466,47 @@ func (g *Generator) traceFunctionCalls(contract *types.Contract, entryContract *
 	if targetFunc == nil {
 		return
 	}
-	funcKey := traceFunctionKey(targetFunc, funcName)
-	visitedKey := types.MakeFunctionID(foundInContract.SourceFile, foundInContract.Name, funcKey)
+	g.traceResolvedFunctionCalls(
+		reportCallTarget{contract: foundInContract, fn: targetFunc},
+		entryContract, sb, edges, visited,
+	)
+}
+
+func (g *Generator) traceResolvedFunctionCalls(target reportCallTarget, runtime *types.Contract, sb *strings.Builder, edges map[string]bool, visited map[string]bool) {
+	if target.contract == nil || target.fn == nil {
+		return
+	}
+	visitedKey := target.key()
 	if visited[visitedKey] {
 		return
 	}
 	visited[visitedKey] = true
 
-	g.logf("  [TRACE] Found %s in %s with %d calls", funcName, foundInContract.ID, len(targetFunc.Calls))
+	g.logf("  [TRACE] Found %s in %s with %d calls", target.selector(), target.contract.ID, len(target.fn.Calls))
 
 	fromNode := sanitizeMermaidNode(visitedKey)
-	for _, call := range targetFunc.Calls {
-		calledName := traceCallName(call)
+	for _, call := range target.fn.Calls {
 		plan := planTraceCall(call.CallType)
-		target, ok := g.resolveTraceTarget(foundInContract, entryContract, calledName, call, plan)
+		resolved, ok := resolveReportCall(g.db, runtime, target.contract, call)
 		if !ok {
 			continue
 		}
-		writeTraceEdge(sb, edges, fromNode, target.node, funcKey, calledName, target.edgeLabel)
-		if plan.shouldRecurse {
-			next := g.nextTraceLookupContract(contract, entryContract, call)
-			if next != nil {
-				g.traceFunctionCalls(next, entryContract, calledName, sb, edges, visited)
+		edgeLabel := plan.edgeLabel
+		if plan.virtual && resolved.contract.ID != target.contract.ID {
+			if edgeLabel == "" {
+				edgeLabel = resolved.contract.Name
+			} else {
+				edgeLabel = fmt.Sprintf("%s:%s", edgeLabel, resolved.contract.Name)
 			}
 		}
+		writeTraceEdge(
+			sb, edges, fromNode, sanitizeMermaidNode(resolved.key()),
+			target.selector(), resolved.selector(), edgeLabel,
+		)
+		if plan.shouldRecurse {
+			g.traceResolvedFunctionCalls(resolved, runtime, sb, edges, visited)
+		}
 	}
-}
-
-func traceFunctionKey(fn *types.Function, fallback string) string {
-	if fn.Selector != "" {
-		return fn.Selector
-	}
-	return fallback
-}
-
-func traceCallName(call *types.FunctionCall) string {
-	if call.ResolvedFunction != "" {
-		return call.ResolvedFunction
-	}
-	return call.Target
 }
 
 type traceCallPlan struct {
@@ -611,49 +540,6 @@ func planTraceCall(callType types.CallType) traceCallPlan {
 	}
 }
 
-type traceTarget struct {
-	node      string
-	edgeLabel string
-}
-
-func (g *Generator) resolveTraceTarget(foundIn, entryContract *types.Contract, calledName string, call *types.FunctionCall, plan traceCallPlan) (traceTarget, bool) {
-	if plan.virtual {
-		return g.resolveVirtualTraceTarget(foundIn, entryContract, calledName, call, plan.edgeLabel)
-	}
-	targetContract := foundIn
-	if call.ResolvedContractID != "" {
-		if exact := g.db.GetContractByID(call.ResolvedContractID); exact != nil {
-			targetContract = exact
-		}
-	} else if call.ResolvedContract != "" {
-		if scoped := g.db.ResolveContractName(call.ResolvedContract, foundIn.SourceFile); scoped != nil {
-			targetContract = scoped
-		}
-	}
-	targetID := types.MakeFunctionID(targetContract.SourceFile, targetContract.Name, calledName)
-	return traceTarget{node: sanitizeMermaidNode(targetID), edgeLabel: plan.edgeLabel}, true
-}
-
-func (g *Generator) resolveVirtualTraceTarget(foundIn, entryContract *types.Contract, calledName string, call *types.FunctionCall, edgeLabel string) (traceTarget, bool) {
-	implementationContract, implementation := g.findImplementationContract(entryContract, calledName, call.ArgCount)
-	if implementation == nil {
-		return traceTarget{}, false
-	}
-	if implementationContract == nil {
-		implementationContract = foundIn
-	}
-	targetKey := traceFunctionKey(implementation, calledName)
-	targetID := types.MakeFunctionID(implementationContract.SourceFile, implementationContract.Name, targetKey)
-	if implementationContract.ID != foundIn.ID {
-		if edgeLabel == "" {
-			edgeLabel = implementationContract.Name
-		} else {
-			edgeLabel = fmt.Sprintf("%s:%s", edgeLabel, implementationContract.Name)
-		}
-	}
-	return traceTarget{node: sanitizeMermaidNode(targetID), edgeLabel: edgeLabel}, true
-}
-
 func writeTraceEdge(sb *strings.Builder, edges map[string]bool, fromNode, toNode, fromKey, toKey, edgeLabel string) {
 	edgeKey := fmt.Sprintf("%s --> %s", fromNode, toNode)
 	if edges[edgeKey] {
@@ -667,22 +553,6 @@ func writeTraceEdge(sb *strings.Builder, edges map[string]bool, fromNode, toNode
 		return
 	}
 	sb.WriteString(fmt.Sprintf("    %s[\"%s\"] --> %s[\"%s\"]\n", fromNode, fromLabel, toNode, toLabel))
-}
-
-func (g *Generator) nextTraceLookupContract(contract, entryContract *types.Contract, call *types.FunctionCall) *types.Contract {
-	if call.CallType != types.CallTypeSuper {
-		if contract.Kind == types.ContractKindLibrary || call.CallType == types.CallTypeLibrary {
-			return contract
-		}
-		return entryContract
-	}
-	if resolved := g.db.GetContractByID(call.ResolvedContractID); resolved != nil {
-		return resolved
-	}
-	if resolved := g.db.ResolveContractName(call.ResolvedContract, contract.SourceFile); resolved != nil {
-		return resolved
-	}
-	return contract
 }
 
 // isInternalCall checks if a call is within the contract's scope

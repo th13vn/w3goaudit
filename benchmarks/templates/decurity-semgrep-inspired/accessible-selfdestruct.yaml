@@ -5,8 +5,8 @@ meta:
   confidence: MEDIUM
   description: >
     Detects public/external functions that can reach selfdestruct or suicide
-    without an authentication guard, especially when the beneficiary is
-    user-controlled.
+    without an authentication guard. Any caller-triggerable destruction is
+    vulnerable regardless of whether the beneficiary is fixed or caller-controlled.
   recommendation: >
     Review the Decurity rule semantics and add access control, validation,
     reentrancy protection, or safer arithmetic/oracle handling as appropriate.
@@ -18,4 +18,3 @@ query:
   select: selfdestruct
   where:
     - not: { preset: access_controlled }
-    - tainted: parameter

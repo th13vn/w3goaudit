@@ -77,7 +77,7 @@ type FunctionEffects struct {
 // StateWrite records a write to a state variable.
 type StateWrite struct {
 	Var  string `json:"var"`            // state variable name
-	Kind string `json:"kind,omitempty"` // assign | compound | delete | sstore
+	Kind string `json:"kind,omitempty"` // assign | compound | push | pop | delete | increment | decrement | sstore
 	Line int    `json:"line,omitempty"`
 }
 
@@ -93,7 +93,9 @@ type AuthInfo struct {
 	Modifiers    []string `json:"modifiers,omitempty"`
 	SenderChecks []string `json:"senderChecks,omitempty"` // conditions referencing msg.sender
 	UsesTxOrigin bool     `json:"usesTxOrigin,omitempty"`
-	// Controlled is true when any modifier or msg.sender check is present.
+	// Controlled is true only when enforcement-positive exact modifier bodies
+	// and call-site authorization/fixed-operand bindings, inline caller checks,
+	// or recursively resolved internal auth helpers prove privileged access.
 	Controlled bool `json:"controlled,omitempty"`
 }
 

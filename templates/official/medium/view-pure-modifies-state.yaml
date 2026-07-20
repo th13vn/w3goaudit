@@ -27,11 +27,11 @@ meta:
 # "x = ...;" pattern AND the assembly bypass pattern, which is the
 # interesting (and silently dangerous) one.
 #
-# `mutability: view,pure` is wrapped in `all:` so it routes to the
+# `mutability: view,pure` is wrapped in `and:` so it routes to the
 # function-level precondition layer (see delegatecall-in-loop.yaml).
 query:
   from: function
   select: state_write
   where:
-    - all:
+    - and:
         - mutability: view,pure

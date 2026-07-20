@@ -58,6 +58,10 @@ benchmark runner. The gate recomputes metrics from TP/FP/FN and requires:
 
 Any threshold violation exits nonzero.
 
+Project 1 reruns the competitive suite as a no-regression measurement. The
+exact 100 percent W3GoAudit precision and recall gate is delivered by the
+semantic-hardening project.
+
 ## Suites
 
 The active suites are fully owned by `benchmarks/corpus/`; the `SUITES` map in
@@ -121,10 +125,17 @@ answer key:
 | Detection rate | `TP / (TP + FN)`. |
 | F1 | Harmonic mean of precision and detection rate. |
 
-Alias mappings credit equivalent native detector names. `call_chain.py` also
-relaxes function equality when two tools attribute the same category in the
-same contract to functions on one internal call chain; exact matches are tried
-first.
+Alias mappings credit equivalent native detector names. Semantically
+synonymous detector families share one canonical cross-tool category even when
+their native rule IDs come from different template packs. For example,
+`SLITHER-SUICIDAL` and `DECURITY-ACCESSIBLE-SELFDESTRUCT` both map to
+`selfdestruct`; this category means any unauthenticated reachable destruction,
+regardless of whether the beneficiary is fixed or caller-controlled. Meanwhile,
+`SLITHER-CONTROLLED-DELEGATECALL` and
+`DECURITY-DELEGATECALL-TO-ARBITRARY-ADDRESS` both map to
+`controlled-delegatecall`. `call_chain.py` also relaxes function equality when
+two tools attribute the same category in the same contract to functions on one
+internal call chain; exact matches are tried first.
 
 ## Harness modules
 
@@ -140,6 +151,13 @@ case execution sequential:
 | `benchmark_reporting.py` | `benchmark.md` rendering. |
 | `call_chain.py` | Internal-call reachability helper. |
 | `assert_thresholds.py` | Release-quality threshold gate. |
+
+`benchmark_core.SourceIndex` derives fallback contract/function labels from one
+length- and newline-preserving Solidity lexical sanitizer. Line comments,
+block comments, single-quoted strings, double-quoted strings, and escaped
+quotes/backslashes are masked before both declaration regexes and brace
+counting, so quoted braces and fake declarations cannot corrupt Semgrep or
+4naly3er attribution.
 
 Maintainers can exercise the host-independent Python contracts directly:
 

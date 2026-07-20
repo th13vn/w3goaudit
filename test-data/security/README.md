@@ -9,7 +9,7 @@ All `.sol` files sit directly in this directory. The inventory distinguishes
 deep bug-class matrices, focused engine regressions, and fixtures owned by one
 promoted official detector. A promoted fixture may contain more than one
 `Vulnerable_*`/`Safe_*` pair when false-positive exclusions need dedicated
-coverage. The 15 files below are the complete canonical inventory; there are no
+coverage. The 17 files below are the complete canonical inventory; there are no
 duplicate aggregate `test-*` fixtures.
 
 Interprocedural transfer-from coverage is folded into the deep matrix below.
@@ -34,8 +34,10 @@ aggregate files in this directory.
 | `reentrancy.sol` | Deep bug-class matrix | `HIGH-REENTRANCY-PATTERN`; 14 vault, bank, and auction variants using `.call{value:}`, `.transfer`, `.send`, and raw `.call`, with safe and edge controls. |
 | `selfdestruct-unprotected.sol` | Promoted detector matrix | `CRITICAL-SELFDESTRUCT-UNPROTECTED`; unguarded destruction plus modifier and inline-caller-guard safe controls. |
 | `tx-origin-auth.sol` | Promoted detector matrix | `MEDIUM-TX-ORIGIN-AUTH`; unsafe authorization, the deliberate `msg.sender == tx.origin` EOA check exclusion, and `msg.sender` authorization. |
-| `unchecked-arithmetic.sol` | Promoted detector matrix | `MEDIUM-UNCHECKED-ARITHMETIC`; vulnerable unchecked math, bounded/ordered guards, non-ordering guards, and pure-library exclusions. |
+| `unchecked-arithmetic.sol` | Promoted detector matrix | `MEDIUM-UNCHECKED-ARITHMETIC` plus the real Decurity underflow template; vulnerable unchecked math, exact enforced bounds, reversed/unrelated/non-terminating/wrong-polarity guards, mutating dominating/fallthrough arms, effectful conjunction/disjunction operands and guard messages, intervening and ancestor internal/external calls, effectful sibling expressions with unspecified evaluation order, transparent and pure-expression safe controls, signed arithmetic, and pure-library exclusions. |
+| `unprotected-initializer.sol` | Focused detector regression | Actual official and benchmark unprotected-initializer templates; vulnerable initializer plus access-control-only, one-time initializer-modifier-only, and disable-guard-only safe controls. |
 | `unrestricted-transferownership.sol` | Promoted detector fixture | `HIGH-UNRESTRICTED-TRANSFEROWNERSHIP`; unrestricted owner write and access-controlled safe control. |
+| `user-controlled-caller-identity.sol` | Focused detector regression | Actual official and benchmark templates for delegatecall, low-level call, transferOwnership, and accessible selfdestruct; exact internal `_msgSender()` plus caller/parameter vulnerabilities, same-named state/local/external/nonzero-call controls, fixed-target controls where the category requires taint, fixed-beneficiary unprotected selfdestruct, and access-controlled safe controls. A dedicated guard matrix proves both `IsAccessControlled` and `ComparesCallerIdentity` accept only the metadata/MRO-resolved zero-argument internal helper. Also pins retained parameter-only transferFrom and ETH-recipient templates, including a parameter named `_msgSender`. |
 
 ## Used by
 

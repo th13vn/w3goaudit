@@ -14,9 +14,7 @@ meta:
 # Self-scoping is the canonical mitigation here — you can only move your own
 # tokens — so it is treated as safe even though it is not access control.
 #
-# `token_call` (v1) is IsTokenCall(kind) == (kind == call.external) — name
-# filtering for ERC20/ERC721 methods is a separate check either way, so
-# `external_call` + `name:` is behaviorally identical.
+# `external_call` plus `name:` identifies the ERC20/ERC721 method shape.
 query:
   from: entry_function
   select: external_call

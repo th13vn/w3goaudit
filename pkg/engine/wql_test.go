@@ -5,7 +5,7 @@ import (
 	"testing"
 )
 
-const v2DelegatecallYAML = `
+const delegatecallWQL = `
 meta: { id: delegatecall-user-input, severity: CRITICAL, title: Delegatecall to user-controlled target }
 query:
   select: delegatecall
@@ -15,7 +15,7 @@ query:
     - not: { preset: access_controlled }
 `
 
-const v2ComboSelectYAML = `
+const comboSelectWQL = `
 meta: { id: multicall-msgvalue, severity: HIGH, title: msg.value reuse across multicall }
 query:
   select: [delegatecall, external_call]
@@ -24,13 +24,11 @@ query:
     - block: function
 `
 
-const missingSelectAndFromYAML = `
+const missingSelectFromAndWhereYAML = `
 meta:
   id: incomplete-template
   severity: LOW
-query:
-  where:
-    - block: delegatecall
+query: {}
 `
 
 const missingQueryYAML = `
@@ -39,10 +37,10 @@ meta:
   severity: LOW
 `
 
-func TestParseV2_ScalarSelect(t *testing.T) {
-	doc, err := parseV2([]byte(v2DelegatecallYAML))
+func TestParseWQL_ScalarSelect(t *testing.T) {
+	doc, err := parseWQL([]byte(delegatecallWQL))
 	if err != nil {
-		t.Fatalf("parseV2 returned error: %v", err)
+		t.Fatalf("parseWQL returned error: %v", err)
 	}
 
 	if doc.Meta.ID != "delegatecall-user-input" {
@@ -74,34 +72,58 @@ func TestParseV2_ScalarSelect(t *testing.T) {
 	}
 }
 
-func TestParseV2RejectsListSelect(t *testing.T) {
-	_, err := parseV2([]byte(v2ComboSelectYAML))
+func TestParseWQLRejectsListSelect(t *testing.T) {
+	_, err := parseWQL([]byte(comboSelectWQL))
 	if err == nil || !strings.Contains(err.Error(), "select must be a scalar block kind") {
 		t.Fatalf("error = %v", err)
 	}
 }
 
-func TestLowerErrorOnMissingSelectAndFrom(t *testing.T) {
-	doc, err := parseV2([]byte(missingSelectAndFromYAML))
-	if err != nil {
-		t.Fatalf("parseV2 returned error: %v", err)
-	}
-	if _, err := doc.lower(); err == nil || !strings.Contains(err.Error(), "neither select nor from") {
-		t.Fatalf("lower error = %v, want neither-select-nor-from error", err)
+func TestParseWQLRejectsPublicAllMatcher(t *testing.T) {
+	_, err := ParseTemplate(`
+meta: {id: T, severity: HIGH}
+query:
+  select: external_call
+  where:
+    - all: [{name: transfer}, {arg.0: {tainted: parameter}}]
+`)
+	if err == nil || !strings.Contains(err.Error(), `unknown matcher key "all"`) {
+		t.Fatalf("error = %v, want canonical and: rejection", err)
 	}
 }
 
-func TestParseV2_ErrorOnMissingQuery(t *testing.T) {
-	_, err := parseV2([]byte(missingQueryYAML))
+func TestParseTemplateRejectsLegacyRuleKeys(t *testing.T) {
+	for _, key := range []string{"source_regex", "visibility_filter", "mutability_filter"} {
+		t.Run(key, func(t *testing.T) {
+			_, err := ParseTemplate("meta: {id: legacy-key, severity: HIGH}\nquery:\n  select: external_call\n  from: entry_function\n  where:\n    - " + key + ": public\n")
+			if err == nil || !strings.Contains(err.Error(), `unknown matcher key "`+key+`"`) {
+				t.Fatalf("error = %v, want strict rejection of legacy WQL key %q", err, key)
+			}
+		})
+	}
+}
+
+func TestLowerErrorOnMissingSelectFromAndWhere(t *testing.T) {
+	doc, err := parseWQL([]byte(missingSelectFromAndWhereYAML))
+	if err != nil {
+		t.Fatalf("parseWQL returned error: %v", err)
+	}
+	if _, err := doc.lower(); err == nil || !strings.Contains(err.Error(), "neither select, from, nor where") {
+		t.Fatalf("lower error = %v, want neither-select-from-nor-where error", err)
+	}
+}
+
+func TestParseWQL_ErrorOnMissingQuery(t *testing.T) {
+	_, err := parseWQL([]byte(missingQueryYAML))
 	if err == nil || !strings.Contains(err.Error(), "no query:") {
 		t.Fatalf("error = %v, want missing-query error", err)
 	}
 }
 
-func TestMatcherV2Key(t *testing.T) {
-	doc, err := parseV2([]byte(v2DelegatecallYAML))
+func TestMatcherKey(t *testing.T) {
+	doc, err := parseWQL([]byte(delegatecallWQL))
 	if err != nil {
-		t.Fatalf("parseV2 returned error: %v", err)
+		t.Fatalf("parseWQL returned error: %v", err)
 	}
 
 	key, _, ok := doc.Query.Where[1].key()
@@ -113,19 +135,19 @@ func TestMatcherV2Key(t *testing.T) {
 	}
 
 	// Empty matcher map should report ok=false.
-	empty := MatcherV2{}
+	empty := Matcher{}
 	if _, _, ok := empty.key(); ok {
-		t.Errorf("empty MatcherV2.key() ok = true, want false")
+		t.Errorf("empty Matcher.key() ok = true, want false")
 	}
 
 	// Multi-key matcher map should report ok=false.
-	multi := MatcherV2{"a": {}, "b": {}}
+	multi := Matcher{"a": {}, "b": {}}
 	if _, _, ok := multi.key(); ok {
-		t.Errorf("multi-key MatcherV2.key() ok = true, want false")
+		t.Errorf("multi-key Matcher.key() ok = true, want false")
 	}
 }
 
-func TestMatcherV2CompilesNestedArgN(t *testing.T) {
+func TestMatcherCompilesNestedArgN(t *testing.T) {
 	cases := []struct {
 		name  string
 		where string
@@ -134,7 +156,7 @@ func TestMatcherV2CompilesNestedArgN(t *testing.T) {
 		{name: "top level", where: `- arg.0: {tainted: parameter}`, index: 0},
 		{name: "has", where: `- has: {block: external_call, arg.1: {tainted: parameter}}`, index: 1},
 		{name: "sequence", where: `- sequence: [{block: external_call, arg.2: {tainted: parameter}}]`, index: 2},
-		{name: "all", where: `- all: [{block: external_call, arg.3: {tainted: parameter}}]`, index: 3},
+		{name: "and", where: `- and: [{block: external_call, arg.3: {tainted: parameter}}]`, index: 3},
 		{name: "any", where: `- any: [{block: external_call, arg.4: {tainted: parameter}}]`, index: 4},
 		{name: "not", where: `- not: {block: external_call, arg.5: {tainted: parameter}}`, index: 5},
 		{name: "nested argument", where: `- arg.0: {arg.6: {tainted: parameter}}`, index: 6},
@@ -142,9 +164,9 @@ func TestMatcherV2CompilesNestedArgN(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			doc, err := parseV2([]byte("meta: {id: nested-arg, severity: HIGH}\nquery:\n  select: external_call\n  from: entry_function\n  where:\n    " + tc.where + "\n"))
+			doc, err := parseWQL([]byte("meta: {id: nested-arg, severity: HIGH}\nquery:\n  select: external_call\n  from: entry_function\n  where:\n    " + tc.where + "\n"))
 			if err != nil {
-				t.Fatalf("parseV2 returned error: %v", err)
+				t.Fatalf("parseWQL returned error: %v", err)
 			}
 			tmpl, err := doc.lower()
 			if err != nil {

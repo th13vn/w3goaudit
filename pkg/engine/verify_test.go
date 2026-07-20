@@ -223,6 +223,56 @@ func TestVerifyTraversal(t *testing.T) {
 	}
 }
 
+const argAnyMemberFixture = `// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.0;
+
+contract ArgAnyMember {
+    function caller() external view returns (address) {
+        return msg.sender;
+    }
+}
+`
+
+func TestArgAnyMemberRightFailsClosed(t *testing.T) {
+	tmpl, err := ParseTemplate(`
+meta: {id: T, severity: HIGH}
+query:
+  select: member
+  from: function
+  where:
+    - name: ^sender$
+    - right: {arg.any: {name: ^recipient$}}
+`)
+	if err != nil {
+		t.Fatalf("ParseTemplate: %v", err)
+	}
+
+	db := buildDBFromSource(t, argAnyMemberFixture).GetDatabase()
+	if findings := New(db).Execute(tmpl); len(findings) != 0 {
+		t.Fatalf("member right arg.any is unsupported and must fail closed; findings = %+v", findings)
+	}
+}
+
+func TestArgAnyMemberLeftDoesNotPassVacuously(t *testing.T) {
+	tmpl, err := ParseTemplate(`
+meta: {id: T, severity: HIGH}
+query:
+  select: member
+  from: function
+  where:
+    - name: ^sender$
+    - left: {arg.any: {name: ^recipient$}}
+`)
+	if err != nil {
+		t.Fatalf("ParseTemplate: %v", err)
+	}
+
+	db := buildDBFromSource(t, argAnyMemberFixture).GetDatabase()
+	if findings := New(db).Execute(tmpl); len(findings) != 0 {
+		t.Fatalf("member left child does not satisfy arg.any and must not pass vacuously; findings = %+v", findings)
+	}
+}
+
 func TestVerifyPrimaryTraceRollsBackFailedCandidates(t *testing.T) {
 	db := types.NewDatabase()
 	engine := New(db)
@@ -351,6 +401,136 @@ func TestVerifyTaint(t *testing.T) {
 				t.Errorf("Expected %v, got %v", tt.expected, result)
 			}
 		})
+	}
+}
+
+func TestUserControlledTaintMatchesParameterAndCallerIdentity(t *testing.T) {
+	e := New(&types.Database{})
+
+	parameter := types.NewASTNode(types.KindExprIdentifier)
+	parameter.Name = "target"
+	parameter.RefKind = "parameter"
+
+	legacyMsgSender := types.NewASTNode(types.KindExprMemberAccess)
+	legacyMsgSender.Name = "sender"
+	legacyMsgSender.SetAttribute("parent", "msg")
+
+	msgSender := types.NewASTNode(types.KindExprMemberAccess)
+	msgSender.Name = "sender"
+	msgSender.SetAttribute("parent", "msg")
+	msgIdentifier := types.NewASTNode(types.KindExprIdentifier)
+	msgIdentifier.Name = "msg"
+	msgSender.AddChild(msgIdentifier)
+
+	txOrigin := types.NewASTNode(types.KindExprMemberAccess)
+	txOrigin.Name = "origin"
+	txOrigin.SetAttribute("parent", "tx")
+	txIdentifier := types.NewASTNode(types.KindExprIdentifier)
+	txIdentifier.Name = "tx"
+	txOrigin.AddChild(txIdentifier)
+
+	accountMsg := types.NewASTNode(types.KindExprMemberAccess)
+	accountMsg.Name = "msg"
+	accountMsg.SetAttribute("parent", "account")
+	accountIdentifier := types.NewASTNode(types.KindExprIdentifier)
+	accountIdentifier.Name = "account"
+	accountIdentifier.RefKind = "state_var"
+	accountMsg.AddChild(accountIdentifier)
+	accountMsgSender := types.NewASTNode(types.KindExprMemberAccess)
+	accountMsgSender.Name = "sender"
+	accountMsgSender.SetAttribute("parent", "msg")
+	accountMsgSender.AddChild(accountMsg)
+
+	accountTx := types.NewASTNode(types.KindExprMemberAccess)
+	accountTx.Name = "tx"
+	accountTx.SetAttribute("parent", "account")
+	accountTxIdentifier := types.NewASTNode(types.KindExprIdentifier)
+	accountTxIdentifier.Name = "account"
+	accountTxIdentifier.RefKind = "state_var"
+	accountTx.AddChild(accountTxIdentifier)
+	accountTxOrigin := types.NewASTNode(types.KindExprMemberAccess)
+	accountTxOrigin.Name = "origin"
+	accountTxOrigin.SetAttribute("parent", "tx")
+	accountTxOrigin.AddChild(accountTx)
+
+	msgSenderIdentifier := types.NewASTNode(types.KindExprIdentifier)
+	msgSenderIdentifier.Name = "_msgSender"
+	msgSenderIdentifier.RefKind = "state_var"
+
+	msgSenderLocal := types.NewASTNode(types.KindExprIdentifier)
+	msgSenderLocal.Name = "_msgSender"
+	msgSenderLocal.RefKind = "local_var"
+
+	msgSenderParameter := types.NewASTNode(types.KindExprIdentifier)
+	msgSenderParameter.Name = "_msgSender"
+	msgSenderParameter.RefKind = "parameter"
+
+	msgSenderInternalCall := types.NewASTNode(types.KindCallInternal)
+	msgSenderInternalCall.Name = "_msgSender"
+
+	msgSenderInternalCallWithArg := types.NewASTNode(types.KindCallInternal)
+	msgSenderInternalCallWithArg.Name = "_msgSender"
+	msgSenderInternalCallWithArg.AddChild(types.NewASTNode(types.KindExprLiteral))
+
+	msgSenderExternalCall := types.NewASTNode(types.KindCallExternal)
+	msgSenderExternalCall.Name = "_msgSender"
+
+	// A state variable alone is not a user-controlled source.
+	stateOnly := types.NewASTNode(types.KindExprIdentifier)
+	stateOnly.Name = "owner"
+	stateOnly.RefKind = "state_var"
+
+	for name, node := range map[string]*types.ASTNode{
+		"parameter":           parameter,
+		"legacy msg.sender":   legacyMsgSender,
+		"builder msg.sender":  msgSender,
+		"builder tx.origin":   txOrigin,
+		"_msgSender internal": msgSenderInternalCall,
+	} {
+		t.Run(name, func(t *testing.T) {
+			if !e.Verify(node, Rule{TaintedFrom: "user_controlled"}) {
+				t.Fatalf("%s must be user controlled", name)
+			}
+		})
+	}
+
+	if e.Verify(stateOnly, Rule{TaintedFrom: "user_controlled"}) {
+		t.Fatal("state-only value must not be user controlled")
+	}
+
+	for name, node := range map[string]*types.ASTNode{
+		"account.msg.sender":          accountMsgSender,
+		"account.tx.origin":           accountTxOrigin,
+		"_msgSender state identifier": msgSenderIdentifier,
+		"_msgSender local identifier": msgSenderLocal,
+		"_msgSender external call":    msgSenderExternalCall,
+		"_msgSender nonzero call":     msgSenderInternalCallWithArg,
+	} {
+		t.Run(name, func(t *testing.T) {
+			if e.Verify(node, Rule{TaintedFrom: "user_controlled"}) {
+				t.Fatalf("%s must not be user controlled", name)
+			}
+		})
+	}
+
+	if !e.Verify(msgSenderParameter, Rule{TaintedFrom: "parameter"}) ||
+		e.Verify(msgSenderParameter, Rule{TaintedFrom: "sender"}) {
+		t.Fatal("a parameter named _msgSender must retain parameter provenance without becoming caller identity")
+	}
+}
+
+func TestSameBoundExpressionRejectsPartialIdentifierIdentity(t *testing.T) {
+	resolved := types.NewASTNode(types.KindExprIdentifier)
+	resolved.Name = "balance"
+	resolved.RefKind = "state_var"
+	resolved.RefID = "/tmp/Vault.sol#Vault.balance"
+
+	unresolved := types.NewASTNode(types.KindExprIdentifier)
+	unresolved.Name = "balance"
+	unresolved.RefKind = "state_var"
+
+	if sameBoundExpression(resolved, unresolved) {
+		t.Fatal("one resolved and one unresolved identifier must not prove exact operand identity")
 	}
 }
 

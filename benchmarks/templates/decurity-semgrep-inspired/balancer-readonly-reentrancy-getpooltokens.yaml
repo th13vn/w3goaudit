@@ -17,7 +17,7 @@ query:
   select: external_call
   where:
     - name: '^getPoolTokens$'
-    - all:
+    - and:
         - not:
             regex: 'VaultReentrancyLib\.ensureNotInVaultContext\s*\('
         - not:

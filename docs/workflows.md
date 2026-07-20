@@ -22,8 +22,9 @@ and report generation.
 
 **Command:** `w3goaudit <path> [--template <template-path>]`
 
-**Purpose:** Scan Solidity contracts for vulnerabilities using WQL templates
-(`select`/`from`/`where`). Removed top-level `query:` documents are rejected.
+**Purpose:** Scan Solidity contracts for vulnerabilities using WQL templates.
+A WQL document is meta plus one query: block. The strict loader rejects
+`select`/`from`/`where` outside that block.
 Omitting `--template` uses `~/.w3goaudit/templates/` when populated, else the
 embedded official pack (see §3 for the full flag set and filtering).
 
@@ -56,6 +57,9 @@ graph LR
    structured database diagnostic. Warnings are rendered on stderr from that
    diagnostic after either a source build or `--db` load, keeping both paths
    equivalent. The default remains tolerant; `--strict-imports` fails closed.
+7. **Preserve every import occurrence** in `SourceFile.ImportBindings`, with the
+   authored path and canonical resolved file. Phase 1 attaches unit/named
+   aliases without deduplicating repeated directives.
 
 **Code:** [reader.go](../pkg/reader/reader.go)
 
@@ -69,6 +73,8 @@ The builder constructs a comprehensive database through **7 phases**:
 - Extract contracts, interfaces, libraries
 - Extract functions, state variables, structs, events
 - Store pragma and import information
+- Enrich occurrence-aligned `ImportBindings` with solast-go unit and symbol
+  aliases before exact inheritance, type, library, and call resolution
 
 **Phase 2: Build ASTs & Semantic Facts**
 - Convert raw AST into simplified tree structure
@@ -78,11 +84,16 @@ The builder constructs a comprehensive database through **7 phases**:
   builtin address expressions, and member-call receivers
 - Store facts in `Database.Semantics` and mirror key facts onto AST attributes
   such as `type_kind` and `receiver_type_kind`
+- Emit Solidity `for` children in runtime order: initialization, condition,
+  body, then post
+- Represent valid dynamic-storage-array `push`/`pop` as non-call
+  `stmt.state_mutation` nodes, preserving real library calls for other shapes
 
 **Phase 3: Calculate Function Selectors**
-- Generate function signatures (e.g., `transfer(address,uint256)`)
+- Store canonical text such as `transfer(address,uint256)` in
+  `Function.Selector`
 - Resolve struct types to tuple format
-- Calculate 4-byte keccak256 selectors
+- Store the four-byte Keccak value in `Function.Signature`
 
 **Phase 4: Build Inheritance**
 - Apply **C3 linearization** for proper method resolution order
@@ -94,6 +105,9 @@ The builder constructs a comprehensive database through **7 phases**:
 - Identify internal, external, self, super, and low-level calls
 - Resolve call targets using inheritance chain
 - Track exact caller/target identities and line/Unicode-column/UTF-8-byte call sites
+- Fail known-arity mismatches closed: leave exact target fields empty and emit
+  one durable `identity.unresolved` diagnostic rather than selecting a unique
+  wrong-arity declaration by name
 - Context-aware `super` post-pass (`ResolveSuperAcrossLeaves`): bind each
   `super.f()` to the next definition in **every** instantiation leaf's MRO
   (sound union, additive + deduplicated), since Solidity resolves `super`
@@ -103,12 +117,15 @@ The builder constructs a comprehensive database through **7 phases**:
 **Phase 6: Calculate Entry Points**
 - Identify main contracts (deployable)
 - Find public/external functions
-- Resolve inherited functions to their final implementation
+- Resolve inherited functions to their final implementation, deduplicating by
+  canonical selector so derived overrides replace base implementations while
+  overloads remain distinct
 
 **Phase 7: Analyze Per-Function Effects**
 - Walk each function's AST and record durable `FunctionEffects`:
   - **Write facts** — state variables written (with write kind: `=`, compound
-    assignment, `delete`, `.push`/`.pop`, mapping/array/struct element writes)
+    assignment, `delete`, `.push`/`.pop`, `++`/`--`, mapping/array/struct
+    element writes)
   - **Guard facts** — `require`/`assert`/`revert` conditions and `if`/ternary
     branch conditions
   - **Auth facts** — modifiers, inline `msg.sender` checks, `tx.origin` use,
@@ -140,21 +157,28 @@ graph TD
    `th13vn/w3goaudit-templates` (zipball download, nuclei-style), falling back to
    the embedded pack when offline.
 2. **Load template file(s)** from YAML
-3. **Parse WQL strictly**: `meta` plus `query:` (`select`/`from`/`where`, or
+3. **Parse WQL strictly**: `meta` plus one `query:` block (`select`/`from`/`where`, or
    a query-level `and:`/`or:` composition); unknown fields at any level are
-   rejected.
+   rejected, YAML merge keys (`<<`) are unsupported throughout the document,
+   and explicitly present composition keys must be non-null lists that remain
+   mutually exclusive even when empty.
 4. **Lower to evaluator `Rule` IR** (`TemplateDoc.lower()` in
-   [wql_v2.go](../pkg/engine/wql_v2.go)) before validation and execution —
+   [wql.go](../pkg/engine/wql.go)) before validation and execution —
    `or:` produces one QueryBlock per branch (`Template.Queries`), executed
-   as a deduplicated union; `and:` produces one block of labeled `all:`
+   as a deduplicated union; `and:` produces one block of labeled `Rule.All`
    branches at the join scope.
-5. **Validate template syntax**
-6. **Fail closed on invalid template directories** — by default, one invalid
+5. **Validate anchor provenance**: select-less sequences need positive
+   actionable evidence in step one; every query-level `and:` branch needs a
+   positive reportable anchor and traceable AST evidence. Regex-only join
+   branches fail, while regex may refine an AST-anchored branch.
+6. **Validate bounded evaluator graphs**: Rule shapes and supported nested
+   `Attr` maps/slices share the depth-64 and active-cycle checks.
+7. **Fail closed on invalid template directories** — by default, one invalid
    template or zero valid templates aborts the scan; `--ignore-invalid-templates`
    is the explicit ad-hoc escape hatch
-7. **Store in engine**
+8. **Store in engine**
 
-**Code:** [template.go](../pkg/engine/template.go), [wql_v2.go](../pkg/engine/wql_v2.go)
+**Code:** [template.go](../pkg/engine/template.go), [wql.go](../pkg/engine/wql.go)
 
 #### Phase 4: Query Execution
 **Component:** [`pkg/engine`](../pkg/engine)
@@ -180,33 +204,46 @@ graph TD
     I --> K[Findings List]
 ```
 
-**Verification process** ([verify.go](../pkg/engine/verify.go)):
+**Compiled evaluator-IR verification process** ([verify.go](../pkg/engine/verify.go)):
 
-1. **Parse match rules** (`all` / `any` / `not` / `sequence` / `contains` / `inside`)
-2. **Check atomic matchers**: `kind`, `name` (regex), `attr` — when the rule has a
+1. **Evaluate Rule fields** (`All` / `Any` / `Not` / `Sequence` / `Contains` / `Inside`)
+2. **Check atomic Rule fields**: `Kind`, `Name` (regex), `Attr` — when the rule has a
    surface predicate AND the full branch succeeds, the engine records the
    matched AST node as the finding's `PrimaryAST` (the dangerous statement
    to report). Failed branches roll back their provisional capture.
 3. **Evaluate context helpers**: `modifier`, `extends`, `regex`, `has_guard`
-4. **Traverse AST** for `contains` (descendants) / `inside` (ancestors) operators
-5. **Check `sequence`** for ordered patterns
+4. **Traverse AST** for `Rule.Contains` (descendants) / `Rule.Inside` (ancestors)
+5. **Check `Rule.Sequence`** against an execution-event partial order. Ordinary
+   statements retain source order; receiver/option/argument and non-call
+   operand/value subtrees precede their enclosing effect; calls precede inlined
+   callees; distinct pre-effect siblings are unordered. Exact callgraph edges
+   include nested receiver/option helper calls once.
 6. **Perform taint analysis** for source tracking, including caller argument bindings when entrypoints invoke internal helpers — the call chain traversed becomes the finding's `Reachability` (entry → … → host of `PrimaryAST`)
 
 **Advanced features:**
 - **Recursive internal call tracing**: Engine follows entrypoint → helper call chains and maps caller argument taint onto callee parameters; the chain itself is preserved on the finding
 - **Inheritance-aware matching**: Checks base contracts and modifiers
+- **Exact declaration matching**: Contract scopes expose contract, function,
+  variable, parameter, and modifier declarations with their exact stored spans
+- **Real `guarded_by` matching**: Matches inline guards or an exact applied
+  modifier declaration whose body satisfies the matcher. Modifier names are
+  descriptive and do not automatically prove access control.
 - **Contract-scope AST matching**: Contract scopes run `match:` on a synthetic
   `decl.contract` root containing cloned function ASTs from the linearized
-  inheritance chain, so one `match.all` can prove multiple local/inherited
+  inheritance chain, so one internal `Rule.All` can prove multiple local/inherited
   same-contract conditions
 - **Argument position matching**: Validates specific function arguments
 - **Related matched sites**: Multi-condition contract findings can carry
   `Finding.Related`, which reports every contributing source site and not only
   the primary location
-- **Bug location**: hardcoded to the best provenance — the dangerous-node
-  `file:line:col` is the primary anchor, with the `Reachability` chain and
-  `EntryPoint` fix-here pointer populated whenever the sink is reached through
-  internal calls (no flag; the `--location-source` switch was removed in v0.3)
+- **Location source**: verifier attribution is the default, with the matched
+  node supplying the precise line, columns, and bytes. SDK callers can select
+  `LocationSourceMatchedNode`, and CLI scans can opt in through
+  `WGAUDIT_LOCATION_FROM_MATCHED_NODE=1`; there is no current CLI
+  `--location-source` flag. Structured primary-node,
+  reachability, and entry-point context is populated in both modes.
+- **Location units**: columns are one-based, half-open Unicode code points;
+  bytes are zero-based, half-open UTF-8 offsets. They are not LSP positions.
 
 #### Phase 5: Report Generation (Result Folder)
 **Component:** [`pkg/report`](../pkg/report) — `WriteBundle`
@@ -228,7 +265,10 @@ graph TD
 ```
 
 **Top-level artifacts:**
-- `overview.md` — all main contracts with their pragma version, stats, call graphs
+`overview.md` is the report index and links to detailed artifacts.
+
+- `overview.md` – the report index, with project metrics and links to detailed
+  per-contract artifacts
 - `findings.md` — severity-sorted findings with recommendation, fix,
   references, per-occurrence reachability trace blocks, and `All matched sites`
   blocks for multi-site findings
@@ -332,12 +372,30 @@ The output JSON contains:
 }
 ```
 
+Each serialized source-file entry may add occurrence-level import bindings:
+
+```javascript
+{
+  "importBindings": [{
+    "importPath": "./Base.sol",
+    "resolvedFile": "/path/to/project/Base.sol",
+    "unitAlias": "V",
+    "symbols": [{"symbol": "Base", "alias": "Parent"}]
+  }]
+}
+```
+
+This schema-2.0.0-compatible field lets exact resolution consume local named
+aliases and namespace-qualified names after a database-cache round trip.
+
 **Key fields:**
 - `linearizedBases` - C3 linearization order
 - `linearizedBaseIds` - canonical exact C3 identities
 - `mainContracts` - Deployable contracts with entry function IDs
 - `functions[].Calls` - Call graph edges
-- `functions[].Selector` - 4-byte function selector
+- `functions[].Selector` - canonical text such as
+  `transfer(address,uint256)`
+- `functions[].Signature` - four-byte Keccak value such as `a9059cbb`
 
 ---
 
@@ -370,7 +428,9 @@ captured in `<output>/run.log`.
 
 > **Removed in v0.3:** `--fail-on`,
 > `--format`/`--json`/`--md`/`--html`-as-format (the folder always
-> carries Markdown + SARIF + JSON), `--location-source`, and `--log`.
+> carries Markdown + SARIF + JSON), and `--log`. Location-source behavior
+> remains available through the SDK and
+> `WGAUDIT_LOCATION_FROM_MATCHED_NODE`.
 
 ### Flow Diagram
 
@@ -437,6 +497,11 @@ install scanner toolchains. Requested tools fail closed before output is
 replaced, and the only host-owned output is
 `benchmarks/results/<RUN_NAME>/`.
 
+Fallback contract/function attribution masks Solidity comments, quoted strings,
+and escapes with a length- and newline-preserving lexer. Declaration matching
+and brace counting consume the same sanitized source, preventing fake
+declarations or quoted braces from corrupting Semgrep/4naly3er locations.
+
 When W3GoAudit is requested, the container recomputes the competitive metrics
 from TP/FP/FN and requires precision >= 0.65, recall >= 0.95, and zero failed
 cases. The image verifies the reviewed generated-lock hash for the pinned
@@ -486,13 +551,13 @@ graph TD
 
 **Process for evaluating a match rule:**
 
-1. **Parse operator** (`all` / `any` / `not` / `sequence` / `contains` / `inside` / atomic)
-2. **For `all`**: All sub-rules must match (AND)
+1. **Parse operator** (`and` / `any` / `not` / `sequence` / `has` / `in` / atomic)
+2. **For `and`**: All sub-rules must match (AND), lowering to evaluator `Rule.All`
 3. **For `any`**: At least one sub-rule must match (OR)
 4. **For `not`**: Sub-rule must NOT match
 5. **For `sequence`**: Sub-rules must match in order on children
-6. **For `contains`**: Search descendants for match
-7. **For `inside`**: Search ancestors for match
+6. **For `has`**: Search descendants for match
+7. **For `in`**: Search ancestors for match
 8. **For atomic**: Check `kind` / `name` regex / `attr` directly
 
 ### Recursive Internal Call Tracing (Interprocedural)
@@ -526,12 +591,13 @@ graph TD
 
 **Purpose:** Track where identifiers originate from
 
-**Sources tracked** (the four values WQL accepts through `tainted:`;
+**Sources tracked** (the five values WQL accepts through `tainted:`;
 the lowered evaluator IR stores the value in its `tainted_from` field):
 - `parameter` - Function parameters (user input)
 - `state_var` - Contract state variables
 - `local_var` - Local variables
 - `sender` - Caller identity (`msg.sender` / `tx.origin` / `_msgSender()`)
+- `user_controlled` - Either a function parameter or caller identity
 
 **Use case example:**
 Detect when a user-controlled parameter is passed to a dangerous function. In

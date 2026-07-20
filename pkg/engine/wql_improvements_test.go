@@ -408,6 +408,7 @@ func TestContractScopeASTMatchesInheritedAndLocalFunctions(t *testing.T) {
 
 	db.AddContract(main)
 	db.AddContract(multicall)
+	main.LinearizedBaseIDs = []string{main.ID, multicall.ID}
 	db.MainContracts[main.ID] = &types.MainContractEntry{}
 	e := New(db)
 

@@ -28,6 +28,9 @@ Main file reader implementation.
 - Content Checksum (SHA256)
 - Canonical resolved-import provenance (`ResolvedImports`) after
   `ResolveImports`, including relative and remapped targets
+- Per-occurrence structured import provenance (`ImportBindings`) containing the
+  raw import path and canonical resolved file; builder parsing later enriches
+  the same occurrence with unit and named-symbol aliases
 - Contracts list (populated by builder)
 - Imports list (populated by builder)
 - Pragma version (populated by builder) - **Used for version checking**
@@ -46,6 +49,9 @@ Main file reader implementation.
   `SourceFile.ResolvedImports`, even when the target was already loaded. This
   survives database JSON round-trips and lets identity resolution prefer the
   file that was actually imported over an unrelated same-directory duplicate.
+- Records every valid authored import occurrence in `SourceFile.ImportBindings`
+  without path deduplication. Repeated imports from one file remain distinct so
+  different aliases survive into the builder and database cache.
 - Handles transitive dependencies automatically
 - **Unresolved imports are surfaced, not swallowed.** Each import that fails to
   load is recorded as a `types.Diagnostic` with code `import.unresolved`, reader
@@ -237,6 +243,8 @@ diagnostics := r.Diagnostics() // pass to builder.Options.Diagnostics
 - `Content` (string) - Raw Solidity code
 - `ResolvedImports` (`[]string`) - Canonical absolute imported files actually
   selected by the resolver; additive/omitted in older caches
+- `ImportBindings` (`[]types.ImportBinding`) - Additive per-directive raw path
+  plus canonical resolved file; aliases are enriched by the builder
 - `PragmaVersion` (string) - Solidity version from pragma directive (**used by engine for version checks**)
 - Other fields populated later by builder
 

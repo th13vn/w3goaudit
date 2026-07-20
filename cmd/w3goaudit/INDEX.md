@@ -29,8 +29,18 @@ result folder. There is **no `scan` subcommand**.
 - **Isolation:** `runScan` snapshots Cobra/config state once. `executeScan` reads only immutable options and injects one logger/writer set through reader, builder, cache loading, engine, template loading, and report generation, so concurrent scans cannot cross streams.
 - **Version:** `Version` (`root.go`) is the single source of truth — it feeds the `version` subcommand, `--version`, and the SARIF driver version. Bump it on release.
 - **Extract identity:** contract queries accept exact `file#Contract` IDs or unique case-insensitive names. Function queries accept exact function IDs, `Contract.selector`, full selectors, 4-byte signatures, or unique bare names. Ambiguous queries fail; map order never selects a result. Inherited state/context/bundle data walks the selected contract's exact `LinearizedBaseIDs`, so duplicate base names cannot cross-wire an exact query.
+- **Extract diff identity:** contracts compare as slash-normalized source paths
+  relative to each database's own `ProjectRoot`, plus `#Contract`; functions
+  compare by full selector with a declaration-name fallback only for legacy
+  selector-less entries. Equivalent checkout roots align while duplicate names
+  and overload changes remain separate.
 
 ## Change checklist
+
+`LinearizedBases` may retain unresolved display entries and is never zipped by
+index with compact `LinearizedBaseIDs`. Inheritance and bundle kinds map a
+display name only when one exact object of that name is present in the selected
+contract's exact MRO; unresolved or ambiguous entries stay `unknown`.
 
 - New flag/command → update `docs/usage.md` and `README.md`.
 - Behavior change to output artifacts → update `docs/workflows.md` / `docs/extension-output.md` as applicable.

@@ -222,14 +222,15 @@ const (
 
 // Statement kinds
 const (
-	KindStmtAssign    = "stmt.assign"
-	KindStmtIf        = "stmt.if"
-	KindStmtLoop      = "stmt.loop"
-	KindStmtReturn    = "stmt.return"
-	KindStmtEmit      = "stmt.emit"
-	KindStmtTryCatch  = "stmt.try_catch"
-	KindStmtBlock     = "stmt.block"
-	KindStmtUnchecked = "stmt.unchecked"
+	KindStmtAssign        = "stmt.assign"
+	KindStmtStateMutation = "stmt.state_mutation"
+	KindStmtIf            = "stmt.if"
+	KindStmtLoop          = "stmt.loop"
+	KindStmtReturn        = "stmt.return"
+	KindStmtEmit          = "stmt.emit"
+	KindStmtTryCatch      = "stmt.try_catch"
+	KindStmtBlock         = "stmt.block"
+	KindStmtUnchecked     = "stmt.unchecked"
 )
 
 // Expression kinds
@@ -383,14 +384,15 @@ func allRegisteredKinds() map[string]bool {
 		KindCheckAssert:  true,
 		KindCheckRevert:  true,
 		// Statement kinds
-		KindStmtAssign:    true,
-		KindStmtIf:        true,
-		KindStmtLoop:      true,
-		KindStmtReturn:    true,
-		KindStmtEmit:      true,
-		KindStmtTryCatch:  true,
-		KindStmtBlock:     true,
-		KindStmtUnchecked: true,
+		KindStmtAssign:        true,
+		KindStmtStateMutation: true,
+		KindStmtIf:            true,
+		KindStmtLoop:          true,
+		KindStmtReturn:        true,
+		KindStmtEmit:          true,
+		KindStmtTryCatch:      true,
+		KindStmtBlock:         true,
+		KindStmtUnchecked:     true,
 		// Expression kinds
 		KindExprIdentifier:   true,
 		KindExprLiteral:      true,
@@ -469,7 +471,8 @@ func IsKnownKind(kind string) bool {
 // IsTokenCall returns true if the kind is an external call AND the name matches
 // ERC20/ERC721 standard token methods.
 // Note: This is evaluated at KIND level only — name matching is done separately.
-// Used with kind: token_call in WQL templates.
+// Evaluator compatibility helper; public WQL uses block: external_call plus
+// name matching for ERC20/ERC721 methods.
 func IsTokenCall(kind string) bool {
 	// token_call maps to call.external — name filtering for ERC20/ERC721 methods
 	// is handled separately via the `name` field in WQL rules.
@@ -477,7 +480,8 @@ func IsTokenCall(kind string) bool {
 }
 
 // IsGuard returns true if the kind is a validation check (require/assert/revert).
-// This is an alias for IsCheck(), allowing `kind: guard` in WQL templates.
+// This is an evaluator compatibility alias for IsCheck(); public WQL uses
+// block: guard.
 func IsGuard(kind string) bool {
 	return IsCheck(kind)
 }

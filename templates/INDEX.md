@@ -8,10 +8,11 @@ self-contained detector. The `official/` pack is embedded in the binary
 
 ## Template Language: WQL
 
-**All templates under `official/` and `test/` (this directory), plus every
+**A WQL document is meta plus one query: block.** All templates under
+`official/` and `test/` (this directory), plus every
 benchmark template under `../benchmarks/templates/` (slither-inspired,
 decurity-semgrep-inspired, 4naly3er-inspired) — 106 templates total — are
-written in WQL** (`select`/`from`/`where`). See
+written in WQL (`query:` containing `select`/`from`/`where` or composition). See
 [`../docs/wql-syntax.md`](../docs/wql-syntax.md) for the full language
 reference.
 
@@ -93,7 +94,7 @@ template/category rather than by name prefix alone.
 | ID | Severity | File | Detects |
 |---|---|---|---|
 | `CRITICAL-SELFDESTRUCT-UNPROTECTED` | CRITICAL | `critical/selfdestruct-unprotected.yaml` | `selfdestruct(...)` (Solidity-level OR assembly opcode) reachable from an entrypoint without the `access_controlled` safety property (modifiers, inline sender/role guards, and recursive auth helpers) |
-| `CRITICAL-DELEGATECALL-USER-INPUT` | CRITICAL | `critical/delegatecall-user-input.yaml` | `delegatecall` whose target flows from a function parameter |
+| `CRITICAL-DELEGATECALL-USER-INPUT` | CRITICAL | `critical/delegatecall-user-input.yaml` | `delegatecall` whose target flows from a parameter or caller identity |
 | `HIGH-ARBITRARY-SEND-ETH` | HIGH | `high/arbitrary-send-eth.yaml` | Unprotected ETH withdrawal via `.transfer` / `.send` / `.call{value:}`. Negates the `caller_checked` safety property, so functions that self-scope the caller to a resource they own are cleared without misclassifying item ownership as privileged access control |
 | `HIGH-ARBITRARY-TRANSFERFROM` | HIGH | `high/arbitrary-transferfrom.yaml` | `transferFrom(from, ...)` where `from` is user-controlled across entrypoint/helper flows and the function neither has privileged access control nor self-scopes the caller (`not: { preset: caller_checked }`; `require(from == msg.sender)` is safe) |
 | `HIGH-UNCHECKED-ERC20-TRANSFER` | HIGH | `high/unchecked-erc20-transfer.yaml` | ERC20 `transfer` / `transferFrom` whose bool return is discarded |
@@ -122,6 +123,11 @@ template/category rather than by name prefix alone.
 reference exists (SWC registry, Slither wiki, Solidity docs, EIPs). The engine
 propagates references to findings; Markdown / HTML / JSON / SARIF formatters
 surface them, and SARIF emits GitHub `security-severity` scores.
+
+The benchmark `DECURITY-ACCESSIBLE-SELFDESTRUCT` rule shares the canonical
+`selfdestruct` category with Slither suicidal: any unauthenticated reachable
+selfdestruct is vulnerable, including a fixed beneficiary. Beneficiary taint is
+not part of that category; access control is the safe property.
 
 ---
 
@@ -153,6 +159,21 @@ query:
 `from:` scope, branch `label:`s surfacing in `Finding.Related`) or `or:`
 (union of branch queries under one meta, deduplicated by location) — see
 [`../docs/wql-syntax.md`](../docs/wql-syntax.md#query-composition-and--or).
+Every query-level `and:` branch must expose a positive reportable anchor;
+absence-only branches are rejected because they cannot contribute a primary or
+related site. Positive contract-root branches contribute contract/file related
+sites.
+Explicitly authored `select`/`from`/branch `label` values must be non-null,
+non-empty scalars, and explicitly authored `where` values must be non-null,
+non-empty matcher lists. Empty nested matcher maps/lists, empty required
+strings, `unchecked_var: false`, and signed/non-decimal `arg.N` keys are
+rejected at load.
+Repeated sibling `not:` items remain independent implicit-AND predicates:
+`not A` plus `not B` means `(not A) and (not B)`; the lowering step never
+combines their children into `not (A and B)`.
+A where-only query with actionable AST evidence defaults to
+`entry_function`; context-only where clauses remain invalid because they
+cannot anchor a finding.
 
 At contract scopes (`main_contract`, `any_contract`, `contract`, `library`,
 `abstract`), `where:` runs on a synthetic `decl.contract` AST whose children are
@@ -160,6 +181,9 @@ resolved function ASTs from the contract's C3 linearized inheritance chain. Use
 this for same-contract combination detectors that need multiple conditions in one
 contract context, such as payable `msg.value` entrypoints plus inherited
 `Multicall.multicall`, without falling back to `regex`.
+Declaration nodes retain exact kinds, owning files, and spans. Active inherited
+functions are deduplicated by canonical selector, so derived overrides win and
+overloads remain distinct.
 
 ---
 
@@ -179,6 +203,19 @@ query:
 
 Use `has:` for descendant matching, `in:` for ancestor matching, and semantic
 block kinds such as `eth_transfer`, `delegatecall`, `state_write`, and `guard`.
+`state_write` covers state assignments, dynamic-storage-array `push`/`pop`,
+state-targeted `delete`/`++`/`--`, and `asm.sstore`; storage mutations are not
+modeled as calls. `guarded_by` matches inline guards or an exact applied
+modifier body. A modifier name alone does not imply access control.
+The Decurity-inspired basic-arithmetic-underflow benchmark template also uses
+`unchecked_var: true` on both binary `-` and assignment `-=` shapes, so an
+enforced local proof of the exact unsigned relation `left >= right` suppresses
+the subtraction without relying on file, contract, function, or variable
+names. Solidity 0.8 matches must sit inside an explicit `unchecked` block;
+ordinary checked subtraction is not an underflow finding. Reversed/unrelated
+inequalities, non-terminating branches, intervening statements, effectful
+condition operands or additional guard arguments, signed arithmetic, and
+unstable expressions remain findings.
 
 ### Sequence matching
 
@@ -195,6 +232,16 @@ query:
 The first sequence step is the anchor. If `select` is present, it must match
 that step's `block` (or fill a simple unkinded first step); conflicting or
 composite anchors are rejected. A fully specified sequence can omit `select`.
+Solidity `for` children participate in runtime order: initialization,
+condition, body, then post.
+
+The benchmark `SLITHER-REENTRANCY-NO-ETH` sequence excludes only a selected
+call whose direct `receiver_name` is exactly `this`: an external self-call has
+a fixed immediate target and cannot directly transfer control to an
+attacker-selected target, even though the self-called function may still
+transitively call untrusted code. A nested `this.*` call inside an
+outer call's argument or call option does not change that outer call's direct
+receiver, so other external-call receivers remain covered.
 
 ### Presets
 
@@ -206,8 +253,16 @@ template load.
 ### Taint Analysis
 
 ```yaml
-- arg.0: { tainted: parameter }  # also state_var, local_var, sender
+- arg.0: { tainted: user_controlled }
 ```
+
+`user_controlled` means parameter or caller-identity taint. Use the narrower
+`parameter`, `state_var`, `local_var`, or `sender` source when detector intent
+requires that exact provenance. Caller identity recognizes `msg.sender`,
+`tx.origin`, and an exact zero-argument internal `_msgSender()` helper confirmed
+by call metadata and exact MRO resolution when available, not same-named
+identifiers, state/local/parameter names, external/self/unresolved calls, or
+overloads.
 
 Member-call receivers are preserved as tagged children, so receiver-tainted
 sinks can be expressed without confusing calldata arguments:
@@ -277,7 +332,7 @@ to substring matching.
    - `official/` — curated, audit-grade patterns with optional `references`.
    - `test/` — low-confidence feature-exercise templates for WQL operators
      (paired with `../test-data/core/engine-features/`), NOT production detectors.
-2. Write it in **WQL** (`meta` plus `query:` — `select`/`from`/`where`, or a
+2. Write it in **WQL** (`meta` plus one `query:` block containing `select`/`from`/`where`, or a
    query-level `and:`/`or:` composition) — see
    [../docs/wql-syntax.md](../docs/wql-syntax.md).
 3. Test against fixtures in [`../test-data/security/`](../test-data/security/):
@@ -293,15 +348,14 @@ zero failed cases; the threshold tool recomputes metrics from TP/FP/FN instead
 of trusting rounded report fields.
 
 ```bash
-FOURNALY3ER_LOCK_SHA256=<reviewed hash> \
-  docker compose -f benchmarks/compose.yaml run --rm benchmark
+docker compose -f benchmarks/compose.yaml run --rm benchmark
 ```
 
 Docker Compose is the only supported benchmark host entry point. Its Dockerfile
 derives and verifies Go directly from `go.mod`; scanners are pinned inside the
-image and output is confined to `benchmarks/results/`. The reviewed hash is
-still an external blocker, so this checkout does not claim a fresh image or
-competitive run.
+image and output is confined to `benchmarks/results/`. The reviewed generated-lock
+hash for the pinned 4naly3er commit is built into the Dockerfile, so the canonical
+command requires no external hash argument.
 
 ---
 

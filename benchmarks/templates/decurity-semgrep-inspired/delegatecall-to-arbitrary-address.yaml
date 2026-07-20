@@ -17,9 +17,9 @@ query:
   select: delegatecall
   where:
     - not: { preset: access_controlled }
-    - all:
+    - and:
         - has:
             receiver: true
-            tainted: parameter
+            tainted: user_controlled
         - arg.0:
-            tainted: parameter
+            tainted: user_controlled

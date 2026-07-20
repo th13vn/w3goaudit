@@ -2,6 +2,7 @@ package types
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
@@ -18,6 +19,24 @@ type DatabaseOptions struct {
 // LoadOptions configures a database JSON load.
 type LoadOptions struct {
 	Logger *logging.Logger
+}
+
+// ImportSymbolBinding maps one symbol name in an imported source unit to the
+// local name visible in the importing file. Alias is empty for an unrenamed
+// named import.
+type ImportSymbolBinding struct {
+	Symbol string `json:"symbol"`
+	Alias  string `json:"alias,omitempty"`
+}
+
+// ImportBinding preserves one authored import occurrence, its canonical
+// resolved source file, and any local unit/symbol aliases. It is additive to
+// Imports and ResolvedImports so older schema-2.0.0 caches remain readable.
+type ImportBinding struct {
+	ImportPath   string                `json:"importPath"`
+	ResolvedFile string                `json:"resolvedFile,omitempty"`
+	UnitAlias    string                `json:"unitAlias,omitempty"`
+	Symbols      []ImportSymbolBinding `json:"symbols,omitempty"`
 }
 
 // SourceFile represents a parsed Solidity source file
@@ -55,6 +74,10 @@ type SourceFile struct {
 	// actually resolved and loaded for this source. It preserves import
 	// provenance across database JSON round-trips, including remapped imports.
 	ResolvedImports []string `json:"resolvedImports,omitempty"`
+
+	// ImportBindings preserves per-directive alias semantics and exact resolved
+	// source provenance. Multiple occurrences of the same path remain distinct.
+	ImportBindings []ImportBinding `json:"importBindings,omitempty"`
 
 	// PragmaVersion from the file
 	PragmaVersion string `json:"pragmaVersion,omitempty"`
@@ -112,9 +135,11 @@ type MainContractEntry struct {
 	// Most derived (current contract) first, most base contract last
 	LinearizedBases []string `json:"linearizedBases"`
 
-	// LinearizedBaseIDs mirrors LinearizedBases with exact file#Contract IDs.
-	// Older schema-2.0.0 cache files omit it and use Database.LinearizedContracts'
-	// source-scoped compatibility fallback.
+	// LinearizedBaseIDs is the compact exact file#Contract C3 chain in
+	// derived-first order. It preserves the relative order of resolvable entries
+	// but is not index-aligned with LinearizedBases when a display entry is
+	// unresolved. Older schema-2.0.0 cache files omit it and use
+	// Database.LinearizedContracts' source-scoped compatibility fallback.
 	LinearizedBaseIDs []string `json:"linearizedBaseIds,omitempty"`
 }
 
@@ -322,8 +347,21 @@ func (db *Database) RestoreASTParents() {
 			continue
 		}
 		for _, fn := range contract.Functions {
-			if fn != nil && fn.AST != nil {
+			if fn == nil {
+				continue
+			}
+			if fn.AST != nil {
 				fn.AST.RestoreParents()
+			}
+			for _, call := range fn.Calls {
+				if call == nil {
+					continue
+				}
+				for _, argument := range call.Arguments {
+					if argument != nil {
+						argument.RestoreParents()
+					}
+				}
 			}
 		}
 		for _, modifier := range contract.Modifiers {
@@ -490,21 +528,37 @@ func (db *Database) ResolveContractName(name, fromFile string) *Contract {
 	return candidates[0]
 }
 
-// ResolveContractNameExact resolves an unqualified name only when source scope
-// identifies one concrete file#Contract candidate. The bool is false for both
-// missing and genuinely ambiguous identities; callers that need to distinguish
-// them can inspect FindContractsByName. Unlike ResolveContractName, this method
-// never chooses a lexicographic fallback.
+// ExactResolutionStatus distinguishes a resolved exact identity from missing
+// and ambiguous source-scoped bindings without changing the historical
+// ResolveContractNameExact signature.
+type ExactResolutionStatus uint8
+
+const (
+	ExactResolutionMissing ExactResolutionStatus = iota
+	ExactResolutionResolved
+	ExactResolutionAmbiguous
+	ExactResolutionBindingMissing
+)
+
+// ResolveContractNameExact resolves a source-scoped contract name or imported
+// local alias only when it identifies one concrete file#Contract candidate.
+// Unlike ResolveContractName, it never chooses directory or lexicographic
+// proximity. The bool remains the compatibility view over the detailed status.
 func (db *Database) ResolveContractNameExact(name, fromFile string) (*Contract, bool) {
+	contract, status := db.ResolveContractNameExactWithStatus(name, fromFile)
+	return contract, status == ExactResolutionResolved
+}
+
+// ResolveContractNameExactWithStatus is the diagnostic-aware exact resolver.
+// It recognizes named aliases and namespace-qualified imports before applying
+// the existing canonical-import and legacy-relative fallbacks.
+func (db *Database) ResolveContractNameExactWithStatus(name, fromFile string) (*Contract, ExactResolutionStatus) {
 	candidates := db.FindContractsByName(name)
-	switch len(candidates) {
-	case 0:
-		return nil, false
-	case 1:
-		return candidates[0], true
-	}
 	if fromFile == "" {
-		return nil, false
+		if contract, status, ok := exactResolutionFromCandidates(candidates); ok {
+			return contract, status
+		}
+		return nil, ExactResolutionMissing
 	}
 
 	var sameFile []*Contract
@@ -513,59 +567,164 @@ func (db *Database) ResolveContractNameExact(name, fromFile string) (*Contract, 
 			sameFile = append(sameFile, candidate)
 		}
 	}
-	if len(sameFile) == 1 {
-		return sameFile[0], true
+	if contract, status, ok := exactResolutionFromCandidates(sameFile); ok {
+		return contract, status
 	}
 
 	fromDir := filepath.Dir(fromFile)
 	if sf := db.SourceFiles[fromFile]; sf != nil {
-		// Canonical reader provenance is authoritative and works for relative,
-		// remapped, node_modules, lib, and monorepo imports.
-		resolvedSet := make(map[string]bool, len(sf.ResolvedImports))
-		for _, importedFile := range sf.ResolvedImports {
-			resolvedSet[filepath.Clean(importedFile)] = true
-		}
-		var resolvedMatches []*Contract
-		for _, candidate := range candidates {
-			if resolvedSet[filepath.Clean(candidate.SourceFile)] {
-				resolvedMatches = append(resolvedMatches, candidate)
+		if bindingMatches, matchedBinding := db.resolveImportBindingContracts(sf, name, fromDir); matchedBinding {
+			if len(bindingMatches) == 0 {
+				return nil, ExactResolutionBindingMissing
 			}
-		}
-		if len(resolvedMatches) == 1 {
-			return resolvedMatches[0], true
-		}
-		if len(resolvedMatches) > 1 {
-			return nil, false
+			contract, status, _ := exactResolutionFromCandidates(bindingMatches)
+			return contract, status
 		}
 
-		// Old cache fallback: only relative raw imports can be reconstructed
-		// without the original resolver/remapping configuration.
-		imported := make(map[string]bool)
-		for _, imp := range sf.Imports {
-			if !strings.HasPrefix(imp, "./") && !strings.HasPrefix(imp, "../") && !filepath.IsAbs(imp) {
-				continue
-			}
-			resolved := imp
-			if !filepath.IsAbs(resolved) {
-				resolved = filepath.Join(fromDir, imp)
-			}
-			imported[filepath.Clean(resolved)] = true
+		if contract, status, ok := db.resolveCanonicalImportCandidate(sf, candidates); ok {
+			return contract, status
 		}
-		var matches []*Contract
-		for _, candidate := range candidates {
-			if imported[filepath.Clean(candidate.SourceFile)] {
-				matches = append(matches, candidate)
-			}
-		}
-		if len(matches) == 1 {
-			return matches[0], true
-		}
-		if len(matches) > 1 {
-			return nil, false
+
+		if contract, status, ok := db.resolveLegacyRelativeImportCandidate(sf, candidates, fromDir); ok {
+			return contract, status
 		}
 	}
 
-	return nil, false
+	if len(candidates) > 0 {
+		return nil, ExactResolutionAmbiguous
+	}
+	return nil, ExactResolutionMissing
+}
+
+func exactResolutionFromCandidates(candidates []*Contract) (*Contract, ExactResolutionStatus, bool) {
+	switch len(candidates) {
+	case 0:
+		return nil, ExactResolutionMissing, false
+	case 1:
+		return candidates[0], ExactResolutionResolved, true
+	default:
+		return nil, ExactResolutionAmbiguous, true
+	}
+}
+
+// resolveCanonicalImportCandidate uses authoritative reader provenance for
+// relative, remapped, node_modules, lib, and monorepo imports.
+func (db *Database) resolveCanonicalImportCandidate(sf *SourceFile, candidates []*Contract) (*Contract, ExactResolutionStatus, bool) {
+	resolvedSet := make(map[string]bool, len(sf.ResolvedImports))
+	if len(sf.ImportBindings) > 0 {
+		for _, binding := range sf.ImportBindings {
+			if binding.UnitAlias == "" && len(binding.Symbols) == 0 && binding.ResolvedFile != "" {
+				resolvedSet[filepath.Clean(binding.ResolvedFile)] = true
+			}
+		}
+	} else {
+		for _, importedFile := range sf.ResolvedImports {
+			resolvedSet[filepath.Clean(importedFile)] = true
+		}
+	}
+
+	var matches []*Contract
+	for _, candidate := range candidates {
+		if resolvedSet[filepath.Clean(candidate.SourceFile)] {
+			matches = append(matches, candidate)
+		}
+	}
+	return exactResolutionFromCandidates(matches)
+}
+
+// resolveLegacyRelativeImportCandidate reconstructs only relative raw imports
+// from old caches that lack canonical resolver/remapping provenance.
+func (db *Database) resolveLegacyRelativeImportCandidate(sf *SourceFile, candidates []*Contract, fromDir string) (*Contract, ExactResolutionStatus, bool) {
+	legacyImports := sf.Imports
+	if len(sf.ImportBindings) > 0 {
+		legacyImports = nil
+		for _, binding := range sf.ImportBindings {
+			if binding.UnitAlias == "" && len(binding.Symbols) == 0 {
+				legacyImports = append(legacyImports, binding.ImportPath)
+			}
+		}
+	}
+
+	imported := make(map[string]bool)
+	for _, imp := range legacyImports {
+		if !strings.HasPrefix(imp, "./") && !strings.HasPrefix(imp, "../") && !filepath.IsAbs(imp) {
+			continue
+		}
+		resolved := imp
+		if !filepath.IsAbs(resolved) {
+			resolved = filepath.Join(fromDir, imp)
+		}
+		imported[filepath.Clean(resolved)] = true
+	}
+
+	var matches []*Contract
+	for _, candidate := range candidates {
+		if imported[filepath.Clean(candidate.SourceFile)] {
+			matches = append(matches, candidate)
+		}
+	}
+	return exactResolutionFromCandidates(matches)
+}
+
+func (db *Database) resolveImportBindingContracts(sf *SourceFile, name, fromDir string) ([]*Contract, bool) {
+	if sf == nil || name == "" {
+		return nil, false
+	}
+	namespace, qualifiedName, qualified := strings.Cut(name, ".")
+	matchedBinding := false
+	resolved := make(map[string]*Contract)
+	for _, binding := range sf.ImportBindings {
+		originalName := ""
+		if qualified && binding.UnitAlias == namespace && qualifiedName != "" {
+			matchedBinding = true
+			originalName = qualifiedName
+		} else if !qualified {
+			for _, symbol := range binding.Symbols {
+				localName := symbol.Alias
+				if localName == "" {
+					localName = symbol.Symbol
+				}
+				if localName == name {
+					matchedBinding = true
+					originalName = symbol.Symbol
+					break
+				}
+			}
+		}
+		if originalName == "" {
+			continue
+		}
+		resolvedFile := binding.ResolvedFile
+		if resolvedFile == "" && binding.ImportPath != "" &&
+			(strings.HasPrefix(binding.ImportPath, "./") || strings.HasPrefix(binding.ImportPath, "../") || filepath.IsAbs(binding.ImportPath)) {
+			resolvedFile = binding.ImportPath
+			if !filepath.IsAbs(resolvedFile) {
+				resolvedFile = filepath.Join(fromDir, resolvedFile)
+			}
+		}
+		resolvedFile = filepath.Clean(resolvedFile)
+		if resolvedFile == "." || resolvedFile == "" {
+			continue
+		}
+		for _, candidate := range db.FindContractsByName(originalName) {
+			if filepath.Clean(candidate.SourceFile) == resolvedFile {
+				resolved[candidate.ID] = candidate
+			}
+		}
+	}
+	if !matchedBinding {
+		return nil, false
+	}
+	ids := make([]string, 0, len(resolved))
+	for id := range resolved {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	out := make([]*Contract, 0, len(ids))
+	for _, id := range ids {
+		out = append(out, resolved[id])
+	}
+	return out, true
 }
 
 // LinearizedContracts returns a contract's C3 method-resolution order as exact
@@ -628,22 +787,38 @@ func (db *Database) recordLegacyIdentityDiagnostics() {
 			if name == "" || (i == 0 && name == contract.Name) {
 				continue
 			}
-			if _, exact := db.ResolveContractNameExact(name, contract.SourceFile); exact {
-				continue
-			}
-			if len(db.FindContractsByName(name)) <= 1 {
+			_, status := db.ResolveContractNameExactWithStatus(name, contract.SourceFile)
+			if status == ExactResolutionResolved {
 				continue
 			}
 			db.AddDiagnostic(Diagnostic{
-				Code:       DiagnosticIdentity,
-				Severity:   DiagnosticWarning,
-				Phase:      "types",
-				Message:    "legacy linearized base identity is ambiguous in source scope",
+				Code:     DiagnosticIdentity,
+				Severity: DiagnosticWarning,
+				Phase:    "types",
+				Message: fmt.Sprintf(
+					"legacy linearized base %q from %q is unresolved (%s)",
+					name, contract.SourceFile, exactResolutionStatusLabel(status),
+				),
 				File:       contract.SourceFile,
 				Symbol:     name,
 				Incomplete: true,
 			})
 		}
+	}
+}
+
+func exactResolutionStatusLabel(status ExactResolutionStatus) string {
+	switch status {
+	case ExactResolutionResolved:
+		return "resolved"
+	case ExactResolutionAmbiguous:
+		return "ambiguous"
+	case ExactResolutionBindingMissing:
+		return "binding missing"
+	case ExactResolutionMissing:
+		return "missing"
+	default:
+		return "unknown"
 	}
 }
 

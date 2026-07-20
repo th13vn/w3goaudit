@@ -18,18 +18,16 @@ meta:
 
 # Only payable entries can receive ETH — non-payable functions cannot exhibit
 # this bug because msg.value is always 0. Restricting here cuts the FP surface
-# dramatically. `mutability: payable` is wrapped in `all:` so it routes to the
+# dramatically. `mutability: payable` is wrapped in `and:` so it routes to the
 # function-level precondition (see delegatecall-in-loop.yaml for why bare
 # `mutability:` at the top of `where` would be wrong here).
 #
-# `left: {name: ^msg$}` (v1) is a bare-name check on a member_access's parent
-# expression, which the engine reads off the node's `parent` attribute — the
-# same value the v2 `parent:` attribute (§7 advanced) exposes directly.
+# `parent: ^msg$` checks the member-access parent expression directly.
 query:
   from: entry_function
   select: loop
   where:
-    - all:
+    - and:
         - mutability: payable
     - has:
         block: member

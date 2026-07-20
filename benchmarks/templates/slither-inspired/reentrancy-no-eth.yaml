@@ -20,4 +20,5 @@ query:
     - not: { preset: reentrancy_guarded }
     - sequence:
         - block: external_call
+          not: { receiver_name: ^this$ }
         - block: state_write

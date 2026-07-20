@@ -3,10 +3,11 @@
   "name": "Decurity Semgrep Solidity security rule comparison",
   "description": "Focused corpus for comparing Decurity Semgrep Solidity security rules with W3GoAudit Decurity-inspired templates.",
   "categories": {
-    "accessible-selfdestruct": {
-      "title": "Accessible Selfdestruct",
+    "selfdestruct": {
+      "title": "Unprotected selfdestruct",
       "aliases": {
         "w3goaudit": [
+          "SLITHER-SUICIDAL",
           "DECURITY-ACCESSIBLE-SELFDESTRUCT"
         ],
         "semgrep": [
@@ -124,10 +125,11 @@
         ]
       }
     },
-    "delegatecall-to-arbitrary-address": {
-      "title": "Delegatecall To Arbitrary Address",
+    "controlled-delegatecall": {
+      "title": "Delegatecall to user-controlled address",
       "aliases": {
         "w3goaudit": [
+          "SLITHER-CONTROLLED-DELEGATECALL",
           "DECURITY-DELEGATECALL-TO-ARBITRARY-ADDRESS"
         ],
         "semgrep": [
@@ -476,12 +478,12 @@
       "requires_compilation": false,
       "expected": [
         {
-          "category": "accessible-selfdestruct",
+          "category": "selfdestruct",
           "contract": "VulnerableAccessibleSelfdestruct",
           "function": "destroy"
         },
         {
-          "category": "accessible-selfdestruct",
+          "category": "selfdestruct",
           "contract": "VulnerableAccessibleSelfdestructHelper",
           "function": "destroy"
         },
@@ -556,12 +558,12 @@
           "function": "virtualPrice"
         },
         {
-          "category": "delegatecall-to-arbitrary-address",
+          "category": "controlled-delegatecall",
           "contract": "VulnerableDelegatecallToArbitraryAddress",
           "function": "run"
         },
         {
-          "category": "delegatecall-to-arbitrary-address",
+          "category": "controlled-delegatecall",
           "contract": "VulnerableDelegatecallAlias",
           "function": "run"
         },
@@ -746,17 +748,17 @@
           "function": "transferOwnership"
         },
         {
-          "category": "accessible-selfdestruct",
+          "category": "selfdestruct",
           "contract": "VulnerableAccessibleSelfdestructAsm",
           "function": "destroy"
         },
         {
-          "category": "accessible-selfdestruct",
+          "category": "selfdestruct",
           "contract": "VulnerableAccessibleSelfdestructCast",
           "function": "destroy"
         },
         {
-          "category": "delegatecall-to-arbitrary-address",
+          "category": "controlled-delegatecall",
           "contract": "VulnerableDelegatecallStruct",
           "function": "exec"
         },

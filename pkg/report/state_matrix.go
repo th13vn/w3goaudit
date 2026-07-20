@@ -22,6 +22,7 @@ type resolvedFn struct {
 	fn         *types.Function
 	contract   string
 	sourceFile string
+	owner      *types.Contract
 }
 
 func (r resolvedFn) selector() string {
@@ -42,23 +43,158 @@ func (r resolvedFn) label(main string) string {
 	return r.fn.Name
 }
 
+type reportCallTarget struct {
+	contract *types.Contract
+	fn       *types.Function
+}
+
+func (target reportCallTarget) selector() string {
+	if target.fn == nil {
+		return ""
+	}
+	if target.fn.Selector != "" {
+		return target.fn.Selector
+	}
+	return target.fn.Name
+}
+
+func (target reportCallTarget) key() string {
+	if target.contract == nil {
+		return ""
+	}
+	return types.MakeFunctionID(target.contract.SourceFile, target.contract.Name, target.selector())
+}
+
+// resolveReportCall is the single exact call-target resolver used by report
+// call graphs, state matrices, and workflow reachability. Exact recorded
+// contract IDs constrain the lookup immediately. Legacy metadata may search
+// only source-exact runtime MRO objects and succeeds only when one distinct
+// selector remains after applying the known arity.
+func resolveReportCall(db *types.Database, runtime, caller *types.Contract, call *types.FunctionCall) (reportCallTarget, bool) {
+	if db == nil || call == nil {
+		return reportCallTarget{}, false
+	}
+	target := call.ResolvedFunction
+	if target == "" {
+		target = call.Target
+	}
+	if target == "" {
+		return reportCallTarget{}, false
+	}
+
+	contracts, ok := reportCallContracts(db, runtime, caller, call)
+	if !ok {
+		return reportCallTarget{}, false
+	}
+	return resolveReportFunction(contracts, target, call.ArgCount)
+}
+
+func reportCallContracts(db *types.Database, runtime, caller *types.Contract, call *types.FunctionCall) ([]*types.Contract, bool) {
+	if call.ResolvedContractID != "" {
+		exact := db.GetContractByID(call.ResolvedContractID)
+		if exact == nil {
+			return nil, false
+		}
+		return []*types.Contract{exact}, true
+	}
+	if reportCallUsesRuntimeMRO(call.CallType) {
+		contracts := db.LinearizedContracts(runtime)
+		if len(contracts) == 0 && caller != nil {
+			contracts = []*types.Contract{caller}
+		}
+		if call.CallType == types.CallTypeSuper && caller != nil {
+			for i, contract := range contracts {
+				if contract != nil && contract.ID == caller.ID {
+					contracts = contracts[i+1:]
+					break
+				}
+			}
+		}
+		return contracts, len(contracts) > 0
+	}
+	if call.ResolvedContract != "" {
+		fromFile := ""
+		if caller != nil {
+			fromFile = caller.SourceFile
+		}
+		exact, status := db.ResolveContractNameExactWithStatus(call.ResolvedContract, fromFile)
+		if status != types.ExactResolutionResolved || exact == nil {
+			return nil, false
+		}
+		return []*types.Contract{exact}, true
+	}
+	return nil, false
+}
+
+func reportCallUsesRuntimeMRO(callType types.CallType) bool {
+	switch callType {
+	case types.CallTypeInternal, types.CallTypeInherited, types.CallTypeSelf,
+		types.CallTypeSuper, types.CallTypeModifier:
+		return true
+	default:
+		return false
+	}
+}
+
+func resolveReportFunction(contracts []*types.Contract, target string, argCount int) (reportCallTarget, bool) {
+	if target == "" {
+		return reportCallTarget{}, false
+	}
+	fullSelector := strings.Contains(target, "(")
+	name := target
+	if i := strings.IndexByte(name, '('); i >= 0 {
+		name = name[:i]
+	}
+	bySelector := make(map[string]reportCallTarget)
+	order := make([]string, 0)
+	for _, contract := range contracts {
+		if contract == nil {
+			continue
+		}
+		for _, fn := range contract.Functions {
+			if fn == nil {
+				continue
+			}
+			if fullSelector {
+				if fn.Selector != target {
+					continue
+				}
+			} else if fn.Name != name {
+				continue
+			}
+			if argCount >= 0 && len(fn.Parameters) != argCount {
+				continue
+			}
+			selector := fn.Selector
+			if selector == "" {
+				selector = fn.Name
+			}
+			if _, exists := bySelector[selector]; exists {
+				continue
+			}
+			bySelector[selector] = reportCallTarget{contract: contract, fn: fn}
+			order = append(order, selector)
+		}
+	}
+	if len(order) != 1 {
+		return reportCallTarget{}, false
+	}
+	return bySelector[order[0]], true
+}
+
 // stateMatrixBuilder resolves functions across a contract's linearized bases
 // and answers reachability/write questions.
 type stateMatrixBuilder struct {
-	db         *types.Database
-	main       *types.Contract
-	bySelector map[string]resolvedFn
-	byName     map[string]resolvedFn
-	allByID    map[string]resolvedFn
+	db      *types.Database
+	main    *types.Contract
+	allByID map[string]resolvedFn
 }
 
 func newStateMatrixBuilder(db *types.Database, main *types.Contract) *stateMatrixBuilder {
 	b := &stateMatrixBuilder{
-		db:         db,
-		main:       main,
-		bySelector: make(map[string]resolvedFn),
-		byName:     make(map[string]resolvedFn),
-		allByID:    make(map[string]resolvedFn),
+		db:      db,
+		main:    main,
+		allByID: make(map[string]resolvedFn),
 	}
 	mro := db.LinearizedContracts(main)
 	// The exact MRO is derived-first; iterate in REVERSE so the most-derived
@@ -66,14 +202,8 @@ func newStateMatrixBuilder(db *types.Database, main *types.Contract) *stateMatri
 	for i := len(mro) - 1; i >= 0; i-- {
 		bc := mro[i]
 		for _, fn := range bc.Functions {
-			rf := resolvedFn{fn: fn, contract: bc.Name, sourceFile: bc.SourceFile}
+			rf := resolvedFn{fn: fn, contract: bc.Name, sourceFile: bc.SourceFile, owner: bc}
 			b.allByID[rf.key()] = rf
-			if fn.Selector != "" {
-				b.bySelector[fn.Selector] = rf
-			}
-			if fn.Name != "" {
-				b.byName[fn.Name] = rf
-			}
 		}
 	}
 	return b
@@ -85,74 +215,38 @@ func (b *stateMatrixBuilder) effects(rf resolvedFn) *types.FunctionEffects {
 	return b.db.Semantics.GetFunctionEffects(id)
 }
 
-// resolveCall maps a recorded call to a known function. Explicit super/library
-// targets use their exact resolved contract ID; virtual internal/self calls use
-// the most-derived selector map for the deployment hierarchy.
-func (b *stateMatrixBuilder) resolveCall(call *types.FunctionCall) (resolvedFn, bool) {
-	if call == nil {
+// resolveCall maps a recorded call through the package-wide exact report
+// resolver, using the current function owner as source context and main as the
+// runtime MRO.
+func (b *stateMatrixBuilder) resolveCall(caller resolvedFn, call *types.FunctionCall) (resolvedFn, bool) {
+	target, ok := resolveReportCall(b.db, b.main, caller.owner, call)
+	if !ok {
 		return resolvedFn{}, false
 	}
-	target := call.ResolvedFunction
-	if target == "" {
-		target = call.Target
-	}
-	if call.CallType == types.CallTypeSuper || call.CallType == types.CallTypeLibrary {
-		if rf, ok := b.resolveExactTarget(call, target); ok {
-			return rf, true
-		}
-	}
-	if rf, ok := b.bySelector[target]; ok {
-		return rf, true
-	}
-	name := target
-	if i := strings.IndexByte(name, '('); i >= 0 {
-		name = name[:i]
-	}
-	if rf, ok := b.byName[name]; ok {
-		return rf, true
-	}
-	return b.resolveExactTarget(call, target)
-}
-
-func (b *stateMatrixBuilder) resolveExactTarget(call *types.FunctionCall, target string) (resolvedFn, bool) {
-	if call == nil || call.ResolvedContractID == "" {
-		return resolvedFn{}, false
-	}
-	contract := b.db.GetContractByID(call.ResolvedContractID)
-	if contract == nil {
-		return resolvedFn{}, false
-	}
-	name := target
-	if i := strings.IndexByte(name, '('); i >= 0 {
-		name = name[:i]
-	}
-	for _, fn := range contract.Functions {
-		if target != "" && strings.Contains(target, "(") && fn.Selector != target {
-			continue
-		}
-		if !strings.Contains(target, "(") && fn.Name != name {
-			continue
-		}
-		if call.ArgCount >= 0 && !strings.Contains(target, "(") && len(fn.Parameters) != call.ArgCount {
-			continue
-		}
-		rf := resolvedFn{fn: fn, contract: contract.Name, sourceFile: contract.SourceFile}
-		return rf, true
-	}
-	return resolvedFn{}, false
+	return resolvedFn{
+		fn:         target.fn,
+		contract:   target.contract.Name,
+		sourceFile: target.contract.SourceFile,
+		owner:      target.contract,
+	}, true
 }
 
 // resolveEntry finds a resolved function by selector (preferred) or name.
 func (b *stateMatrixBuilder) resolveEntry(selector, name string) (resolvedFn, bool) {
-	if selector != "" {
-		if rf, ok := b.bySelector[selector]; ok {
-			return rf, true
-		}
+	target := selector
+	if target == "" {
+		target = name
 	}
-	if rf, ok := b.byName[name]; ok {
-		return rf, true
+	resolved, ok := resolveReportFunction(b.db.LinearizedContracts(b.main), target, -1)
+	if !ok {
+		return resolvedFn{}, false
 	}
-	return resolvedFn{}, false
+	return resolvedFn{
+		fn:         resolved.fn,
+		contract:   resolved.contract.Name,
+		sourceFile: resolved.contract.SourceFile,
+		owner:      resolved.contract,
+	}, true
 }
 
 // reachable returns every function reachable from entry via intra-contract calls
@@ -171,7 +265,7 @@ func (b *stateMatrixBuilder) reachable(entry resolvedFn) []resolvedFn {
 			if !isIntraContractCall(call.CallType) {
 				continue
 			}
-			if next, ok := b.resolveCall(call); ok {
+			if next, ok := b.resolveCall(rf, call); ok {
 				visit(next)
 			}
 		}
@@ -200,7 +294,7 @@ func (b *stateMatrixBuilder) entryFns() []resolvedFn {
 			if !fn.IsEntrypoint() {
 				continue
 			}
-			rf := resolvedFn{fn: fn, contract: bc.Name, sourceFile: bc.SourceFile}
+			rf := resolvedFn{fn: fn, contract: bc.Name, sourceFile: bc.SourceFile, owner: bc}
 			key := fn.Selector
 			if key == "" {
 				key = fn.Name

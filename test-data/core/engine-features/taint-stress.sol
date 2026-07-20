@@ -5,7 +5,7 @@ pragma solidity ^0.8.20;
 //
 // Each contract has ONE external entry that calls token.transferFrom(<expr>, ...).
 // The probe template (templates/test/taint-probe-parameter.yaml) flags when the
-// FIRST arg is `tainted_from: parameter`. Contract name encodes the PREDICTED
+// FIRST arg matches `tainted: parameter`. Contract name encodes the PREDICTED
 // engine result:
 //   Hit_*     → engine SHOULD flag (parameter taint reaches arg0)   [ideal agrees]
 //   Miss_*    → engine SHOULD NOT flag (no parameter taint at arg0)  [ideal agrees]

@@ -19,8 +19,8 @@ meta:
 # Whitelist the legitimate anti-contract idiom `require(msg.sender ==
 # tx.origin)` / `tx.origin == msg.sender`, which asserts the caller is an EOA
 # rather than authenticating. Slither excludes the same form. `not: {regex:}`
-# here is function-source-scoped (routes to the context/filter layer via
-# ruleIsContextOnly), matching v1's `filter: not: {regex: ...}` exactly.
+# here is function-source-scoped and routes to the context/filter layer via
+# ruleIsContextOnly.
 #
 # `tx.origin` inside ANY guard or branch (require / assert / revert /
 # if / conditional) — all are auth-shaped uses. The previous version

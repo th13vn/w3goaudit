@@ -14,6 +14,42 @@ const (
 	superMultiLeafFixt = "../../test-data/core/build-database/14-super-multi-leaf.sol"
 )
 
+func TestGetInheritedFunctionsUsesExactMROAndDerivedOverride(t *testing.T) {
+	db := types.NewDatabase()
+	grandHook := &types.Function{Name: "hook", Selector: "hook(address)"}
+	grandOnly := &types.Function{Name: "grandOnly", Selector: "grandOnly()"}
+	grand := &types.Contract{Name: "Grand", SourceFile: "/repo/Grand.sol", Functions: []*types.Function{grandHook, grandOnly}}
+	baseHook := &types.Function{Name: "hook", Selector: "hook(address)"}
+	baseOnly := &types.Function{Name: "baseOnly", Selector: "baseOnly(uint256)"}
+	base := &types.Contract{Name: "Base", SourceFile: "/repo/Base.sol", Functions: []*types.Function{baseHook, baseOnly}}
+	derivedHook := &types.Function{Name: "hook", Selector: "hook(address)"}
+	derived := &types.Contract{Name: "Derived", SourceFile: "/repo/Derived.sol", Functions: []*types.Function{derivedHook}}
+	db.AddContract(grand)
+	db.AddContract(base)
+	db.AddContract(derived)
+	derived.LinearizedBaseIDs = []string{derived.ID, base.ID, grand.ID}
+
+	got := NewInheritanceBuilder(db).GetInheritedFunctions("Derived")
+	want := []*types.Function{baseOnly, grandOnly}
+	if len(got) != len(want) {
+		t.Fatalf("inherited functions = %#v, want %#v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("function[%d] = %p (%s), want %p (%s)", i, got[i], got[i].Selector, want[i], want[i].Selector)
+		}
+	}
+}
+
+func TestGetInheritedFunctionsRejectsAmbiguousContractName(t *testing.T) {
+	db := types.NewDatabase()
+	db.AddContract(&types.Contract{Name: "Derived", SourceFile: "/repo/a/Derived.sol"})
+	db.AddContract(&types.Contract{Name: "Derived", SourceFile: "/repo/b/Derived.sol"})
+	if got := NewInheritanceBuilder(db).GetInheritedFunctions("Derived"); got != nil {
+		t.Fatalf("GetInheritedFunctions returned %#v for ambiguous contract name, want nil", got)
+	}
+}
+
 // TestC3ClassicKZEndToEnd runs the canonical Dylan/CPython C3 example through the
 // FULL c3Linearize pipeline from real Solidity source (base-list reversal +
 // canonical merge), not just the c3Merge primitive. The Python result

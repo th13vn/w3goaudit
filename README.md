@@ -62,6 +62,7 @@ Results land in a folder — `README.md` (landing page), `summary.md`,
 `data/` folder (JSON + DB + manifest index), and a `contracts/` tree (one
 sub-folder per main contract, mirroring source paths) with per-entry workflow
 files and a state-change report. See [Result folder layout](#result-folder-layout).
+`overview.md` is the report index and links to detailed artifacts.
 
 ---
 
@@ -71,7 +72,9 @@ files and a state-change report. See [Result folder layout](#result-folder-layou
 - **Contract Database** - Comprehensive database with inheritance, entry points, call graphs
 - **Semantic Type Facts** - Parameters, state variables, locals, casts, and call receivers carry lightweight type facts so WQL can stay simple while call classification becomes more precise
 - **C3 Linearization** - Proper Solidity inheritance resolution
-- **Function Selectors** - Calculate 4-byte keccak256 selectors
+- **Function Identity** - `Function.Selector` stores canonical text such as
+  `transfer(address,uint256)`; `Function.Signature` stores its four-byte
+  Keccak value such as `a9059cbb`
 - **Call Graph** - Recursive tracing with filtered built-ins and optimized styling
 - **Exact Identity** - Internal contracts use `absPath#Contract`; functions use
   `absPath#Contract.selector(types)`. Exact C3 `LinearizedBaseIDs` and resolved
@@ -79,7 +82,8 @@ files and a state-change report. See [Result folder layout](#result-folder-layou
 - **Precise Locations** - One-based, half-open Unicode-code-point columns plus
   zero-based, half-open UTF-8 byte offsets. SARIF declares
   `columnKind: unicodeCodePoints` and never emits byte offsets as
-  `charOffset`/`charLength`.
+  `charOffset`/`charLength`. These are not LSP positions; LSP lines and
+  characters are zero-based and commonly use UTF-16 code units.
 - **WQL Templates** - Powerful query language for security pattern matching, with load-time validation (regex, preset names, filter/match placement) so typos fail fast instead of producing silent zero-finding scans. Includes a source-scope `regex` matcher for rare raw-source predicates and contract-scope AST matching for same-contract local/inherited combination rules.
 - **Result Folder** - One opinionated folder per scan: a `README.md` landing page, `summary.md`, `overview.md` (metrics + in-scope contract index), `findings.md`, always-on `results.sarif` + `run.log`, a machine-readable `data/` (`manifest.json`, reusable `database.json`, findings/overview, always-on `diagnostics.json`, plus nav/explorer data for the editor extension), and a `contracts/` tree mirroring source paths. Opt-in **fully offline** HTML mirror with `--html` (graph library embedded — no CDN request).
 - **Per-Entry Workflow Files** - For every entry function, a self-contained context block (signature, auth / access control, guards & checks, branch conditions, transitive state effects, Mermaid call workflow) — built to be fed to a human or an AI auditor.
@@ -289,6 +293,8 @@ For complete usage, see [Usage Guide](./docs/usage.md).
 
 ```go
 import (
+    "log"
+
     "github.com/th13vn/w3goaudit/pkg/reader"
     "github.com/th13vn/w3goaudit/pkg/builder"
     "github.com/th13vn/w3goaudit/pkg/engine"
@@ -296,15 +302,33 @@ import (
 
 // Read sources
 r := reader.New()
-sources, _ := r.Read("./contracts/")
+inputPath := "./contracts/"
+projectRoot, err := reader.DetectProjectRoot(inputPath)
+if err != nil {
+    log.Fatal(err)
+}
+sources, err := r.Read(inputPath)
+if err != nil {
+    log.Fatal(err)
+}
+if err := r.ResolveImports(projectRoot); err != nil {
+    log.Fatal(err)
+}
+sources = r.GetAllSources()
 
 // Build database
 b := builder.New()
-db, _ := b.Build(sources)
+db, err := b.Build(sources)
+if err != nil {
+    log.Fatal(err)
+}
 
 // Execute template
 e := engine.New(db)
-tmpl, _ := engine.LoadTemplate("./template.yaml")
+tmpl, err := engine.LoadTemplate("./template.yaml")
+if err != nil {
+    log.Fatal(err)
+}
 findings := e.Execute(tmpl)
 ```
 
@@ -332,10 +356,10 @@ query:
         - block: state_write
 ```
 
-This is **WQL** (W3GoAudit Query Language) — a YAML template is `meta` plus
-one `query:` (`select`/`from`/`where`, or a query-level `and:`/`or:`
-composition). All 106 repository templates (25 official, 5 feature-test, and
-76 benchmark) use it; see the
+This is **WQL** (W3GoAudit Query Language). A WQL document is meta plus one query: block.
+That block contains `select`/`from`/`where`, or a query-level
+`and:`/`or:` composition. All 106 repository templates (25 official, 5
+feature-test, and 76 benchmark) use it; see the
 [WQL Syntax Guide](./docs/wql-syntax.md) for the full language reference.
 
 ---
@@ -384,7 +408,8 @@ Input → Reader → Builder → Database → Engine → Findings → Result-fol
 Build phases:
 1. Parse files
 2. Build ASTs, data flow, and semantic type facts
-3. Calculate selectors
+3. Calculate canonical `Function.Selector` text and four-byte
+   `Function.Signature` values
 4. Build inheritance (C3)
 5. Build call graph
 6. Calculate entry points
@@ -392,9 +417,9 @@ Build phases:
 
 ### 3. Default Scan (Combined) Workflow
 
-The default scan combines stats, overview, and findings:
+The default scan combines stats, an overview index, and findings:
 - Statistics (files, contracts, functions, nSLOC)
-- Contract hierarchy with call graphs (Mermaid diagrams)
+- A contract index linking each per-contract architecture report
 - Security findings (when templates provided)
 
 For detailed workflows, see [Workflows Documentation](./docs/workflows.md).

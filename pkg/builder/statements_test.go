@@ -1,9 +1,11 @@
 package builder
 
 import (
+	"strconv"
 	"strings"
 	"testing"
 
+	"github.com/th13vn/solast-go/pkg/ast"
 	"github.com/th13vn/w3goaudit/pkg/types"
 )
 
@@ -175,6 +177,280 @@ func TestAssemblyLocalShadowing(t *testing.T) {
 	}
 }
 
+func TestTupleMetadataPreservesHolesAndAssignmentLHSCount(t *testing.T) {
+	db := buildFromSource(t, `// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.20;
+contract TupleMetadata {
+    function pair() internal pure returns (uint256, uint256) { return (1, 2); }
+    function run() external {
+        (uint256 first, uint256 second) = pair();
+        (first, , second) = (second, 0, first);
+    }
+}`)
+	fn := funcByName(t, db, "TupleMetadata", "run")
+	assigns := fn.AST.CollectDescendants(func(n *types.ASTNode) bool {
+		return n.Kind == types.KindStmtAssign
+	})
+	if len(assigns) != 2 {
+		t.Fatalf("assignment count = %d, want 2", len(assigns))
+	}
+	if got := assigns[0].GetAttributeString("assignment_lhs_count"); got != "2" {
+		t.Fatalf("declaration assignment_lhs_count = %q, want 2", got)
+	}
+	if len(assigns[0].Children) < 2 || assigns[0].Children[0].GetAttributeString("tuple_index") != "0" || assigns[0].Children[1].GetAttributeString("tuple_index") != "1" {
+		t.Fatalf("declaration tuple indexes not preserved: %+v", assigns[0].Children)
+	}
+
+	if got := assigns[1].GetAttributeString("tuple_arity"); got != "3" {
+		t.Fatalf("tuple_arity = %q, want 3", got)
+	}
+	if len(assigns[1].Children) < 2 || assigns[1].Children[0].GetAttributeString("tuple_index") != "0" || assigns[1].Children[1].GetAttributeString("tuple_index") != "2" {
+		t.Fatalf("tuple hole shifted child positions: %+v", assigns[1].Children)
+	}
+	if assigns[1].Children[0].Name != "first" || assigns[1].Children[1].Name != "second" || assigns[1].Children[0].RefID == "" || assigns[1].Children[1].RefID == "" {
+		t.Fatalf("tuple assignment targets lost exact identities: first=%+v second=%+v", assigns[1].Children[0], assigns[1].Children[1])
+	}
+}
+
+func TestAssemblyAssignmentLHSCountIsSerializedOnAST(t *testing.T) {
+	db := buildFromSource(t, `// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.20;
+contract AssemblyLHS {
+    function run() external pure returns (uint256 x, uint256 y) {
+        assembly {
+            let a, b := 1, 2
+            x, y := a, b
+        }
+    }
+}`)
+	fn := funcByName(t, db, "AssemblyLHS", "run")
+	nodes := fn.AST.CollectDescendants(func(n *types.ASTNode) bool {
+		return n.GetAttributeBool("assembly") && (n.Kind == types.KindDeclVariable || n.Kind == types.KindStmtAssign)
+	})
+	if len(nodes) != 2 {
+		t.Fatalf("assembly multi-LHS node count = %d, want 2", len(nodes))
+	}
+	for _, node := range nodes {
+		if got := node.GetAttributeString("assignment_lhs_count"); got != "2" {
+			t.Errorf("%s assignment_lhs_count = %q, want 2", node.Kind, got)
+		}
+	}
+}
+
+func TestAssemblyNestedShadowingUsesExactDeclarationRefIDs(t *testing.T) {
+	db := buildFromSource(t, `// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.20;
+contract AssemblyIdentity {
+    function run(uint256 i, uint256 j) external {
+        assembly {
+            let shadow := i
+            pop(shadow)
+            {
+                let shadow := j
+                pop(shadow)
+                shadow := i
+                pop(shadow)
+            }
+            pop(shadow)
+        }
+    }
+}`)
+	fn := funcByName(t, db, "AssemblyIdentity", "run")
+	definitions := fn.AST.CollectDescendants(func(n *types.ASTNode) bool {
+		return n.Kind == types.KindDeclVariable && n.GetAttributeBool("assembly")
+	})
+	if len(definitions) != 2 || len(definitions[0].Children) == 0 || len(definitions[1].Children) == 0 {
+		t.Fatalf("assembly definitions = %+v, want two declarations", definitions)
+	}
+	outerID := definitions[0].Children[0].RefID
+	innerID := definitions[1].Children[0].RefID
+	if outerID == "" || innerID == "" || outerID == innerID {
+		t.Fatalf("Yul declaration RefIDs not exact: outer=%q inner=%q", outerID, innerID)
+	}
+
+	pops := assemblyCallsByName(fn.AST, "pop")
+	if len(pops) != 4 {
+		t.Fatalf("pop count = %d, want 4", len(pops))
+	}
+	if pops[0].Children[0].RefID != outerID || pops[1].Children[0].RefID != innerID || pops[2].Children[0].RefID != innerID || pops[3].Children[0].RefID != outerID {
+		t.Fatalf("lexical reads did not reuse declaration identities: outer=%q inner=%q reads=%q,%q,%q,%q", outerID, innerID, pops[0].Children[0].RefID, pops[1].Children[0].RefID, pops[2].Children[0].RefID, pops[3].Children[0].RefID)
+	}
+	assigns := fn.AST.CollectDescendants(func(n *types.ASTNode) bool {
+		return n.Kind == types.KindStmtAssign && n.GetAttributeBool("assembly")
+	})
+	if len(assigns) != 1 || len(assigns[0].Children) == 0 || assigns[0].Children[0].RefID != innerID {
+		t.Fatalf("Yul assignment target did not reuse inner declaration identity: %+v", assigns)
+	}
+}
+
+func TestOverloadedFunctionsUseCanonicalSelectorRefIDs(t *testing.T) {
+	db := buildFromSource(t, `// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.20;
+contract OverloadedIdentity {
+    function f(uint256 input) external returns (uint256 result) {
+        uint256 local = input;
+        assembly { let y := local pop(y) }
+        return local;
+    }
+    function f(address input) external returns (address result) {
+        address local = input;
+        assembly { let y := local pop(y) }
+        return local;
+    }
+}`)
+	contract := db.GetContractByName("OverloadedIdentity")
+	if contract == nil || len(contract.Functions) != 2 {
+		t.Fatalf("overloaded functions = %+v", contract)
+	}
+	seen := map[string]bool{}
+	for _, fn := range contract.Functions {
+		want := types.MakeFunctionID(fn.SourceFile, fn.ContractName, fn.Selector)
+		for _, node := range collectBuilderNodes(fn.AST, func(node *types.ASTNode) bool { return node.RefID != "" }) {
+			if !strings.HasPrefix(node.RefID, want) {
+				t.Fatalf("%s binding RefID %q lacks canonical selector", fn.Selector, node.RefID)
+			}
+			seen[node.RefID] = true
+		}
+	}
+	if len(seen) < 6 {
+		t.Fatalf("too few distinct overloaded binding identities: %v", seen)
+	}
+}
+
+func TestLiteralAttributesPreserveClassAndSubdenomination(t *testing.T) {
+	db := buildFromSource(t, `// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.20;
+contract LiteralFacts {
+    function f() external pure {
+        uint256 a = 1 ether;
+        uint256 b = 0x03;
+        bytes memory c = hex"03";
+    }
+}`)
+	fn := funcByName(t, db, "LiteralFacts", "f")
+	literals := fn.AST.CollectDescendants(func(node *types.ASTNode) bool { return node.Kind == types.KindExprLiteral })
+	facts := map[string][2]string{}
+	for _, literal := range literals {
+		facts[literal.Value] = [2]string{literal.GetAttributeString("literal_class"), literal.GetAttributeString("subdenomination")}
+	}
+	hexString := (&ASTBuilder{}).buildLiteral(&ast.HexLiteral{Value: "03"})
+	facts[hexString.Value] = [2]string{hexString.GetAttributeString("literal_class"), hexString.GetAttributeString("subdenomination")}
+	if facts["1"] != [2]string{"numeric_decimal", "ether"} || facts["0x03"][0] != "numeric_hex" || facts["03"][0] != "hex_string" {
+		t.Fatalf("literal facts = %v", facts)
+	}
+	assemblyHex := buildAssemblyLiteral(&ast.AssemblyLiteral{Value: "0x40", Kind: "number"})
+	if assemblyHex.GetAttributeString("literal_class") != "numeric_hex" || assemblyHex.GetAttributeString("subtype") != "hex" {
+		t.Fatalf("assembly hex literal facts = %+v", assemblyHex.Attributes)
+	}
+}
+
+func TestAssemblyDeclarationNameRecoverySkipsComments(t *testing.T) {
+	db := buildFromSource(t, `// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.20;
+contract CommentIdentity {
+    function f(uint256 input) external pure {
+        assembly {
+            let /* shadow in block comment */ shadow := input
+            pop(shadow)
+        }
+    }
+}`)
+	fn := funcByName(t, db, "CommentIdentity", "f")
+	defs := fn.AST.CollectDescendants(func(node *types.ASTNode) bool {
+		return node.Kind == types.KindDeclVariable && node.GetAttributeBool("assembly")
+	})
+	if len(defs) != 1 || len(defs[0].Children) == 0 {
+		t.Fatalf("Yul definition missing: %+v", defs)
+	}
+	refID := defs[0].Children[0].RefID
+	if !strings.Contains(refID, ":shadow") {
+		t.Fatalf("Yul RefID missing name: %q", refID)
+	}
+	parts := strings.Split(refID, ":")
+	if len(parts) < 8 {
+		t.Fatalf("Yul RefID shape = %q", refID)
+	}
+	nameStart, err := strconv.Atoi(parts[len(parts)-3])
+	if err != nil {
+		t.Fatalf("Yul name start in %q: %v", refID, err)
+	}
+	source := db.SourceFiles[fn.SourceFile].Content
+	if source[nameStart:nameStart+len("shadow")] != "shadow" || strings.HasPrefix(source[nameStart:], "shadow in block") {
+		t.Fatalf("Yul RefID selected comment text at %d: %q", nameStart, source[nameStart:nameStart+len("shadow")])
+	}
+}
+
+func TestAssemblyShadowDeclarationRecoveryMasksDelimiterText(t *testing.T) {
+	cases := []string{
+		"let // shadow := fake\n shadow := input",
+		"let /* shadow := fake */ shadow := input",
+		"let 'shadow := fake' shadow := input",
+		`let "shadow := fake" shadow := input`,
+	}
+	for _, declaration := range cases {
+		file := "/tmp/YulMask.sol"
+		db := types.NewDatabase()
+		db.SourceFiles[file] = &types.SourceFile{Path: file, Content: declaration}
+		builder := &ASTBuilder{db: db, function: &types.Function{SourceFile: file}}
+		rng := ast.Range{0, len(declaration)}
+		start, end, ok := builder.assemblyDeclarationNameSpan("shadow", &ast.Identifier{Name: "shadow"}, &rng)
+		if !ok || declaration[start:end] != "shadow" || start != strings.LastIndex(declaration, "shadow") {
+			t.Fatalf("declaration recovery selected masked text in %q: start=%d end=%d ok=%v", declaration, start, end, ok)
+		}
+	}
+}
+
+func TestSolidityLocalShadowingUsesDeclarationRefIDs(t *testing.T) {
+	db := buildFixture(t, "../../test-data/core/semantic-hardening/access-paths.sol")
+	fn := funcByName(t, db, "AccessPaths", "localShadow")
+	xReads := fn.AST.CollectDescendants(func(node *types.ASTNode) bool {
+		return node.Kind == types.KindExprIdentifier && node.Name == "x"
+	})
+	if len(xReads) < 5 {
+		t.Fatalf("x binding count = %d, want at least 5", len(xReads))
+	}
+	var ids []string
+	for _, node := range xReads {
+		if node.RefID == "" {
+			t.Fatalf("local x at byte %d lacks exact declaration RefID", node.StartByte)
+		}
+		ids = append(ids, node.RefID)
+	}
+	unique := map[string]bool{}
+	for _, id := range ids {
+		unique[id] = true
+	}
+	if len(unique) != 2 {
+		t.Fatalf("shadowed Solidity locals resolved to %d identities, want 2: %v", len(unique), ids)
+	}
+	outerID := ids[0]
+	innerID := ""
+	for _, id := range ids {
+		if id != outerID {
+			innerID = id
+			break
+		}
+	}
+	if innerID == "" || ids[len(ids)-1] != outerID {
+		t.Fatalf("scope exit did not restore outer local: %v", ids)
+	}
+	if !strings.Contains(outerID, ":local:") || !strings.Contains(innerID, ":local:") {
+		t.Fatalf("local identities omit declaration provenance: outer=%q inner=%q", outerID, innerID)
+	}
+}
+
+func collectBuilderNodes(root *types.ASTNode, predicate func(*types.ASTNode) bool) []*types.ASTNode {
+	if root == nil {
+		return nil
+	}
+	var nodes []*types.ASTNode
+	if predicate(root) {
+		nodes = append(nodes, root)
+	}
+	nodes = append(nodes, root.CollectDescendants(predicate)...)
+	return nodes
+}
+
 // TestAssemblyAssignmentsUpdateSoliditySymbols verifies Yul assignments to
 // Solidity parameters, locals, and named return variables update the outer
 // taint state. The clean overwrite is an FP regression; the two taint copies
@@ -327,6 +603,94 @@ func assertAssemblyArgTypeUnknown(t *testing.T, call *types.ASTNode, name string
 	arg := call.Children[0]
 	if got := arg.GetAttributeString("type"); got != "" {
 		t.Errorf("assembly %s(%s) type = %q, want unknown after disagreeing path types", call.Name, name, got)
+	}
+}
+
+func TestForStatementChildrenFollowRuntimeOrder(t *testing.T) {
+	db := buildFromSource(t, `// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.0;
+contract ForOrder {
+    function guard(uint256 i) internal pure returns (bool) { return i < 2; }
+    function step(uint256 i) internal pure returns (uint256) { return i + 1; }
+    function body(uint256) internal pure {}
+    function run() external {
+        for (uint256 i = 0; guard(i); i = step(i)) {
+            body(i);
+        }
+    }
+}`)
+	fn := funcByName(t, db, "ForOrder", "run")
+	loops := fn.AST.CollectDescendants(func(n *types.ASTNode) bool {
+		return n.Kind == types.KindStmtLoop &&
+			n.GetAttributeString("loop_type") == "for"
+	})
+	if len(loops) != 1 {
+		t.Fatalf("for loop count = %d, want 1", len(loops))
+	}
+	guard := directChildContainingCall(loops[0], "guard")
+	body := directChildContainingCall(loops[0], "body")
+	step := directChildContainingCall(loops[0], "step")
+	if guard < 0 || body < 0 || step < 0 {
+		t.Fatalf("indexes guard=%d body=%d step=%d; kinds=%v",
+			guard, body, step, astKinds(loops[0]))
+	}
+	if !(guard < body && body < step) {
+		t.Fatalf("order guard=%d body=%d step=%d, want guard < body < step",
+			guard, body, step)
+	}
+	post := loops[0].Children[step]
+	if post.Kind != types.KindStmtAssign {
+		t.Fatalf("post kind = %q, want %q", post.Kind, types.KindStmtAssign)
+	}
+	if len(post.Children) != 2 || post.Children[0].Name != "i" ||
+		post.Children[1].Name != "step" || !strings.HasPrefix(post.Children[1].Kind, "call.") {
+		t.Fatalf("post children = %+v, want identifier i then call step", post.Children)
+	}
+	stepCall := post.Children[1]
+	if stepCall.StartLine == 0 || stepCall.EndLine == 0 || stepCall.EndByte <= stepCall.StartByte {
+		t.Fatalf("post call span = line %d:%d bytes [%d,%d), want real source span",
+			stepCall.StartLine, stepCall.EndLine, stepCall.StartByte, stepCall.EndByte)
+	}
+}
+
+func directChildContainingCall(parent *types.ASTNode, name string) int {
+	for i, child := range parent.Children {
+		if child.Name == name && strings.HasPrefix(child.Kind, "call.") {
+			return i
+		}
+		if child.FindDescendant(func(n *types.ASTNode) bool {
+			return n.Name == name && strings.HasPrefix(n.Kind, "call.")
+		}) != nil {
+			return i
+		}
+	}
+	return -1
+}
+
+func TestForStatementOptionalClausesBuildSafely(t *testing.T) {
+	db := buildFromSource(t, `// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.0;
+contract OptionalFor {
+    function run(uint256 i) external {
+        for (;;) { break; }
+        for (; i < 1;) { i++; }
+        for (uint256 j = 0;; j++) { break; }
+    }
+}`)
+	fn := funcByName(t, db, "OptionalFor", "run")
+	loops := fn.AST.CollectDescendants(func(n *types.ASTNode) bool {
+		return n.Kind == types.KindStmtLoop &&
+			n.GetAttributeString("loop_type") == "for"
+	})
+	if len(loops) != 3 {
+		t.Fatalf("for loop count = %d, want 3", len(loops))
+	}
+	for i, loop := range loops {
+		for j, child := range loop.Children {
+			if child == nil {
+				t.Fatalf("for loop %d child %d is nil", i, j)
+			}
+		}
 	}
 }
 

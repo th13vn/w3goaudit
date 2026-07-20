@@ -135,6 +135,10 @@ func New(db *types.Database) *Engine
 func NewWithOptions(db *types.Database, opts Options) *Engine
 func (e *Engine) Execute(tmpl *Template) []*Finding
 func (e *Engine) ExecuteAll(templates []*Template) []*Finding
+func (e *Engine) Verify(node *types.ASTNode, rule Rule) bool
+func (e *Engine) VerifyAtFunction(fn *types.Function, rule Rule, contract *types.Contract) bool
+func (e *Engine) VerifyAtFunctionWithCallees(fn *types.Function, rule Rule, contract *types.Contract) bool
+func (e *Engine) VerifyAtContract(contract *types.Contract, rule Rule) bool
 func LoadTemplate(path string) (*Template, error)
 func LoadTemplates(dir string) ([]*Template, error)
 func LoadTemplatesWithOptions(dir string, opts TemplateLoadOptions) ([]*Template, error)
@@ -150,15 +154,41 @@ directory loader and backs the binary's embedded default pack
 (`github.com/th13vn/w3goaudit/templates`.`Official`). `ParseTemplate` is the
 inline equivalent of `LoadTemplate` for SDK consumers that hold YAML in memory.
 
-> **WQL:** All 106 official/benchmark/feature-test templates shipped in
-> this repo are written in **WQL** — `meta` plus one `query:` holding
-> `select`/`from`/`where` or a query-level `and:`/`or:` composition (see
+> **WQL:** A WQL document is meta plus one query: block. All 106
+> official/benchmark/feature-test templates shipped in this repo use that block
+> to hold `select`/`from`/`where` or a query-level `and:`/`or:` composition (see
 > [`docs/wql-syntax.md`](./wql-syntax.md)). `LoadTemplate`, `LoadTemplates`,
 > `LoadTemplatesFromFS`, and `ParseTemplate` accept this schema only; unknown
 > keys at any level are rejected. The returned `Template`/`QueryBlock`/`Rule`
 > values are compiled evaluator IR, not a second supported YAML schema; an
 > or:-composed template carries every executable block in
 > `Template.Queries` (`Queries[0] == Query`).
+
+Programmatic evaluator IR is copied before compatibility normalization.
+Self-referential/cyclic `Rule` pointers and Rule graphs deeper than 64 levels
+fail closed in direct evaluator calls, `Execute`, and template finalization;
+supported nested `Attr` maps and slices, including containers passed through
+exported `Rule.IsStateVar`, use the same active-cycle checks and depth budget.
+Depth 64 and shared DAG containers remain valid; cycles and depth 65 fail closed
+without mutating caller-owned rules or templates.
+
+All four exported direct evaluator entry points (`Verify`,
+`VerifyAtFunction`, `VerifyAtFunctionWithCallees`, and `VerifyAtContract`)
+deep-copy and normalize the supplied programmatic `Rule`, including deprecated
+compatibility aliases, before applying the same regex, kind, preset, taint
+source, visibility, mutability, and version validation used by loaded
+templates. Invalid values fail closed by returning `false`. Caller-owned
+rules, nested rules, maps, and slices are not mutated, and recursive evaluation
+reuses the prepared copy rather than preparing it again at each node or callee.
+
+Sequence matching uses an execution-event partial order. Ordinary statements
+retain source order; receiver, option, argument, assignment RHS, return, emit,
+check, and similar input subtrees precede their enclosing effect; calls precede
+inlined callees; distinct pre-effect siblings are unordered. Each event carries
+the exact inline occurrence path and accumulated caller/callee conditional-arm
+tokens, so cross-tree mutually exclusive arms cannot match and repeated uses of
+one callee AST retain the selected occurrence's reachability. Nested receiver
+and option helper calls use exact callgraph metadata and are recorded once.
 
 **What It Does:**
 - Load YAML templates
@@ -181,7 +211,20 @@ type SourceFile struct {
     Contracts     []string
     Imports       []string
     ResolvedImports []string // canonical imported files selected by the reader
+    ImportBindings []ImportBinding // one serialized record per authored import
     PragmaVersion string
+}
+
+type ImportBinding struct {
+    ImportPath   string
+    ResolvedFile string
+    UnitAlias    string
+    Symbols      []ImportSymbolBinding
+}
+
+type ImportSymbolBinding struct {
+    Symbol string // declaration name in the imported source
+    Alias  string // local name; empty when unrenamed
 }
 
 type Database struct {
@@ -215,7 +258,9 @@ type SemanticFacts struct {
 type MainContractEntry struct {
     EntryFunctions    []string  // exact resolved function IDs
     LinearizedBases   []string  // compatibility/display names
-    LinearizedBaseIDs []string  // exact file#Contract C3 identities
+    // Compact exact derived-first C3 chain. Preserves resolvable relative order;
+    // not index-aligned with LinearizedBases when display entries are unresolved.
+    LinearizedBaseIDs []string
 }
 
 type Contract struct {
@@ -225,7 +270,9 @@ type Contract struct {
     SourceFile        string
     BaseContracts     []string
     LinearizedBases   []string  // compatibility/display names
-    LinearizedBaseIDs []string  // exact C3 identities (most derived first)
+    // Compact exact derived-first C3 chain. Preserves resolvable relative order;
+    // not index-aligned with LinearizedBases when display entries are unresolved.
+    LinearizedBaseIDs []string
     InheritanceWeight int
     Functions         []*Function
     StateVariables    []*StateVariable
@@ -258,6 +305,16 @@ type Function struct {
     StartByte       int  // 0-based UTF-8 byte offset into the source file
     EndByte         int  // 0-based, half-open UTF-8 byte offset
 }
+
+type FunctionCall struct {
+    Target             string
+    ResolvedContractID string
+    ResolvedFunction   string
+    CallType           CallType
+    Resolved           bool
+    ArgCount           int // -1 absent/unknown legacy JSON; 0 is a real call
+    Arguments          []*ASTNode // modifier invocation arguments, when recorded
+}
 ```
 
 > **v0.4 — precise source locations:** `StartCol`/`EndCol`/`StartByte`/
@@ -275,6 +332,14 @@ type Function struct {
 > field/helper reference.
 > SARIF declares `columnKind: unicodeCodePoints` and intentionally omits
 > `charOffset`/`charLength`; UTF-8 byte offsets are not SARIF character offsets.
+> These line/column fields are not LSP positions. LSP lines and characters are
+> zero-based and commonly use UTF-16 code units.
+>
+> `FunctionCall.argCount` is presence-aware in JSON. A legacy object with no
+> field loads as `-1`; newly serialized zero-argument calls emit
+> `"argCount": 0`, and zero survives repeated round trips.
+> Resolved modifier invocations may also carry detached simplified argument
+> ASTs in `FunctionCall.arguments`; parent links are restored after cache loads.
 
 **Exported Functions:**
 ```go
@@ -285,9 +350,11 @@ func (db *Database) GetAllFunctions() []*Function
 func (db *Database) GetContractByID(id string) *Contract
 func (db *Database) ResolveContractName(name, fromFile string) *Contract
 func (db *Database) ResolveContractNameExact(name, fromFile string) (*Contract, bool)
+func (db *Database) ResolveContractNameExactWithStatus(name, fromFile string) (*Contract, ExactResolutionStatus)
 func (db *Database) LinearizedContracts(contract *Contract) []*Contract
 func (db *Database) AnalysisComplete() bool
 func (db *Database) GetStats() *DatabaseStats
+func (f *Function) ComparesCallerIdentity(databases ...*Database) bool
 func LoadFromJSON(path string) (*Database, error)  // Load pre-built database from JSON
 func LoadFromJSONWithOptions(path string, opts LoadOptions) (*Database, error)
 func MakeContractID(filePath, contractName string) string
@@ -419,6 +486,11 @@ byte-stable complete bundle is required.
 > See [`docs/extension-output.md`](./extension-output.md) for the full
 > `nav.json` / `explorer.json` schema and worked examples.
 
+`NavJSON.Callers` contains only resolved edges whose fully qualified callee ID
+maps to an existing exact function. Bare, malformed, unresolved, and stale
+target IDs remain available in `Database.CallGraph` but are not published as
+navigable callees.
+
 ---
 
 ## Quick Start
@@ -440,10 +512,17 @@ import (
 func main() {
     // 1. Read source files
     r := reader.New()
-    sources, err := r.Read("./contracts/")
+    inputPath := "./contracts/"
+    projectRoot, err := reader.DetectProjectRoot(inputPath)
+    if err != nil { log.Fatal(err) }
+    sources, err := r.Read(inputPath)
     if err != nil {
         log.Fatal(err)
     }
+    if err := r.ResolveImports(projectRoot); err != nil {
+        log.Fatal(err)
+    }
+    sources = r.GetAllSources()
     
     // 2. Build database
     b := builder.New()
@@ -502,19 +581,27 @@ r := reader.New()
 
 **Step 2: Read Source Files**
 ```go
-// Option A: Auto-detect (file or directory)
-sources, err := r.Read("./path/to/contracts/")
+// Auto-detect a file or directory. ReadFile and ReadFiles use the same
+// explicit error handling before import resolution.
+inputPath := "./path/to/contracts/"
+projectRoot, err := reader.DetectProjectRoot(inputPath)
+if err != nil {
+    return fmt.Errorf("detect project root: %w", err)
+}
+sources, err := r.Read(inputPath)
 if err != nil {
     return fmt.Errorf("read failed: %w", err)
 }
-
-// Option B: Read specific file
-source, err := r.ReadFile("./MyContract.sol")
-sources = []*types.SourceFile{source}
-
-// Option C: Read multiple files
-sources, err := r.ReadFiles([]string{"A.sol", "B.sol"})
+if err := r.ResolveImports(projectRoot); err != nil {
+    return fmt.Errorf("resolve imports: %w", err)
+}
+sources = r.GetAllSources()
 ```
+
+Whichever read option seeds the reader, resolve imports before calling
+`Builder.Build` and build from `r.GetAllSources()`. Alternatively, callers
+that construct `SourceFile` values manually must populate canonical
+`ResolvedImports` and occurrence-level `ImportBindings` themselves.
 
 **Step 3: Build Database**
 ```go
@@ -603,10 +690,17 @@ Auto-detects whether path is a file or directory and reads accordingly.
 
 **Example:**
 ```go
-sources, err := r.Read("./contracts/")
+inputPath := "./contracts/"
+projectRoot, err := reader.DetectProjectRoot(inputPath)
+if err != nil { log.Fatal(err) }
+sources, err := r.Read(inputPath)
 if err != nil {
     log.Fatal(err)
 }
+if err := r.ResolveImports(projectRoot); err != nil {
+    log.Fatal(err)
+}
+sources = r.GetAllSources()
 ```
 
 ---
@@ -883,7 +977,8 @@ Selects how `Finding.Location` is computed.
 
 The env var `WGAUDIT_LOCATION_FROM_MATCHED_NODE` (`1`/`true`/`matched`)
 takes precedence over the API call so CI/scripts can flip the mode without
-touching code. The new structured fields on `Finding` (`Reachability`,
+touching code. There is no current CLI `--location-source` flag. The new
+structured fields on `Finding` (`Reachability`,
 `PrimaryAST`, `EntryPoint`, `Related`) are populated **regardless** of this setting —
 only `Location` itself changes.
 
@@ -915,13 +1010,18 @@ type Finding struct {
 }
 
 type RelatedLocation struct {
-    Label    string // from the matched `where`-level `all:` branch's `label:` field; falls back to "condition N"
-    File     string
-    Contract string
-    Function string
-    Line     int
-    Kind     string // matched AST kind
-    Name     string // matched AST name
+    Label     string // from the matched query-level `and:` branch's `label:` field; falls back to "condition N"
+    File      string
+    Contract  string
+    Function  string
+    Line      int
+    Col       int // one-based Unicode-code-point column
+    EndLine   int
+    EndCol    int // one-based Unicode-code-point, half-open end column
+    StartByte int // zero-based UTF-8 byte offset
+    EndByte   int // zero-based, half-open UTF-8 byte offset
+    Kind      string // matched AST kind
+    Name      string // matched AST name
 }
 
 type ReachabilityPath struct { Steps []ReachStep }
@@ -929,6 +1029,7 @@ type ReachabilityPath struct { Steps []ReachStep }
 type ReachStep struct {
     Contract   string
     Function   string
+    File       string // exact source file hosting this hop
     Visibility string // public/external/internal/private
     Line       int
     // AuthVerdict and AuthReasons are populated once the semantic
@@ -938,10 +1039,14 @@ type ReachStep struct {
 }
 
 type NodeRef struct {
-    Kind  string
-    Name  string
-    Start int
-    End   int
+    Kind      string
+    Name      string
+    Start     int // start line
+    End       int // end line
+    StartCol  int
+    EndCol    int
+    StartByte int
+    EndByte   int
 }
 
 type EntryRef struct {
@@ -951,6 +1056,16 @@ type EntryRef struct {
     AuthReasons []string
 }
 ```
+
+`RelatedLocation.Col` and `EndCol` use one-based Unicode-code-point columns;
+`EndCol` is half-open. `StartByte` and `EndByte` use zero-based, half-open UTF-8
+byte offsets. Contract/file-level synthetic related sites leave precise column
+and byte fields at zero.
+
+`ReachStep.File` is the exact source file for that hop, which may differ across
+an inherited or cross-contract trace. NodeRef columns are one-based Unicode-code-point columns,
+with `EndCol` half-open. NodeRef byte offsets are zero-based, half-open UTF-8 byte offsets.
+Synthetic or location-less primary nodes leave these precise fields at zero.
 
 Reading these from SDK code:
 
@@ -1078,25 +1193,46 @@ base := db.ResolveContractName("IERC20", derived.SourceFile)
 
 ```go
 func (db *Database) ResolveContractNameExact(name, fromFile string) (*Contract, bool)
+func (db *Database) ResolveContractNameExactWithStatus(name, fromFile string) (*Contract, ExactResolutionStatus)
 func (db *Database) LinearizedContracts(contract *Contract) []*Contract
 ```
 
 Use these for identity-sensitive work. Exact resolution considers the current
-file and `SourceFile.ResolvedImports` (including remapped imports) and returns
-`ok=false` when identity remains ambiguous; it never uses same-directory or
-lexicographic proximity as proof. `LinearizedContracts` follows canonical
+file, occurrence-level `SourceFile.ImportBindings`, and canonical
+`ResolvedImports`. Named aliases expose only their local name; namespace aliases
+resolve qualified names such as `V.Base` only in the exact imported file. The
+compatibility bool is true only for `ExactResolutionResolved`; the status form
+also returns `ExactResolutionMissing`, `ExactResolutionAmbiguous`, or
+`ExactResolutionBindingMissing`. It never uses same-directory or lexicographic
+proximity as proof. `LinearizedContracts` follows canonical
 `LinearizedBaseIDs` in derived-first C3 order. Inheritance, call-graph, report,
 navigation, workflow, state, and extract consumers use these exact identities.
+
+`ImportBindings` is additive schema-2.0.0 JSON. Each occurrence contains
+`importPath`, optional canonical `resolvedFile`, optional `unitAlias`, and
+optional `symbols` entries (`symbol`, optional local `alias`). Repeated imports
+and aliases survive `LoadFromJSON`.
 
 #### Diagnostics and cache parity
 
 `Database.Diagnostics` contains deduplicated, stable-sorted analysis-quality
 records such as unresolved imports/bases, parser recovery/skips, invalid source
-ranges, and unresolved exact identity. `AnalysisComplete()` reports whether any
+ranges, and unresolved exact identity. A parsed known-arity call never resolves
+a unique same-name declaration of the wrong arity; exact target fields remain
+empty and one `identity.unresolved` diagnostic records the target and observed
+arity. Legacy name-only MRO caches also record one incomplete identity
+diagnostic for every missing, binding-missing, or ambiguous base entry.
+`AnalysisComplete()` reports whether any
 diagnostic marks known coverage loss. Diagnostics, `ScanTarget`, source content,
 and exact MRO IDs serialize in the database, so source and equivalent
 `LoadFromJSONWithOptions` scans can enforce the same policy and render the same
 warning/diagnostic artifacts.
+
+`SourceFile.Content` supplies current cached excerpts and workflows after the
+original file changes or disappears. Report and extraction code reads
+`Database.SourceFiles[path].Content` first; disk is only a legacy fallback for
+caches that predate embedded content. Serialized AST data is restored independently, and
+`Database.RestoreASTParents` rebuilds AST parent links after JSON loading.
 
 ---
 
@@ -1109,6 +1245,12 @@ func NewGenerator(db *types.Database) *Generator
 ```
 
 Creates a report generator.
+
+Generator call graphs, state matrices, and workflow reachability share one
+private exact call resolver. Recorded contract IDs and full selectors are
+verified directly; legacy metadata searches only exact runtime-MRO objects and
+succeeds only when the known or unknown arity leaves one distinct selector.
+Ambiguity and mismatch omit the edge.
 
 **Example:**
 ```go
@@ -1158,16 +1300,29 @@ db, err := b.Build(sources)  // What happens?
 
 **Correct Handling:**
 ```go
-sources, err := r.Read(path)
+inputPath := path
+projectRoot, err := reader.DetectProjectRoot(inputPath)
+if err != nil {
+    return fmt.Errorf("detect project root: %w", err)
+}
+sources, err := r.Read(inputPath)
 if err != nil {
     return err
 }
+if err := r.ResolveImports(projectRoot); err != nil {
+    return fmt.Errorf("resolve imports: %w", err)
+}
+sources = r.GetAllSources()
 
 if len(sources) == 0 {
     return fmt.Errorf("no Solidity files found in %s", path)
 }
 
+b := builder.New()
 db, err := b.Build(sources)
+if err != nil {
+    return fmt.Errorf("build failed: %w", err)
+}
 ```
 
 ---
@@ -1290,32 +1445,22 @@ source, err := r.ReadFile(path)
 
 ---
 
-#### 7. Concurrent Access to Database
+#### 7. Concurrent Pipeline Reuse
 
 **Problem:**
 ```go
-// Goroutine 1
-db, _ := b.Build(sources)
-
-// Goroutine 2
-stats := db.GetStats()  // Race condition!
+go e.Execute(templateA)
+go e.Execute(templateB) // races on mutable engine context
 ```
 
-**Issue:** Database is not thread-safe
+**Issue:** A reader, builder, engine, or report generator is a mutable pipeline
+object and must not be reused concurrently.
 
 **Correct Handling:**
 ```go
-var mu sync.RWMutex
-
-// Writer
-mu.Lock()
-db, _ := b.Build(sources)
-mu.Unlock()
-
-// Reader
-mu.RLock()
-stats := db.GetStats()
-mu.RUnlock()
+// Construct a complete independent pipeline per concurrent scan.
+go scanWithNewReaderBuilderEngineAndGenerator(projectA)
+go scanWithNewReaderBuilderEngineAndGenerator(projectB)
 ```
 
 ---
@@ -1386,14 +1531,11 @@ sources, _ := r.Read("./huge-project/")
 db, _ := b.Build(sources)  // Out of memory!
 ```
 
-**Mitigation:**
+**Mitigation:** Keep one complete project database so imports, inheritance, and
+call edges remain exact. Reuse a saved database for later scans rather than
+splitting one project into semantically incomplete batches.
 ```go
-// Process in batches
-batches := splitIntoBatches(sources, 100)
-for _, batch := range batches {
-    db, err := b.Build(batch)
-    // Process each batch
-}
+db, err := types.LoadFromJSON("./cache/complete-project.json")
 ```
 
 ---
@@ -1446,10 +1588,17 @@ func getOrBuildDatabase(srcPath, cachePath string) (*types.Database, error) {
     // Build fresh if cache doesn't exist
     fmt.Println("Building fresh database...")
     r := reader.New()
-    sources, err := r.Read(srcPath)
+    inputPath := srcPath
+    projectRoot, err := reader.DetectProjectRoot(inputPath)
+    if err != nil { return nil, err }
+    sources, err := r.Read(inputPath)
     if err != nil {
         return nil, err
     }
+    if err := r.ResolveImports(projectRoot); err != nil {
+        return nil, err
+    }
+    sources = r.GetAllSources()
     
     b := builder.New()
     db, err = b.Build(sources)
@@ -1538,14 +1687,17 @@ enabled flags or writers.
 log := logging.New(true, logFile) // nil writer becomes io.Discard
 
 r := reader.NewWithOptions(reader.Options{Logger: log})
-sources, err := r.Read("./contracts")
+inputPath := "./contracts"
+projectRoot, err := reader.DetectProjectRoot(inputPath)
 if err != nil { return err }
-if err := r.ResolveImports(r.ProjectRoot); err != nil { return err }
+sources, err := r.Read(inputPath)
+if err != nil { return err }
+if err := r.ResolveImports(projectRoot); err != nil { return err }
 
 b := builder.NewWithOptions(builder.Options{
     Logger:      log,
-    ProjectRoot: r.ProjectRoot,
-    ScanTarget:  "./contracts",
+    ProjectRoot: projectRoot,
+    ScanTarget:  inputPath,
     Diagnostics: r.Diagnostics(),
 })
 db, err := b.Build(r.GetAllSources())
@@ -1601,11 +1753,19 @@ func main() {
 func runSecurityScan() int {
     // Read contracts
     r := reader.New()
-    sources, err := r.Read("./contracts/")
+    inputPath := "./contracts/"
+    projectRoot, err := reader.DetectProjectRoot(inputPath)
+    if err != nil { return 1 }
+    sources, err := r.Read(inputPath)
     if err != nil {
         fmt.Fprintf(os.Stderr, "Error reading files: %v\n", err)
         return 1
     }
+    if err := r.ResolveImports(projectRoot); err != nil {
+        fmt.Fprintf(os.Stderr, "Error resolving imports: %v\n", err)
+        return 1
+    }
+    sources = r.GetAllSources()
     
     if len(sources) == 0 {
         fmt.Println("No Solidity files found")
@@ -1690,10 +1850,17 @@ import (
 func main() {
     // Setup
     r := reader.New()
-    sources, _ := r.Read("./contracts/")
+    inputPath := "./contracts/"
+    projectRoot, err := reader.DetectProjectRoot(inputPath)
+    if err != nil { log.Fatal(err) }
+    sources, err := r.Read(inputPath)
+    if err != nil { log.Fatal(err) }
+    if err := r.ResolveImports(projectRoot); err != nil { log.Fatal(err) }
+    sources = r.GetAllSources()
     
     b := builder.New()
-    db, _ := b.Build(sources)
+    db, err := b.Build(sources)
+    if err != nil { log.Fatal(err) }
     
     e := engine.New(db)
     templates, err := engine.LoadTemplates("./templates/official/")
@@ -1756,10 +1923,19 @@ sources, _ := r.Read(path)
 db, _ := b.Build(sources)
 
 // GOOD:
-sources, err := r.Read(path)
+inputPath := path
+projectRoot, err := reader.DetectProjectRoot(inputPath)
+if err != nil {
+    return fmt.Errorf("detect project root: %w", err)
+}
+sources, err := r.Read(inputPath)
 if err != nil {
     return fmt.Errorf("read failed: %w", err)
 }
+if err := r.ResolveImports(projectRoot); err != nil {
+    return fmt.Errorf("resolve imports: %w", err)
+}
+sources = r.GetAllSources()
 
 db, err := b.Build(sources)
 if err != nil {

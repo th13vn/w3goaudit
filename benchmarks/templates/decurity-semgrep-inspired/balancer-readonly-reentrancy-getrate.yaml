@@ -17,7 +17,7 @@ query:
   select: external_call
   where:
     - name: '^getRate$'
-    - all:
+    - and:
         - not:
             func_name: '^_updateTokenRateCache$'
         - not:

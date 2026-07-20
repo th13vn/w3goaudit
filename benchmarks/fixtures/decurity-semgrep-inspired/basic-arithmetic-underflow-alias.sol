@@ -54,6 +54,8 @@ contract VulnerableBasicArithmeticUnderflowAlias {
     function redeem(uint256 requested) external pure returns (uint256) {
         uint256 debit = requested;
         uint256 balance = 5;
-        return balance - debit;
+        unchecked {
+            return balance - debit;
+        }
     }
 }

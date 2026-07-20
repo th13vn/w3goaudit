@@ -109,7 +109,10 @@ findings), so `nav.json` IDs can be cross-referenced against
 
 ### `callers[]`
 
-The reverse call graph — one entry per edge in `db.CallGraph.Edges`:
+The reverse call graph – one entry per resolved edge whose fully qualified
+callee ID maps to an existing exact contract function. Unresolved bare names,
+malformed IDs, missing contracts, and missing selectors are omitted rather than
+published as navigable targets:
 
 ```jsonc
 {
@@ -145,7 +148,7 @@ matching Solidity's own dispatch semantics.
 ### Determinism
 
 `symbols`, `callers`, and `interfaceImpl` are each sorted before the file is
-written (by ID, then by callee/caller/site-line, then by
+written (by ID, then by callee/caller/site-line/site-column/site-byte, then by
 interface/method respectively), so re-running a scan on unchanged sources
 produces a byte-identical `nav.json` — safe to diff across runs.
 
@@ -223,13 +226,16 @@ real dispatch. Constructors and functions without a selector are skipped.
 {
   "name": "transfer",
   "selector": "transfer(address,uint256)",
-  "signature": "transfer(address,uint256)",
+  "signature": "a9059cbb",
   "visibility": "external",
   "mutability": "nonpayable",
   "modifiers": ["whenNotPaused"],   // omitempty
   "range": { "...": "SrcRange" }
 }
 ```
+
+`selector` is the canonical `Function.Selector` text. `signature` is the
+four-byte Keccak `Function.Signature` value.
 
 ### Determinism
 

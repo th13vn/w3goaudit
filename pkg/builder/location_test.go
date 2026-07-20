@@ -130,6 +130,43 @@ func TestUnicodeColumnsUseCodePointsForDeclarationsASTAndCallEdges(t *testing.T)
 	}
 }
 
+func TestExpressionStatementPreservesSemanticExpressionSpan(t *testing.T) {
+	tests := []struct {
+		name string
+		line string
+	}{
+		{name: "ASCII", line: "        target.call(data);"},
+		{name: "Unicode prefix", line: `        string memory marker = "→😀"; target.call(data);`},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			src := "contract C {\n    function run(address target, bytes memory data) external {\n" + tc.line + "\n    }\n}\n"
+			db := buildFromSource(t, src)
+			fn := funcByName(t, db, "C", "run")
+			calls := fn.AST.CollectDescendants(func(n *types.ASTNode) bool {
+				return n.Kind == types.KindCallLowlevelCall
+			})
+			if len(calls) != 1 {
+				t.Fatalf("low-level call nodes = %d, want 1", len(calls))
+			}
+
+			const expression = "target.call(data)"
+			startByte := strings.Index(src, expression)
+			endByte := startByte + len(expression)
+			lineStart := strings.LastIndex(src[:startByte], "\n") + 1
+			wantStartCol := utf8.RuneCountInString(src[lineStart:startByte]) + 1
+			wantEndCol := utf8.RuneCountInString(src[lineStart:endByte]) + 1
+			call := calls[0]
+			if call.StartByte != startByte || call.EndByte != endByte || call.StartCol != wantStartCol || call.EndCol != wantEndCol {
+				t.Fatalf("call span = L%d:C%d-L%d:C%d bytes [%d,%d), want cols %d..%d bytes [%d,%d) excluding semicolon", call.StartLine, call.StartCol, call.EndLine, call.EndCol, call.StartByte, call.EndByte, wantStartCol, wantEndCol, startByte, endByte)
+			}
+			if got := src[call.StartByte:call.EndByte]; got != expression {
+				t.Fatalf("call source = %q, want %q", got, expression)
+			}
+		})
+	}
+}
+
 func TestUnicodeColumnsOnEndingLineOfMultilineNode(t *testing.T) {
 	src := `contract C {
     function run() external {

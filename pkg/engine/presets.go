@@ -11,9 +11,9 @@ type PresetFunc func(fn *types.Function, contract *types.Contract, e *Engine) bo
 
 // BuiltinPresets contains all built-in preset checks
 var BuiltinPresets = map[string]PresetFunc{
-	"unAuthenticated": checkUnAuthenticated,
-	"unCheckedSender": checkUnCheckedSender,
-	"unLocked":        checkUnLocked,
+	"access_controlled":  checkAccessControlled,
+	"caller_checked":     checkCallerChecked,
+	"reentrancy_guarded": checkReentrancyGuarded,
 }
 
 // checkBuiltinPreset checks if a built-in preset condition is satisfied.
@@ -49,40 +49,24 @@ func KnownPresetNames() []string {
 	return names
 }
 
-// checkUnAuthenticated checks if a function does NOT have authentication
-// Returns true if the function is NOT authenticated (vulnerable)
-// Logic delegated to types.Function.IsAccessControlled() — privileged access
-// control only (owner/admin/role modifiers, auth helpers, and caller-vs-storage
-// or caller-vs-hardcoded-address guards). A caller self-scoping check such as
-// require(from == msg.sender) is NOT privileged access control and does NOT
-// satisfy this preset — use `unCheckedSender` where self-scoping is a valid
-// mitigation (e.g. arbitrary transferFrom).
-func checkUnAuthenticated(fn *types.Function, contract *types.Contract, e *Engine) bool {
-	return !fn.IsAccessControlled(e.db)
+// checkAccessControlled reports whether privileged access control is present.
+func checkAccessControlled(fn *types.Function, _ *types.Contract, e *Engine) bool {
+	return fn.IsAccessControlled(e.db)
 }
 
-// checkUnCheckedSender is the safety predicate for arbitrary-transferFrom-style
-// detectors, where binding a sensitive argument to the caller is itself a valid
-// mitigation ("you can only act on your own behalf"). A function is vulnerable
-// only when it has NEITHER privileged access control NOR a caller self-scoping
-// equality check (e.g. require(from == msg.sender) / if (from != msg.sender)
-// revert). This is broader than `unAuthenticated`: it also clears functions that
-// scope the caller without gating to a privileged role.
-func checkUnCheckedSender(fn *types.Function, contract *types.Contract, e *Engine) bool {
-	return !fn.IsAccessControlled(e.db) && !fn.ComparesCallerIdentity(e.db)
+// checkCallerChecked reports whether the caller is privileged or constrained
+// to act on its own behalf.
+func checkCallerChecked(fn *types.Function, _ *types.Contract, e *Engine) bool {
+	return fn.IsAccessControlled(e.db) || fn.ComparesCallerIdentity(e.db)
 }
 
-// checkUnLocked checks if a function does NOT have reentrancy protection
-// Returns true if the function is NOT protected (vulnerable)
-// Protection is defined as having a reentrancy guard modifier
-func checkUnLocked(fn *types.Function, contract *types.Contract, e *Engine) bool {
-	// Check for reentrancy guard modifiers
-	lockModifierPattern := `(?i)(nonReentrant|noReentrancy|lock|locked|guard|mutex|reentrancyGuard)`
+// checkReentrancyGuarded reports whether a reentrancy-guard modifier is present.
+func checkReentrancyGuarded(fn *types.Function, _ *types.Contract, _ *Engine) bool {
+	const pattern = `(?i)(nonReentrant|noReentrancy|lock|locked|guard|mutex|reentrancyGuard)`
 	for _, mod := range fn.Modifiers {
-		if MatchesRegex(lockModifierPattern, mod) {
-			return false // Has reentrancy protection, NOT vulnerable
+		if MatchesRegex(pattern, mod) {
+			return true
 		}
 	}
-
-	return true // No reentrancy protection found, IS vulnerable
+	return false
 }

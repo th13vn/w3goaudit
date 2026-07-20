@@ -194,12 +194,15 @@ func (b *Builder) parseFile(sf *types.SourceFile) error {
 	}
 
 	// Manually iterate over children instead of using visitor
+	importIndex := 0
 	for _, child := range result.Children {
 		switch n := child.(type) {
 		case *ast.ContractDefinition:
 			extractor.visitContract(n)
 		case *ast.ImportDirective:
 			sf.Imports = append(sf.Imports, n.Path)
+			enrichImportBinding(sf, n, importIndex)
+			importIndex++
 		case *ast.PragmaDirective:
 			if n.Name == "solidity" {
 				sf.PragmaVersion = n.Value
@@ -227,6 +230,30 @@ func (b *Builder) parseFile(sf *types.SourceFile) error {
 	return nil
 }
 
+func enrichImportBinding(sf *types.SourceFile, directive *ast.ImportDirective, index int) {
+	if sf == nil || directive == nil || index < 0 {
+		return
+	}
+	for len(sf.ImportBindings) <= index {
+		sf.ImportBindings = append(sf.ImportBindings, types.ImportBinding{})
+	}
+	binding := &sf.ImportBindings[index]
+	if binding.ImportPath == "" {
+		binding.ImportPath = directive.Path
+	}
+	binding.UnitAlias = directive.UnitAlias
+	binding.Symbols = make([]types.ImportSymbolBinding, 0, len(directive.SymbolAliases))
+	for _, symbol := range directive.SymbolAliases {
+		if symbol == nil || symbol.Symbol == "" {
+			continue
+		}
+		binding.Symbols = append(binding.Symbols, types.ImportSymbolBinding{
+			Symbol: symbol.Symbol,
+			Alias:  symbol.Alias,
+		})
+	}
+}
+
 func parseFailureLine(err error) int {
 	parseErr, ok := err.(*parser.ParserError)
 	if !ok || len(parseErr.Errors) == 0 || parseErr.Errors[0] == nil {
@@ -245,7 +272,10 @@ func (b *Builder) recordUnresolvedBaseDiagnostics() {
 	for _, id := range contractIDs {
 		contract := b.db.Contracts[id]
 		for _, baseName := range contract.BaseContracts {
-			if baseName == "" || b.db.ResolveContractName(baseName, contract.SourceFile) != nil {
+			if baseName == "" {
+				continue
+			}
+			if _, status := b.db.ResolveContractNameExactWithStatus(baseName, contract.SourceFile); status == types.ExactResolutionResolved {
 				continue
 			}
 			b.db.AddDiagnostic(types.Diagnostic{
@@ -264,14 +294,19 @@ func (b *Builder) recordUnresolvedBaseDiagnostics() {
 // buildASTs builds AST trees for all functions and modifiers
 func (b *Builder) buildASTs() error {
 	b.logf("Building AST trees for %d functions and %d modifiers", len(b.functionASTs), len(b.modifierASTs))
+	structDefs := b.structDefinitions()
+	for fn := range b.functionASTs {
+		fn.Selector = fn.GetSelector(structDefs)
+	}
 
 	// Building a function AST appends DataFlow edges to the shared graph, so the
 	// order we visit functions becomes the order of db.DataFlow.Edges in the
 	// serialized output. Map iteration order is randomized per run, which made
 	// the exported database non-reproducible. Visit in a stable key order
-	// (exact source/contract, source position, name) so edges are emitted identically across
-	// runs. Selectors are not assigned yet (Phase 3), so they cannot be part of
-	// the key here.
+	// (exact source/contract, source position, name) so edges are emitted
+	// identically across runs. Selectors are intentionally computed above before
+	// AST construction, but are unnecessary in this visit key because exact
+	// ownership, source position, and declaration data already determine order.
 	fns := make([]*types.Function, 0, len(b.functionASTs))
 	for fn := range b.functionASTs {
 		fns = append(fns, fn)
@@ -413,6 +448,18 @@ func (b *Builder) calculateFunctionSelectors() {
 	// struct with the same short name, the short-name winner is deterministic
 	// across runs (previously map-iteration order made selectors non-reproducible).
 	// The qualified `Contract.Struct` key is always unambiguous.
+	structDefs := b.structDefinitions()
+
+	// Calculate selectors and signatures for all functions
+	for _, contract := range b.db.Contracts {
+		for _, fn := range contract.Functions {
+			fn.Selector = fn.GetSelector(structDefs)
+			fn.Signature = fn.GetSignature(structDefs)
+		}
+	}
+}
+
+func (b *Builder) structDefinitions() map[string]*types.Struct {
 	structDefs := make(map[string]*types.Struct)
 	contractIDs := make([]string, 0, len(b.db.Contracts))
 	for id := range b.db.Contracts {
@@ -431,13 +478,7 @@ func (b *Builder) calculateFunctionSelectors() {
 		}
 	}
 
-	// Calculate selectors and signatures for all functions
-	for _, contract := range b.db.Contracts {
-		for _, fn := range contract.Functions {
-			fn.Selector = fn.GetSelector(structDefs)
-			fn.Signature = fn.GetSignature(structDefs)
-		}
-	}
+	return structDefs
 }
 
 // GetDatabase returns the built database

@@ -12,9 +12,7 @@ meta:
   references:
     - https://github.com/Decurity/semgrep-smart-contracts/tree/master/solidity/security
 
-# `token_call` (v1) is call.external + name filtering — v2 has no dedicated
-# `token_call` block-kind alias, so `external_call` (call.external) + `name:`
-# is behaviorally identical (see slither-inspired/arbitrary-send-erc20.yaml).
+# `external_call` plus `name:` identifies the transferFrom method shape.
 query:
   from: entry_function
   select: external_call

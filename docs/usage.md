@@ -175,12 +175,17 @@ Every flag has a long and short form.
   `--db` cache scans, so cache reuse cannot silently weaken the policy.
 - `NO_COLOR` (https://no-color.org) is honored everywhere — the summary header,
   per-section emoji, and severity icons all suppress.
-- Bug location is hardcoded to the best provenance: the dangerous-node
-  `file:line:col` is the primary anchor, with the `entry ⇒ … ⇒ sink` chain and a
-  fix-here pointer when the sink is reached through internal calls.
+- Location attribution defaults to verifier context with the matched node's
+  precise line, columns, and bytes. Set
+  `WGAUDIT_LOCATION_FROM_MATCHED_NODE=1` for matched-node attribution, or use
+  `Engine.SetLocationSource` from the SDK. There is no current CLI
+  `--location-source` flag. Primary-node, reachability, and fix-here context
+  remains available in either mode.
+- Columns are one-based, half-open Unicode code points. Bytes are zero-based,
+  half-open UTF-8 offsets. These fields are not LSP positions.
 
 > **Removed in v0.3:** `--format`, `--json`, `--md`, `--html`-as-format,
-> `--fail-on`, `--location-source`, and `--log`. `run.log` replaces `--log`;
+> `--fail-on`, and `--log`. `run.log` replaces `--log`;
 > format flags are gone because the folder always carries Markdown + SARIF + JSON.
 
 #### Examples
@@ -506,7 +511,10 @@ w3goaudit extract statevar <contract-name> --db <database.json> [-o output.json]
 
 #### extract selector
 
-List all function selectors (4-byte keccak256 hashes) for a contract.
+List function identities for a contract. In the database,
+`Function.Selector` is canonical text such as `transfer(address,uint256)` and
+`Function.Signature` is the four-byte Keccak value such as `a9059cbb`; this
+command presents the four-byte values expected by selector-oriented CLI users.
 
 ```bash
 w3goaudit extract selector <contract-name> [path] [-o output.md]
@@ -666,7 +674,11 @@ w3goaudit extract source withdraw --db database.json --contract DeFiVault
 
 Compare two databases and show added/removed/changed contracts and functions.
 Unlike the other extract subcommands, `diff` does not accept a trailing source
-path — it always compares two pre-built databases.
+path – it always compares two pre-built databases. Contract identity is the
+slash-normalized source path relative to each database's own `ProjectRoot`, plus
+`#Contract`, so equivalent projects at different checkout roots align while
+same-named contracts in different files stay separate. Functions compare by
+full selector; legacy selector-less declarations fall back to their name.
 
 ```bash
 w3goaudit extract diff --db1 <old.json> --db2 <new.json> [-o output.json]
@@ -675,13 +687,13 @@ w3goaudit extract diff --db1 <old.json> --db2 <new.json> [-o output.json]
 **Output:**
 ```json
 {
-  "added": {"contracts": ["NewContract"]},
-  "removed": {"contracts": ["OldContract"]},
+  "added": {"contracts": ["src/New.sol#NewContract"]},
+  "removed": {"contracts": ["src/Old.sol#OldContract"]},
   "changed": [
     {
-      "contract": "ModifiedContract",
-      "addedFunctions": ["newFunc"],
-      "removedFunctions": ["oldFunc"]
+      "contract": "src/Modified.sol#ModifiedContract",
+      "addedFunctions": ["overload(address)"],
+      "removedFunctions": ["overload(uint256)"]
     }
   ]
 }
@@ -817,9 +829,11 @@ reachability continuation shown above are printed to the terminal only under
 
 ### Markdown — `overview.md` + `findings.md`
 
+`overview.md` is the report index and links to detailed artifacts.
+
 | File          | Content                                                                                                                                                                                                                                                                                                             |
 | ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `overview.md` | All main contracts with their pragma version, stats, Mermaid call graphs, inheritance, entry-point tables                                                                                                                                                                                                           |
+| `overview.md` | Report index with project metrics and links to the detailed per-contract artifacts                                                                                                                                                                                                                                  |
 | `findings.md` | Severity-sorted findings with recommendation, suggested fix, and references. Each occurrence includes a **reachability trace block** when present — file path, entry-point (fix-here), and a dotted-level list (`.`, `..`, `...`) from the entry function down to the host of the dangerous statement, with line numbers per hop. Multi-site findings also include `All matched sites` and full matched-function excerpts |
 
 Per-main-contract folders add `state-changes.md` and one
@@ -875,7 +889,7 @@ dangerous statement. `entryPoint` is the auditor-actionable fix-here pointer.
 `related[]` lists every source site that contributed to a multi-condition
 finding, such as each payable `msg.value` function and the inherited multicall
 function in a contract-scope combination rule. Each entry's `label` is taken
-from the matched `where`-level `all:` branch's `label:` field in the template
+from the matched `where`-level `and:` branch's `label:` field in the template
 (falling back to `condition N` when the branch has none).
 
 ### HTML (`--html/-H`) — Accessible
@@ -1009,7 +1023,7 @@ exits 0 — not an error.
 | `No findings`                         | Use `--verbose` to verify templates loaded and matched, or inspect `run.log` in the result folder |
 | `Permission denied`                   | Check file permissions                                                                            |
 | `Out of memory`                       | Scan subdirectories separately, use `build` to cache                                              |
-| `extract workflow` returns 1 function | Call graph not built — ensure source is accessible, not just a cached DB without disk fallback    |
+| `extract workflow` returns 1 function | Inspect call-graph diagnostics and exact target metadata. Current caches embed `SourceFile.Content`; disk fallback is only for legacy caches without embedded content. |
 
 ### Verbose Debugging
 

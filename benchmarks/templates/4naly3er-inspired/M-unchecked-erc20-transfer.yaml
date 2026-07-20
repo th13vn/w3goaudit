@@ -14,9 +14,7 @@ meta:
     Use OpenZeppelin's SafeERC20 library (safeTransfer / safeTransferFrom)
     which wraps the call and reverts on false returns or missing return values.
 
-# `token_call` (v1) is IsTokenCall(kind) == (kind == call.external) — v2 has
-# no dedicated `token_call` block-kind alias, so `external_call` (call.external)
-# + `name:` is behaviorally identical.
+# `external_call` plus `name:` identifies the ERC20 method shape.
 query:
   from: entry_function
   select: external_call

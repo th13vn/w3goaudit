@@ -3,6 +3,7 @@ package builder
 import (
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/th13vn/solast-go/pkg/ast"
@@ -11,24 +12,44 @@ import (
 
 // ASTBuilder builds w3goaudit AST from Solidity AST
 type ASTBuilder struct {
-	contract       *types.Contract
-	function       *types.Function
-	db             *types.Database
-	locator        *sourceLocator
-	symbolTable    map[string]string // variable name -> RefKind (parameter, state_var, local_var)
-	symbolTypes    map[string]types.TypeInfo
-	taintTable     map[string][]string // variable name -> list of taints
-	paramNames     map[string]bool     // quick lookup for parameter names
-	stateVarNames  map[string]bool     // quick lookup for state variable names
-	assemblyScopes []map[string]assemblySymbol
-	assemblyFlow   map[*types.ASTNode]assemblyControlFlow
-	assemblyLHS    map[*types.ASTNode]int
-	assemblyTypes  map[*types.ASTNode]assemblyObservedType
+	contract        *types.Contract
+	function        *types.Function
+	rawFunction     *ast.FunctionDefinition
+	db              *types.Database
+	locator         *sourceLocator
+	symbolTable     map[string]string // variable name -> RefKind (parameter, state_var, local_var)
+	symbolTypes     map[string]types.TypeInfo
+	symbolLocations map[string]string
+	symbolRefIDs    map[string]string
+	symbolScopes    []astSymbolScope
+	taintTable      map[string][]string // variable name -> list of taints
+	paramNames      map[string]bool     // quick lookup for parameter names
+	stateVarNames   map[string]bool     // quick lookup for state variable names
+	assemblyScopes  []map[string]assemblySymbol
+	assemblyFlow    map[*types.ASTNode]assemblyControlFlow
+	assemblyLHS     map[*types.ASTNode]int
+	assemblyTypes   map[*types.ASTNode]assemblyObservedType
 }
+
+type astSymbolSnapshot struct {
+	kind        string
+	kindExists  bool
+	typeInfo    types.TypeInfo
+	typeExists  bool
+	location    string
+	locExists   bool
+	taint       []string
+	taintExists bool
+	refID       string
+	refExists   bool
+}
+
+type astSymbolScope map[string]astSymbolSnapshot
 
 type assemblySymbol struct {
 	taintSources []string
 	typeInfo     types.TypeInfo
+	refID        string
 }
 
 type assemblyFlowState struct {
@@ -69,15 +90,18 @@ func BuildFunctionAST(fndef *ast.FunctionDefinition, fn *types.Function, contrac
 
 func buildFunctionASTWithLocator(fndef *ast.FunctionDefinition, fn *types.Function, contract *types.Contract, db *types.Database, locator *sourceLocator) *types.ASTNode {
 	builder := &ASTBuilder{
-		contract:      contract,
-		function:      fn,
-		db:            db,
-		locator:       locator,
-		symbolTable:   make(map[string]string),
-		symbolTypes:   make(map[string]types.TypeInfo),
-		taintTable:    make(map[string][]string),
-		paramNames:    make(map[string]bool),
-		stateVarNames: make(map[string]bool),
+		contract:        contract,
+		function:        fn,
+		rawFunction:     fndef,
+		db:              db,
+		locator:         locator,
+		symbolTable:     make(map[string]string),
+		symbolTypes:     make(map[string]types.TypeInfo),
+		symbolLocations: make(map[string]string),
+		symbolRefIDs:    make(map[string]string),
+		taintTable:      make(map[string][]string),
+		paramNames:      make(map[string]bool),
+		stateVarNames:   make(map[string]bool),
 	}
 
 	// Build symbol table
@@ -96,6 +120,55 @@ func buildFunctionASTWithLocator(fndef *ast.FunctionDefinition, fn *types.Functi
 	}
 
 	return root
+}
+
+// buildDetachedExpressionAST builds a call-site expression without mutating
+// the function's persisted AST. It is used for modifier invocation arguments,
+// whose bindings are semantically relevant to the modifier body.
+func buildDetachedExpressionAST(expr ast.Node, fn *types.Function, contract *types.Contract, db *types.Database, locator *sourceLocator, symbolDataLocations map[string]string) *types.ASTNode {
+	builder := &ASTBuilder{
+		contract:        contract,
+		function:        fn,
+		db:              db,
+		locator:         locator,
+		symbolTable:     make(map[string]string),
+		symbolTypes:     make(map[string]types.TypeInfo),
+		symbolLocations: make(map[string]string),
+		symbolRefIDs:    make(map[string]string),
+		taintTable:      make(map[string][]string),
+		paramNames:      make(map[string]bool),
+		stateVarNames:   make(map[string]bool),
+	}
+	// Seed contract storage first. Function parameters are added afterward so
+	// their active RefKind/type wins when Solidity permits declaration shadowing.
+	if contract != nil {
+		for _, binding := range exactStateVariablesForAST(db, contract) {
+			stateVar := binding.variable
+			if stateVar == nil || stateVar.Name == "" {
+				continue
+			}
+			builder.symbolTable[stateVar.Name] = "state_var"
+			builder.stateVarNames[stateVar.Name] = true
+			builder.symbolTypes[stateVar.Name] = builder.typeInfoFromTypeName(stateVar.TypeName, "state_var")
+			builder.symbolLocations[stateVar.Name] = "storage"
+			builder.symbolRefIDs[stateVar.Name] = binding.owner.ID + "." + stateVar.Name
+		}
+	}
+	if fn != nil {
+		for _, param := range fn.Parameters {
+			if param == nil || param.Name == "" {
+				continue
+			}
+			builder.symbolTable[param.Name] = "parameter"
+			builder.paramNames[param.Name] = true
+			builder.symbolTypes[param.Name] = builder.typeInfoFromTypeName(param.TypeName, "parameter")
+			builder.symbolRefIDs[param.Name] = builder.parameterRefID(param.Name)
+			if inherited, ok := symbolDataLocations[param.Name]; ok {
+				builder.symbolLocations[param.Name] = inherited
+			}
+		}
+	}
+	return builder.buildExpression(expr)
 }
 
 // BuildModifierAST preserves the original one-argument SDK API. Without owning
@@ -117,33 +190,40 @@ func BuildModifierASTWithContext(moddef *ast.ModifierDefinition, contract *types
 
 func buildModifierASTWithLocator(moddef *ast.ModifierDefinition, contract *types.Contract, db *types.Database, locator *sourceLocator) *types.ASTNode {
 	builder := &ASTBuilder{
-		contract:      contract,
-		db:            db,
-		locator:       locator,
-		symbolTable:   make(map[string]string),
-		symbolTypes:   make(map[string]types.TypeInfo),
-		taintTable:    make(map[string][]string),
-		paramNames:    make(map[string]bool),
-		stateVarNames: make(map[string]bool),
+		contract:        contract,
+		db:              db,
+		locator:         locator,
+		symbolTable:     make(map[string]string),
+		symbolTypes:     make(map[string]types.TypeInfo),
+		symbolLocations: make(map[string]string),
+		symbolRefIDs:    make(map[string]string),
+		taintTable:      make(map[string][]string),
+		paramNames:      make(map[string]bool),
+		stateVarNames:   make(map[string]bool),
 	}
 
-	// Add modifier parameters to symbol table
+	// Add the owning contract's state variables so writes/reads of them inside
+	if contract != nil {
+		for _, binding := range exactStateVariablesForAST(db, contract) {
+			sv := binding.variable
+			builder.symbolTable[sv.Name] = "state_var"
+			ti := builder.typeInfoFromTypeName(sv.TypeName, "state_var")
+			builder.symbolTypes[sv.Name] = ti
+			builder.stateVarNames[sv.Name] = true
+			builder.symbolLocations[sv.Name] = "storage"
+			builder.symbolRefIDs[sv.Name] = binding.owner.ID + "." + sv.Name
+		}
+	}
+
+	// Modifier parameters are active locals and must shadow same-named state
+	// variables in RefKind, type facts, taint, and state-write classification.
 	for _, param := range moddef.Parameters {
 		if param.Name != "" {
 			builder.symbolTable[param.Name] = "parameter"
 			builder.paramNames[param.Name] = true
 			builder.symbolTypes[param.Name] = builder.typeInfoFromTypeName(getTypeName(param.TypeName), "modifier_parameter")
-		}
-	}
-
-	// Add the owning contract's state variables so writes/reads of them inside
-	// the modifier body are resolved (is_state_var, RefKind, taint source).
-	if contract != nil {
-		for _, sv := range contract.StateVariables {
-			builder.symbolTable[sv.Name] = "state_var"
-			ti := builder.typeInfoFromTypeName(sv.TypeName, "state_var")
-			builder.symbolTypes[sv.Name] = ti
-			builder.stateVarNames[sv.Name] = true
+			builder.symbolLocations[param.Name] = param.StorageLocation
+			delete(builder.symbolRefIDs, param.Name)
 		}
 	}
 
@@ -162,51 +242,140 @@ func buildModifierASTWithLocator(moddef *ast.ModifierDefinition, contract *types
 
 // buildSymbolTable builds a symbol table for variable lookups.
 //
-// TODO(stage-3): the symbol table is currently a flat map per function,
-// so block-scoped shadowing (e.g. `{ uint x = 1; { uint x = 2; } }`)
-// produces incorrect taint classifications. A proper fix needs a scope
-// stack pushed at each `{` and popped at `}`. Tracked in
-// .vscode/2026-05-08-invariant-audit.md §1.6.
+// Contract and inherited state are seeded first, then parameters and named
+// returns. Declaration-aware block/for scopes temporarily overlay these maps
+// and restore only names declared in the exited scope.
 func (b *ASTBuilder) buildSymbolTable() {
-	// Add function parameters
-	for _, param := range b.function.Parameters {
+	// Seed contract state first. Function parameters, named returns, and later
+	// local declarations are active locals and overwrite same-named state facts.
+	for _, binding := range exactStateVariablesForAST(b.db, b.contract) {
+		sv := binding.variable
+		b.symbolTable[sv.Name] = "state_var"
+		ti := b.typeInfoFromTypeName(sv.TypeName, "state_var")
+		b.symbolTypes[sv.Name] = ti
+		b.addSemanticStateSymbol(sv.Name, binding.owner, ti)
+		b.stateVarNames[sv.Name] = true
+		b.symbolLocations[sv.Name] = "storage"
+		b.symbolRefIDs[sv.Name] = binding.owner.ID + "." + sv.Name
+	}
+
+	// Add function parameters after storage so Solidity shadowing is reflected
+	// consistently in RefKind, type facts, taint, and mutation classification.
+	for i, param := range b.function.Parameters {
 		if param.Name != "" {
 			b.symbolTable[param.Name] = "parameter"
 			ti := b.typeInfoFromTypeName(param.TypeName, "parameter")
 			b.symbolTypes[param.Name] = ti
-			b.addSemanticSymbol(param.Name, "parameter", ti)
 			b.paramNames[param.Name] = true
+			b.symbolRefIDs[param.Name] = b.parameterRefID(param.Name)
+			b.addSemanticSymbol(param.Name, "parameter", ti)
+			if b.rawFunction != nil && i < len(b.rawFunction.Parameters) && b.rawFunction.Parameters[i] != nil {
+				b.symbolLocations[param.Name] = b.rawFunction.Parameters[i].StorageLocation
+			}
 		}
-	}
-
-	// Add state variables from contract
-	for _, sv := range b.contract.StateVariables {
-		b.symbolTable[sv.Name] = "state_var"
-		ti := b.typeInfoFromTypeName(sv.TypeName, "state_var")
-		b.symbolTypes[sv.Name] = ti
-		b.addSemanticSymbol(sv.Name, "state_var", ti)
-		b.stateVarNames[sv.Name] = true
 	}
 
 	// Named return parameters are Solidity locals: inline assembly may read and
 	// assign them directly (for example `result := value`). Keep them in the
 	// surrounding symbol state so Yul writes are visible after the assignment.
-	// Add them after contract storage so the function-local name wins if it
-	// shadows a state variable.
-	for _, result := range b.function.Returns {
+	// Add them after parameters so the named local wins if it shadows either a
+	// state variable or an input parameter.
+	for i, result := range b.function.Returns {
 		if result.Name != "" {
 			b.symbolTable[result.Name] = "local_var"
 			ti := b.typeInfoFromTypeName(result.TypeName, "return_parameter")
 			b.symbolTypes[result.Name] = ti
+			delete(b.symbolRefIDs, result.Name)
+			if b.rawFunction != nil && i < len(b.rawFunction.ReturnParameters) && b.rawFunction.ReturnParameters[i] != nil {
+				b.symbolRefIDs[result.Name] = b.solidityLocalDeclarationRefID(result.Name, b.rawFunction.ReturnParameters[i])
+			}
 			b.addSemanticSymbol(result.Name, "local_var", ti)
+			if b.rawFunction != nil && i < len(b.rawFunction.ReturnParameters) && b.rawFunction.ReturnParameters[i] != nil {
+				b.symbolLocations[result.Name] = b.rawFunction.ReturnParameters[i].StorageLocation
+			}
 		}
 	}
 
 	// Note: Local variables are added during traversal
 }
 
+func (b *ASTBuilder) pushSymbolScope() {
+	b.symbolScopes = append(b.symbolScopes, make(astSymbolScope))
+}
+
+func (b *ASTBuilder) popSymbolScope() {
+	if len(b.symbolScopes) == 0 {
+		return
+	}
+	scope := b.symbolScopes[len(b.symbolScopes)-1]
+	b.symbolScopes = b.symbolScopes[:len(b.symbolScopes)-1]
+	for name, snapshot := range scope {
+		if snapshot.kindExists {
+			b.symbolTable[name] = snapshot.kind
+		} else {
+			delete(b.symbolTable, name)
+		}
+		if snapshot.typeExists {
+			b.symbolTypes[name] = snapshot.typeInfo
+		} else {
+			delete(b.symbolTypes, name)
+		}
+		if snapshot.locExists {
+			b.symbolLocations[name] = snapshot.location
+		} else {
+			delete(b.symbolLocations, name)
+		}
+		if snapshot.taintExists {
+			b.taintTable[name] = append([]string(nil), snapshot.taint...)
+		} else {
+			delete(b.taintTable, name)
+		}
+		if snapshot.refExists {
+			b.symbolRefIDs[name] = snapshot.refID
+		} else {
+			delete(b.symbolRefIDs, name)
+		}
+	}
+}
+
+func (b *ASTBuilder) declareSymbol(name, kind string, typeInfo types.TypeInfo, dataLocation string) {
+	if name == "" {
+		return
+	}
+	if len(b.symbolScopes) > 0 {
+		scope := b.symbolScopes[len(b.symbolScopes)-1]
+		if _, recorded := scope[name]; !recorded {
+			oldKind, kindExists := b.symbolTable[name]
+			oldType, typeExists := b.symbolTypes[name]
+			oldLocation, locExists := b.symbolLocations[name]
+			oldTaint, taintExists := b.taintTable[name]
+			oldRefID, refExists := b.symbolRefIDs[name]
+			scope[name] = astSymbolSnapshot{
+				kind:        oldKind,
+				kindExists:  kindExists,
+				typeInfo:    oldType,
+				typeExists:  typeExists,
+				location:    oldLocation,
+				locExists:   locExists,
+				taint:       append([]string(nil), oldTaint...),
+				taintExists: taintExists,
+				refID:       oldRefID,
+				refExists:   refExists,
+			}
+		}
+	}
+	b.symbolTable[name] = kind
+	b.symbolTypes[name] = typeInfo
+	b.symbolLocations[name] = dataLocation
+	if kind != "state_var" {
+		delete(b.symbolRefIDs, name)
+	}
+}
+
 // buildBlock builds AST nodes for a block statement
 func (b *ASTBuilder) buildBlock(parent *types.ASTNode, block *ast.Block) {
+	b.pushSymbolScope()
+	defer b.popSymbolScope()
 	for _, stmt := range block.Statements {
 		node := b.buildStatement(stmt)
 		if node != nil {
@@ -219,6 +388,13 @@ func (b *ASTBuilder) buildBlock(parent *types.ASTNode, block *ast.Block) {
 // onto the produced node. Central chokepoint so every statement node is located.
 func (b *ASTBuilder) buildStatement(stmt ast.Node) *types.ASTNode {
 	node := b.buildStatementInner(stmt)
+	if _, ok := stmt.(*ast.ExpressionStatement); ok && node != nil &&
+		(node.StartLine > 0 || node.EndLine > 0 || node.StartByte > 0 || node.EndByte > 0) {
+		// ExpressionStatement reuses the semantic expression node returned by
+		// buildExpression. Keep that expression-owned span instead of replacing
+		// it with the enclosing semicolon-inclusive statement range.
+		return node
+	}
 	b.locator.apply(node, stmt)
 	return node
 }
@@ -360,7 +536,17 @@ func (b *ASTBuilder) buildAssemblyOperationInner(op ast.Node) *types.ASTNode {
 func buildAssemblyLiteral(literal *ast.AssemblyLiteral) *types.ASTNode {
 	node := types.NewASTNode(types.KindExprLiteral)
 	node.Value = literal.Value
-	node.SetAttribute("subtype", literal.Kind)
+	if literal.Kind == "number" {
+		if strings.HasPrefix(literal.Value, "0x") || strings.HasPrefix(literal.Value, "0X") {
+			node.SetAttribute("subtype", "hex")
+			node.SetAttribute("literal_class", "numeric_hex")
+		} else {
+			node.SetAttribute("subtype", "number")
+			node.SetAttribute("literal_class", "numeric_decimal")
+		}
+	} else {
+		node.SetAttribute("subtype", literal.Kind)
+	}
 	node.SetAttribute("assembly", true)
 	return node
 }
@@ -375,7 +561,7 @@ func (b *ASTBuilder) buildAssemblyLocalDefinition(definition *ast.AssemblyLocalD
 	taintSources := b.computeTaint(expression)
 	typeInfo := b.typeFromNode(expression)
 	lhsCount := 0
-	for _, name := range definition.Names {
+	for position, name := range definition.Names {
 		if name == nil || name.Name == "" {
 			continue
 		}
@@ -383,9 +569,13 @@ func (b *ASTBuilder) buildAssemblyLocalDefinition(definition *ast.AssemblyLocalD
 		b.declareAssemblySymbol(name.Name, assemblySymbol{
 			taintSources: append([]string(nil), taintSources...),
 			typeInfo:     typeInfo,
+			refID:        b.assemblyDeclarationRefID(name.Name, position, name, definition),
 		})
-		node.AddChild(b.buildAssemblyIdentifier(name.Name))
+		identifier := b.buildAssemblyIdentifier(name.Name)
+		identifier.SetAttribute("tuple_index", strconv.Itoa(position))
+		node.AddChild(identifier)
 	}
+	node.SetAttribute("tuple_arity", strconv.Itoa(len(definition.Names)))
 	b.setAssemblyLHSCount(node, lhsCount)
 	if expression != nil {
 		node.AddChild(expression)
@@ -404,14 +594,17 @@ func (b *ASTBuilder) buildAssemblyAssignment(assignment *ast.AssemblyAssignment)
 	taintSources := b.computeTaint(expression)
 	typeInfo := b.typeFromNode(expression)
 	lhsCount := 0
-	for _, name := range assignment.Names {
+	for position, name := range assignment.Names {
 		if name == nil || name.Name == "" {
 			continue
 		}
 		lhsCount++
 		b.assignAssemblySymbol(name.Name, taintSources, typeInfo)
-		node.AddChild(b.buildAssemblyIdentifier(name.Name))
+		identifier := b.buildAssemblyIdentifier(name.Name)
+		identifier.SetAttribute("tuple_index", strconv.Itoa(position))
+		node.AddChild(identifier)
 	}
+	node.SetAttribute("tuple_arity", strconv.Itoa(len(assignment.Names)))
 	b.setAssemblyLHSCount(node, lhsCount)
 	if expression != nil {
 		node.AddChild(expression)
@@ -624,9 +817,11 @@ func (b *ASTBuilder) buildVariableDeclaration(stmt *ast.VariableDeclarationState
 			continue
 		}
 		if decl.Name != "" {
-			b.symbolTable[decl.Name] = "local_var"
 			ti := b.typeInfoFromTypeName(getTypeName(decl.TypeName), "local_var")
-			b.symbolTypes[decl.Name] = ti
+			b.declareSymbol(decl.Name, "local_var", ti, decl.StorageLocation)
+			if refID := b.solidityLocalDeclarationRefID(decl.Name, decl); refID != "" {
+				b.symbolRefIDs[decl.Name] = refID
+			}
 			b.addSemanticSymbol(decl.Name, "local_var", ti)
 		}
 	}
@@ -634,20 +829,26 @@ func (b *ASTBuilder) buildVariableDeclaration(stmt *ast.VariableDeclarationState
 	// If there's an initial value, treat it as an assignment
 	if stmt.InitialValue != nil {
 		assignNode := types.NewASTNode(types.KindStmtAssign)
+		lhsCount := 0
+		assignNode.SetAttribute("tuple_arity", strconv.Itoa(len(stmt.Variables)))
 		// Add variable identifiers
-		for _, decl := range stmt.Variables {
+		for position, decl := range stmt.Variables {
 			if decl == nil {
 				continue
 			}
-			ident := types.NewASTNode(types.KindExprIdentifier)
-			ident.Name = decl.Name
-			ident.RefKind = "local_var"
-			if b.contract != nil && b.function != nil && ident.Name != "" {
-				ident.RefID = fmt.Sprintf("%s#%s.%s.-%s", b.contract.SourceFile, b.contract.Name, b.function.Name, ident.Name)
+			lhsCount++
+			name := b.variableDeclarationIdentifierName(decl)
+			ident := b.buildNamedIdentifier(name)
+			if decl.Identifier != nil {
+				b.locator.apply(ident, decl.Identifier)
+			} else {
+				b.locator.apply(ident, decl)
 			}
-			b.applyTypeAttributes(ident, b.symbolTypes[decl.Name])
+			b.applyTypeAttributes(ident, b.symbolTypes[name])
+			ident.SetAttribute("tuple_index", strconv.Itoa(position))
 			assignNode.AddChild(ident)
 		}
+		assignNode.SetAttribute("assignment_lhs_count", strconv.Itoa(lhsCount))
 		// Add initial value
 		valueNode := b.buildExpression(stmt.InitialValue)
 		if valueNode != nil {
@@ -662,10 +863,6 @@ func (b *ASTBuilder) buildVariableDeclaration(stmt *ast.VariableDeclarationState
 						b.taintTable[child.Name] = rhsTaint
 
 						// Add missing RefID for local var if not set
-						if child.RefID == "" && b.contract != nil && b.function != nil {
-							child.RefID = fmt.Sprintf("%s#%s.%s.-%s", b.contract.SourceFile, b.contract.Name, b.function.Name, child.Name)
-						}
-
 						// Attempt to extract from source identifier
 						fromID := valueNode.RefID
 						if fromID == "" {
@@ -687,7 +884,7 @@ func (b *ASTBuilder) buildVariableDeclaration(stmt *ast.VariableDeclarationState
 								ToNode:   child,
 								Type:     "assignment",
 							}
-							if b.db.DataFlow != nil {
+							if b.db != nil && b.db.DataFlow != nil {
 								b.db.DataFlow.AddEdge(edge)
 							}
 						}
@@ -709,6 +906,35 @@ func (b *ASTBuilder) buildVariableDeclaration(stmt *ast.VariableDeclarationState
 	}
 
 	return node
+}
+
+func (b *ASTBuilder) variableDeclarationIdentifierName(declaration *ast.VariableDeclaration) string {
+	if declaration == nil {
+		return ""
+	}
+	if declaration.Name != "" {
+		return declaration.Name
+	}
+	var identifierNode ast.Node = declaration
+	if declaration.Identifier != nil {
+		if declaration.Identifier.Name != "" {
+			return declaration.Identifier.Name
+		}
+		identifierNode = declaration.Identifier
+	}
+	if b != nil && b.db != nil && b.function != nil {
+		if source := b.db.SourceFiles[b.function.SourceFile]; source != nil {
+			if rng := identifierNode.GetRange(); rng != nil && rng[0] >= 0 && rng[1] <= len(source.Content) && rng[1] > rng[0] {
+				candidate := source.Content[rng[0]:rng[1]]
+				if candidate != "" && strings.IndexFunc(candidate, func(r rune) bool {
+					return !(r == '_' || r == '$' || r >= '0' && r <= '9' || r >= 'A' && r <= 'Z' || r >= 'a' && r <= 'z')
+				}) < 0 {
+					return candidate
+				}
+			}
+		}
+	}
+	return ""
 }
 
 // buildIfStatement builds AST for if statement
@@ -770,6 +996,8 @@ func (b *ASTBuilder) buildWhileStatement(stmt *ast.WhileStatement) *types.ASTNod
 
 // buildForStatement builds AST for for loop
 func (b *ASTBuilder) buildForStatement(stmt *ast.ForStatement) *types.ASTNode {
+	b.pushSymbolScope()
+	defer b.popSymbolScope()
 	node := types.NewASTNode(types.KindStmtLoop)
 	node.SetAttribute("loop_type", "for")
 
@@ -790,20 +1018,20 @@ func (b *ASTBuilder) buildForStatement(stmt *ast.ForStatement) *types.ASTNode {
 		}
 	}
 
-	// Loop expression
-	if stmt.LoopExpression != nil {
-		// LoopExpression is an ExpressionStatement
-		loopNode := b.buildStatement(stmt.LoopExpression)
-		if loopNode != nil {
-			node.AddChild(loopNode)
-		}
-	}
-
-	// Body
+	// The body executes before the post expression.
 	if stmt.Body != nil {
 		bodyNode := b.buildStatement(stmt.Body)
 		if bodyNode != nil {
 			node.AddChild(bodyNode)
+		}
+	}
+
+	// The post expression executes before the next condition. solast-go exposes
+	// LoopExpression as a raw expression, not an ExpressionStatement.
+	if stmt.LoopExpression != nil {
+		loopNode := b.buildExpression(stmt.LoopExpression)
+		if loopNode != nil {
+			node.AddChild(loopNode)
 		}
 	}
 
@@ -1017,11 +1245,13 @@ func (b *ASTBuilder) buildNewExpression(expr *ast.NewExpression) *types.ASTNode 
 // a child, preserving identifier targets for tuple assignments.
 func (b *ASTBuilder) buildTupleExpression(expr *ast.TupleExpression) *types.ASTNode {
 	node := types.NewASTNode(types.KindExprTuple)
-	for _, comp := range expr.Components {
+	node.SetAttribute("tuple_arity", strconv.Itoa(len(expr.Components)))
+	for position, comp := range expr.Components {
 		if comp == nil {
 			continue // tuple hole, e.g. (, b) = f()
 		}
 		if compNode := b.buildExpression(comp); compNode != nil {
+			compNode.SetAttribute("tuple_index", strconv.Itoa(position))
 			node.AddChild(compNode)
 		}
 	}
@@ -1107,9 +1337,17 @@ func (b *ASTBuilder) buildFunctionCall(call *ast.FunctionCall) *types.ASTNode {
 			}
 		}
 	}
+	receiverLocation := b.expressionDataLocation(receiverExpr)
+	if isBuiltinStorageArrayMutation(callName, len(call.Arguments), receiverType, receiverLocation) {
+		callType = types.KindStmtStateMutation
+	}
 
 	node := types.NewASTNode(callType)
 	node.Name = callName
+	if callType == types.KindStmtStateMutation {
+		node.SetAttribute("operator", callName)
+		node.SetAttribute("is_state_var", b.isStateVariableReference(receiverExpr))
+	}
 	if resultType.IsKnown() {
 		b.applyTypeAttributes(node, resultType)
 	}
@@ -1127,6 +1365,9 @@ func (b *ASTBuilder) buildFunctionCall(call *ast.FunctionCall) *types.ASTNode {
 	// distinguish a tainted call receiver from tainted calldata.
 	if receiverExpr != nil {
 		if rn := b.buildExpression(receiverExpr); rn != nil {
+			if rn.Name != "" {
+				node.SetAttribute("receiver_name", rn.Name)
+			}
 			rn.SetAttribute("call_receiver", true)
 			node.AddChild(rn)
 		}
@@ -1286,6 +1527,7 @@ func (b *ASTBuilder) extractCalledSignature(args []ast.Node) string {
 func (b *ASTBuilder) buildAssignmentFromBinary(op *ast.BinaryOperation) *types.ASTNode {
 	node := types.NewASTNode(types.KindStmtAssign)
 	node.SetAttribute("operator", op.Operator)
+	node.SetAttribute("assignment_lhs_count", "1")
 
 	// Check if this is a state variable assignment
 	isStateVarAssignment := b.isStateVariableReference(op.Left)
@@ -1359,7 +1601,7 @@ func (b *ASTBuilder) buildAssignmentFromBinary(op *ast.BinaryOperation) *types.A
 					ToNode:   leftNode,
 					Type:     "assignment",
 				}
-				if b.db.DataFlow != nil {
+				if b.db != nil && b.db.DataFlow != nil {
 					b.db.DataFlow.AddEdge(edge)
 				}
 			}
@@ -1378,8 +1620,9 @@ func (b *ASTBuilder) isStateVariableReference(expr ast.Node) bool {
 
 	switch e := expr.(type) {
 	case *ast.Identifier:
-		// Simple identifier: check if it's a state variable
-		return b.stateVarNames[e.Name]
+		// Use the active symbol classification so parameters and locals that
+		// shadow a state declaration win over the declaration-name cache.
+		return b.symbolTable[e.Name] == "state_var"
 
 	case *ast.IndexAccess:
 		// Array/mapping access: arr[index] or mapping[key]
@@ -1393,6 +1636,22 @@ func (b *ASTBuilder) isStateVariableReference(expr ast.Node) bool {
 
 	default:
 		return false
+	}
+}
+
+func (b *ASTBuilder) expressionDataLocation(expr ast.Node) string {
+	if expr == nil {
+		return ""
+	}
+	switch e := expr.(type) {
+	case *ast.Identifier:
+		return b.symbolLocations[e.Name]
+	case *ast.IndexAccess:
+		return b.expressionDataLocation(e.Base)
+	case *ast.MemberAccess:
+		return b.expressionDataLocation(e.Expression)
+	default:
+		return ""
 	}
 }
 
@@ -1550,15 +1809,17 @@ func (b *ASTBuilder) buildNamedIdentifier(name string) *types.ASTNode {
 		node.RefKind = ""
 	}
 
-	// Set RefID for cross-reference (only if we have contract/function context)
-	if b.contract != nil && b.function != nil {
-		if node.RefKind == "state_var" {
+	// State references need contract context but not a function, so contextual
+	// modifier ASTs retain exact local/inherited owner IDs. Parameters and locals
+	// remain function-scoped identities.
+	if node.RefKind == "state_var" && b.contract != nil {
+		if exactRefID := b.symbolRefIDs[name]; exactRefID != "" {
+			node.RefID = exactRefID
+		} else {
 			node.RefID = fmt.Sprintf("%s#%s.%s", b.contract.SourceFile, b.contract.Name, name)
-		} else if node.RefKind == "parameter" {
-			node.RefID = fmt.Sprintf("%s#%s.%s.%s", b.contract.SourceFile, b.contract.Name, b.function.Name, name)
-		} else if node.RefKind == "local_var" {
-			node.RefID = fmt.Sprintf("%s#%s.%s.-%s", b.contract.SourceFile, b.contract.Name, b.function.Name, name)
 		}
+	} else if node.RefKind == "parameter" || node.RefKind == "local_var" {
+		node.RefID = b.refIDForSymbol(name, node.RefKind)
 	}
 
 	// An explicit flow-state entry wins even when it is empty: legal Yul writes
@@ -1570,6 +1831,9 @@ func (b *ASTBuilder) buildNamedIdentifier(name string) *types.ASTNode {
 		node.TaintSources = []string{node.RefKind}
 	}
 	b.applyTypeAttributes(node, b.symbolTypes[name])
+	if location, ok := b.symbolLocations[name]; ok && location != "" {
+		node.SetAttribute("data_location", location)
+	}
 
 	return node
 }
@@ -1579,9 +1843,7 @@ func (b *ASTBuilder) buildAssemblyIdentifier(name string) *types.ASTNode {
 		node := types.NewASTNode(types.KindExprIdentifier)
 		node.Name = name
 		node.RefKind = "local_var"
-		if b.contract != nil && b.function != nil {
-			node.RefID = fmt.Sprintf("%s#%s.%s.-%s", b.contract.SourceFile, b.contract.Name, b.function.Name, name)
-		}
+		node.RefID = symbol.refID
 		node.TaintSources = append([]string(nil), symbol.taintSources...)
 		b.applyTypeAttributes(node, symbol.typeInfo)
 		node.SetAttribute("assembly", true)
@@ -1606,6 +1868,125 @@ func (b *ASTBuilder) declareAssemblySymbol(name string, symbol assemblySymbol) {
 		b.pushAssemblyScope()
 	}
 	b.assemblyScopes[len(b.assemblyScopes)-1][name] = symbol
+}
+
+func (b *ASTBuilder) assemblyDeclarationRefID(name string, position int, declaration, definition ast.Node) string {
+	if b == nil || b.contract == nil || b.function == nil || declaration == nil || definition == nil || name == "" {
+		return ""
+	}
+	definitionRange := definition.GetRange()
+	if definitionRange == nil || definitionRange[0] < 0 || definitionRange[1] <= definitionRange[0] {
+		return ""
+	}
+	nameStart, nameEnd, ok := b.assemblyDeclarationNameSpan(name, declaration, definitionRange)
+	if !ok {
+		return ""
+	}
+	file := b.function.SourceFile
+	contractName := b.function.ContractName
+	if file == "" {
+		file = b.contract.SourceFile
+	}
+	if contractName == "" {
+		contractName = b.contract.Name
+	}
+	if b.function.Selector == "" {
+		return ""
+	}
+	functionID := types.MakeFunctionID(file, contractName, b.function.Selector)
+	if functionID == "" {
+		return ""
+	}
+	return fmt.Sprintf("%s:yul:%d:%d:%d:%d:%d:%s", functionID, position, definitionRange[0], definitionRange[1], nameStart, nameEnd, name)
+}
+
+func (b *ASTBuilder) assemblyDeclarationNameSpan(name string, declaration ast.Node, definitionRange *ast.Range) (int, int, bool) {
+	if rng := declaration.GetRange(); rng != nil && rng[0] >= 0 && rng[1] > rng[0] {
+		return rng[0], rng[1], true
+	}
+	if b == nil || b.db == nil || b.function == nil || definitionRange == nil {
+		return 0, 0, false
+	}
+	source := b.db.SourceFiles[b.function.SourceFile]
+	if source == nil || definitionRange[0] < 0 || definitionRange[1] > len(source.Content) || definitionRange[0] >= definitionRange[1] {
+		return 0, 0, false
+	}
+	declarationText := source.Content[definitionRange[0]:definitionRange[1]]
+	searchText := maskYulNonCode(declarationText)
+	if assignment := strings.Index(searchText, ":="); assignment >= 0 {
+		declarationText = declarationText[:assignment]
+		searchText = searchText[:assignment]
+	}
+	for searchFrom := 0; searchFrom < len(declarationText); {
+		relative := strings.Index(searchText[searchFrom:], name)
+		if relative < 0 {
+			break
+		}
+		start := searchFrom + relative
+		end := start + len(name)
+		leftBoundary := start == 0 || !isYulIdentifierByte(declarationText[start-1])
+		rightBoundary := end == len(declarationText) || !isYulIdentifierByte(declarationText[end])
+		if leftBoundary && rightBoundary {
+			return definitionRange[0] + start, definitionRange[0] + end, true
+		}
+		searchFrom = end
+	}
+	return 0, 0, false
+}
+
+func maskYulNonCode(source string) string {
+	masked := []byte(source)
+	for i := 0; i < len(masked); {
+		switch {
+		case i+1 < len(masked) && masked[i] == '/' && masked[i+1] == '/':
+			for i < len(masked) && masked[i] != '\n' {
+				masked[i] = ' '
+				i++
+			}
+		case i+1 < len(masked) && masked[i] == '/' && masked[i+1] == '*':
+			masked[i], masked[i+1] = ' ', ' '
+			i += 2
+			for i < len(masked) {
+				if i+1 < len(masked) && masked[i] == '*' && masked[i+1] == '/' {
+					masked[i], masked[i+1] = ' ', ' '
+					i += 2
+					break
+				}
+				if masked[i] != '\n' {
+					masked[i] = ' '
+				}
+				i++
+			}
+		case masked[i] == '\'' || masked[i] == '"':
+			quote := masked[i]
+			masked[i] = ' '
+			i++
+			for i < len(masked) {
+				current := masked[i]
+				if current != '\n' {
+					masked[i] = ' '
+				}
+				i++
+				if current == '\\' && i < len(masked) {
+					if masked[i] != '\n' {
+						masked[i] = ' '
+					}
+					i++
+					continue
+				}
+				if current == quote {
+					break
+				}
+			}
+		default:
+			i++
+		}
+	}
+	return string(masked)
+}
+
+func isYulIdentifierByte(value byte) bool {
+	return value == '_' || value == '$' || value >= '0' && value <= '9' || value >= 'A' && value <= 'Z' || value >= 'a' && value <= 'z'
 }
 
 func (b *ASTBuilder) lookupAssemblySymbol(name string) (assemblySymbol, int, bool) {
@@ -1663,6 +2044,9 @@ func (b *ASTBuilder) setAssemblyLHSCount(node *types.ASTNode, count int) {
 		b.assemblyLHS = make(map[*types.ASTNode]int)
 	}
 	b.assemblyLHS[node] = count
+	if node != nil {
+		node.SetAttribute("assignment_lhs_count", strconv.Itoa(count))
+	}
 }
 
 // runAssemblyLoopFixpoint computes the least conservative loop-head state:
@@ -1750,6 +2134,7 @@ func (b *ASTBuilder) transferAssemblyDefinition(node *types.ASTNode) {
 		b.declareAssemblySymbol(lhs.Name, assemblySymbol{
 			taintSources: append([]string(nil), taint...),
 			typeInfo:     typeInfo,
+			refID:        lhs.RefID,
 		})
 		b.observeAssemblyIdentifier(lhs)
 	}
@@ -2140,7 +2525,7 @@ func mergeAssemblySymbols(scopes []map[string]assemblySymbol) map[string]assembl
 		presentEverywhere := true
 		for _, scope := range scopes[1:] {
 			candidate, exists := scope[name]
-			if !exists {
+			if !exists || candidate.refID != first.refID {
 				presentEverywhere = false
 				break
 			}
@@ -2254,14 +2639,19 @@ func (b *ASTBuilder) buildLiteral(lit ast.Node) *types.ASTNode {
 	switch l := lit.(type) {
 	case *ast.NumberLiteral:
 		node.Value = l.Number
+		if l.SubDenomination != "" {
+			node.SetAttribute("subdenomination", l.SubDenomination)
+		}
 		// A `0x…` number literal is a hex literal semantically (a bitmask/address
 		// constant), even though the grammar calls it NumberLiteral. Tag it `hex`
 		// so value-vs-bitmask templates (e.g. incorrect-exp) can tell `10 ^ 18`
 		// (decimal, likely `**` typo) from `x ^ 0xFF` (mask).
 		if strings.HasPrefix(strings.TrimSpace(l.Number), "0x") || strings.HasPrefix(strings.TrimSpace(l.Number), "0X") {
 			node.SetAttribute("subtype", "hex")
+			node.SetAttribute("literal_class", "numeric_hex")
 		} else {
 			node.SetAttribute("subtype", "number")
+			node.SetAttribute("literal_class", "numeric_decimal")
 		}
 	case *ast.StringLiteral:
 		node.Value = l.Value
@@ -2276,6 +2666,7 @@ func (b *ASTBuilder) buildLiteral(lit ast.Node) *types.ASTNode {
 	case *ast.HexLiteral:
 		node.Value = l.Value
 		node.SetAttribute("subtype", "hex")
+		node.SetAttribute("literal_class", "hex_string")
 	}
 
 	return node

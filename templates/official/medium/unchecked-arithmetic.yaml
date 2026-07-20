@@ -33,10 +33,10 @@ query:
     # values and cannot corrupt accounting, so exclude it here. Note: this is
     # the in-template control; a genuinely vendored dependency tree (lib/,
     # node_modules/, src/@openzeppelin/) is better excluded by scan scope.
-    # Wrapped in `all:` (single item) so the bare `mutability:` — a dual
+    # Wrapped in `and:` (single item) so the bare `mutability:` — a dual
     # field with no AST-only sibling — routes to the filter/context layer
     # (a function precondition) instead of the match/AST layer.
-    - all:
+    - and:
         - mutability: "payable,nonpayable"
 
     - has:

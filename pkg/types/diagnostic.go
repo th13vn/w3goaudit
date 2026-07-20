@@ -11,12 +11,13 @@ const (
 	DiagnosticWarning DiagnosticSeverity = "warning"
 	DiagnosticError   DiagnosticSeverity = "error"
 
-	DiagnosticUnresolvedImport = "import.unresolved"
-	DiagnosticParseSkipped     = "parse.skipped"
-	DiagnosticParseRecovered   = "parse.recovered"
-	DiagnosticUnresolvedBase   = "inheritance.base_unresolved"
-	DiagnosticInvalidLocation  = "location.invalid"
-	DiagnosticIdentity         = "identity.unresolved"
+	DiagnosticUnresolvedImport    = "import.unresolved"
+	DiagnosticParseSkipped        = "parse.skipped"
+	DiagnosticParseRecovered      = "parse.recovered"
+	DiagnosticUnresolvedBase      = "inheritance.base_unresolved"
+	DiagnosticInvalidLocation     = "location.invalid"
+	DiagnosticIdentity            = "identity.unresolved"
+	DiagnosticSemanticUnsupported = "analysis.semantic_unsupported"
 )
 
 // Diagnostic is a durable record of analysis loss or noteworthy analysis

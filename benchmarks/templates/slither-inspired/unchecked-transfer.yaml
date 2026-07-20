@@ -13,8 +13,7 @@ meta:
     Use OpenZeppelin's SafeERC20 library (safeTransfer/safeTransferFrom) which
     reverts on failure, or explicitly check the return value with require().
 
-# `token_call` (v1) is IsTokenCall(kind) == (kind == call.external); v2 uses
-# `external_call` + `name:` for the same ERC20/ERC721-shaped call filtering,
+# `external_call` plus `name:` provides ERC20/ERC721-shaped call filtering,
 # so we don't trip on every external method named "transfer".
 # `stmt.assign` is included so `bool ok = token.transfer(...); require(ok);`
 # is correctly recognised as a checked call.
