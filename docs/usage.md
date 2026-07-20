@@ -86,17 +86,28 @@ w3goaudit --update      # or -u
 
 ## Competitive Benchmark
 
-Docker Compose is the only supported benchmark host entry point. The image
-contains the pinned compared scanners, and its Dockerfile derives and verifies
-the Go version directly from the repository's `go.mod`.
+The w3goaudit-only quality gate runs via the local CLI — no Docker required:
+
+```bash
+go build -o /tmp/w3goaudit ./cmd/w3goaudit
+python3 scripts/benchmark/run_benchmark.py --suite competitive --tools w3goaudit \
+  --w3goaudit-bin /tmp/w3goaudit --out benchmarks/results/latest
+python3 scripts/benchmark/assert_thresholds.py benchmarks/results/latest/benchmark.json
+```
+
+Docker Compose is the supported host entry point for the **multi-tool
+comparison** against the pinned scanners (Slither/Semgrep/4naly3er); its
+Dockerfile derives and verifies the Go version directly from the repository's
+`go.mod`.
 
 ```bash
 docker compose -f scripts/benchmark/compose.yaml run --rm benchmark
 ```
 
-The host owns only `benchmarks/results/<RUN_NAME>/`; it does not run the Python
-benchmark runner directly or install scanner toolchains. The image verifies
-the reviewed generated-lock hash for the pinned 4naly3er commit. See
+Both lanes own only `benchmarks/results/<RUN_NAME>/` at run time; durable
+results are stored as tracked dated reports in `benchmarks/`
+(`yyyy-mm-dd-<commit-slug>.md`). The image verifies the reviewed generated-lock
+hash for the pinned 4naly3er commit. See
 [`scripts/benchmark/README.md`](../scripts/benchmark/README.md) for suites and tool selection.
 
 ---

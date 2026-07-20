@@ -160,8 +160,8 @@ w3goaudit/
 ├── templates/              # WQL detection templates (embed.go embeds official/)
 │   ├── official/           # 25 curated WQL detectors, embedded as the default
 │   └── test/               # 5 WQL engine feature-exercise templates
-├── scripts/benchmark/             # Docker Compose benchmark
-│   ├── compose.yaml        # Only supported host entry point
+├── scripts/benchmark/      # Benchmark harness (local CLI; Docker for multi-tool)
+│   ├── compose.yaml        # Multi-tool comparison host entry point
 │   ├── run_benchmark.py    # CLI and sequential orchestration
 │   ├── benchmark_core.py   # Paths, indexes, process I/O, aliases, manifests
 │   ├── benchmark_adapters.py # Scanner commands + native-output normalization
@@ -861,8 +861,14 @@ go test ./pkg/...
   --template templates/official/ \
   -o test-report/
 
-# Docker Compose is the only supported benchmark host workflow. The image
-# derives and verifies Go directly from go.mod.
+# Competitive quality gate via the local CLI (no Docker).
+go build -o /tmp/w3goaudit ./cmd/w3goaudit
+python3 scripts/benchmark/run_benchmark.py --suite competitive --tools w3goaudit \
+  --w3goaudit-bin /tmp/w3goaudit --out benchmarks/results/latest
+python3 scripts/benchmark/assert_thresholds.py benchmarks/results/latest/benchmark.json
+
+# Docker Compose only for the multi-tool comparison; the image derives and
+# verifies Go directly from go.mod.
 docker compose -f scripts/benchmark/compose.yaml run --rm benchmark
 ```
 
