@@ -1,8 +1,11 @@
 # Benchmark Results Store
 
 This directory stores benchmark **results**. The benchmark harness itself
-(runner, corpora, fixtures, adapters, Docker files) lives in
-[`scripts/benchmark/`](../scripts/benchmark/README.md).
+(runner, corpora, fixtures, adapters, Docker files) lives under `scripts/`,
+which is **dev-only and git-ignored** — it is not part of a fresh clone or the
+published release. The commands below run only where a maintainer has the
+harness checked out. Benchmark-dependent Go tests skip automatically when it is
+absent.
 
 ## Layout
 

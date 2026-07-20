@@ -17,7 +17,16 @@ func TestRepositoryTemplatePackIsValidWQL(t *testing.T) {
 	}{
 		{path: "templates/official", want: 25},
 		{path: "templates/test", want: 5},
-		{path: "scripts/benchmark/templates", want: 76},
+	}
+	wantTotal := 30
+	// The benchmark template lane lives under the dev-only, git-ignored
+	// scripts/benchmark/ harness; only assert it when the harness is present.
+	if benchmarkHarnessAvailable(root) {
+		templateRoots = append(templateRoots, struct {
+			path string
+			want int
+		}{path: "scripts/benchmark/templates", want: 76})
+		wantTotal = 106
 	}
 
 	total := 0
@@ -28,8 +37,8 @@ func TestRepositoryTemplatePackIsValidWQL(t *testing.T) {
 		}
 		total += count
 	}
-	if total != 106 {
-		t.Fatalf("repository template inventory = %d, want 106", total)
+	if total != wantTotal {
+		t.Fatalf("repository template inventory = %d, want %d", total, wantTotal)
 	}
 }
 
@@ -157,6 +166,9 @@ func TestAuthoritativeWQLDocsUseCanonicalVocabulary(t *testing.T) {
 		},
 	}
 	for rel, obsoleteTerms := range staleText {
+		if strings.HasPrefix(rel, "scripts/benchmark/") && !benchmarkHarnessAvailable(root) {
+			continue // dev-only harness not checked out
+		}
 		text := readRepositoryText(t, root, rel)
 		for _, obsolete := range obsoleteTerms {
 			if strings.Contains(text, obsolete) {
@@ -231,6 +243,9 @@ func TestAuthoritativeWQLDocsUseCanonicalVocabulary(t *testing.T) {
 		},
 	}
 	for rel, obsoleteTerms := range activeVocabulary {
+		if strings.HasPrefix(rel, "scripts/benchmark/") && !benchmarkHarnessAvailable(root) {
+			continue // dev-only harness not checked out
+		}
 		text := readRepositoryText(t, root, rel)
 		for _, obsolete := range obsoleteTerms {
 			if strings.Contains(text, obsolete) {

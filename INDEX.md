@@ -38,11 +38,16 @@ finished `Database`/`Findings`, independent of the WQL template surface.
 | `pkg/report/` | Markdown/HTML/SARIF/JSON output, result folder, state matrix, workflow files, source excerpts | `pkg/report/INDEX.md` |
 | `pkg/home/` | `~/.w3goaudit` config/template-home management and release download | `pkg/home/INDEX.md` |
 | `templates/` | Official embedded WQL detector pack plus benchmark and feature-test templates | `templates/INDEX.md` |
-| `scripts/benchmark/` | Competitive analyzer benchmark harness, corpora, fixtures, adapters, and quality threshold gate (local CLI for w3goaudit; Docker Compose only for multi-tool comparison) | `scripts/benchmark/README.md` |
+| `scripts/benchmark/` | **Dev-only, git-ignored** (not in a fresh clone): competitive analyzer benchmark harness, corpora, fixtures, adapters, and quality threshold gate. Benchmark-dependent Go tests skip when it is absent. | `scripts/benchmark/README.md` |
 | `benchmarks/` | Stored benchmark results: tracked dated reports (`yyyy-mm-dd-<commit-slug>.md`) plus the Git-ignored `results/` run-output scratch directory | `benchmarks/README.md` |
 | `test-data/` | Canonical Solidity fixtures: security matrices plus core builder/engine/extract/identity cases | `test-data/README.md` |
 
 ## Benchmark Harness Map
+
+> The benchmark harness lives under `scripts/`, which is **dev-only and
+> git-ignored** — it is not part of a fresh clone or the published release. The
+> module map below describes the maintainer-local harness; benchmark-dependent
+> Go tests skip automatically when it is absent.
 
 The competitive benchmark keeps scanner and corpus-case execution sequential,
 with the Python harness divided into focused modules:

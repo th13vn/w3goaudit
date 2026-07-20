@@ -15,6 +15,12 @@ v2.0.0** canonical-WQL pack.
 
 ### Benchmark harness (local CLI + relocation)
 
+- The benchmark harness under `scripts/` is **dev-only and git-ignored** — not
+  part of a fresh clone or the published release. `benchmarks/` still tracks the
+  dated result reports (`yyyy-mm-dd-<commit-slug>.md`). Benchmark-dependent Go
+  tests skip automatically when the harness is absent, so `go test ./...` stays
+  green on a clean checkout.
+
 
 - Moved the competitive benchmark harness (runner, scoring, adapters, corpora,
   fixtures, WQL ports, Docker files, threshold gate) from `benchmarks/` to
