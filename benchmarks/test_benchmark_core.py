@@ -1,3 +1,4 @@
+import json
 import os
 import pathlib
 import subprocess
@@ -94,6 +95,66 @@ class ToolAvailabilityTest(unittest.TestCase):
             benchmark_core.prepare_requested_tool("slither", adapter)
 
 
+class CorpusCategoryOntologyTest(unittest.TestCase):
+    CORPORA = (
+        "competitive.json",
+        "decurity-semgrep-inspired.json",
+    )
+    CANONICAL_RULES = {
+        "selfdestruct": (
+            "SLITHER-SUICIDAL",
+            "DECURITY-ACCESSIBLE-SELFDESTRUCT",
+        ),
+        "controlled-delegatecall": (
+            "SLITHER-CONTROLLED-DELEGATECALL",
+            "DECURITY-DELEGATECALL-TO-ARBITRARY-ADDRESS",
+        ),
+    }
+    RETIRED_CATEGORIES = {
+        "accessible-selfdestruct",
+        "delegatecall-to-arbitrary-address",
+    }
+
+    @staticmethod
+    def _load_corpus(corpus_name):
+        return json.loads(
+            (BENCHMARKS / "corpus" / corpus_name).read_text(encoding="utf-8")
+        )
+
+    def test_synonymous_native_rules_share_canonical_categories(self):
+        for corpus_name in self.CORPORA:
+            corpus = self._load_corpus(corpus_name)
+            matcher = benchmark_core.AliasMatcher(corpus)
+
+            for category, rule_ids in self.CANONICAL_RULES.items():
+                for rule_id in rule_ids:
+                    with self.subTest(
+                        corpus=corpus_name,
+                        rule_id=rule_id,
+                        canonical_category=category,
+                    ):
+                        self.assertEqual(
+                            matcher.category_for("w3goaudit", rule_id),
+                            category,
+                        )
+
+    def test_retired_categories_are_absent(self):
+        for corpus_name in self.CORPORA:
+            with self.subTest(corpus=corpus_name):
+                corpus = self._load_corpus(corpus_name)
+                self.assertTrue(
+                    self.RETIRED_CATEGORIES.isdisjoint(corpus["categories"])
+                )
+                expected_categories = {
+                    expected["category"]
+                    for case in corpus["cases"]
+                    for expected in case["expected"]
+                }
+                self.assertTrue(
+                    self.RETIRED_CATEGORIES.isdisjoint(expected_categories)
+                )
+
+
 class ContainerOutputTest(unittest.TestCase):
     def test_result_path_inside_root_is_accepted(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -166,6 +227,68 @@ class ContainerOutputTest(unittest.TestCase):
                     run_benchmark.main()
 
             self.assertEqual(marker.read_text(encoding="utf-8"), "preserve")
+
+
+class SourceIndexLexicalSanitizerTest(unittest.TestCase):
+    @staticmethod
+    def _line_with(source: str, marker: str) -> int:
+        return next(
+            index
+            for index, line in enumerate(source.splitlines(), start=1)
+            if marker in line
+        )
+
+    def test_strings_and_block_comments_do_not_end_real_ranges(self):
+        source = r'''contract Real {
+    function target(bool ok) external {
+        require(ok, "}");
+        string memory singleQuoted = '}';
+        string memory escaped = "quote: \" slash: \\ brace: }";
+        /* } function FakeInsideComment() external { */
+        uint256 findingLine = 1;
+    }
+}
+'''
+        with tempfile.TemporaryDirectory() as tmp:
+            path = pathlib.Path(tmp) / "Real.sol"
+            path.write_text(source, encoding="utf-8")
+
+            index = benchmark_core.SourceIndex(path)
+
+            self.assertEqual(
+                index.lookup(self._line_with(source, "findingLine")),
+                ("Real", "target"),
+            )
+            self.assertNotIn(
+                "FakeInsideComment", {name for _, _, name in index.functions}
+            )
+
+    def test_multiline_lexical_state_masks_fake_declarations_and_braces(self):
+        source = r'''/*
+contract Phantom {
+    function ghost() external { }
+}
+*/
+contract Real {
+    function target() external {
+        string memory continued = "escaped quote \" and slash \\
+            } function FakeInString() external {";
+        uint256 findingLine = 1;
+    }
+}
+'''
+        with tempfile.TemporaryDirectory() as tmp:
+            path = pathlib.Path(tmp) / "Real.sol"
+            path.write_text(source, encoding="utf-8")
+
+            index = benchmark_core.SourceIndex(path)
+
+            self.assertEqual(
+                index.lookup(self._line_with(source, "findingLine")),
+                ("Real", "target"),
+            )
+            self.assertEqual([name for _, _, name in index.contracts], ["Real"])
+            self.assertEqual([name for _, _, name in index.functions], ["target"])
 
 
 class CaseSourceIndexTest(unittest.TestCase):

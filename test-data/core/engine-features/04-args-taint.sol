@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.0;
 
-// Exercises WQL feature: args (positional argument match) + tainted_from.
+// Exercises WQL feature: arg.N (positional argument match) + tainted.
 // Pattern: ERC20 transferFrom whose first argument is a caller-controlled
 // parameter (arbitrary transferFrom / approval-theft shape).
 
@@ -13,7 +13,7 @@ interface IERC20 {
 // Should be matched by feature-args-taint.yaml.
 contract VulnerableTransferFrom {
     function pull(IERC20 token, address from, uint256 amount) external {
-        token.transferFrom(from, msg.sender, amount); // arg0 tainted_from: parameter
+        token.transferFrom(from, msg.sender, amount); // arg.0 tainted: parameter
     }
 }
 

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.0;
 
-// Exercises WQL feature: match.sequence (ordered descendants).
+// Exercises WQL feature: sequence: (ordered descendants).
 // Pattern: outgoing_call followed by state_write in the same function body.
 
 // VULNERABLE: external call happens BEFORE the state update (reentrancy-shaped).

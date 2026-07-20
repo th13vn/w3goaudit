@@ -8,7 +8,7 @@ meta:
     handle ERC721 tokens. If the recipient is a contract without IERC721Receiver
     support, the NFT becomes permanently locked.
     Equivalent to 4naly3er's erc721safeTransferFrom detector.
-    Note: to reduce FPs, this targets token_call (external calls) only.
+    Note: to reduce FPs, this targets `external_call` plus the transferFrom name.
   recommendation: >
     Use safeTransferFrom() instead of transferFrom() for ERC721 transfers.
 
@@ -16,9 +16,7 @@ meta:
 # alone can't distinguish them. Restrict to contracts that inherit ERC721
 # to keep the detector usable; without this filter every ERC20
 # transferFrom call gets flagged.
-# `token_call` (v1) is IsTokenCall(kind) == (kind == call.external) — v2 has
-# no dedicated `token_call` block-kind alias, so `external_call` (call.external)
-# + `name:` is behaviorally identical.
+# `external_call` plus `name:` identifies the ERC721 method shape.
 query:
   from: function
   select: external_call

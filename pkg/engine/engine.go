@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/th13vn/w3goaudit/pkg/logging"
 	"github.com/th13vn/w3goaudit/pkg/types"
@@ -58,12 +59,6 @@ type Engine struct {
 	// want this capture pay zero cost.
 	match *matchTrace
 
-	// ipChains, when non-nil, maps an inlined-callee AST node back to the
-	// call chain the interprocedural walker followed to reach it
-	// ([entryFn, ..., hostFn]). Populated by interproceduralDescendants for
-	// the lifetime of a single match attempt; nil otherwise.
-	ipChains map[*types.ASTNode]ipPath
-
 	// locationOverride is set by SetLocationSource and consulted via
 	// locationSource(); the env var WGAUDIT_LOCATION_FROM_MATCHED_NODE takes
 	// precedence so CI/scripts can opt in without touching code.
@@ -78,16 +73,26 @@ type Engine struct {
 	// contract is visited only once). Reset at the top of Execute.
 	contractASTContract *types.Contract
 	contractASTRoot     *types.ASTNode
+
+	// modifierDeclContract / modifierDeclByName are a separate SINGLE-slot
+	// memo for guarded_by. It clones only modifier declarations from one exact
+	// contract MRO, avoiding full function/variable contract-AST construction.
+	// A new contract evicts the previous map; Execute resets both slots.
+	modifierDeclContract *types.Contract
+	modifierDeclByName   map[string]*types.ASTNode
 }
 
 // matchTrace accumulates the metadata needed to build a Finding with
 // matched-node provenance. Populated by Verify and its helpers as they
 // descend; the outer call site reads it back on success.
 type matchTrace struct {
-	// Primary is the deepest atomic-match node — the dangerous statement
-	// the rule was anchored on. Set once, on the first atomic match that
-	// fires; subsequent matches don't overwrite it.
+	// Primary is the dangerous statement the rule was anchored on. The first
+	// equal-priority atomic match wins, while traceable AST evidence may replace
+	// an earlier coarse regex/root fallback.
 	Primary *types.ASTNode
+	// primaryPriority lets exact AST evidence supersede a coarse regex/root
+	// fallback while preserving first-match behavior among equal-priority sites.
+	primaryPriority uint8
 
 	// Chain, when populated by the interprocedural matcher, lists the
 	// functions the walker traversed to reach Primary: [entry, ..., host].
@@ -100,9 +105,8 @@ type matchTrace struct {
 	ChainContracts []*types.Contract
 }
 
-// ipPath is what interproceduralDescendants stores in Engine.ipChains for
-// each inlined node so the caller can reconstruct the full reachability path
-// when a sequence/has rule eventually matches that node.
+// ipPath is stored on each interprocedural sequence-event occurrence so reused
+// callee AST pointers retain the exact entry-to-host path for that occurrence.
 type ipPath struct {
 	Functions []*types.Function
 	Contracts []*types.Contract
@@ -182,7 +186,7 @@ type Location struct {
 	Function string `json:"function,omitempty"`
 	Line     int    `json:"line,omitempty"`
 	// Precise source span of the matched node (v0.4). Col/EndLine/EndCol are
-	// 1-based; StartByte/EndByte are 0-based character offsets. Zero/omitted for
+	// 1-based; StartByte/EndByte are 0-based UTF-8 byte offsets. Zero/omitted for
 	// synthetic nodes or verifier-derived locations that lack a matched node.
 	Col       int `json:"col,omitempty"`
 	EndLine   int `json:"endLine,omitempty"`
@@ -192,16 +196,21 @@ type Location struct {
 }
 
 // RelatedLocation identifies an additional source site that contributes to a
-// multi-condition finding. Contract-scope combination rules use this to show
-// every exploitable site instead of only the first matched node.
+// multi-condition finding. Function and contract joins use this to show each
+// branch's exact matched node instead of only the first site.
 type RelatedLocation struct {
-	Label    string `json:"label,omitempty"`
-	File     string `json:"file"`
-	Contract string `json:"contract,omitempty"`
-	Function string `json:"function,omitempty"`
-	Line     int    `json:"line,omitempty"`
-	Kind     string `json:"kind,omitempty"`
-	Name     string `json:"name,omitempty"`
+	Label     string `json:"label,omitempty"`
+	File      string `json:"file"`
+	Contract  string `json:"contract,omitempty"`
+	Function  string `json:"function,omitempty"`
+	Line      int    `json:"line,omitempty"`
+	Col       int    `json:"col,omitempty"`
+	EndLine   int    `json:"endLine,omitempty"`
+	EndCol    int    `json:"endCol,omitempty"`
+	StartByte int    `json:"startByte,omitempty"`
+	EndByte   int    `json:"endByte,omitempty"`
+	Kind      string `json:"kind,omitempty"`
+	Name      string `json:"name,omitempty"`
 }
 
 // ReachabilityPath records the call chain a finding traversed from an entry
@@ -271,9 +280,9 @@ const (
 	// comes from the matched AST node. Maintained for backward compatibility.
 	LocationSourceVerifier LocationSource = iota
 
-	// LocationSourceMatchedNode points every field of Location at the matched
-	// AST node — the dangerous statement. Aligns w3goaudit with SARIF /
-	// Slither / Semgrep conventions. Selected via the env var
+	// LocationSourceMatchedNode takes the precise range from the matched AST
+	// node and host identity from the final trace hop or enclosing declaration.
+	// Aligns w3goaudit with SARIF / Slither / Semgrep conventions. Selected via the env var
 	// WGAUDIT_LOCATION_FROM_MATCHED_NODE=1 or the --location-source matched
 	// CLI flag. Will become the default in a future major version.
 	LocationSourceMatchedNode
@@ -321,44 +330,178 @@ func newFinding(tmpl *Template, loc Location) *Finding {
 
 // Execute runs a template. Single-query templates execute their one
 // QueryBlock; or:-composed templates (len(Queries) > 1) execute every block
-// and union the findings under this template's meta, deduplicating branches
-// that matched the same source location. Branch order is template order, so
-// output stays deterministic.
+// and union the findings under this template's meta. Only the same precise
+// matched site from an earlier branch is deduplicated; duplicates within one
+// branch and imprecise legacy findings remain. Branch order is deterministic.
 func (e *Engine) Execute(tmpl *Template) []*Finding {
+	normalized, err := normalizedTemplateCompatibilityCopy(tmpl)
+	if err != nil {
+		e.logf("Template compatibility normalization failed: %v", err)
+		return nil
+	}
+	tmpl = normalized
 	if len(tmpl.Queries) <= 1 {
 		return e.executeQuery(tmpl)
 	}
 
 	var findings []*Finding
-	seen := make(map[string]bool)
+	seenEarlier := make(map[matchedSiteSpan]*matchedSiteKinds)
 	for _, q := range tmpl.Queries {
 		branch := *tmpl
 		branch.Query = q
 		branch.Queries = nil
+		var branchIdentities []matchedSiteOccurrence
+		replacedUnknown := make(map[matchedSiteSpan]bool)
 		for _, f := range e.executeQuery(&branch) {
-			key := findingIdentityKey(f)
-			if seen[key] {
+			identity, precise := findingMatchedSiteIdentity(f)
+			if precise && matchedSiteSeen(seenEarlier, identity) {
 				continue
 			}
-			seen[key] = true
+			if precise && identity.Kind != "" {
+				kinds := seenEarlier[identity.Span]
+				if kinds != nil && kinds.Unknown && !replacedUnknown[identity.Span] {
+					findings[kinds.UnknownIndex] = f
+					replacedUnknown[identity.Span] = true
+					branchIdentities = append(branchIdentities, matchedSiteOccurrence{
+						Identity: identity, FindingIndex: kinds.UnknownIndex,
+					})
+					continue
+				}
+			}
 			findings = append(findings, f)
+			if precise {
+				branchIdentities = append(branchIdentities, matchedSiteOccurrence{
+					Identity: identity, FindingIndex: len(findings) - 1,
+				})
+			}
+		}
+		for _, occurrence := range branchIdentities {
+			rememberMatchedSite(seenEarlier, occurrence.Identity, occurrence.FindingIndex)
 		}
 	}
 	return findings
 }
 
-// findingIdentityKey identifies a finding by its matched source location, so
-// two or: branches anchoring on the same node yield one finding while
-// distinct sites are kept.
-func findingIdentityKey(f *Finding) string {
-	l := f.Location
-	return fmt.Sprintf("%s|%s|%s|%d|%d|%d|%d|%d|%d",
-		l.File, l.Contract, l.Function, l.Line, l.Col, l.EndLine, l.EndCol, l.StartByte, l.EndByte)
+type matchedSiteSpan struct {
+	File                string
+	ByByte              bool
+	StartByte, EndByte  int
+	StartLine, StartCol int
+	EndLine, EndCol     int
+}
+
+type matchedSiteIdentity struct {
+	Span matchedSiteSpan
+	Kind string
+}
+
+type matchedSiteOccurrence struct {
+	Identity     matchedSiteIdentity
+	FindingIndex int
+}
+
+type matchedSiteKinds struct {
+	Unknown      bool
+	UnknownIndex int
+	Known        map[string]bool
+}
+
+func matchedSiteSeen(seen map[matchedSiteSpan]*matchedSiteKinds, identity matchedSiteIdentity) bool {
+	kinds := seen[identity.Span]
+	if kinds == nil {
+		return false
+	}
+	if identity.Kind == "" {
+		return kinds.Unknown || len(kinds.Known) > 0
+	}
+	return kinds.Known[identity.Kind]
+}
+
+func rememberMatchedSite(seen map[matchedSiteSpan]*matchedSiteKinds, identity matchedSiteIdentity, findingIndex int) {
+	kinds := seen[identity.Span]
+	if kinds == nil {
+		kinds = &matchedSiteKinds{UnknownIndex: -1}
+		seen[identity.Span] = kinds
+	}
+	if identity.Kind == "" {
+		if !kinds.Unknown && len(kinds.Known) == 0 {
+			kinds.Unknown = true
+			kinds.UnknownIndex = findingIndex
+		}
+		return
+	}
+	kinds.Unknown = false
+	kinds.UnknownIndex = -1
+	if kinds.Known == nil {
+		kinds.Known = make(map[string]bool)
+	}
+	kinds.Known[identity.Kind] = true
+}
+
+// findingMatchedSiteIdentity returns the canonical precise source identity of
+// a finding. Kind is optional provenance: an unknown kind matches the same span
+// with a known kind in either branch order, while two different known kinds at
+// one span remain distinct. Coarse declaration/function locations deliberately
+// return false so legacy or synthetic findings are retained.
+func findingMatchedSiteIdentity(f *Finding) (matchedSiteIdentity, bool) {
+	if f == nil {
+		return matchedSiteIdentity{}, false
+	}
+	kind := ""
+	if f.PrimaryAST != nil {
+		kind = f.PrimaryAST.Kind
+		file := finalReachabilityFile(f)
+		if file == "" {
+			// Contract matches have no call path. For a real-span primary,
+			// buildContractLocation supplies the exact owning file needed for a
+			// canonical identity. A location-less primary remains imprecise, so
+			// its zero span returns no canonical identity below.
+			file = f.Location.File
+		}
+		if file != "" {
+			if f.PrimaryAST.EndByte > f.PrimaryAST.StartByte {
+				return matchedSiteIdentity{Span: matchedSiteSpan{
+					File: file, ByByte: true, StartByte: f.PrimaryAST.StartByte, EndByte: f.PrimaryAST.EndByte,
+				}, Kind: kind}, true
+			}
+			if preciseLineSpan(f.PrimaryAST.Start, f.PrimaryAST.StartCol, f.PrimaryAST.End, f.PrimaryAST.EndCol) {
+				return matchedSiteIdentity{Span: matchedSiteSpan{
+					File: file, StartLine: f.PrimaryAST.Start, StartCol: f.PrimaryAST.StartCol,
+					EndLine: f.PrimaryAST.End, EndCol: f.PrimaryAST.EndCol,
+				}, Kind: kind}, true
+			}
+		}
+	}
+
+	loc := f.Location
+	if loc.File != "" && loc.EndByte > loc.StartByte {
+		return matchedSiteIdentity{Span: matchedSiteSpan{
+			File: loc.File, ByByte: true, StartByte: loc.StartByte, EndByte: loc.EndByte,
+		}, Kind: kind}, true
+	}
+	if loc.File != "" && preciseLineSpan(loc.Line, loc.Col, loc.EndLine, loc.EndCol) {
+		return matchedSiteIdentity{Span: matchedSiteSpan{
+			File: loc.File, StartLine: loc.Line, StartCol: loc.Col, EndLine: loc.EndLine, EndCol: loc.EndCol,
+		}, Kind: kind}, true
+	}
+	return matchedSiteIdentity{}, false
+}
+
+func finalReachabilityFile(f *Finding) string {
+	if f == nil || f.Reachability == nil || len(f.Reachability.Steps) == 0 {
+		return ""
+	}
+	return f.Reachability.Steps[len(f.Reachability.Steps)-1].File
+}
+
+func preciseLineSpan(startLine, startCol, endLine, endCol int) bool {
+	return startLine > 0 && startCol > 0 && endLine > 0 && endCol > 0
 }
 
 func (e *Engine) executeQuery(tmpl *Template) []*Finding {
 	e.logf("Executing template: %s (ID: %s, Scope: %s)", tmpl.Meta.Title, tmpl.Meta.ID, tmpl.Query.Scope)
 	e.contractASTContract, e.contractASTRoot = nil, nil // fresh per Execute
+	e.modifierDeclContract, e.modifierDeclByName = nil, nil
 	var findings []*Finding
 
 	switch tmpl.Query.Scope {
@@ -427,17 +570,49 @@ func (e *Engine) executeOnSourceFiles(tmpl *Template) []*Finding {
 			continue
 		}
 		for _, match := range re.FindAllStringIndex(content, -1) {
-			line := 1 + strings.Count(content[:match[0]], "\n")
-			contract, fn := e.lookupSourceLine(path, line)
-			findings = append(findings, newFinding(tmpl, Location{
-				File:     path,
-				Contract: contract,
-				Function: fn,
-				Line:     line,
-			}))
+			loc := sourceMatchLocation(path, content, match[0], match[1])
+			loc.Contract, loc.Function = e.lookupSourceLine(path, loc.Line)
+			findings = append(findings, newFinding(tmpl, loc))
 		}
 	}
 	return findings
+}
+
+// sourceMatchLocation converts a regexp's UTF-8 byte range into the source
+// units used by findings: zero-based half-open bytes and one-based half-open
+// Unicode-code-point columns.
+func sourceMatchLocation(path, content string, startByte, endByte int) Location {
+	if startByte < 0 {
+		startByte = 0
+	}
+	if startByte > len(content) {
+		startByte = len(content)
+	}
+	if endByte < startByte {
+		endByte = startByte
+	}
+	if endByte > len(content) {
+		endByte = len(content)
+	}
+	startLine, startCol := sourceEndpoint(content, startByte)
+	endLine, endCol := sourceEndpoint(content, endByte)
+	return Location{
+		File:      path,
+		Line:      startLine,
+		Col:       startCol,
+		EndLine:   endLine,
+		EndCol:    endCol,
+		StartByte: startByte,
+		EndByte:   endByte,
+	}
+}
+
+func sourceEndpoint(content string, byteOffset int) (line, col int) {
+	prefix := content[:byteOffset]
+	line = 1 + strings.Count(prefix, "\n")
+	lineStart := strings.LastIndex(prefix, "\n") + 1
+	col = utf8.RuneCountInString(content[lineStart:byteOffset]) + 1
+	return line, col
 }
 
 func (e *Engine) lookupSourceLine(path string, line int) (string, string) {
@@ -460,7 +635,7 @@ func (e *Engine) lookupSourceLine(path string, line int) (string, string) {
 	}
 	if content := e.sourceContent(path); content != "" {
 		for _, contract := range contracts {
-			start, end := sourceContractRange(content, contract.Name)
+			start, end := contractLineRange(contract, content)
 			if start <= line && line <= end {
 				return contract.Name, ""
 			}
@@ -523,7 +698,7 @@ func (e *Engine) contractSource(contract *types.Contract) string {
 	if content == "" {
 		return ""
 	}
-	start, end := sourceContractRange(content, contract.Name)
+	start, end := contractLineRange(contract, content)
 	return e.sourceSnippet(contract.SourceFile, start, end)
 }
 
@@ -563,6 +738,17 @@ func sourceContractRange(content, name string) (int, int) {
 		return idx + 1, sourceBlockEnd(lines, idx)
 	}
 	return 0, 0
+}
+
+func contractLineRange(contract *types.Contract, content string) (int, int) {
+	if contract != nil && contract.StartLine > 0 &&
+		contract.EndLine >= contract.StartLine {
+		return contract.StartLine, contract.EndLine
+	}
+	if contract == nil {
+		return 0, 0
+	}
+	return sourceContractRange(content, contract.Name)
 }
 
 func sourceBlockEnd(lines []string, startIdx int) int {
@@ -705,10 +891,7 @@ func (e *Engine) executeOnAllContracts(tmpl *Template) []*Finding {
 				continue
 			}
 		}
-		trace := &matchTrace{}
-		e.match = trace
-		matched := e.VerifyAtContract(contract, tmpl.Query.Match)
-		e.match = nil
+		trace, matched := e.matchContractWithTrace(contract, tmpl.Query.Match)
 		if matched {
 			f := newFinding(tmpl, e.buildContractLocation(trace, contract))
 			e.enrichFindingFromTrace(f, trace, nil, contract)
@@ -735,10 +918,7 @@ func (e *Engine) executeOnMainContracts(tmpl *Template) []*Finding {
 				continue
 			}
 		}
-		trace := &matchTrace{}
-		e.match = trace
-		matched := e.VerifyAtContract(contract, tmpl.Query.Match)
-		e.match = nil
+		trace, matched := e.matchContractWithTrace(contract, tmpl.Query.Match)
 		if matched {
 			f := newFinding(tmpl, e.buildContractLocation(trace, contract))
 			e.enrichFindingFromTrace(f, trace, nil, contract)
@@ -762,11 +942,12 @@ func (e *Engine) executeOnContractsByKind(tmpl *Template, kind types.ContractKin
 				continue
 			}
 		}
-		if e.VerifyAtContract(contract, tmpl.Query.Match) {
-			findings = append(findings, newFinding(tmpl, Location{
-				File:     contract.SourceFile,
-				Contract: contract.Name,
-			}))
+		trace, matched := e.matchContractWithTrace(contract, tmpl.Query.Match)
+		if matched {
+			f := newFinding(tmpl, e.buildContractLocation(trace, contract))
+			e.enrichFindingFromTrace(f, trace, nil, contract)
+			e.enrichContractRelatedLocations(f, contract, tmpl.Query.Match)
+			findings = append(findings, f)
 		}
 	}
 
@@ -782,19 +963,25 @@ func (e *Engine) executeOnAllFunctions(tmpl *Template) []*Finding {
 		e.currentSourceFile = e.db.SourceFiles[contract.SourceFile]
 
 		for _, fn := range contract.Functions {
+			if fn == nil {
+				continue
+			}
 			// Apply filter if present
 			if tmpl.Query.Filter != nil {
 				if !e.VerifyAtFunction(fn, *tmpl.Query.Filter, contract) {
 					continue
 				}
 			}
-			if e.VerifyAtFunction(fn, tmpl.Query.Match, contract) {
-				findings = append(findings, newFinding(tmpl, Location{
-					File:     contract.SourceFile,
-					Contract: fn.ContractName,
-					Function: fn.Name,
-					Line:     fn.StartLine,
-				}))
+			trace, matched := e.matchFunctionWithTrace(fn, contract, tmpl.Query.Match, false)
+			if matched {
+				locationFile := fn.SourceFile
+				if locationFile == "" {
+					locationFile = contract.SourceFile
+				}
+				f := newFinding(tmpl, e.buildLocation(trace, fn, contract, locationFile))
+				e.enrichFindingFromTrace(f, trace, fn, contract)
+				e.enrichFunctionRelatedLocations(f, fn, contract, tmpl.Query.Match, false)
+				findings = append(findings, f)
 			}
 		}
 
@@ -837,16 +1024,14 @@ func (e *Engine) executeOnEntryFunctions(tmpl *Template) []*Finding {
 			}
 			// Set up the per-attempt match trace so Verify can capture the
 			// primary AST node + (for IP matches) the call chain.
-			trace := &matchTrace{}
-			e.match = trace
-			matched := e.VerifyAtFunctionWithCallees(fn, tmpl.Query.Match, contract)
-			e.match = nil
+			trace, matched := e.matchFunctionWithTrace(fn, contract, tmpl.Query.Match, true)
 			if !matched {
 				continue
 			}
 			loc := e.buildLocation(trace, fn, fnContract, locationFile)
 			f := newFinding(tmpl, loc)
 			e.enrichFindingFromTrace(f, trace, fn, fnContract)
+			e.enrichFunctionRelatedLocations(f, fn, contract, tmpl.Query.Match, true)
 			findings = append(findings, f)
 		}
 
@@ -856,43 +1041,100 @@ func (e *Engine) executeOnEntryFunctions(tmpl *Template) []*Finding {
 	return findings
 }
 
+// matchFunctionWithTrace executes one function verifier path with an isolated
+// provenance trace. The prior trace is always restored so nested enrichment
+// attempts cannot leak state into the surrounding match.
+func (e *Engine) matchFunctionWithTrace(fn *types.Function, contract *types.Contract, rule Rule, withCallees bool) (*matchTrace, bool) {
+	trace := &matchTrace{}
+	prior := e.match
+	e.match = trace
+	defer func() { e.match = prior }()
+
+	matched := false
+	if withCallees {
+		matched = e.VerifyAtFunctionWithCallees(fn, rule, contract)
+	} else {
+		matched = e.VerifyAtFunction(fn, rule, contract)
+	}
+	if !matched {
+		return nil, false
+	}
+	return trace, true
+}
+
+// matchContractWithTrace executes contract verification with an isolated
+// provenance trace and restores any surrounding trace on return.
+func (e *Engine) matchContractWithTrace(contract *types.Contract, rule Rule) (*matchTrace, bool) {
+	trace := &matchTrace{}
+	prior := e.match
+	e.match = trace
+	defer func() { e.match = prior }()
+
+	if !e.VerifyAtContract(contract, rule) {
+		return nil, false
+	}
+	return trace, true
+}
+
 // buildLocation chooses the Finding.Location fields based on the active
-// LocationSource. With LocationSourceMatchedNode, every field comes from the
-// matched AST node (the dangerous statement); with LocationSourceVerifier
-// (the default today) the function/contract come from the verifier-function
-// context — preserving today's behavior for callers that haven't opted in.
+// LocationSource. With LocationSourceMatchedNode, the precise range comes from
+// the matched AST node and host identity prefers the final trace hop; with
+// LocationSourceVerifier (the default today) the function/contract come from
+// the verifier-function context — preserving today's behavior for callers that
+// haven't opted in.
 func (e *Engine) buildLocation(trace *matchTrace, verifierFn *types.Function, verifierContract *types.Contract, fallbackFile string) Location {
 	if trace != nil && trace.Primary != nil && e.locationSource() == LocationSourceMatchedNode {
-		hostName, hostContract, hostFile, hostLine := e.hostFunctionFor(trace.Primary)
+		var hostName, hostContract, hostFile string
+		if len(trace.Chain) > 0 {
+			idx := len(trace.Chain) - 1
+			if fn := trace.Chain[idx]; fn != nil {
+				hostName = fn.Name
+				hostContract = fn.ContractName
+				hostFile = fn.SourceFile
+			}
+			if idx < len(trace.ChainContracts) && trace.ChainContracts[idx] != nil {
+				if hostContract == "" {
+					hostContract = trace.ChainContracts[idx].Name
+				}
+				if hostFile == "" {
+					hostFile = trace.ChainContracts[idx].SourceFile
+				}
+			}
+		}
+		declName, declContract, declFile, _ := e.hostFunctionFor(trace.Primary)
+		if hostName == "" {
+			hostName = declName
+		}
+		if hostContract == "" {
+			hostContract = declContract
+		}
+		if hostFile == "" {
+			hostFile = declFile
+		}
+		if verifierFn != nil {
+			if hostName == "" {
+				hostName = verifierFn.Name
+			}
+			if hostContract == "" {
+				hostContract = verifierFn.ContractName
+			}
+			if hostFile == "" {
+				hostFile = verifierFn.SourceFile
+			}
+		}
+		if verifierContract != nil {
+			if hostContract == "" {
+				hostContract = verifierContract.Name
+			}
+			if hostFile == "" {
+				hostFile = verifierContract.SourceFile
+			}
+		}
 		if hostFile == "" {
 			hostFile = fallbackFile
 		}
-		if hostContract == "" && verifierContract != nil {
-			hostContract = verifierContract.Name
-		}
-		if hostName == "" && verifierFn != nil {
-			hostName = verifierFn.Name
-		}
-		if hostLine == 0 {
-			// Interior AST nodes now carry precise source spans (v0.4), so
-			// the primary node's StartLine is the normal precise-anchor
-			// path here, not a fallback; only drop to the host function's
-			// StartLine when the primary node genuinely lacks one (e.g. a
-			// synthetic node).
-			if trace.Primary.StartLine > 0 {
-				hostLine = trace.Primary.StartLine
-			} else if len(trace.Chain) > 0 {
-				if last := trace.Chain[len(trace.Chain)-1]; last != nil {
-					hostLine = last.StartLine
-				}
-			} else if verifierFn != nil {
-				hostLine = verifierFn.StartLine
-			}
-		}
-		loc := Location{File: hostFile, Contract: hostContract, Function: hostName, Line: hostLine}
-		if hostLine == trace.Primary.StartLine {
-			applyNodeSpan(&loc, trace.Primary)
-		}
+		loc := Location{File: hostFile, Contract: hostContract, Function: hostName, Line: trace.Primary.StartLine}
+		applyNodeSpan(&loc, trace.Primary)
 		return loc
 	}
 	// Default (today's behavior): verifier function/contract; matched-node line if available.
@@ -918,8 +1160,11 @@ func (e *Engine) buildContractLocation(trace *matchTrace, contract *types.Contra
 	if trace == nil || trace.Primary == nil {
 		return loc
 	}
+	if trace.Primary.StartLine <= 0 {
+		return loc
+	}
 
-	hostName, hostContract, hostFile, hostLine := e.hostFunctionFor(trace.Primary)
+	hostName, hostContract, hostFile, _ := e.hostFunctionFor(trace.Primary)
 	if hostFile != "" {
 		loc.File = hostFile
 	}
@@ -929,14 +1174,8 @@ func (e *Engine) buildContractLocation(trace *matchTrace, contract *types.Contra
 	if hostName != "" {
 		loc.Function = hostName
 	}
-	if hostLine > 0 {
-		loc.Line = hostLine
-	} else if trace.Primary.StartLine > 0 {
-		loc.Line = trace.Primary.StartLine
-	}
-	if loc.Line == trace.Primary.StartLine {
-		applyNodeSpan(&loc, trace.Primary)
-	}
+	loc.Line = trace.Primary.StartLine
+	applyNodeSpan(&loc, trace.Primary)
 	return loc
 }
 
@@ -978,7 +1217,7 @@ func (e *Engine) enrichFindingFromTrace(f *Finding, trace *matchTrace, verifierF
 				Contract:   fn.ContractName,
 				Function:   fn.Name,
 				Visibility: string(fn.Visibility),
-				File:       stepFile(chainContracts, i),
+				File:       stepFile(fn, chainContracts, i),
 				// The function's StartLine is the anchor for intermediate
 				// hops in the chain, where we only have the function-level
 				// context. Interior AST nodes carry precise source spans
@@ -1006,11 +1245,27 @@ func (e *Engine) enrichFindingFromTrace(f *Finding, trace *matchTrace, verifierF
 // stepFile returns the source file of the contract hosting hop i, or "" when
 // the contract is unknown. Used so a cross-contract reachability chain can
 // render each hop at its own file rather than the primary file.
-func stepFile(chainContracts []*types.Contract, i int) string {
+func stepFile(fn *types.Function, chainContracts []*types.Contract, i int) string {
+	if fn != nil && fn.SourceFile != "" {
+		return fn.SourceFile
+	}
 	if i >= 0 && i < len(chainContracts) && chainContracts[i] != nil {
 		return chainContracts[i].SourceFile
 	}
 	return ""
+}
+
+func (e *Engine) enrichFunctionRelatedLocations(f *Finding, fn *types.Function, contract *types.Contract, r Rule, withCallees bool) {
+	if f == nil || fn == nil || len(r.All) == 0 {
+		return
+	}
+	for i, branch := range r.All {
+		trace, matched := e.matchFunctionWithTrace(fn, contract, branch, withCallees)
+		if !matched || trace.Primary == nil {
+			continue
+		}
+		f.Related = append(f.Related, e.relatedLocationFromTrace(trace, fn, contract, contractBranchLabel(branch, i)))
+	}
 }
 
 func (e *Engine) enrichContractRelatedLocations(f *Finding, contract *types.Contract, r Rule) {
@@ -1028,8 +1283,10 @@ func (e *Engine) enrichContractRelatedLocations(f *Finding, contract *types.Cont
 	seen := make(map[string]bool)
 	for i, branch := range rules {
 		label := contractBranchLabel(branch, i)
-		for _, related := range e.collectContractRelatedLocations(root, branch, label) {
-			key := related.File + "|" + related.Contract + "|" + related.Function + "|" + related.Label + "|" + strconv.Itoa(related.Line)
+		for _, related := range e.collectContractRelatedLocations(root, contract, branch, label) {
+			key := fmt.Sprintf("%s|%s|%s|%s|%s|%s|%d|%d|%d|%d|%d|%d",
+				related.File, related.Contract, related.Function, related.Label, related.Kind, related.Name,
+				related.Line, related.Col, related.EndLine, related.EndCol, related.StartByte, related.EndByte)
 			if seen[key] {
 				continue
 			}
@@ -1039,7 +1296,24 @@ func (e *Engine) enrichContractRelatedLocations(f *Finding, contract *types.Cont
 	}
 }
 
-func (e *Engine) collectContractRelatedLocations(root *types.ASTNode, r Rule, label string) []RelatedLocation {
+func (e *Engine) collectContractRelatedLocations(root *types.ASTNode, contract *types.Contract, r Rule, label string) []RelatedLocation {
+	rootTrace, rootMatched := e.matchASTWithTrace(root, r)
+	if rootMatched && rootTrace.Primary == root {
+		return []RelatedLocation{{
+			Label:     label,
+			File:      contract.SourceFile,
+			Contract:  contract.Name,
+			Line:      root.StartLine,
+			Col:       root.StartCol,
+			EndLine:   root.EndLine,
+			EndCol:    root.EndCol,
+			StartByte: root.StartByte,
+			EndByte:   root.EndByte,
+			Kind:      root.Kind,
+			Name:      root.Name,
+		}}
+	}
+
 	// The function-targeting sub-rule(s) of this branch. A branch like
 	// `contains: { kind: decl.function, ... }` matches a function as a
 	// descendant of the contract root; we re-identify which function(s) satisfy
@@ -1057,26 +1331,87 @@ func (e *Engine) collectContractRelatedLocations(root *types.ASTNode, r Rule, la
 			return true
 		}
 		for i := range fnRules {
-			if e.Verify(n, fnRules[i]) {
-				out = append(out, e.relatedLocationForNode(n, label))
+			trace, matched := e.matchASTWithTrace(n, fnRules[i])
+			if matched && trace.Primary != nil {
+				out = append(out, e.relatedLocationFromTrace(trace, nil, nil, label))
 				break
 			}
 		}
 		return true
 	})
+	if len(out) == 0 && rootMatched && rootTrace.Primary != nil {
+		return []RelatedLocation{e.relatedLocationFromTrace(rootTrace, nil, contract, label)}
+	}
 	return out
 }
 
-func (e *Engine) relatedLocationForNode(node *types.ASTNode, label string) RelatedLocation {
-	hostName, hostContract, hostFile, hostLine := e.hostFunctionFor(node)
+func (e *Engine) matchASTWithTrace(node *types.ASTNode, rule Rule) (*matchTrace, bool) {
+	trace := &matchTrace{}
+	prior := e.match
+	e.match = trace
+	defer func() { e.match = prior }()
+	if !e.verify(node, rule) {
+		return nil, false
+	}
+	return trace, true
+}
+
+func (e *Engine) relatedLocationFromTrace(trace *matchTrace, verifierFn *types.Function, verifierContract *types.Contract, label string) RelatedLocation {
+	if trace == nil || trace.Primary == nil {
+		return RelatedLocation{Label: label}
+	}
+	node := trace.Primary
+	hostName, hostContract, hostFile, _ := e.hostFunctionFor(node)
+	if len(trace.Chain) > 0 {
+		idx := len(trace.Chain) - 1
+		if fn := trace.Chain[idx]; fn != nil {
+			hostName = fn.Name
+			hostContract = fn.ContractName
+			if fn.SourceFile != "" {
+				hostFile = fn.SourceFile
+			}
+		}
+		if idx < len(trace.ChainContracts) && trace.ChainContracts[idx] != nil {
+			if hostContract == "" {
+				hostContract = trace.ChainContracts[idx].Name
+			}
+			if hostFile == "" {
+				hostFile = trace.ChainContracts[idx].SourceFile
+			}
+		}
+	}
+	if verifierFn != nil {
+		if hostName == "" {
+			hostName = verifierFn.Name
+		}
+		if hostContract == "" {
+			hostContract = verifierFn.ContractName
+		}
+		if hostFile == "" {
+			hostFile = verifierFn.SourceFile
+		}
+	}
+	if verifierContract != nil {
+		if hostContract == "" {
+			hostContract = verifierContract.Name
+		}
+		if hostFile == "" {
+			hostFile = verifierContract.SourceFile
+		}
+	}
 	return RelatedLocation{
-		Label:    label,
-		File:     hostFile,
-		Contract: hostContract,
-		Function: hostName,
-		Line:     hostLine,
-		Kind:     node.Kind,
-		Name:     node.Name,
+		Label:     label,
+		File:      hostFile,
+		Contract:  hostContract,
+		Function:  hostName,
+		Line:      node.StartLine,
+		Col:       node.StartCol,
+		EndLine:   node.EndLine,
+		EndCol:    node.EndCol,
+		StartByte: node.StartByte,
+		EndByte:   node.EndByte,
+		Kind:      node.Kind,
+		Name:      node.Name,
 	}
 }
 

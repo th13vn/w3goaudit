@@ -7,7 +7,8 @@
 **Key Features:**
 - AST-based Solidity parsing via [solast-go](https://github.com/th13vn/solast-go), with precise source
   locations on both AST nodes and declarations: one-based Unicode-code-point
-  columns and zero-based half-open UTF-8 byte offsets
+  columns and zero-based half-open UTF-8 byte offsets. These are not LSP
+  positions, whose lines and characters are zero-based and commonly UTF-16.
 - Recursive import resolution with remapping support
 - Durable source/build diagnostics with source-cache parity and optional
   fail-closed imports (`--strict-imports`)
@@ -16,7 +17,7 @@
 - C3 linearization for proper inheritance resolution
 - Comprehensive call graph with recursive tracing
 - Per-function effects analysis (state writes, guards, access control)
-- WQL template-based vulnerability detection (`select`/`from`/`where`)
+- WQL template-based vulnerability detection (`meta` plus one `query:` block)
 - Result-folder output: `overview.md`, `findings.md`, `results.sarif`, `run.log`, a machine-readable `data/`
   (including extension-facing `nav.json`/`explorer.json`), and per-main-contract workflow files + a
   state-change matrix; opt-in HTML mirror
@@ -32,13 +33,14 @@
 **1. Contract Database Construction**
 - Parses Solidity source files into a structured database
 - Resolves inheritance hierarchies using C3 linearization
-- Calculates function selectors (4-byte keccak256)
+- Stores canonical function text in `Function.Selector` and its four-byte
+  Keccak value in `Function.Signature`
 - Builds call graphs tracking all function invocations
 - Identifies main contracts and entry points
 
 **2. Security Analysis**
-- Executes user-defined WQL templates against the database
-  (`select`/`from`/`where`); removed top-level `query:` documents are rejected
+- Executes user-defined WQL templates against the database. The strict loader
+  rejects `select`/`from`/`where` outside the required `query:` block.
 - Detects patterns like reentrancy, access control issues, dangerous calls
 - Supports taint analysis for tracking user-controlled input, including
   context-sensitive propagation through internal helper calls
@@ -48,6 +50,7 @@
 
 **3. Reporting**
 - A single opinionated **result folder** per scan (overview, findings, SARIF, run.log, JSON data/)
+- `overview.md` is the report index and links to detailed artifacts
 - Per-entry-function workflow files (signature, auth, guards, branch conditions, state effects, call workflow)
 - A per-contract state-change matrix (state var → writers → reaching entry points)
 - An extension-facing data layer — `data/nav.json` (symbol navigation index) and
@@ -119,10 +122,10 @@ w3goaudit/
 │   ├── engine/             # Template execution
 │   │   ├── engine.go       # Query execution engine
 │   │   ├── template.go     # Template loading, parsing, normalization
-│   │   ├── wql_v2.go       # WQL parser + lowering to evaluator Rule IR
-│   │   ├── wql_v2_catalog.go # v2 block-kind/attribute/preset name tables
+│   │   ├── wql.go          # WQL parser + lowering to evaluator Rule IR
+│   │   ├── wql_catalog.go  # WQL block-kind/attribute/preset name tables
 │   │   ├── verify.go       # WQL rule verification (recursive Verify)
-│   │   └── presets.go      # Built-in presets (unAuthenticated, unCheckedSender, unLocked)
+│   │   └── presets.go      # Built-in property presets
 │   │
 │   ├── home/               # ~/.w3goaudit config + template home
 │   │   └── home.go         # config.yml load/init, release download (zipball), --update-templates
@@ -201,6 +204,8 @@ w3goaudit/
   when a candidate target is missing or not a regular file
 - Canonical `ResolvedImports` provenance is persisted for exact identity after
   database-cache round-trips
+- Occurrence-level `ImportBindings` preserve raw/canonical paths plus named and
+  namespace aliases, including repeated imports with different local names
 - Path canonicalization (`EvalSymlinks` + `Clean`) so symlink/relative
   aliases don't double-load the same file
 - UTF-8 BOM stripping so pragma/import regexes work on BOM-prefixed sources
@@ -220,13 +225,18 @@ w3goaudit/
 1. **Parse Files** - Extract contracts, functions, state vars from AST
 2. **Build ASTs & Semantic Facts** - Create simplified AST trees for function
    bodies, intra-procedural data flow, and lightweight type facts for symbols,
-   casts, and call receivers
-3. **Calculate Selectors** - Generate function signatures and selectors
+   casts, and call receivers. Solidity `for` children use runtime order:
+   initialization, condition, body, then post.
+3. **Calculate Selectors** - Store canonical text such as
+   `transfer(address,uint256)` in `Function.Selector` and its four-byte Keccak
+   value in `Function.Signature`
 4. **Build Inheritance** - Apply **canonical** C3 linearization (forward-order
    "no-tail" merge over the reversed base list — the MRO solc computes, not a
    divergence-prone heuristic; cycle-safe — `A is B; B is A` errors out instead
    of panicking). `LinearizedBaseIDs` stores exact `file#Contract` identities;
    ambiguous bases remain unresolved and diagnostic instead of being guessed.
+   Exact lookup consumes serialized import bindings, so `Parent` and `V.Base`
+   resolve only in the canonical imported source.
 5. **Build Call Graph** - Resolve all function calls (deterministic iteration
    order). A post-pass (`ResolveSuperAcrossLeaves`) makes `super` resolution
    context-aware: `super.f()` binds against the linearization of the most-derived
@@ -234,7 +244,12 @@ w3goaudit/
    in **every** instantiation leaf's MRO (sound union, additive + deduplicated),
    not just the textual contract's own MRO. This closes a reachability
    false-negative on cooperative-diamond `super` chains.
-6. **Calculate Entry Points** - Identify main contracts and public/external functions
+   Parsed calls with known arity never resolve a same-name declaration of the
+   wrong arity; exact target fields remain empty and one durable
+   `identity.unresolved` diagnostic records the observed arity.
+6. **Calculate Entry Points** - Identify main contracts and public/external
+   functions, deduplicating active inherited implementations by canonical
+   selector so the most-derived override wins while overloads remain distinct
 7. **Analyze Per-Function Effects** - Walk each function's AST and record durable
    `FunctionEffects`: the state variables it writes (with write kind), its guards
    (`require`/`assert`/`revert` and `if`/ternary branch conditions), and its auth
@@ -267,13 +282,18 @@ interface/contract methods with the same names.
   `where` or a query-level `and:`/`or:` composition; all 106 official,
   benchmark, and feature-test templates use it). Unknown keys at any level
   are rejected by the strict parser. `TemplateDoc.lower()`
-  (`pkg/engine/wql_v2.go`) compiles the document into evaluator `Rule` IR
+  (`pkg/engine/wql.go`) compiles the document into evaluator `Rule` IR
   before matching, taint, and reachability run. Full load-time validation includes:
   required metadata, rule-placement (`filter:` vs `match:`), regex validity,
   known presets, known kinds. Directory loading fails closed by default; use
   `--ignore-invalid-templates` only for ad-hoc mixed rule folders.
-- Parse WQL logic (`all`/`any`/`not`/`sequence`/`has`/`in`) with bounded recursion
-  (`MaxRuleRecursionDepth = 64`)
+- Require every query-level `and:` branch to expose a positive reportable
+  anchor and traceable AST evidence; absence-only and regex-only branches fail
+  at load, while regex may refine an AST-anchored branch. Select-less sequences
+  require positive actionable evidence in their first step.
+- Parse WQL logic (`and`/`any`/`not`/`sequence`/`has`/`in`) with bounded recursion
+  (`MaxRuleRecursionDepth = 64`), including supported nested `Attr` maps/slices;
+  cycles and depth 65 fail closed while shared DAGs remain valid
 - Recursive `arg.N` constraint propagation through nested rules
 - Process-wide compiled-regex cache
 - Verify match rules against functions/contracts
@@ -285,22 +305,35 @@ interface/contract methods with the same names.
 - Context-sensitive internal-call taint: `_helper(from)` keeps the callee
   parameter user-controlled, while `_helper(msg.sender)` is treated as sender
   identity rather than arbitrary user input
-- `sequence` is control-flow aware via branch-arm exclusivity: matches in the
+- Caller identity recognizes only `msg.sender`, `tx.origin`, and an exact
+  zero-argument internal `_msgSender()` helper. Same-named identifiers,
+  external calls, unresolved calls, and nonzero overloads retain their normal
+  provenance.
+- `sequence` uses an execution-event partial order: statements retain source
+  order; call preludes and non-call operand/value expressions precede their
+  enclosing effect; calls precede inlined callees; distinct pre-effect siblings
+  remain unordered. Nested receiver/option calls are recorded once in the
+  callgraph. It is also control-flow aware
+  via branch-arm exclusivity: matches in the
   `then`/`else` of an `if`, the two arms of a ternary, or the body vs a `catch`
   clause of a `try/catch` cannot form a sequence (not a full CFG — loops stay
   straight-line)
 - Recursive internal call tracing from entrypoints with a bounded depth guard
   (`MaxInterproceduralTaintDepth = 12`)
 - Contract-scope AST matching through a synthetic `decl.contract` root whose
-  children are resolved function ASTs from the C3 linearized inheritance chain;
-  same-contract combination rules can match local and inherited functions
-  without raw source regexes
+  children retain exact contract, function, variable, parameter, and modifier
+  declaration kinds and spans from the C3 linearized inheritance chain. Active
+  functions are deduplicated by canonical selector, so the most-derived
+  override wins while overloads remain distinct; same-contract combination
+  rules can match local and inherited declarations without raw source regexes
 - Generate findings with locations
 - Transactional matched-node attribution: failed candidate branches roll back
   provisional `PrimaryAST` capture, so reports point at the node that actually
   satisfied the rule.
-- Multi-site contract findings can populate `Finding.Related`, allowing reports
-  to show every contributing matched site rather than only the first match.
+- Multi-site function and contract findings populate `Finding.Related`,
+  including deterministic contract/file sites for positive synthetic roots,
+  so reports show every labeled contributing branch rather than only the first
+  match.
 
 **Thread-safety:** `Engine` is **not safe for concurrent use** — it carries
 per-scan context fields. SDK callers wanting parallelism must allocate one
@@ -482,6 +515,11 @@ supported multi-tool host workflow remains:
 docker compose -f benchmarks/compose.yaml run --rm benchmark
 ```
 
+Fallback Semgrep/4naly3er source attribution uses one length- and
+newline-preserving Solidity sanitizer for declaration matching and brace
+counting. Comments, quoted strings, and escapes are masked so fake declarations
+and quoted braces cannot move a finding to the wrong scope.
+
 **Code:** [benchmarks/](../benchmarks)
 
 ---
@@ -611,25 +649,31 @@ function _processWithdraw() internal {
 - Entry point identification
 
 **WQL Query Language**
-- Public source is `meta` plus `query:` (unknown keys rejected at every
-  level); `query:` composes with `and:`/`or:` one level deep. `select` is
+- A WQL document is meta plus one query: block. Unknown keys are rejected at every
+  level; `query:` composes with `and:`/`or:` one level deep. `select` is
   scalar and may be omitted
-  only when `where` supplies a complete scope-root matcher (for example a
-  top-level sequence or contract-root regex/structural rule).
+  in a where-only query when `where` supplies actionable AST evidence; that
+  form defaults to `entry_function`. Context-only where clauses are rejected.
 - The loader lowers source documents into evaluator `Rule` IR; the
   underlying `Template`/`QueryBlock`/`Rule` values are execution IR, not a
   second public YAML schema
-- Logic operators: all, any, not, sequence
+- Logic operators: and, any, not, sequence
 - Traversal: `has` (descendants), `in` (ancestors)
 - Atomic matchers: `block:` (kind), `name:` (regex), bare attribute keys, `preset:`, `regex:`
 - Context matchers: `modifier`, `base`, `func_name`, `visibility`, `mutability`,
   `guarded_by`, `version`, `has_param`
-- Taint analysis: `tainted: parameter|state_var|local_var|sender` source tracking
+- `guarded_by` evaluates an inline guard or an exact applied modifier body;
+  modifier names alone do not imply access control
+- Taint analysis: `tainted: parameter|state_var|local_var|sender|user_controlled`
+  source tracking; `user_controlled` is parameter or caller-identity taint
 - Call-specific: `arg.N:` keys
-- Semantic groups: outgoing_call, eth_transfer, delegatecall, check/guard, token_call, state_write/state_read, selfdestruct
-- Presets (intuitive polarity): `access_controlled`, `caller_checked`,
-  `reentrancy_guarded` (mapped to evaluator presets through `presetToIR`);
-  parameter-controlled data is explicit as `tainted: parameter`
+- Semantic groups: outgoing_call, eth_transfer, delegatecall, check/guard,
+  external_call, state_write/state_read, selfdestruct. `state_write` includes
+  assignments, storage-array `push`/`pop`, state-targeted `delete`/`++`/`--`,
+  and `asm.sstore`; storage mutations are not call nodes.
+- Presets are property-true checks: `access_controlled`, `caller_checked`, and
+  `reentrancy_guarded`; ordinary `not:` expresses the property's absence.
+  Parameter-only provenance remains explicit as `tainted: parameter`.
 
 **Extract Subcommands (11 total)**
 - Canonical order widest→narrowest: `main`, `entry`, `inheritance`, `statevar`, `selector`, `involve`, `workflow`, `bundle`, `context`, `source`, `diff`
@@ -663,8 +707,10 @@ function _processWithdraw() internal {
     indentation (`.`, `..`, `...`) and line numbers per hop; Markdown also
     renders `All matched sites` plus full function excerpts for
     `Finding.Related`
-- Bug location is hardcoded to the best provenance: the dangerous-node
-  `file:line:col` anchor plus the reachability chain and fix-here pointer
+- Finding locations default to verifier attribution with the matched node's
+  line. SDK callers or `WGAUDIT_LOCATION_FROM_MATCHED_NODE=1` can instead use
+  the matched node's enclosing declaration for every location field. Both
+  modes preserve precise primary-node spans, reachability, and fix-here context.
 
 **Configuration & Distribution**
 - `~/.w3goaudit/config.yml` (defaults overridable by flags), managed by `pkg/home`
@@ -734,7 +780,6 @@ function _processWithdraw() internal {
 **Performance**
 - Parallel file parsing
 - Incremental builds (only reparse changed files)
-- Database caching
 - Stream processing for large projects
 
 **Template Ecosystem**

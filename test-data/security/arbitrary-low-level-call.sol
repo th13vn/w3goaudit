@@ -24,7 +24,7 @@ contract Safe_ArbitraryLowLevelCall {
         owner = msg.sender;
     }
 
-    // GOOD: same shape, but access-controlled (preset unAuthenticated excludes it)
+    // GOOD: same shape, but access-controlled (not: access_controlled excludes it)
     function execute(address target, bytes calldata data) external onlyOwner {
         (bool ok, ) = target.call(data);
         require(ok, "call failed");

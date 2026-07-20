@@ -19,7 +19,7 @@ query:
   select: binary
   where:
     - operator: "\\*"
-    - all:
+    - and:
         - has:
             block: identifier
             name: (?i)price

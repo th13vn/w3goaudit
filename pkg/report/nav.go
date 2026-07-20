@@ -74,7 +74,7 @@ func BuildNavJSON(db *types.Database) *NavJSON {
 		}
 	}
 	for _, e := range db.CallGraph.Edges {
-		if e == nil || e.From == "" || e.To == "" {
+		if e == nil || e.From == "" || !e.Resolved || !exactNavFunctionTarget(db, e.To) {
 			continue
 		}
 		file, _, _ := types.ParseFunctionID(e.From) // caller's file for the call-site range
@@ -106,7 +106,13 @@ func BuildNavJSON(db *types.Database) *NavJSON {
 		if nav.Callers[i].Caller != nav.Callers[j].Caller {
 			return nav.Callers[i].Caller < nav.Callers[j].Caller
 		}
-		return nav.Callers[i].Site.StartLine < nav.Callers[j].Site.StartLine
+		if nav.Callers[i].Site.StartLine != nav.Callers[j].Site.StartLine {
+			return nav.Callers[i].Site.StartLine < nav.Callers[j].Site.StartLine
+		}
+		if nav.Callers[i].Site.StartCol != nav.Callers[j].Site.StartCol {
+			return nav.Callers[i].Site.StartCol < nav.Callers[j].Site.StartCol
+		}
+		return nav.Callers[i].Site.StartByte < nav.Callers[j].Site.StartByte
 	})
 	sort.Slice(nav.InterfaceImpl, func(i, j int) bool {
 		if nav.InterfaceImpl[i].Interface != nav.InterfaceImpl[j].Interface {
@@ -120,6 +126,30 @@ func BuildNavJSON(db *types.Database) *NavJSON {
 		return nav.InterfaceImpl[i].Implementation < nav.InterfaceImpl[j].Implementation
 	})
 	return nav
+}
+
+func exactNavFunctionTarget(db *types.Database, id string) bool {
+	file, contractName, selector := types.ParseFunctionID(id)
+	if file == "" || contractName == "" || selector == "" {
+		return false
+	}
+	contract := db.GetContractByID(types.MakeContractID(file, contractName))
+	if contract == nil {
+		return false
+	}
+	for _, fn := range contract.Functions {
+		if fn == nil {
+			continue
+		}
+		functionKey := fn.Selector
+		if functionKey == "" {
+			functionKey = fn.Name
+		}
+		if functionKey == selector {
+			return true
+		}
+	}
+	return false
 }
 
 // resolveInterfaceImpls materializes interface-method -> concrete-implementation

@@ -122,8 +122,77 @@ def norm_rule(rule: str | None) -> str:
     return (rule or "").strip().lower()
 
 
-def strip_comments(line: str) -> str:
-    return line.split("//", 1)[0]
+def sanitize_solidity_source(source: str) -> str:
+    """Mask Solidity comments and quoted strings without moving positions."""
+    masked: list[str] = []
+    state = "code"
+    index = 0
+    while index < len(source):
+        char = source[index]
+        next_char = source[index + 1] if index + 1 < len(source) else ""
+
+        if state == "code":
+            if char == "/" and next_char == "/":
+                masked.extend((" ", " "))
+                state = "line_comment"
+                index += 2
+                continue
+            if char == "/" and next_char == "*":
+                masked.extend((" ", " "))
+                state = "block_comment"
+                index += 2
+                continue
+            if char == "'":
+                masked.append(" ")
+                state = "single_quote"
+                index += 1
+                continue
+            if char == '"':
+                masked.append(" ")
+                state = "double_quote"
+                index += 1
+                continue
+            masked.append(char)
+            index += 1
+            continue
+
+        if state == "line_comment":
+            if char in "\r\n":
+                masked.append(char)
+                state = "code"
+            else:
+                masked.append(" ")
+            index += 1
+            continue
+
+        if state == "block_comment":
+            if char == "*" and next_char == "/":
+                masked.extend((" ", " "))
+                state = "code"
+                index += 2
+                continue
+            masked.append(char if char in "\r\n" else " ")
+            index += 1
+            continue
+
+        quote = "'" if state == "single_quote" else '"'
+        if char == "\\":
+            masked.append(" ")
+            index += 1
+            if index < len(source):
+                escaped = source[index]
+                masked.append(escaped if escaped in "\r\n" else " ")
+                index += 1
+            continue
+        if char == quote:
+            masked.append(" ")
+            state = "code"
+            index += 1
+            continue
+        masked.append(char if char in "\r\n" else " ")
+        index += 1
+
+    return "".join(masked)
 
 
 class SourceIndex:
@@ -136,7 +205,9 @@ class SourceIndex:
 
     def __init__(self, path: Path) -> None:
         self.path = path
-        self.lines = path.read_text(encoding="utf-8").splitlines()
+        source = path.read_text(encoding="utf-8")
+        self.lines = source.splitlines()
+        self.sanitized_lines = sanitize_solidity_source(source).splitlines()
         self.contracts = self._build_ranges(
             r"\b(contract|interface|library)\s+([A-Za-z_][A-Za-z0-9_]*)"
         )
@@ -160,8 +231,8 @@ class SourceIndex:
     def _build_ranges(self, pattern: str) -> list[tuple[int, int, str]]:
         out: list[tuple[int, int, str]] = []
         rx = re.compile(pattern)
-        for idx, raw in enumerate(self.lines):
-            match = rx.search(strip_comments(raw))
+        for idx, text in enumerate(self.sanitized_lines):
+            match = rx.search(text)
             if match:
                 name = match.group(2)
                 out.append((idx + 1, self._block_end(idx), name))
@@ -171,8 +242,7 @@ class SourceIndex:
         out: list[tuple[int, int, str]] = []
         function_rx = re.compile(r"\bfunction\s+([A-Za-z_][A-Za-z0-9_]*)")
         special_rx = re.compile(r"^\s*(receive|fallback)\s*\(")
-        for idx, raw in enumerate(self.lines):
-            text = strip_comments(raw)
+        for idx, text in enumerate(self.sanitized_lines):
             match = function_rx.search(text)
             name = ""
             if match:
@@ -188,8 +258,8 @@ class SourceIndex:
     def _block_end(self, start_idx: int) -> int:
         depth = 0
         seen_open = False
-        for idx in range(start_idx, len(self.lines)):
-            text = strip_comments(self.lines[idx])
+        for idx in range(start_idx, len(self.sanitized_lines)):
+            text = self.sanitized_lines[idx]
             for char in text:
                 if char == "{":
                     depth += 1
@@ -200,7 +270,7 @@ class SourceIndex:
                 return idx + 1
             if not seen_open and ";" in text:
                 return idx + 1
-        return len(self.lines)
+        return len(self.sanitized_lines)
 
 
 class CaseSourceIndex:

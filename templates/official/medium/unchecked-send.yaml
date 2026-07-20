@@ -18,7 +18,7 @@ meta:
     - https://github.com/crytic/slither/wiki/Detector-Documentation#unchecked-send
     - https://swcregistry.io/docs/SWC-104
 
-# `call.builtin.send` has no dedicated v2 block-kind alias — only the broader
+# `call.builtin.send` has no dedicated WQL block-kind alias — only the broader
 # `eth_transfer` semantic group (transfer/send/lowlevel .call/asm.call). Since
 # only `.send(...)` calls carry the node name "send" among that group,
 # `select: eth_transfer` + `name: ^send$` narrows to exactly the same nodes.

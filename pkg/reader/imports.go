@@ -23,6 +23,21 @@ type importToken struct {
 func extractImports(content string) []string {
 	imports := make([]string, 0)
 	seen := make(map[string]struct{})
+	for _, importPath := range extractImportOccurrences(content) {
+		if _, exists := seen[importPath]; exists {
+			continue
+		}
+		seen[importPath] = struct{}{}
+		imports = append(imports, importPath)
+	}
+	return imports
+}
+
+// extractImportOccurrences returns every syntactically valid import path in
+// authored order. Unlike extractImports, repeated paths remain distinct so the
+// reader and builder can attach different aliases to each occurrence.
+func extractImportOccurrences(content string) []string {
+	imports := make([]string, 0)
 
 	for pos := 0; ; {
 		tok, ok := nextImportToken(content, pos)
@@ -39,10 +54,6 @@ func extractImports(content string) []string {
 			continue
 		}
 		pos = end
-		if _, exists := seen[importPath]; exists {
-			continue
-		}
-		seen[importPath] = struct{}{}
 		imports = append(imports, importPath)
 	}
 

@@ -32,20 +32,38 @@ source/contract before source position and name. This keeps serialized data-flow
 edges deterministic even when two files declare the same contract, function,
 modifier, and line layout.
 
+Phase 1 also enriches the reader's occurrence-aligned
+`SourceFile.ImportBindings` with solast-go `UnitAlias` and `SymbolAliases`.
+Named and namespace aliases therefore remain serialized for exact inheritance,
+semantic type, library, callgraph, entry-point, and cache resolution.
+
 ### effects.go
 Phase-7 per-function effects analysis.
 
 - `analyzeEffects()` iterates every contract's functions, computing
   `types.FunctionEffects` keyed by function ID.
 - State writes are detected from `stmt.assign` nodes flagged `is_state_var`
-  (kind `assign`/`compound`), `delete` unary ops, and `asm.sstore`.
+  (kind `assign`/`compound`), `stmt.state_mutation` storage-array `push`/`pop`,
+  state-targeted `delete`/`++`/`--` unary ops, and `asm.sstore`.
+  Mutation targets follow only the lvalue root: index/member nodes recurse
+  through their base/receiver, never through index expressions or unrelated
+  descendants. Local targets therefore stay local even when their index is a
+  state variable.
 - Guards come from `check.require`/`check.assert`/`check.revert`/`stmt.if`
   nodes; their condition text is reconstructed from the AST via `astText`
   (rendered from the tree, not sliced from source text — even though nodes
   now carry `StartLine`/`StartCol`/`StartByte`, below). `StateWrite.Line` /
   `Guard.Line` are populated from each node's `StartLine` (v0.4).
-- Auth: function modifiers plus `msg.sender`/`tx.origin` references found in
-  guard conditions. Consumed by `pkg/report` (`state_matrix.go`, `bundle.go`).
+- Auth: function modifiers remain descriptive metadata, while
+  `AuthInfo.Controlled` delegates to `Function.IsAccessControlled(db)` so only
+  exact modifier bodies and invocation arguments, inline caller checks, or
+  recursively resolved internal auth helpers prove privileged access. Names
+  alone never prove authorization, and observational `if` conditions or
+  false-polarity checks do not count. Normal execution must require the
+  authorization predicate to be true, through `require`/`assert` or an
+  equivalent negated-revert gate. `msg.sender`/`tx.origin` references in guard
+  conditions remain available as descriptive sender-check metadata.
+  Consumed by `pkg/report` (`state_matrix.go`, `bundle.go`).
 
 ### verbose.go
 Deprecated compatibility logging infrastructure.
@@ -123,7 +141,9 @@ Builds simplified AST trees for function bodies.
 - `BuildFunctionAST()` - Convert raw AST to simplified tree; applies its own
   span as the function-body root. The exported compatibility wrapper obtains
   source content from `db.SourceFiles`; the builder's internal path reuses the
-  cached per-file locator.
+  cached per-file locator. A nil database remains SDK-compatible: direct state
+  symbols come from the provided contract with exact owner RefIDs, while only
+  inherited lookup is unavailable.
 - `BuildModifierAST(moddef)` - Original one-argument SDK compatibility API.
 - `BuildModifierASTWithContext(moddef, contract, db)` - Contextual modifier
   builder used by new callers. Takes the owning contract + db so the modifier body's identifier references resolve
@@ -131,7 +151,9 @@ Builds simplified AST trees for function bodies.
   pass the owning contract — `buildASTs` builds a modifier→contract map from
   `db.Contracts` since `types.Modifier` has no contract back-reference. Building
   a modifier AST with `nil` context (the old signature) silently missed every
-  state-write/taint fact inside modifier bodies.
+  state-write/taint fact inside modifier bodies. With context, local and exact
+  inherited state identifiers receive owner RefIDs even though modifiers have
+  no function context; parameter/local IDs remain function-dependent.
 
 **Interior-node locations (v0.4):** every interior node is stamped via a
 dispatch-wrapper chokepoint rather than ad hoc call sites, so no statement or
@@ -161,7 +183,7 @@ Kinds use dot-notation (the `Kind*` constants in `pkg/types/ast.go`):
 
 | Category | Kinds |
 |----------|-------|
-| Statements | `stmt.assign`, `stmt.loop`, `stmt.if`, `stmt.try_catch`, `stmt.emit`, `stmt.return`, `stmt.block`, `stmt.unchecked` |
+| Statements | `stmt.assign`, `stmt.state_mutation`, `stmt.loop`, `stmt.if`, `stmt.try_catch`, `stmt.emit`, `stmt.return`, `stmt.block`, `stmt.unchecked` |
 | Expressions | `expr.identifier`, `expr.literal`, `expr.binary_op`, `expr.unary_op`, `expr.member_access`, `expr.index_access`, `expr.conditional`, `expr.tuple` |
 | Calls | `call.internal`, `call.external`, `call.lowlevel.*`, `call.builtin.*`, `call.create` |
 | Checks | `check.require`, `check.assert`, `check.revert` |
@@ -172,12 +194,19 @@ Kinds use dot-notation (the `Kind*` constants in `pkg/types/ast.go`):
   (NOT as a `require`-style call) and produce a `check.revert` node, with the
   revert arguments attached as children for `args:` matching.
 - `do { ... } while (c)` produces a `stmt.loop` with `loop_type=do_while`.
+- Solidity `for` children use runtime order: initialization, condition, body,
+  then post expression. Optional initialization, condition, and post clauses
+  are omitted safely.
 - `unchecked { ... }` produces a `stmt.unchecked` block; its body statements and
   calls are preserved.
 - Compound assignments `%= &= |= ^= <<= >>=` (as well as `= += -= *= /=`) produce
   `stmt.assign` and participate in state-write / taint analysis.
-- Tuple assignment `(a, b) = (b, a)` produces an `expr.tuple` node preserving each
-  component.
+- Tuple expressions and declaration-style tuple assignments preserve exact
+  positions through serialized `tuple_index` child attributes and a
+  `tuple_arity` root attribute. Holes do not renumber later components.
+  Multi-target assignments also persist `assignment_lhs_count`, including Yul
+  definitions and assignments, so cache-loaded semantic lowering separates all
+  LHS values from the single RHS exactly.
 - `new Contract(args)` produces a `call.create` node (and a call-graph creation edge).
 - Inline-assembly `ok := delegatecall(...)` (an `AssemblyAssignment`, no `let`) has
   its RHS classified (`asm.delegatecall`, `asm.call`, …) instead of being dropped;
@@ -190,6 +219,26 @@ Kinds use dot-notation (the `Kind*` constants in `pkg/types/ast.go`):
   `a := b; b := source`) without duplicating AST nodes. Identifier taints seen
   on later iterations are unioned into the existing sink nodes, and the stable
   head remains the after-state so the zero-iteration path is preserved.
+- Each Yul `let` binding receives a scope-distinct RefID containing its exact
+  function identity, binding position, declaration span, name span, and name.
+  Reads and assignments reuse that RefID through lexical shadowing. When exact
+  source provenance is unavailable, the builder leaves RefID empty rather than
+  inventing pointer-based identity.
+- Function selectors are computed from canonical parameter types before Phase 2
+  AST construction. Parameter, named-return, local, tuple-target, and Yul RefIDs
+  therefore remain distinct across overloads. Direct SDK or legacy inputs with
+  no canonical selector leave those function-scoped RefIDs empty instead of
+  falling back to a bare function name.
+- Every Solidity local declaration uses the exact function ID plus its stable
+  declaration byte range and name. Nested block declarations that shadow the
+  same name therefore receive distinct roots, all reads and assignments reuse
+  the active declaration root, and scope exit restores the outer root. Missing
+  selector or declaration provenance leaves the local RefID empty so semantic
+  lowering can fail closed.
+- Yul declaration-name recovery masks comments and quoted strings while
+  preserving byte positions before it searches for the code-level `:=`
+  delimiter, so misleading names or delimiters in comments and strings cannot
+  become declaration provenance.
 
 **Call Classification:**
 
@@ -216,6 +265,40 @@ one-argument interface method named `transfer` being treated as an ETH transfer.
 | `revert(...)` / `revert CustomError()` | any | `check.revert` | |
 | `foo()` (named) | any | `call.internal` | |
 | `pool.swap(...)` (any other member) | any | `call.external` | |
+| dynamic storage `array.push(...)` / `array.pop()` | push 0/1, pop 0 | `stmt.state_mutation` | Builtin only for raw `storage` data location and valid builtin arity; `is_state_var` is true only for an exact state lvalue root |
+| memory/calldata `array.push/pop` extension | library arity | `call.external` AST + exact library callgraph edge | `using L for T[]` resolution is preserved; method name alone never suppresses the call |
+| fixed-array or extension-only-arity `push/pop` | library arity | `call.external` AST + exact library callgraph edge | Not a dynamic-array builtin |
+
+"state_write" matches state assignments, storage-array "push"/"pop",
+state-targeted "delete"/"++"/"--", and assembly "sstore". Storage-array
+mutations are not calls. Phase 5 therefore does not emit callgraph edges for
+real builtin array `push`/`pop` operations. Known storage parameters and local
+storage aliases use `stmt.state_mutation` with `is_state_var=false`, avoiding a
+false outgoing call while keeping effects and WQL fail closed.
+
+State-array classification consults `symbolTable`, the active symbol
+classification, rather than the declaration-only state-name set. A local
+storage alias that shadows a state-array declaration therefore does not gain
+`stmt.state_mutation` or `is_state_var` merely from its name.
+Symbol seeding follows Solidity shadowing precedence in every AST construction
+path: contract state first, then function or modifier parameters, then named
+returns and traversal-time locals. The same order is used for detached
+modifier-argument expressions, so `RefKind`, semantic type facts, taint, and
+state-write classification agree when a parameter shadows storage.
+Solidity block and for-initializer scopes snapshot only declared names and
+restore their prior kind, type, taint, raw data location, and exact state RefID
+on exit. Assignments to existing outer variables are not rolled back.
+
+Phase 2 seeds inherited state variables base-first through exact
+`ResolveContractNameExact` results from parsed source/import bindings, skipping
+unresolved or ambiguous bases rather than guessing. Phase 5 uses
+`Database.LinearizedContracts` in reverse order for base-first state seeding.
+Derived declarations and then parameters/locals retain shadowing precedence.
+
+Raw Solidity data location is tracked privately for state (`storage`), raw
+parameters, named returns, and local declarations. This fact, dynamic-array
+shape, and builtin arity jointly distinguish array builtins from same-named
+library extensions.
 
 **`FunctionCallOptions` preservation:** the `{value: x, gas: y, salt: z}`
 modifier map on a low-level call is no longer dropped at parse time
@@ -235,7 +318,11 @@ children with `attr.call_receiver = true`, e.g. `target` in
 `target.delegatecall(data)` or `to` in `to.transfer(amount)`. The engine's
 `args:` matcher skips this metadata child, so `args.0` still means the first
 Solidity argument. Templates can now distinguish tainted receivers from tainted
-calldata.
+calldata. When the direct receiver child has a name, that name is also copied
+onto the selected call node as `receiver_name`. This lets WQL constrain the
+direct receiver without matching nested argument or call-option descendants.
+`builder_test.go` pins fresh materialization and JSON round-trip persistence of
+this additive fact independently of the engine's legacy-cache fallback.
 
 **Semantic type facts:** `semantic.go` and `ASTBuilder` infer lightweight
 `TypeInfo` for parameters, state variables, local declarations, simple
@@ -270,6 +357,12 @@ Unknown or complex expressions keep the previous heuristic behavior.
   literal (e.g. `0xFF`) is tagged `hex`, not `number`, even though the grammar
   classifies it `NumberLiteral` — so value-vs-bitmask templates (incorrect-exp)
   treat `10 ^ 18` (decimal, likely `**` typo) differently from `x ^ 0xFF` (mask).
+- Literal AST attributes also preserve `literal_class` as `numeric_decimal`,
+  `numeric_hex`, or `hex_string`, plus the original numeric
+  `subdenomination`. This keeps hexadecimal numbers distinct from `hex"..."`
+  byte strings and lets semantic lowering evaluate Solidity units exactly.
+  Yul hexadecimal numbers use the same consistent `subtype: hex` plus
+  `literal_class: numeric_hex` pair as Solidity hexadecimal numbers.
 
 **Assembly Block Handling:**
 - `buildAssemblyBlock()` - Process inline assembly
@@ -395,6 +488,12 @@ Function call graph construction.
   empty) and emitting edges rooted at the modifier ID. `IsAccessControlled`
   uses this to recognize a non-auth-named modifier that gates via an auth
   helper (`modifier gate { _enforceOwner(); _; }`).
+- **Modifier invocation arguments**: resolved modifier calls retain detached
+  simplified argument ASTs in `FunctionCall.Arguments`. This lets semantic auth
+  analysis derive authorization-boolean bindings such as
+  `onlyRole(isOperator[msg.sender])` separately from fixed operands such as
+  `onlyRole(ADMIN_ROLE)`, without trusting the modifier name. Caller-selected
+  arguments remain unbound.
 
 **Statement traversal:** `analyzeNode` walks `unchecked { }` blocks, `do/while`
 bodies, `try` **success bodies** (previously only the catch clauses were
@@ -404,6 +503,10 @@ type switch delegates variable declarations, try statements, call arguments,
 binary assignments, tuples, and call options to private helpers; call
 classification similarly separates identifier/member/cast/library/option
 receivers before the shared edge-emission path.
+For an outer call, traversal records that call once, then walks its expression
+and positional arguments once. Nested receiver calls (`helper().ping()`) and
+option-value calls (`ping{gas: helper()}()`) therefore receive exact edges
+without duplicating the outer call or arguments.
 
 **Stores:** `Function.Calls` / `Modifier.Calls` with resolved target information,
 including additive `ResolvedContractID` exact identities.
@@ -426,6 +529,14 @@ Name+line and name+arity are never sufficient, so overloads declared on the
 same line stay separate. Target overload resolution deduplicates overridden
 selectors derived-first, uses known argument types, and leaves genuinely
 ambiguous same-arity calls unresolved instead of selecting declaration order.
+When parsed arguments are present and no same-name declaration has the observed
+arity, the call also remains unresolved with empty exact target fields and one
+durable `identity.unresolved` diagnostic. A unique wrong-arity declaration is
+never selected as a compatibility fallback.
+
+Option-wrapped member calls reuse the normal member classifier, so
+`this.helper{value: ...}(arg)` retains exact `self` metadata while low-level
+address calls still classify through their low-level call name.
 
 Extension-library resolution honors `UsingDirective.ForType`, receiver type,
 and call arity (including the implicit receiver parameter). More than one
@@ -498,6 +609,13 @@ security-relevant Yul opcode set: `create`, `create2`, `log0`–`log4`, `revert`
 builder consumes the resulting kinds.)
 
 ## Build Flow
+
+`InheritanceBuilder.GetInheritedFunctions(name)` retains its historical SDK
+signature, requires a unique contract name, walks exact linearized objects, and
+seeds selector suppression from the selected contract before returning unique
+base functions in derived-first order. `ExpressionStatement` keeps the semantic
+expression's already stamped range, excluding the semicolon; other real
+statements retain the central statement-location chokepoint.
 
 ```
 Options metadata + reader diagnostics → Sources → Parse → AST Trees + Semantic Facts → Selectors → Inheritance → Call Graph → Entry Points → normalized Database diagnostics

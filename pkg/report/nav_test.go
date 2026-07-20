@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -84,6 +85,44 @@ func TestBuildNavJSON_SymbolsAndCallers(t *testing.T) {
 	b, _ := json.Marshal(nav)
 	if !json.Valid(b) {
 		t.Fatal("invalid JSON")
+	}
+}
+
+func TestBuildNavJSONEmitsOnlyExactResolvedCallers(t *testing.T) {
+	db := navFixtureDB()
+	db.CallGraph.Edges = append(db.CallGraph.Edges,
+		&types.CallEdge{
+			From: "/x.sol#C.g()", To: "/x.sol#C.f()", Type: types.CallTypeInternal,
+			Line: 9, Col: 7, Byte: 220, Resolved: true,
+		},
+		&types.CallEdge{From: "/x.sol#C.f()", To: "g", Type: types.CallTypeInternal, Resolved: false},
+		&types.CallEdge{From: "/x.sol#C.f()", To: "g", Type: types.CallTypeInternal, Resolved: true},
+		&types.CallEdge{From: "/x.sol#C.f()", To: "/missing.sol#Missing.g()", Type: types.CallTypeInternal, Resolved: true},
+		&types.CallEdge{From: "/x.sol#C.f()", To: "/x.sol#C.missing()", Type: types.CallTypeInternal, Resolved: true},
+		&types.CallEdge{From: "/x.sol#C.f()", To: "/x.sol#C", Type: types.CallTypeInternal, Resolved: true},
+	)
+
+	first := BuildNavJSON(db).Callers
+	second := BuildNavJSON(db).Callers
+	if !reflect.DeepEqual(first, second) {
+		t.Fatalf("caller ordering is nondeterministic:\nfirst=%#v\nsecond=%#v", first, second)
+	}
+	if len(first) != 2 {
+		t.Fatalf("callers = %#v, want only two exact resolved edges", first)
+	}
+	want := map[string]bool{
+		"/x.sol#C.f()|/x.sol#C.g()": true,
+		"/x.sol#C.g()|/x.sol#C.f()": true,
+	}
+	for _, caller := range first {
+		key := caller.Caller + "|" + caller.Callee
+		if !want[key] {
+			t.Fatalf("unexpected caller edge %#v", caller)
+		}
+		delete(want, key)
+	}
+	if len(want) != 0 {
+		t.Fatalf("missing exact caller edges: %v", want)
 	}
 }
 

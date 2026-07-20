@@ -17,7 +17,7 @@ query:
   select: assign
   where:
     - func_name: '^redeemFresh$'
-    - all:
+    - and:
         - visibility: internal
     - left:
         name: '^redeemAmount$'

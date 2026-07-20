@@ -3,6 +3,7 @@ package types
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"regexp"
 	"sort"
@@ -12,13 +13,7 @@ import (
 	"golang.org/x/crypto/sha3"
 )
 
-// Access-control heuristic patterns, compiled once at package init. These were
-// previously recompiled on every (recursive) call of isAccessControlledRecursive,
-// which is invoked per function per report — a measurable cost on large scans.
-var (
-	authModifierRegex = regexp.MustCompile(`(?i)(onlyOwner|onlyAdmin|onlyOperator|onlyRole|onlyGuardian|onlyGovernor|onlyGovernance|onlyGov|onlyManager|onlyController|auth|authorized|requiresAuth|onlyMinter|onlyPauser)`)
-	authFuncRegex     = regexp.MustCompile(`(?i)(check|require|verify|validate|enforce)_*(owner|auth|admin|role|sender|access|permission)`)
-)
+var accessControlNameRegex = regexp.MustCompile(`(?i)(owner|admin|auth|authori[sz]ed|operator|role|permission|allow|whitelist|guardian|minter|pauser)`)
 
 // Visibility represents function visibility
 type Visibility string
@@ -161,7 +156,33 @@ type FunctionCall struct {
 	// ArgCount is the number of arguments at the call site.
 	// Used to disambiguate overloaded functions with the same name.
 	// -1 means unknown (e.g. loaded from old JSON without this field).
-	ArgCount int `json:"argCount,omitempty"`
+	ArgCount int `json:"argCount"`
+
+	// Arguments preserves simplified argument ASTs when later semantic analysis
+	// needs the exact call-site binding. The builder currently records these for
+	// modifier invocations; the field is additive for schema-2.0.0 compatibility.
+	Arguments []*ASTNode `json:"arguments,omitempty"`
+}
+
+// UnmarshalJSON preserves the distinction between legacy calls that omitted
+// argCount (unknown, -1) and genuine zero-argument calls. The ordinary int
+// zero value cannot represent both states.
+func (call *FunctionCall) UnmarshalJSON(data []byte) error {
+	type functionCallAlias FunctionCall
+	decoded := struct {
+		*functionCallAlias
+		ArgCount json.RawMessage `json:"argCount"`
+	}{
+		functionCallAlias: (*functionCallAlias)(call),
+	}
+	call.ArgCount = -1
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	if len(decoded.ArgCount) == 0 {
+		return nil
+	}
+	return json.Unmarshal(decoded.ArgCount, &call.ArgCount)
 }
 
 // IsEntrypoint returns true if function is a public/external entry point that can modify state
@@ -376,21 +397,6 @@ func (f *Function) UniqueID(structDefs map[string]*Struct) string {
 	return hex.EncodeToString(hash[:8])
 }
 
-// ownerContract resolves f's declaring contract without collapsing duplicate
-// short names. SourceFile is present on newly built databases; the name-only
-// lookup is retained solely for old/synthetic schema-2.0.0 values.
-func (f *Function) ownerContract(db *Database) *Contract {
-	if f == nil || db == nil {
-		return nil
-	}
-	if f.SourceFile != "" {
-		if contract := db.GetContractByID(MakeContractID(f.SourceFile, f.ContractName)); contract != nil {
-			return contract
-		}
-	}
-	return db.GetContractByName(f.ContractName)
-}
-
 func functionIdentityKey(f *Function) string {
 	if f == nil {
 		return ""
@@ -405,97 +411,277 @@ func functionIdentityKey(f *Function) string {
 	return f.ContractName + "." + selector
 }
 
-// modifierLooksProtective walks the function's contract and its linearized
-// bases looking for a modifier definition with the given name, and returns
-// true when the modifier body carries at least one auth-shaped signal —
-// a require/assert/revert, an if/ternary, or a msg.sender / tx.origin
-// reference. When the definition cannot be resolved (synthetic test data,
-// inherited from a base that isn't in the database, or modifier AST not
-// captured during build), the function returns true so callers fall back to
-// trusting the modifier's name. It returns false only when the modifier is
-// definitely a no-op decoy.
-func modifierLooksProtective(db *Database, fn *Function, modName string) bool {
-	if db == nil {
-		return true
-	}
-	owner := fn.ownerContract(db)
-	if owner == nil {
-		return true
-	}
-	seen := make(map[string]bool)
-	for _, contract := range db.LinearizedContracts(owner) {
-		if contract == nil || seen[contract.ID] {
-			continue
-		}
-		seen[contract.ID] = true
-		for _, mod := range contract.Modifiers {
-			if mod == nil || mod.Name != modName {
-				continue
-			}
-			if mod.AST == nil {
-				return true // can't inspect — trust the name
-			}
-			return modifierBodyHasAuthSignal(mod.AST)
-		}
-	}
-	return true // not found — trust the name
+type accessControlAnalysis struct {
+	db    *Database
+	stack map[string]bool
+	memo  map[string]bool
 }
 
-// modifierCallsAuthHelper resolves modName through contractName's linearization
-// and reports whether the modifier's body calls an auth-shaped helper
-// (e.g. _checkOwner, requireAuth). Relies on Modifier.Calls being populated by
-// the call-graph builder's modifier-body analysis.
-func modifierCallsAuthHelper(db *Database, fn *Function, modName string) bool {
-	if db == nil {
+// IsAccessControlled reports whether exact bodies prove privileged caller
+// authorization. Modifier and helper names are descriptive only: applied
+// modifiers and internal calls must resolve through db, then their actual body
+// or recursively resolved behavior must contain a privileged caller check.
+func (f *Function) IsAccessControlled(db *Database) bool {
+	if f == nil {
 		return false
 	}
-	owner := fn.ownerContract(db)
-	if owner == nil {
+	analysis := &accessControlAnalysis{
+		db:    db,
+		stack: make(map[string]bool),
+		memo:  make(map[string]bool),
+	}
+	return analysis.functionControlled(f, nil)
+}
+
+func (a *accessControlAnalysis) functionControlled(f *Function, callerParams map[string]bool) bool {
+	if f == nil {
 		return false
 	}
-	seen := make(map[string]bool)
-	for _, contract := range db.LinearizedContracts(owner) {
-		if contract == nil || seen[contract.ID] {
+	return a.bodyControlled("function:"+functionIdentityKey(f), f, callerParams)
+}
+
+func (a *accessControlAnalysis) modifierControlled(contract *Contract, mod *Modifier, invocation *FunctionCall, invokingFn *Function) bool {
+	if contract == nil || mod == nil || invocation == nil {
+		return false
+	}
+	authParams, fixedParams := modifierArgumentBindings(mod, invocation.Arguments, invokingFn, a.db)
+	fn := &Function{
+		Name:         mod.Name,
+		ContractName: contract.Name,
+		SourceFile:   contract.SourceFile,
+		Parameters:   mod.Parameters,
+		Calls:        mod.Calls,
+		AST:          mod.AST,
+	}
+	identity := fmt.Sprintf("modifier:%s@%d:%d", MakeModifierID(contract.SourceFile, contract.Name, mod.Name), invocation.Line, invocation.Byte)
+	return a.bodyControlledWithParams(identity, fn, nil, authParams, fixedParams)
+}
+
+// bodyControlled uses a context-aware key so the same exact body reached with
+// different caller, authorization-boolean, or fixed-operand bindings cannot
+// suppress a later authorized visit. stack detects only active recursion
+// cycles; memo bounds repeated completed traversals within this analysis.
+func (a *accessControlAnalysis) bodyControlled(identity string, f *Function, callerParams map[string]bool) (result bool) {
+	return a.bodyControlledWithParams(identity, f, callerParams, nil, nil)
+}
+
+func (a *accessControlAnalysis) bodyControlledWithParams(identity string, f *Function, callerParams, authParams, fixedParams map[string]bool) (result bool) {
+	key := accessControlContextKey(identity, callerParams, authParams, fixedParams)
+	if cached, ok := a.memo[key]; ok {
+		return cached
+	}
+	if a.stack[key] {
+		return false
+	}
+	a.stack[key] = true
+	defer func() {
+		delete(a.stack, key)
+		a.memo[key] = result
+	}()
+
+	for _, call := range f.Calls {
+		if call == nil || call.CallType != CallTypeModifier {
 			continue
 		}
-		seen[contract.ID] = true
-		for _, mod := range contract.Modifiers {
-			if mod == nil || mod.Name != modName {
-				continue
-			}
-			for _, call := range mod.Calls {
-				if authFuncRegex.MatchString(call.Target) {
-					return true
-				}
-			}
+		contract, mod := resolveExactAppliedModifier(a.db, call)
+		if a.modifierControlled(contract, mod, call, f) {
+			return true
+		}
+	}
+
+	if bodyEnforcesAuthorization(f.AST, f, a, callerParams, authParams, fixedParams) {
+		return true
+	}
+
+	for _, call := range f.Calls {
+		if !isInternalCall(call.CallType) {
+			continue
+		}
+		callee := resolveExactAccessControlCallee(a.db, call)
+		if callee == nil {
+			continue
+		}
+		forwardedCaller, forwardedAuth, forwardedFixed := a.exactCallBindings(f, call, callee, callerParams, authParams, fixedParams)
+		if a.bodyControlledWithParams("function:"+functionIdentityKey(callee), callee, forwardedCaller, forwardedAuth, forwardedFixed) {
+			return true
 		}
 	}
 	return false
 }
 
-// modifierBodyHasAuthSignal reports whether the modifier's AST contains any
-// auth-shaped marker. The check is intentionally lenient — its purpose is to
-// distinguish a true no-op decoy (`modifier auth() { _; }`) from any modifier
-// with a real body, not to validate that the check is correct.
-func modifierBodyHasAuthSignal(root *ASTNode) bool {
+func (a *accessControlAnalysis) exactCallBindings(fn *Function, call *FunctionCall, callee *Function, callerParams, authParams, fixedParams map[string]bool) (caller, auth, fixed map[string]bool) {
+	node := exactASTCallForMetadata(fn, call)
+	if node == nil || callee == nil {
+		return nil, nil, nil
+	}
+	for i, argument := range solidityArgNodes(node) {
+		if i >= len(callee.Parameters) || callee.Parameters[i] == nil || callee.Parameters[i].Name == "" {
+			continue
+		}
+		name := callee.Parameters[i].Name
+		if expressionIsCallerIdentity(argument, fn, a.db, callerParams) {
+			if caller == nil {
+				caller = make(map[string]bool)
+			}
+			caller[name] = true
+		}
+		if expressionRequiresAuthorization(argument, true, fn, a, callerParams, authParams, fixedParams) {
+			if auth == nil {
+				auth = make(map[string]bool)
+			}
+			auth[name] = true
+		}
+		if expressionIsFixedOperand(argument, fn, a.db, callerParams, fixedParams) {
+			if fixed == nil {
+				fixed = make(map[string]bool)
+			}
+			fixed[name] = true
+		}
+	}
+	return caller, auth, fixed
+}
+
+func exactASTCallForMetadata(fn *Function, metadata *FunctionCall) *ASTNode {
+	if fn == nil || fn.AST == nil || metadata == nil {
+		return nil
+	}
+	var exact []*ASTNode
+	var line []*ASTNode
+	var named []*ASTNode
+	fn.AST.WalkDescendants(func(node *ASTNode) bool {
+		if node == nil || !strings.HasPrefix(node.Kind, "call.") || node.Name != metadata.Target {
+			return true
+		}
+		named = append(named, node)
+		if metadata.Byte > 0 && node.StartByte == metadata.Byte {
+			exact = append(exact, node)
+		}
+		if metadata.Line > 0 && node.StartLine == metadata.Line {
+			line = append(line, node)
+		}
+		return true
+	})
+	if len(exact) == 1 {
+		return exact[0]
+	}
+	if len(exact) > 1 {
+		return nil
+	}
+	if len(line) == 1 {
+		return line[0]
+	}
+	if len(line) > 1 {
+		return nil
+	}
+	if metadata.Byte == 0 && metadata.Line == 0 && len(named) == 1 {
+		return named[0]
+	}
+	return nil
+}
+
+func accessControlContextKey(identity string, callerParams, authParams, fixedParams map[string]bool) string {
+	return identity +
+		"|caller=" + sortedBindingNames(callerParams) +
+		"|auth=" + sortedBindingNames(authParams) +
+		"|fixed=" + sortedBindingNames(fixedParams)
+}
+
+func sortedBindingNames(bindings map[string]bool) string {
+	params := make([]string, 0, len(bindings))
+	for name, active := range bindings {
+		if active {
+			params = append(params, name)
+		}
+	}
+	sort.Strings(params)
+	return strings.Join(params, ",")
+}
+
+func resolveExactAppliedModifier(db *Database, call *FunctionCall) (*Contract, *Modifier) {
+	if db == nil || call == nil || !call.Resolved || call.ResolvedContractID == "" || call.ResolvedFunction == "" {
+		return nil, nil
+	}
+	contract := db.GetContractByID(call.ResolvedContractID)
+	if contract == nil {
+		return nil, nil
+	}
+	for _, mod := range contract.Modifiers {
+		if mod != nil && mod.Name == call.ResolvedFunction {
+			return contract, mod
+		}
+	}
+	return nil, nil
+}
+
+func resolveExactAccessControlCallee(db *Database, call *FunctionCall) *Function {
+	if db == nil || call == nil || !call.Resolved || call.ResolvedContractID == "" || call.ResolvedFunction == "" {
+		return nil
+	}
+	contract := db.GetContractByID(call.ResolvedContractID)
+	if contract == nil {
+		return nil
+	}
+	for _, fn := range contract.Functions {
+		if fn == nil {
+			continue
+		}
+		if fn.Selector != "" && fn.Selector == call.ResolvedFunction {
+			return fn
+		}
+		if fn.Selector == "" && fn.Name == call.ResolvedFunction {
+			return fn
+		}
+	}
+	return nil
+}
+
+func modifierArgumentBindings(mod *Modifier, arguments []*ASTNode, fn *Function, db *Database) (authParams, fixedParams map[string]bool) {
+	for i, param := range mod.Parameters {
+		if i >= len(arguments) || param == nil || param.Name == "" {
+			continue
+		}
+		if expressionRequiresAuthorization(arguments[i], true, fn, &accessControlAnalysis{db: db}, nil, nil, nil) {
+			if authParams == nil {
+				authParams = make(map[string]bool)
+			}
+			authParams[param.Name] = true
+		}
+		if expressionIsFixedOperand(arguments[i], fn, db, nil, nil) {
+			if fixedParams == nil {
+				fixedParams = make(map[string]bool)
+			}
+			fixedParams[param.Name] = true
+		}
+	}
+	return authParams, fixedParams
+}
+
+func bodyEnforcesAuthorization(root *ASTNode, fn *Function, analysis *accessControlAnalysis, callerParams, authParams, fixedParams map[string]bool) bool {
 	if root == nil {
 		return false
 	}
 	found := false
 	inspect := func(n *ASTNode) bool {
-		if n == nil {
+		if n == nil || !enforcementNodeIsUnconditional(n, root) {
 			return true
 		}
-		if IsGuard(n.Kind) || IsCheck(n.Kind) {
-			found = true
-			return false
-		}
-		if n.Kind == KindStmtIf || n.Kind == KindExprConditional {
-			found = true
-			return false
-		}
-		if n.Kind == KindExprMemberAccess {
-			if strings.Contains(n.Name, "msg.sender") || strings.Contains(n.Name, "tx.origin") {
+		switch n.Kind {
+		case KindCheckRequire, KindCheckAssert:
+			if len(n.Children) > 0 && expressionRequiresAuthorization(n.Children[0], true, fn, analysis, callerParams, authParams, fixedParams) {
+				found = true
+				return false
+			}
+		case KindStmtIf:
+			if len(n.Children) < 2 {
+				return true
+			}
+			thenReverts := branchAlwaysReverts(n.Children[1])
+			elseReverts := len(n.Children) > 2 && branchAlwaysReverts(n.Children[2])
+			if thenReverts == elseReverts {
+				return true
+			}
+			requiredTruth := elseReverts
+			if expressionRequiresAuthorization(n.Children[0], requiredTruth, fn, analysis, callerParams, authParams, fixedParams) {
 				found = true
 				return false
 			}
@@ -509,114 +695,300 @@ func modifierBodyHasAuthSignal(root *ASTNode) bool {
 	return found
 }
 
-// IsAccessControlled checks if the function has access control logic
-// Checks for:
-//  1. Access control modifiers (onlyOwner, auth, etc.) — with best-effort
-//     modifier-body validation to detect decoy modifiers
-//  2. msg.sender/tx.origin checks in require/assert/if statements
-//  3. Recursive checks on internal calls
-func (f *Function) IsAccessControlled(db *Database) bool {
-	visited := make(map[string]bool)
-	return f.isAccessControlledRecursive(db, visited, nil)
+func enforcementNodeIsUnconditional(node, root *ASTNode) bool {
+	for current := node.Parent; current != nil && current != root; current = current.Parent {
+		switch current.Kind {
+		case KindStmtIf, KindStmtLoop, KindExprConditional, KindStmtTryCatch:
+			return false
+		}
+	}
+	return true
 }
 
-// isAccessControlledRecursive internal recursive check.
-//
-// callerParams names parameters of THIS function that were bound to a
-// caller-identity source (msg.sender / tx.origin / _msgSender()) at the call
-// site that recursed into it. They let an ownership guard written against a
-// forwarded caller — e.g. `_withdraw(msg.sender, ...)` then
-// `if (ownerOf(id) != caller) revert` — count as access control. nil for the
-// top-level entry (no forwarding).
-func (f *Function) isAccessControlledRecursive(db *Database, visited map[string]bool, callerParams map[string]bool) bool {
-	// 0. Cycle detection
-	key := functionIdentityKey(f)
-	if visited[key] {
+func branchAlwaysReverts(node *ASTNode) bool {
+	if node == nil {
 		return false
 	}
-	visited[key] = true
-
-	// 1. Check modifiers (auth-named, validated against decoys below).
-	for _, modName := range f.Modifiers {
-		if !authModifierRegex.MatchString(modName) {
-			continue
-		}
-		// Best-effort body validation: an auth-named modifier whose body is
-		// a no-op (`modifier auth() { _; }`) is a decoy — common in adversarial
-		// or deliberately misleading code. Resolve the modifier definition
-		// through the function's contract + its linearized bases and require
-		// at least one auth-shaped signal (require/assert/revert/if or a
-		// msg.sender / tx.origin reference) before trusting the name. When
-		// the definition cannot be resolved (synthetic tests, inherited from
-		// an out-of-scope base), fall back to trusting the name.
-		if db != nil && !modifierLooksProtective(db, f, modName) {
-			continue
-		}
+	if node.Kind == KindCheckRevert {
 		return true
 	}
-
-	// 1b. A modifier whose NAME isn't auth-shaped can still enforce access
-	// control by calling an auth helper in its body (e.g.
-	// `modifier gate { _enforceOwner(); _; }`). Now that modifier bodies are
-	// walked into Modifier.Calls, detect that case.
-	if db != nil {
-		for _, modName := range f.Modifiers {
-			if modifierCallsAuthHelper(db, f, modName) {
-				return true
-			}
+	if node.Kind == KindStmtBlock || node.Kind == KindStmtUnchecked {
+		if len(node.Children) == 0 {
+			return false
 		}
+		return branchAlwaysReverts(node.Children[len(node.Children)-1])
 	}
-
-	// 2. Check for calls to internal auth functions (heuristic fallback)
-	// Matches verb+noun auth helpers in both camelCase and snake_case:
-	// _checkOwner, checkOwner, requireAuth, _validate_admin, enforceRole, etc.
-	// The verb and noun may be joined directly or separated only by
-	// underscores. (A literal `.` here was a bug: it required exactly one
-	// character between verb and noun, so the common no-separator camelCase
-	// forms like `_checkOwner` silently failed to match.)
-	for _, call := range f.Calls {
-		// Only check internal or self calls (or inherited)
-		if call.CallType == "internal" || call.CallType == "inherited" || call.CallType == "self" {
-			if authFuncRegex.MatchString(call.Target) {
-				return true
-			}
-		}
+	if node.Kind == KindStmtIf && len(node.Children) > 2 {
+		return branchAlwaysReverts(node.Children[1]) && branchAlwaysReverts(node.Children[2])
 	}
-
-	// 3. Check AST for msg.sender / tx.origin / _msgSender() checks
-	if f.AST != nil {
-		hasAuthCheck := false
-		f.AST.WalkDescendants(func(n *ASTNode) bool {
-			// Look for msg.sender in require/assert/if conditions
-			if isAuthCheck(n, f.AST, f, callerParams) {
-				hasAuthCheck = true
-				return false // Stop walking
-			}
-			return true
-		})
-		if hasAuthCheck {
-			return true
-		}
-	}
-
-	// 4. Recursive check on internal calls (Deep Inspection). A callee counts
-	// when it is itself access-controlled; caller-identity arguments forwarded
-	// into it (see forwardedCallerParams) let an ownership/role guard written
-	// against the forwarded value be recognized.
-	if db != nil {
-		for _, call := range f.Calls {
-			if !isInternalCall(call.CallType) {
-				continue
-			}
-			callee := f.resolveInternalCallee(db, call)
-			if callee != nil &&
-				callee.isAccessControlledRecursive(db, visited, f.forwardedCallerParams(call, callee)) {
-				return true
-			}
-		}
-	}
-
 	return false
+}
+
+func expressionRequiresAuthorization(expr *ASTNode, wantTrue bool, fn *Function, analysis *accessControlAnalysis, callerParams, authParams, fixedParams map[string]bool) bool {
+	if expr == nil {
+		return false
+	}
+	var db *Database
+	if analysis != nil {
+		db = analysis.db
+	}
+	if expr.Kind == KindExprIdentifier && authParams[expr.Name] {
+		return wantTrue
+	}
+	if roleCallProvesAuthorization(expr, fn, analysis, callerParams, fixedParams) || accessMappingProvesAuthorization(expr, fn, db, callerParams, fixedParams) {
+		return wantTrue
+	}
+	if expr.Kind == KindExprUnaryOp && expr.GetAttributeString("operator") == "!" && len(expr.Children) > 0 {
+		return expressionRequiresAuthorization(expr.Children[0], !wantTrue, fn, analysis, callerParams, authParams, fixedParams)
+	}
+	if expr.Kind != KindExprBinaryOp || len(expr.Children) < 2 {
+		return false
+	}
+	op := expr.GetAttributeString("operator")
+	left, right := expr.Children[0], expr.Children[1]
+	switch op {
+	case "&&":
+		if wantTrue {
+			return expressionRequiresAuthorization(left, true, fn, analysis, callerParams, authParams, fixedParams) ||
+				expressionRequiresAuthorization(right, true, fn, analysis, callerParams, authParams, fixedParams)
+		}
+		return expressionRequiresAuthorization(left, false, fn, analysis, callerParams, authParams, fixedParams) &&
+			expressionRequiresAuthorization(right, false, fn, analysis, callerParams, authParams, fixedParams)
+	case "||":
+		if wantTrue {
+			return expressionRequiresAuthorization(left, true, fn, analysis, callerParams, authParams, fixedParams) &&
+				expressionRequiresAuthorization(right, true, fn, analysis, callerParams, authParams, fixedParams)
+		}
+		return expressionRequiresAuthorization(left, false, fn, analysis, callerParams, authParams, fixedParams) ||
+			expressionRequiresAuthorization(right, false, fn, analysis, callerParams, authParams, fixedParams)
+	case "==", "!=":
+		if value, ok := booleanLiteral(right); ok {
+			required := wantTrue == (op == "==")
+			if !value {
+				required = !required
+			}
+			return expressionRequiresAuthorization(left, required, fn, analysis, callerParams, authParams, fixedParams)
+		}
+		if value, ok := booleanLiteral(left); ok {
+			required := wantTrue == (op == "==")
+			if !value {
+				required = !required
+			}
+			return expressionRequiresAuthorization(right, required, fn, analysis, callerParams, authParams, fixedParams)
+		}
+		if privilegedCallerComparison(left, right, fn, db, callerParams) || privilegedCallerComparison(right, left, fn, db, callerParams) {
+			if op == "==" {
+				return wantTrue
+			}
+			return !wantTrue
+		}
+	}
+	return false
+}
+
+func booleanLiteral(n *ASTNode) (bool, bool) {
+	if n == nil || n.Kind != KindExprLiteral || n.GetAttributeString("subtype") != "bool" {
+		return false, false
+	}
+	switch n.Value {
+	case "true":
+		return true, true
+	case "false":
+		return false, true
+	default:
+		return false, false
+	}
+}
+
+func privilegedCallerComparison(caller, authority *ASTNode, fn *Function, db *Database, callerParams map[string]bool) bool {
+	return expressionIsCallerIdentity(caller, fn, db, callerParams) &&
+		!expressionIsCallerIdentity(authority, fn, db, callerParams) &&
+		!isCallerControlledTarget(authority, fn, db)
+}
+
+func roleCallProvesAuthorization(call *ASTNode, fn *Function, analysis *accessControlAnalysis, callerParams, fixedParams map[string]bool) bool {
+	if call == nil || call.Kind != KindCallInternal || call.Name != "hasRole" || analysis == nil || analysis.db == nil {
+		return false
+	}
+	metadata := recordedExactInternalCallForNode(fn, call)
+	callee := resolveExactAccessControlCallee(analysis.db, metadata)
+	if callee == nil || callee.Name != "hasRole" || callee.AST == nil {
+		return false
+	}
+	args := solidityArgNodes(call)
+	if len(args) < 2 || len(callee.Parameters) < 2 || callee.Parameters[0] == nil || callee.Parameters[1] == nil ||
+		callee.Parameters[0].Name == "" || callee.Parameters[1].Name == "" ||
+		!expressionIsCallerIdentity(args[1], fn, analysis.db, callerParams) ||
+		!expressionIsFixedOperand(args[0], fn, analysis.db, callerParams, fixedParams) {
+		return false
+	}
+	calleeCaller := map[string]bool{callee.Parameters[1].Name: true}
+	calleeFixed := map[string]bool{callee.Parameters[0].Name: true}
+	return functionReturnsAccessMembership(callee, analysis.db, calleeCaller, calleeFixed)
+}
+
+func accessMappingProvesAuthorization(index *ASTNode, fn *Function, db *Database, callerParams, fixedParams map[string]bool) bool {
+	base, keys := flattenIndexAccess(index)
+	if base == nil || len(keys) == 0 || !isAccessControlName(accessLookupRootName(base)) {
+		return false
+	}
+	callerKeys := 0
+	for _, key := range keys {
+		if expressionIsCallerIdentity(key, fn, db, callerParams) {
+			callerKeys++
+			if callerKeys > 1 {
+				return false
+			}
+			continue
+		}
+		if expressionContainsCallerIdentity(key, fn, db, callerParams) {
+			return false
+		}
+		if !expressionIsFixedOperand(key, fn, db, callerParams, fixedParams) {
+			return false
+		}
+	}
+	return callerKeys == 1
+}
+
+func flattenIndexAccess(index *ASTNode) (*ASTNode, []*ASTNode) {
+	if index == nil || index.Kind != KindExprIndexAccess || len(index.Children) < 2 {
+		return nil, nil
+	}
+	base := index.Children[0]
+	keys := append([]*ASTNode(nil), index.Children[1:]...)
+	if base.Kind == KindExprIndexAccess {
+		root, innerKeys := flattenIndexAccess(base)
+		if root == nil {
+			return nil, nil
+		}
+		return root, append(innerKeys, keys...)
+	}
+	return base, keys
+}
+
+func accessLookupRootName(n *ASTNode) string {
+	for n != nil {
+		switch n.Kind {
+		case KindExprIdentifier, KindExprMemberAccess:
+			return n.Name
+		case KindExprIndexAccess:
+			if len(n.Children) == 0 {
+				return ""
+			}
+			n = n.Children[0]
+		default:
+			return ""
+		}
+	}
+	return ""
+}
+
+func expressionIsCallerIdentity(expr *ASTNode, fn *Function, db *Database, callerParams map[string]bool) bool {
+	if expr == nil {
+		return false
+	}
+	if isDirectAuthSource(expr, fn, db) {
+		return true
+	}
+	if expr.Kind == KindExprIdentifier && callerParams[expr.Name] {
+		return true
+	}
+	if expr.Kind == KindExprIdentifier && fn != nil && isTaintedIdentifier(expr.Name, fn.AST, fn, db) {
+		return true
+	}
+	if (expr.Kind == KindCallInternal || expr.Kind == KindCallExternal) && isTypeCastName(expr.Name) && len(solidityArgNodes(expr)) == 1 {
+		return expressionIsCallerIdentity(solidityArgNodes(expr)[0], fn, db, callerParams)
+	}
+	return false
+}
+
+func expressionContainsCallerIdentity(root *ASTNode, fn *Function, db *Database, callerParams map[string]bool) bool {
+	if root == nil {
+		return false
+	}
+	if expressionIsCallerIdentity(root, fn, db, callerParams) {
+		return true
+	}
+	found := false
+	root.WalkDescendants(func(n *ASTNode) bool {
+		if expressionIsCallerIdentity(n, fn, db, callerParams) {
+			found = true
+			return false
+		}
+		return true
+	})
+	return found
+}
+
+func expressionIsFixedOperand(expr *ASTNode, fn *Function, db *Database, callerParams, fixedParams map[string]bool) bool {
+	if expr == nil || expressionContainsCallerIdentity(expr, fn, db, callerParams) {
+		return false
+	}
+	if expr.Kind == KindExprIdentifier && fixedParams[expr.Name] {
+		return true
+	}
+	return !isCallerControlledTarget(expr, fn, db)
+}
+
+func recordedExactInternalCallForNode(fn *Function, node *ASTNode) *FunctionCall {
+	if fn == nil || node == nil {
+		return nil
+	}
+	var exact []*FunctionCall
+	var line []*FunctionCall
+	var named []*FunctionCall
+	for _, call := range fn.Calls {
+		if call == nil || !isInternalCall(call.CallType) || bareFuncName(call.Target) != node.Name {
+			continue
+		}
+		named = append(named, call)
+		if node.StartByte > 0 && call.Byte == node.StartByte {
+			exact = append(exact, call)
+		}
+		if node.StartLine > 0 && call.Line == node.StartLine {
+			line = append(line, call)
+		}
+	}
+	if len(exact) == 1 {
+		return exact[0]
+	}
+	if len(exact) > 1 {
+		return nil
+	}
+	if len(line) == 1 {
+		return line[0]
+	}
+	if len(line) > 1 {
+		return nil
+	}
+	if node.StartByte == 0 && node.StartLine == 0 && len(named) == 1 {
+		return named[0]
+	}
+	return nil
+}
+
+func functionReturnsAccessMembership(fn *Function, db *Database, callerParams, fixedParams map[string]bool) bool {
+	if fn == nil || fn.AST == nil {
+		return false
+	}
+	var returns []*ASTNode
+	fn.AST.WalkDescendants(func(n *ASTNode) bool {
+		if n.Kind == KindStmtReturn {
+			returns = append(returns, n)
+		}
+		return true
+	})
+	if len(returns) == 0 {
+		return false
+	}
+	for _, ret := range returns {
+		if !enforcementNodeIsUnconditional(ret, fn.AST) || len(ret.Children) != 1 ||
+			!accessMappingProvesAuthorization(ret.Children[0], fn, db, callerParams, fixedParams) {
+			return false
+		}
+	}
+	return true
 }
 
 // isInternalCall reports whether a call stays within the contract's own code
@@ -693,7 +1065,14 @@ func (f *Function) resolveInternalCallee(db *Database, call *FunctionCall) *Func
 // IsAccessControlled (privileged-only, by design) does not. Keep these concepts
 // separate: self-scoping is permissionless and must not count as access control
 // for entry-point classification.
-func (f *Function) ComparesCallerIdentity(db *Database) bool {
+func (f *Function) ComparesCallerIdentity(databases ...*Database) bool {
+	var db *Database
+	for _, candidate := range databases {
+		if candidate != nil {
+			db = candidate
+			break
+		}
+	}
 	return f.comparesCallerIdentityRecursive(db, make(map[string]bool), nil)
 }
 
@@ -721,12 +1100,12 @@ func (f *Function) comparesCallerIdentityRecursive(db *Database, visited, caller
 				return false
 			}
 			// Direct caller-identity source used inside a comparison condition.
-			if isDirectAuthSource(n) && isInsideCondition(n) && hasComparisonOperand(n) {
+			if isDirectAuthSource(n, f, db) && isInsideCondition(n) && hasComparisonOperand(n) {
 				found = true
 				return false
 			}
 			// Local alias of a caller-identity source: address s = _msgSender(); … s == from.
-			if n.Kind == KindExprIdentifier && isTaintedIdentifier(n.Name, f.AST) &&
+			if n.Kind == KindExprIdentifier && isTaintedIdentifier(n.Name, f.AST, f, db) &&
 				isInsideCondition(n) && hasComparisonOperand(n) {
 				found = true
 				return false
@@ -752,7 +1131,7 @@ func (f *Function) comparesCallerIdentityRecursive(db *Database, visited, caller
 			}
 			callee := f.resolveInternalCallee(db, call)
 			if callee != nil &&
-				callee.comparesCallerIdentityRecursive(db, visited, f.forwardedCallerParams(call, callee)) {
+				callee.comparesCallerIdentityRecursive(db, visited, f.forwardedCallerParams(db, call, callee)) {
 				return true
 			}
 		}
@@ -855,7 +1234,7 @@ func bareFuncName(s string) string {
 // `_withdraw(msg.sender, tokenId, receiver)` then `if (ownerOf(tokenId) !=
 // caller) revert` — without it the gated NFT-vault withdrawal looks like an
 // arbitrary ETH send. Returns nil when nothing is forwarded.
-func (f *Function) forwardedCallerParams(call *FunctionCall, callee *Function) map[string]bool {
+func (f *Function) forwardedCallerParams(db *Database, call *FunctionCall, callee *Function) map[string]bool {
 	if f == nil || f.AST == nil || call == nil || callee == nil || len(callee.Parameters) == 0 {
 		return nil
 	}
@@ -872,7 +1251,7 @@ func (f *Function) forwardedCallerParams(call *FunctionCall, callee *Function) m
 			if p == nil || p.Name == "" {
 				continue
 			}
-			if isForwardedCallerIdentity(arg, f.AST) {
+			if isForwardedCallerIdentity(arg, f.AST, f, db) {
 				if result == nil {
 					result = make(map[string]bool)
 				}
@@ -905,174 +1284,18 @@ func solidityArgNodes(call *ASTNode) []*ASTNode {
 // isForwardedCallerIdentity reports whether an argument expression is a
 // caller-identity source: a direct msg.sender / tx.origin / _msgSender(), or a
 // local variable aliased from one.
-func isForwardedCallerIdentity(arg *ASTNode, root *ASTNode) bool {
+func isForwardedCallerIdentity(arg *ASTNode, root *ASTNode, fn *Function, db *Database) bool {
 	if arg == nil {
 		return false
 	}
-	if isDirectAuthSource(arg) {
+	if isDirectAuthSource(arg, fn, db) {
 		return true
 	}
-	return arg.Kind == KindExprIdentifier && isTaintedIdentifier(arg.Name, root)
-}
-
-// isAuthCheck checks if a node represents an authentication check (msg.sender, tx.origin, _msgSender)
-// It checks both direct usage and simple local variable aliases (taint tracking).
-// Returns true only if the auth source is compared against a storage-anchored
-// authority (state var / getter / mapping / immutable / hardcoded address) — NOT
-// against a caller-controlled value such as a function argument. fn supplies the
-// parameter set used as a backstop when an identifier's RefKind is unresolved.
-func isAuthCheck(n *ASTNode, root *ASTNode, fn *Function, callerParams map[string]bool) bool {
-	// 1. Direct check
-	if isDirectAuthSource(n) {
-		if isInsideCondition(n) {
-			// Must be compared against a non-caller-controlled authority anchor,
-			// not just any comparison (require(from == msg.sender) is self-auth).
-			if isOwnerComparison(n, fn) {
-				return true
-			}
-			if isAccessMappingLookup(n) {
-				return true
-			}
-		}
-	}
-
-	// 2. Taint tracking (local alias)
-	// address sender = _msgSender(); require(sender == owner());
-	if n.Kind == KindExprIdentifier {
-		if isTaintedIdentifier(n.Name, root) {
-			if isInsideCondition(n) {
-				if isOwnerComparison(n, fn) {
-					return true
-				}
-			}
-		}
-	}
-
-	// 3. Forwarded caller identity: a parameter the caller bound to msg.sender /
-	// tx.origin / _msgSender() at the call site (see forwardedCallerParams).
-	// Treated like a direct caller-identity source — `if (ownerOf(id) != caller)
-	// revert` is an ownership gate — but still requires the OTHER operand to be a
-	// real authority anchor, so self-scoping (`require(other == caller)` where
-	// `other` is an argument) is NOT promoted to access control.
-	if len(callerParams) > 0 && n.Kind == KindExprIdentifier && callerParams[n.Name] {
-		if isInsideCondition(n) && isOwnerComparison(n, fn) {
-			return true
-		}
-	}
-
-	return false
-}
-
-// isAccessMappingLookup recognizes boolean access maps used directly as guard
-// conditions, e.g. require(isOperator[msg.sender]) or if (!hasRole[msg.sender]).
-// The base name is intentionally vocabulary-gated so ordinary balance checks
-// like require(balances[msg.sender] >= amount) are not treated as auth.
-func isAccessMappingLookup(n *ASTNode) bool {
-	for current := n.Parent; current != nil; current = current.Parent {
-		if IsCheck(current.Kind) || current.Kind == KindStmtIf {
-			return false
-		}
-		if current.Kind != KindExprIndexAccess || len(current.Children) == 0 {
-			continue
-		}
-		baseName := accessLookupBaseName(current.Children[0])
-		if baseName == "" {
-			continue
-		}
-		if isAccessControlName(baseName) {
-			return true
-		}
-	}
-	return false
-}
-
-func accessLookupBaseName(n *ASTNode) string {
-	if n == nil {
-		return ""
-	}
-	switch n.Kind {
-	case KindExprIdentifier, KindExprMemberAccess:
-		return n.Name
-	default:
-		return ""
-	}
+	return arg.Kind == KindExprIdentifier && isTaintedIdentifier(arg.Name, root, fn, db)
 }
 
 func isAccessControlName(name string) bool {
-	if name == "" {
-		return false
-	}
-	pattern := regexp.MustCompile(`(?i)(owner|admin|auth|authori[sz]ed|operator|role|permission|allow|whitelist|guardian|minter|pauser)`)
-	return pattern.MatchString(name)
-}
-
-// isOwnerComparison checks if the auth source (msg.sender / tx.origin / _msgSender)
-// is compared against a non-caller-controlled authority anchor, which constitutes
-// an access control check.
-//
-// A comparison counts as access control unless the other operand is something the
-// caller can freely choose (a function argument or a value derived solely from
-// arguments). It covers state vars, getters, mappings, immutables, constants, and
-// hardcoded literal addresses — e.g.:
-//   - require(msg.sender == owner())
-//   - require(msg.sender == 0xAbC…)          // hardcoded authority
-//   - if (address(endpoint) != msg.sender) revert …
-//   - if (_trustedForwarder != msg.sender) revert …
-//
-// But NOT self-authorization, where the caller picks the comparison value:
-//   - require(from == msg.sender)            // `from` is an argument
-func isOwnerComparison(n *ASTNode, fn *Function) bool {
-	// Find immediate Binary Operation ancestor
-	parent := n.FindAncestor(func(a *ASTNode) bool {
-		return a.Kind == KindExprBinaryOp || a.Kind == "binary_op" || a.Kind == "binary_operation"
-	})
-
-	if parent == nil || len(parent.Children) < 2 {
-		return false
-	}
-
-	for _, child := range parent.Children {
-		// Skip if this is the auth source node itself
-		if child == n {
-			continue
-		}
-
-		// Unwrap type casts like address(endpoint) → endpoint
-		effective := unwrapTypeCast(child)
-
-		// Skip the caller-identity side itself (the other operand is also a
-		// caller-identity source, or n was wrapped in a cast) — we only judge
-		// the authority target, not a sender-vs-sender comparison.
-		if isDirectAuthSource(effective) {
-			continue
-		}
-
-		// A sibling the caller cannot control is a valid access-control anchor.
-		// Caller-controlled siblings (arguments, arg-derived locals) are not.
-		if !isCallerControlledTarget(effective, fn) {
-			return true
-		}
-	}
-	return false
-}
-
-// unwrapTypeCast strips a single-argument type-cast call (e.g. address(x), uint160(x))
-// and returns the inner node. If the node is not a type-cast, it is returned as-is.
-//
-// The callee NAME must be an actual type — `address`, `payable`, `uintN`,
-// `bytesN`, etc. A single-argument call to a non-type callee is a regular
-// function, NOT a cast: unwrapping it conflated a state-reading getter with its
-// argument, so `ownerOf(tokenId) == msg.sender` looked like `tokenId ==
-// msg.sender` (a caller-controlled compare) and the ownership gate was dropped.
-func unwrapTypeCast(n *ASTNode) *ASTNode {
-	if n == nil {
-		return n
-	}
-	if (n.Kind == KindCallInternal || n.Kind == KindCallExternal) &&
-		len(n.Children) == 1 && isTypeCastName(n.Name) {
-		return n.Children[0]
-	}
-	return n
+	return name != "" && accessControlNameRegex.MatchString(name)
 }
 
 // elementaryTypeCastRegex matches Solidity built-in type names usable as a
@@ -1104,7 +1327,7 @@ func isTypeCastName(name string) bool {
 // address the caller cannot influence). A getter the caller indexes with a
 // resource id of their own choosing (ownerOf(tokenId)) is the exception — it is
 // resource self-scoping, handled as caller-controlled (see getterIsResourceScoped).
-func isCallerControlledTarget(n *ASTNode, fn *Function) bool {
+func isCallerControlledTarget(n *ASTNode, fn *Function, db *Database) bool {
 	if n == nil {
 		return false
 	}
@@ -1135,11 +1358,11 @@ func isCallerControlledTarget(n *ASTNode, fn *Function) bool {
 		// CALLER indexes with a resource id of their own choosing — `ownerOf(tokenId)`,
 		// `positions(id).owner` — only asserts "you own the item you named". That is
 		// resource self-scoping, not a privileged gate, so it IS caller-controlled.
-		return getterIsResourceScoped(n, fn)
+		return getterIsResourceScoped(n, fn, db)
 	case KindExprIndexAccess, KindExprMemberAccess:
 		// m[k] / s.f — caller-controlled iff the BASE is caller-controlled.
 		if len(n.Children) > 0 {
-			return isCallerControlledTarget(n.Children[0], fn)
+			return isCallerControlledTarget(n.Children[0], fn, db)
 		}
 		return false
 	default:
@@ -1154,12 +1377,12 @@ func isCallerControlledTarget(n *ASTNode, fn *Function) bool {
 // caller picks which item (`ownerOf(tokenId)`), so the check scopes the caller
 // to their own asset instead of gating to a privileged principal. False for
 // `owner()` (no args) and `hasRole(ROLE, msg.sender)` (no free resource selector).
-func getterIsResourceScoped(call *ASTNode, fn *Function) bool {
+func getterIsResourceScoped(call *ASTNode, fn *Function, db *Database) bool {
 	for _, arg := range solidityArgNodes(call) {
-		if isDirectAuthSource(arg) {
+		if isDirectAuthSource(arg, fn, db) {
 			continue // msg.sender / tx.origin / _msgSender() is not a resource id
 		}
-		if isCallerControlledTarget(arg, fn) {
+		if isCallerControlledTarget(arg, fn, db) {
 			return true
 		}
 	}
@@ -1182,8 +1405,14 @@ func taintIsParameterOnly(sources []string) bool {
 	return true
 }
 
-// isDirectAuthSource checks if node is msg.sender, tx.origin, or _msgSender()
-func isDirectAuthSource(n *ASTNode) bool {
+// isDirectAuthSource checks if node is msg.sender, tx.origin, or an exact
+// zero-argument internal _msgSender() helper in the active function/database
+// context. Same-named identifiers, external/self calls, unresolved calls, and
+// nonzero overloads retain their ordinary provenance.
+func isDirectAuthSource(n *ASTNode, fn *Function, db *Database) bool {
+	if n == nil {
+		return false
+	}
 	// 1. Check for msg.sender or tx.origin member access
 	if n.Kind == KindExprMemberAccess {
 		// Expecting structure: MemberAccess(sender) -> child: Identifier(msg)
@@ -1199,16 +1428,89 @@ func isDirectAuthSource(n *ASTNode) bool {
 		}
 	}
 
-	// 2. Check for _msgSender() calls (Identifier or FunctionCall or InternalCall)
-	if (n.Kind == KindExprIdentifier || n.Kind == KindCallExternal || n.Kind == KindCallInternal) && n.Name == "_msgSender" {
-		return true
+	// 2. _msgSender() is caller identity only for the exact zero-argument
+	// internal-call shape. Recorded metadata and database resolution, when
+	// available, must independently confirm that identity.
+	if n.Kind != KindCallInternal || n.Name != "_msgSender" || len(solidityArgNodes(n)) != 0 {
+		return false
+	}
+	call := recordedAuthCallForNode(fn, n)
+	if call != nil {
+		switch call.CallType {
+		case CallTypeInternal, CallTypeInherited, CallTypeSuper:
+		default:
+			return false
+		}
+		if call.ArgCount != 0 || call.ResolvedFunction != "_msgSender()" {
+			return false
+		}
+	}
+	if helper, available := resolveMsgSenderAuthHelper(db, fn); available {
+		return isMsgSenderAuthHelper(helper)
 	}
 
-	return false
+	// Compatibility for synthetic/programmatic ASTs without usable database
+	// resolution or call metadata: the exact zero-argument call.internal shape
+	// is sufficient.
+	return true
 }
 
-// isTaintedIdentifier checks if a local variable is assigned from an auth source
-func isTaintedIdentifier(name string, root *ASTNode) bool {
+func recordedAuthCallForNode(fn *Function, node *ASTNode) *FunctionCall {
+	if fn == nil || node == nil {
+		return nil
+	}
+	var lineMatch *FunctionCall
+	for _, call := range fn.Calls {
+		if call == nil || bareFuncName(call.Target) != node.Name {
+			continue
+		}
+		if node.StartByte > 0 && call.Byte == node.StartByte {
+			return call
+		}
+		if node.StartLine > 0 && call.Line == node.StartLine && lineMatch == nil {
+			lineMatch = call
+		}
+	}
+	return lineMatch
+}
+
+func resolveMsgSenderAuthHelper(db *Database, fn *Function) (*Function, bool) {
+	if db == nil || fn == nil || fn.ContractName == "" {
+		return nil, false
+	}
+	var owner *Contract
+	if fn.SourceFile != "" {
+		owner = db.GetContractByID(MakeContractID(fn.SourceFile, fn.ContractName))
+		if owner == nil {
+			return nil, false
+		}
+	} else {
+		var exact bool
+		owner, exact = db.ResolveContractNameExact(fn.ContractName, fn.SourceFile)
+		if !exact {
+			return nil, false
+		}
+	}
+	if owner == nil {
+		return nil, false
+	}
+	for _, contract := range db.LinearizedContracts(owner) {
+		for _, candidate := range contract.Functions {
+			if isMsgSenderAuthHelper(candidate) {
+				return candidate, true
+			}
+		}
+	}
+	return nil, true
+}
+
+func isMsgSenderAuthHelper(fn *Function) bool {
+	return fn != nil && fn.Name == "_msgSender" && len(fn.Parameters) == 0 &&
+		(fn.Selector == "" || fn.Selector == "_msgSender()")
+}
+
+// isTaintedIdentifier checks if a local variable is assigned from an auth source.
+func isTaintedIdentifier(name string, root *ASTNode, fn *Function, db *Database) bool {
 	if root == nil {
 		return false
 	}
@@ -1234,7 +1536,7 @@ func isTaintedIdentifier(name string, root *ASTNode) bool {
 					if lhs.Kind == KindExprIdentifier && lhs.Name == name {
 						// Found assignment to our variable
 						// Check if RHS is tainted source
-						if isDirectAuthSource(rhs) {
+						if isDirectAuthSource(rhs, fn, db) {
 							isTainted = true
 							return false
 						}

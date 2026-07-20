@@ -19,6 +19,74 @@ func (cgb *CallGraphBuilder) typeInfoFromTypeName(typeName, source string) types
 	return resolveTypeInfo(typeName, source, cgb.db, cgb.currentContract)
 }
 
+func isBuiltinStorageArrayMutation(name string, argCount int, receiverType types.TypeInfo, dataLocation string) bool {
+	if receiverType.Kind != types.TypeKindArray || !strings.HasSuffix(strings.TrimSpace(receiverType.Name), "[]") || dataLocation != "storage" {
+		return false
+	}
+	switch name {
+	case "push":
+		return argCount == 0 || argCount == 1
+	case "pop":
+		return argCount == 0
+	default:
+		return false
+	}
+}
+
+type stateVariableBinding struct {
+	variable *types.StateVariable
+	owner    *types.Contract
+}
+
+func exactStateVariablesForAST(db *types.Database, contract *types.Contract) []stateVariableBinding {
+	if contract == nil {
+		return nil
+	}
+	if db == nil {
+		result := make([]stateVariableBinding, 0, len(contract.StateVariables))
+		for _, variable := range contract.StateVariables {
+			result = append(result, stateVariableBinding{variable: variable, owner: contract})
+		}
+		return result
+	}
+	visited := make(map[string]bool)
+	var result []stateVariableBinding
+	var visit func(*types.Contract)
+	visit = func(current *types.Contract) {
+		if current == nil || visited[current.ID] {
+			return
+		}
+		visited[current.ID] = true
+		for _, baseName := range current.BaseContracts {
+			base, exact := db.ResolveContractNameExact(baseName, current.SourceFile)
+			if exact {
+				visit(base)
+			}
+		}
+		for _, variable := range current.StateVariables {
+			result = append(result, stateVariableBinding{variable: variable, owner: current})
+		}
+	}
+	visit(contract)
+	return result
+}
+
+func linearizedStateVariablesForCallGraph(db *types.Database, contract *types.Contract) []stateVariableBinding {
+	if db == nil || contract == nil {
+		return nil
+	}
+	mro := db.LinearizedContracts(contract)
+	var result []stateVariableBinding
+	for i := len(mro) - 1; i >= 0; i-- {
+		if mro[i] != nil {
+			for _, variable := range mro[i].StateVariables {
+				result = append(result, stateVariableBinding{variable: variable, owner: mro[i]})
+			}
+		}
+	}
+	return result
+}
+
 func resolveTypeInfo(typeName, source string, db *types.Database, contract *types.Contract) types.TypeInfo {
 	clean := types.CleanTypeName(typeName)
 	if clean == "" || clean == "unknown" {
@@ -309,37 +377,86 @@ func (b *ASTBuilder) addSemanticSymbol(name, kind string, ti types.TypeInfo) {
 	})
 }
 
+func (b *ASTBuilder) addSemanticStateSymbol(name string, owner *types.Contract, ti types.TypeInfo) {
+	if b == nil || b.db == nil || b.db.Semantics == nil || owner == nil || name == "" || !ti.IsKnown() {
+		return
+	}
+	b.db.Semantics.AddSymbol(&types.SemanticSymbol{
+		RefID:        owner.ID + "." + name,
+		Name:         name,
+		Kind:         "state_var",
+		ContractID:   owner.ID,
+		FunctionID:   b.semanticFunctionID(),
+		StorageClass: "state_var",
+		Type:         ti,
+	})
+}
+
 func (b *ASTBuilder) refIDForSymbol(name, kind string) string {
 	if b == nil || b.contract == nil || name == "" {
 		return ""
+	}
+	if exact := b.symbolRefIDs[name]; exact != "" {
+		return exact
 	}
 	switch kind {
 	case "state_var":
 		return fmt.Sprintf("%s#%s.%s", b.contract.SourceFile, b.contract.Name, name)
 	case "parameter":
-		if b.function == nil {
-			return ""
-		}
-		return fmt.Sprintf("%s#%s.%s.%s", b.contract.SourceFile, b.contract.Name, b.function.Name, name)
+		return b.parameterRefID(name)
 	case "local_var":
-		if b.function == nil {
-			return ""
-		}
-		return fmt.Sprintf("%s#%s.%s.-%s", b.contract.SourceFile, b.contract.Name, b.function.Name, name)
+		return ""
 	default:
 		return ""
 	}
 }
 
-func (b *ASTBuilder) semanticFunctionID() string {
-	if b == nil || b.contract == nil || b.function == nil {
+func (b *ASTBuilder) functionIdentityText() string {
+	if b == nil || b.function == nil {
 		return ""
 	}
-	fnKey := b.function.Selector
-	if fnKey == "" {
-		fnKey = b.function.Name
+	if b.function.Selector != "" {
+		return b.function.Selector
 	}
-	return types.MakeFunctionID(b.contract.SourceFile, b.contract.Name, fnKey)
+	return ""
+}
+
+func (b *ASTBuilder) semanticFunctionID() string {
+	if b == nil || b.contract == nil || b.function == nil || b.function.Selector == "" {
+		return ""
+	}
+	file := b.function.SourceFile
+	if file == "" {
+		file = b.contract.SourceFile
+	}
+	contractName := b.function.ContractName
+	if contractName == "" {
+		contractName = b.contract.Name
+	}
+	if file == "" || contractName == "" {
+		return ""
+	}
+	return types.MakeFunctionID(file, contractName, b.function.Selector)
+}
+
+func (b *ASTBuilder) parameterRefID(name string) string {
+	functionID := b.semanticFunctionID()
+	if functionID == "" || name == "" {
+		return ""
+	}
+	return functionID + "." + name
+}
+
+func (b *ASTBuilder) solidityLocalDeclarationRefID(name string, declaration ast.Node) string {
+	functionID := b.semanticFunctionID()
+	if functionID == "" || name == "" || declaration == nil {
+		return ""
+	}
+	rng := declaration.GetRange()
+	if rng == nil || rng[0] < 0 || rng[1] <= rng[0] {
+		return ""
+	}
+	return fmt.Sprintf("%s:local:%d:%d:%s", functionID, rng[0], rng[1], name)
 }
 
 func (b *ASTBuilder) isKnownUserType(name string) bool {

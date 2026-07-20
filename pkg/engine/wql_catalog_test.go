@@ -4,9 +4,9 @@ import "testing"
 
 func TestBlockKindToIR(t *testing.T) {
 	cases := []struct {
-		v2     string
-		wantIR string
-		wantOk bool
+		wqlName string
+		wantIR  string
+		wantOk  bool
 	}{
 		// The 9 call kinds (§5 "Calls" table).
 		{"call", "any_call", true},
@@ -79,13 +79,13 @@ func TestBlockKindToIR(t *testing.T) {
 	}
 
 	for _, tc := range cases {
-		t.Run(tc.v2, func(t *testing.T) {
-			gotIR, gotOk := blockKindToIR(tc.v2)
+		t.Run(tc.wqlName, func(t *testing.T) {
+			gotIR, gotOk := blockKindToIR(tc.wqlName)
 			if gotOk != tc.wantOk {
-				t.Fatalf("blockKindToIR(%q) ok = %v, want %v", tc.v2, gotOk, tc.wantOk)
+				t.Fatalf("blockKindToIR(%q) ok = %v, want %v", tc.wqlName, gotOk, tc.wantOk)
 			}
 			if gotOk && gotIR != tc.wantIR {
-				t.Fatalf("blockKindToIR(%q) = %q, want %q", tc.v2, gotIR, tc.wantIR)
+				t.Fatalf("blockKindToIR(%q) = %q, want %q", tc.wqlName, gotIR, tc.wantIR)
 			}
 		})
 	}
@@ -93,12 +93,13 @@ func TestBlockKindToIR(t *testing.T) {
 
 func TestAttrNameToIR(t *testing.T) {
 	cases := []struct {
-		v2     string
-		wantIR string
-		wantOk bool
+		wqlName string
+		wantIR  string
+		wantOk  bool
 	}{
 		// Core (§7)
 		{"receiver", "call_receiver", true},
+		{"receiver_name", "receiver_name", true},
 		{"signature", "called_signature", true},
 		{"literal_kind", "subtype", true},
 		{"has_value", "has_value", true},
@@ -126,13 +127,13 @@ func TestAttrNameToIR(t *testing.T) {
 	}
 
 	for _, tc := range cases {
-		t.Run(tc.v2, func(t *testing.T) {
-			gotIR, gotOk := attrNameToIR(tc.v2)
+		t.Run(tc.wqlName, func(t *testing.T) {
+			gotIR, gotOk := attrNameToIR(tc.wqlName)
 			if gotOk != tc.wantOk {
-				t.Fatalf("attrNameToIR(%q) ok = %v, want %v", tc.v2, gotOk, tc.wantOk)
+				t.Fatalf("attrNameToIR(%q) ok = %v, want %v", tc.wqlName, gotOk, tc.wantOk)
 			}
 			if gotOk && gotIR != tc.wantIR {
-				t.Fatalf("attrNameToIR(%q) = %q, want %q", tc.v2, gotIR, tc.wantIR)
+				t.Fatalf("attrNameToIR(%q) = %q, want %q", tc.wqlName, gotIR, tc.wantIR)
 			}
 		})
 	}
@@ -142,43 +143,9 @@ func TestAttrNameToIR(t *testing.T) {
 // name/visibility/mutability/tainted are handled by lowering as inline Rule
 // fields, NOT via attrNameToIR — see the doc comment on attrNameToIRTable.
 func TestAttrNameToIR_RuleFieldBackedNamesNotInMap(t *testing.T) {
-	for _, v2 := range []string{"name", "visibility", "mutability", "tainted"} {
-		if _, ok := attrNameToIR(v2); ok {
-			t.Fatalf("attrNameToIR(%q) ok = true, want false (Rule-field-backed, not an Attr-map entry)", v2)
+	for _, wqlName := range []string{"name", "visibility", "mutability", "tainted"} {
+		if _, ok := attrNameToIR(wqlName); ok {
+			t.Fatalf("attrNameToIR(%q) ok = true, want false (Rule-field-backed, not an Attr-map entry)", wqlName)
 		}
-	}
-}
-
-func TestPresetToIR(t *testing.T) {
-	cases := []struct {
-		v2         string
-		wantIR     string
-		wantNegate bool
-		wantOk     bool
-	}{
-		{"access_controlled", "unAuthenticated", true, true},
-		{"caller_checked", "unCheckedSender", true, true},
-		{"reentrancy_guarded", "unLocked", true, true},
-		{"not-a-real-preset", "", false, false},
-	}
-
-	for _, tc := range cases {
-		t.Run(tc.v2, func(t *testing.T) {
-			gotIR, gotNegate, gotOk := presetToIR(tc.v2)
-			if gotOk != tc.wantOk {
-				t.Fatalf("presetToIR(%q) ok = %v, want %v", tc.v2, gotOk, tc.wantOk)
-			}
-			if gotOk {
-				if gotIR != tc.wantIR {
-					t.Fatalf("presetToIR(%q) IR = %q, want %q", tc.v2, gotIR, tc.wantIR)
-				}
-				if gotNegate != tc.wantNegate {
-					t.Fatalf("presetToIR(%q) negate = %v, want %v", tc.v2, gotNegate, tc.wantNegate)
-				}
-				if !IsKnownPreset(gotIR) {
-					t.Fatalf("presetToIR(%q) resolved to unregistered evaluator preset %q", tc.v2, gotIR)
-				}
-			}
-		})
 	}
 }

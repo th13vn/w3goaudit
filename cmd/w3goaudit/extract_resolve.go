@@ -155,20 +155,27 @@ func linearizedContractsBaseFirst(db *types.Database, contract *types.Contract) 
 }
 
 // linearizedContractAt returns the exact object corresponding to one
-// display-name MRO entry. New databases carry index-aligned IDs; legacy caches
-// fall back to source-scoped exact resolution and leave ambiguous entries nil.
+// display-name MRO entry. LinearizedBases may retain unresolved names while
+// LinearizedBaseIDs is compact, so the slices must never be zipped by index.
 func linearizedContractAt(db *types.Database, contract *types.Contract, index int) *types.Contract {
 	if db == nil || contract == nil || index < 0 || index >= len(contract.LinearizedBases) {
 		return nil
 	}
-	if index < len(contract.LinearizedBaseIDs) {
-		return db.GetContractByID(contract.LinearizedBaseIDs[index])
-	}
 	if index == 0 && contract.LinearizedBases[index] == contract.Name {
 		return contract
 	}
-	resolved, _ := db.ResolveContractNameExact(contract.LinearizedBases[index], contract.SourceFile)
-	return resolved
+	displayName := contract.LinearizedBases[index]
+	var match *types.Contract
+	for _, candidate := range db.LinearizedContracts(contract) {
+		if candidate == nil || candidate.Name != displayName {
+			continue
+		}
+		if match != nil && match.ID != candidate.ID {
+			return nil
+		}
+		match = candidate
+	}
+	return match
 }
 
 func resolveFunctionID(db *types.Database, id string) (*types.Function, *types.Contract) {

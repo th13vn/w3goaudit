@@ -6,6 +6,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"sort"
 	"strings"
@@ -130,6 +131,10 @@ type Rule struct {
 	// contexts it checks the scoped source snippet.
 	Regex string `json:"regex,omitempty"`
 
+	// SourceRegex is a deprecated programmatic/JSON alias for Regex. Public
+	// WQL accepts only the canonical `regex` matcher.
+	SourceRegex string `json:"source_regex,omitempty"`
+
 	// StatementContains matches when the node's nearest enclosing statement
 	// (the closest `stmt.*` / `check.*` / `decl.variable` ancestor) has a
 	// descendant matching this sub-rule. It is a statement-scoped sibling search
@@ -140,11 +145,12 @@ type Rule struct {
 	// lives in the template, not the engine.
 	StatementContains *Rule `json:"statement_contains,omitempty"`
 
-	// UncheckedVar, on an arithmetic binary_op, matches only when the operation's
-	// operands were NOT bounded by a preceding guard (require/assert/if condition
-	// that references every operand identifier) earlier in the same function. It
-	// separates a deliberate, range-checked `unchecked` block — e.g.
-	// `require(a >= b); … a - b;` — from a genuinely unchecked one.
+	// UncheckedVar, on an arithmetic binary_op or assignment, matches only when
+	// the operation's operands were NOT bounded by a preceding guard
+	// (require/assert/if condition that references every operand identifier)
+	// earlier in the same function. It
+	// separates deliberate, range-checked subtraction — e.g.
+	// `require(a >= b); … a - b;` or `a -= b;` — from genuinely unchecked math.
 	UncheckedVar bool `json:"unchecked_var,omitempty"`
 
 	// ========== ATTRIBUTES ==========
@@ -161,6 +167,11 @@ type Rule struct {
 	// One keyword, routed by layer — no `_filter` variant.
 	Visibility string `json:"visibility,omitempty"`
 	Mutability string `json:"mutability,omitempty"`
+
+	// VisibilityFilter and MutabilityFilter are deprecated programmatic/JSON
+	// aliases. Public WQL accepts only visibility and mutability.
+	VisibilityFilter string `json:"visibility_filter,omitempty"`
+	MutabilityFilter string `json:"mutability_filter,omitempty"`
 
 	// ========== CONTEXT HELPERS (function-level filters) ==========
 	Extends  string `json:"extends,omitempty"`
@@ -224,7 +235,7 @@ func loadTemplateWithLogger(path string, logger *logging.Logger) (*Template, err
 }
 
 func parseTemplateDocument(data []byte, source string, logger *logging.Logger) (*Template, error) {
-	doc, err := parseV2(data)
+	doc, err := parseWQL(data)
 	if err != nil {
 		return nil, fmt.Errorf("template %s: %w", source, err)
 	}
@@ -280,6 +291,9 @@ func finalizeTemplateWithLogger(tmpl *Template, source string, logger *logging.L
 // rule placement, source-scope shape, inline-attr normalization, and
 // regex/preset/kind/value validation.
 func finalizeQueryBlock(q *QueryBlock, source string) error {
+	if err := normalizeCompatibilityAliases(q); err != nil {
+		return fmt.Errorf("template %s: %w", source, err)
+	}
 	if err := validateScope(q.Scope); err != nil {
 		return fmt.Errorf("template %s: %w", source, err)
 	}
@@ -321,6 +335,333 @@ func finalizeQueryBlock(q *QueryBlock, source string) error {
 	}
 
 	return nil
+}
+
+// normalizeCompatibilityAliases preserves the removed evaluator-IR Go/JSON
+// fields without exposing them through WQL. Canonical values are populated
+// before placement and value validation. Equal duplicate values are accepted;
+// conflicting non-empty values fail closed.
+func normalizeCompatibilityAliases(q *QueryBlock) error {
+	if q == nil {
+		return nil
+	}
+	cloned, err := normalizedQueryBlockCompatibilityCopy(q, "")
+	if err != nil {
+		return err
+	}
+	*q = cloned
+	return nil
+}
+
+func normalizeRuleCompatibilityAliases(rule *Rule, label string) error {
+	return walkRules(rule, func(r *Rule) error {
+		aliases := []struct {
+			canonicalName string
+			aliasName     string
+			canonical     *string
+			alias         string
+		}{
+			{"regex", "source_regex", &r.Regex, r.SourceRegex},
+			{"visibility", "visibility_filter", &r.Visibility, r.VisibilityFilter},
+			{"mutability", "mutability_filter", &r.Mutability, r.MutabilityFilter},
+		}
+		for _, pair := range aliases {
+			if pair.alias == "" {
+				continue
+			}
+			if *pair.canonical != "" && *pair.canonical != pair.alias {
+				return fmt.Errorf("%s: conflicting %s %q and deprecated %s %q", label, pair.canonicalName, *pair.canonical, pair.aliasName, pair.alias)
+			}
+			if *pair.canonical == "" {
+				*pair.canonical = pair.alias
+			}
+		}
+		return nil
+	})
+}
+
+func normalizedRuleCompatibilityCopy(rule Rule, label string) (Rule, error) {
+	return normalizedRuleCompatibilityCopyFrom(&rule, label)
+}
+
+func prepareRuleForEvaluation(rule Rule, label string) (Rule, error) {
+	normalized, err := normalizedRuleCompatibilityCopy(rule, label)
+	if err != nil {
+		return Rule{}, err
+	}
+	normalizeRule(&normalized)
+	for _, validate := range []func(*Rule) error{
+		validateRegexes,
+		validatePresets,
+		validateKinds,
+		validateRuleValues,
+	} {
+		if err := validate(&normalized); err != nil {
+			return Rule{}, err
+		}
+	}
+	return normalized, nil
+}
+
+func normalizedRuleCompatibilityCopyFrom(rule *Rule, label string) (Rule, error) {
+	cloned, err := cloneRuleGraph(rule, label)
+	if err != nil {
+		return Rule{}, err
+	}
+	if err := normalizeRuleCompatibilityAliases(&cloned, label); err != nil {
+		return Rule{}, err
+	}
+	return cloned, nil
+}
+
+type ruleCloneState struct {
+	active           map[*Rule]string
+	activeContainers map[ruleContainerIdentity]string
+}
+
+type ruleContainerIdentity struct {
+	kind reflect.Kind
+	ptr  uintptr
+}
+
+func cloneRuleGraph(rule *Rule, label string) (Rule, error) {
+	if rule == nil {
+		return Rule{}, nil
+	}
+	if label == "" {
+		label = "rule"
+	}
+	state := ruleCloneState{
+		active:           make(map[*Rule]string),
+		activeContainers: make(map[ruleContainerIdentity]string),
+	}
+	return state.clone(rule, 1, label)
+}
+
+func (state *ruleCloneState) clone(rule *Rule, depth int, path string) (Rule, error) {
+	if depth > MaxRuleRecursionDepth {
+		return Rule{}, fmt.Errorf("%s: rule nesting depth %d exceeds maximum %d", path, depth, MaxRuleRecursionDepth)
+	}
+	if ancestor, exists := state.active[rule]; exists {
+		return Rule{}, fmt.Errorf("%s: cyclic Rule reference to %s", path, ancestor)
+	}
+	state.active[rule] = path
+	defer delete(state.active, rule)
+
+	cloned := *rule
+	var err error
+	if cloned.All, err = state.cloneSlice(rule.All, depth+1, path+".all"); err != nil {
+		return Rule{}, err
+	}
+	if cloned.Any, err = state.cloneSlice(rule.Any, depth+1, path+".any"); err != nil {
+		return Rule{}, err
+	}
+	if cloned.Not, err = state.clonePointer(rule.Not, depth+1, path+".not"); err != nil {
+		return Rule{}, err
+	}
+	if cloned.Sequence, err = state.cloneSlice(rule.Sequence, depth+1, path+".sequence"); err != nil {
+		return Rule{}, err
+	}
+	if cloned.Attr, err = state.cloneRuleAttributes(rule.Attr, depth, path+".attr"); err != nil {
+		return Rule{}, err
+	}
+	if cloned.IsStateVar, err = state.cloneRuleAttributeValue(rule.IsStateVar, depth, path+".is_state_var"); err != nil {
+		return Rule{}, err
+	}
+	if cloned.StatementContains, err = state.clonePointer(rule.StatementContains, depth+1, path+".statement_contains"); err != nil {
+		return Rule{}, err
+	}
+	if cloned.HasGuard, err = state.clonePointer(rule.HasGuard, depth+1, path+".has_guard"); err != nil {
+		return Rule{}, err
+	}
+	if cloned.Contains, err = state.clonePointer(rule.Contains, depth+1, path+".contains"); err != nil {
+		return Rule{}, err
+	}
+	if cloned.Inside, err = state.clonePointer(rule.Inside, depth+1, path+".inside"); err != nil {
+		return Rule{}, err
+	}
+	if cloned.Args, err = state.cloneArgs(rule.Args, depth+1, path+".args"); err != nil {
+		return Rule{}, err
+	}
+	if cloned.ArgAny, err = state.clonePointer(rule.ArgAny, depth+1, path+".arg_any"); err != nil {
+		return Rule{}, err
+	}
+	if cloned.Left, err = state.clonePointer(rule.Left, depth+1, path+".left"); err != nil {
+		return Rule{}, err
+	}
+	if cloned.Right, err = state.clonePointer(rule.Right, depth+1, path+".right"); err != nil {
+		return Rule{}, err
+	}
+	return cloned, nil
+}
+
+func (state *ruleCloneState) cloneSlice(rules []Rule, depth int, path string) ([]Rule, error) {
+	if rules == nil {
+		return nil, nil
+	}
+	cloned := make([]Rule, len(rules))
+	for i := range rules {
+		var err error
+		cloned[i], err = state.clone(&rules[i], depth, fmt.Sprintf("%s[%d]", path, i))
+		if err != nil {
+			return nil, err
+		}
+	}
+	return cloned, nil
+}
+
+func (state *ruleCloneState) clonePointer(rule *Rule, depth int, path string) (*Rule, error) {
+	if rule == nil {
+		return nil, nil
+	}
+	cloned, err := state.clone(rule, depth, path)
+	if err != nil {
+		return nil, err
+	}
+	return &cloned, nil
+}
+
+func (state *ruleCloneState) cloneArgs(args map[int]Rule, depth int, path string) (map[int]Rule, error) {
+	if args == nil {
+		return nil, nil
+	}
+	cloned := make(map[int]Rule, len(args))
+	keys := make([]int, 0, len(args))
+	for index := range args {
+		keys = append(keys, index)
+	}
+	sort.Ints(keys)
+	for _, index := range keys {
+		rule := args[index]
+		clonedRule, err := state.clone(&rule, depth, fmt.Sprintf("%s[%d]", path, index))
+		if err != nil {
+			return nil, err
+		}
+		cloned[index] = clonedRule
+	}
+	return cloned, nil
+}
+
+func (state *ruleCloneState) cloneRuleAttributes(attributes map[string]interface{}, depth int, path string) (map[string]interface{}, error) {
+	if attributes == nil {
+		return nil, nil
+	}
+	leave, err := state.enterAttributeContainer(attributes, depth, path)
+	if err != nil {
+		return nil, err
+	}
+	defer leave()
+
+	cloned := make(map[string]interface{}, len(attributes))
+	keys := make([]string, 0, len(attributes))
+	for key := range attributes {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		value, err := state.cloneRuleAttributeValue(attributes[key], depth+1, fmt.Sprintf("%s[%q]", path, key))
+		if err != nil {
+			return nil, err
+		}
+		cloned[key] = value
+	}
+	return cloned, nil
+}
+
+func (state *ruleCloneState) cloneRuleAttributeValue(value interface{}, depth int, path string) (interface{}, error) {
+	switch typed := value.(type) {
+	case map[string]interface{}:
+		return state.cloneRuleAttributes(typed, depth, path)
+	case []interface{}:
+		if typed == nil {
+			return nil, nil
+		}
+		leave, err := state.enterAttributeContainer(typed, depth, path)
+		if err != nil {
+			return nil, err
+		}
+		defer leave()
+		cloned := make([]interface{}, len(typed))
+		for i := range typed {
+			cloned[i], err = state.cloneRuleAttributeValue(typed[i], depth+1, fmt.Sprintf("%s[%d]", path, i))
+			if err != nil {
+				return nil, err
+			}
+		}
+		return cloned, nil
+	case []string:
+		if typed == nil {
+			return nil, nil
+		}
+		leave, err := state.enterAttributeContainer(typed, depth, path)
+		if err != nil {
+			return nil, err
+		}
+		defer leave()
+		return append([]string(nil), typed...), nil
+	default:
+		return value, nil
+	}
+}
+
+func (state *ruleCloneState) enterAttributeContainer(value interface{}, depth int, path string) (func(), error) {
+	if depth > MaxRuleRecursionDepth {
+		return nil, fmt.Errorf("%s: attribute container nesting depth %d exceeds maximum %d", path, depth, MaxRuleRecursionDepth)
+	}
+	reflected := reflect.ValueOf(value)
+	identity := ruleContainerIdentity{kind: reflected.Kind(), ptr: reflected.Pointer()}
+	if ancestor, exists := state.activeContainers[identity]; exists {
+		return nil, fmt.Errorf("%s: cyclic attribute container reference to %s", path, ancestor)
+	}
+	state.activeContainers[identity] = path
+	return func() { delete(state.activeContainers, identity) }, nil
+}
+
+func normalizedQueryBlockCompatibilityCopy(q *QueryBlock, prefix string) (QueryBlock, error) {
+	if q == nil {
+		return QueryBlock{}, nil
+	}
+	label := func(field string) string {
+		if prefix == "" {
+			return field
+		}
+		return prefix + "." + field
+	}
+	cloned := *q
+	match, err := normalizedRuleCompatibilityCopyFrom(&q.Match, label("match"))
+	if err != nil {
+		return QueryBlock{}, err
+	}
+	cloned.Match = match
+	if q.Filter != nil {
+		filter, err := normalizedRuleCompatibilityCopyFrom(q.Filter, label("filter"))
+		if err != nil {
+			return QueryBlock{}, err
+		}
+		cloned.Filter = &filter
+	}
+	return cloned, nil
+}
+
+func normalizedTemplateCompatibilityCopy(tmpl *Template) (*Template, error) {
+	if tmpl == nil {
+		return nil, fmt.Errorf("empty template")
+	}
+	cloned := *tmpl
+	query, err := normalizedQueryBlockCompatibilityCopy(&tmpl.Query, "query")
+	if err != nil {
+		return nil, err
+	}
+	cloned.Query = query
+	cloned.Queries = make([]QueryBlock, len(tmpl.Queries))
+	for i := range tmpl.Queries {
+		query, err := normalizedQueryBlockCompatibilityCopy(&tmpl.Queries[i], fmt.Sprintf("queries[%d]", i))
+		if err != nil {
+			return nil, err
+		}
+		cloned.Queries[i] = query
+	}
+	return &cloned, nil
 }
 
 // normalizeQueryBlock promotes inline attributes (is_state_var, operator,
@@ -523,6 +864,9 @@ func checkRule(r *Rule, where string, inMatch bool) error {
 	if err := checkRule(r.Right, where, inMatch); err != nil {
 		return err
 	}
+	if err := checkRule(r.StatementContains, where, inMatch); err != nil {
+		return err
+	}
 	// has_guard's body is itself an AST predicate even when it lives in filter:.
 	if r.HasGuard != nil {
 		if err := checkRule(r.HasGuard, "has_guard", true); err != nil {
@@ -691,13 +1035,14 @@ func (r *Rule) IsEmpty() bool {
 	return len(r.All) == 0 && len(r.Any) == 0 && len(r.Sequence) == 0 &&
 		r.Not == nil && r.Contains == nil && r.Inside == nil &&
 		r.Kind == "" && r.Name == "" && len(r.Attr) == 0 &&
-		r.Regex == "" && r.ArgAny == nil &&
+		r.Regex == "" && r.SourceRegex == "" && r.ArgAny == nil &&
 		r.Extends == "" && r.Modifier == "" && len(r.Args) == 0 &&
 		r.TaintedFrom == "" && r.Version == "" && r.Preset == "" &&
 		r.Left == nil && r.Right == nil && r.HasParam == "" &&
 		r.FuncName == "" &&
 		r.HasGuard == nil && r.IsStateVar == nil &&
 		r.Operator == "" && r.Visibility == "" && r.Mutability == "" &&
+		r.VisibilityFilter == "" && r.MutabilityFilter == "" &&
 		!r.UncheckedVar && r.StatementContains == nil
 }
 
@@ -895,6 +1240,7 @@ func validateRegexes(r *Rule) error {
 var (
 	validTaintSources = map[string]bool{
 		"parameter": true, "state_var": true, "local_var": true, "sender": true,
+		"user_controlled": true,
 	}
 	validVisibilities = map[string]bool{
 		"public": true, "external": true, "internal": true, "private": true,
@@ -909,7 +1255,7 @@ var (
 func validateRuleValues(r *Rule) error {
 	return walkRules(r, func(n *Rule) error {
 		if n.TaintedFrom != "" && !validTaintSources[n.TaintedFrom] {
-			return fmt.Errorf("unknown tainted_from %q — must be one of: parameter, state_var, local_var, sender", n.TaintedFrom)
+			return fmt.Errorf("unknown tainted_from %q — must be one of: parameter, state_var, local_var, sender, user_controlled", n.TaintedFrom)
 		}
 		if err := validateCSVVocabulary("visibility", n.Visibility, validVisibilities); err != nil {
 			return err
@@ -927,24 +1273,31 @@ func validateRuleValues(r *Rule) error {
 }
 
 // validateCSVVocabulary checks each comma-separated token of value against the
-// allowed set. Empty value is a no-op.
+// allowed set. An empty field is a no-op, while a non-empty field must contain
+// at least one non-empty token.
 func validateCSVVocabulary(field, value string, allowed map[string]bool) error {
 	if value == "" {
 		return nil
 	}
+	seen := 0
 	for _, part := range strings.Split(value, ",") {
 		token := strings.TrimSpace(strings.ToLower(part))
 		if token == "" {
 			continue
 		}
+		seen++
 		if !allowed[token] {
 			keys := make([]string, 0, len(allowed))
-			for k := range allowed {
-				keys = append(keys, k)
+			for key := range allowed {
+				keys = append(keys, key)
 			}
 			sort.Strings(keys)
-			return fmt.Errorf("unknown %s value %q — must be one of: %s", field, token, strings.Join(keys, ", "))
+			return fmt.Errorf("unknown %s value %q: must be one of: %s",
+				field, token, strings.Join(keys, ", "))
 		}
+	}
+	if seen == 0 {
+		return fmt.Errorf("%s must contain at least one value", field)
 	}
 	return nil
 }

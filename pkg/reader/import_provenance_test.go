@@ -61,6 +61,46 @@ func TestRemappedResolvedImportProvenanceBeatsUnrelatedSameDirectoryContract(t *
 	assertResolvedImportAndExactContract(t, r.GetAllSources(), consumer, vendorToken, localToken)
 }
 
+func TestResolvedImportBindingsPreserveEveryOccurrence(t *testing.T) {
+	root := t.TempDir()
+	consumer := filepath.Join(root, "Consumer.sol")
+	vendor := filepath.Join(root, "Vendor.sol")
+	mustWrite(t, consumer, `
+import {Base as Parent} from "./Vendor.sol";
+import * as V from "./Vendor.sol";
+contract Consumer is Parent {}
+`)
+	mustWrite(t, vendor, `contract Base {}`)
+
+	r := New()
+	sources, err := r.Read(consumer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	consumer = sources[0].Path
+	if err := r.ResolveImports(root); err != nil {
+		t.Fatal(err)
+	}
+	var source *types.SourceFile
+	for _, candidate := range r.GetAllSources() {
+		if candidate.Path == consumer {
+			source = candidate
+			break
+		}
+	}
+	if source == nil {
+		t.Fatal("consumer source missing")
+	}
+	if len(source.ImportBindings) != 2 {
+		t.Fatalf("import bindings = %#v, want two authored occurrences", source.ImportBindings)
+	}
+	for _, binding := range source.ImportBindings {
+		if binding.ImportPath != "./Vendor.sol" || binding.ResolvedFile != cleanAbs(t, vendor) {
+			t.Fatalf("binding = %#v, want raw path plus canonical vendor", binding)
+		}
+	}
+}
+
 func assertResolvedImportAndExactContract(t *testing.T, sources []*types.SourceFile, consumerPath, importedPath, unrelatedPath string) {
 	t.Helper()
 	consumerPath = cleanAbs(t, consumerPath)

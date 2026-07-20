@@ -87,6 +87,50 @@ func TestBuildBasicContracts(t *testing.T) {
 	}
 }
 
+func TestBuildPersistsDirectReceiverNameThroughJSON(t *testing.T) {
+	db := buildFromSource(t, `pragma solidity ^0.8.20;
+interface Target { function ping() external; }
+contract ReceiverPersistence {
+    function run(Target target) external { target.ping(); }
+}`)
+	assertReceiver := func(t *testing.T, db *types.Database) {
+		t.Helper()
+		for _, contract := range db.Contracts {
+			for _, fn := range contract.Functions {
+				if fn == nil || fn.AST == nil {
+					continue
+				}
+				var got string
+				fn.AST.WalkDescendants(func(node *types.ASTNode) bool {
+					if node.Kind == types.KindCallExternal && node.Name == "ping" {
+						got = node.GetAttributeString("receiver_name")
+						return false
+					}
+					return true
+				})
+				if got != "" {
+					if got != "target" {
+						t.Fatalf("receiver_name = %q, want target", got)
+					}
+					return
+				}
+			}
+		}
+		t.Fatal("external ping call with receiver_name not found")
+	}
+	assertReceiver(t, db)
+	raw, err := json.Marshal(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var loaded types.Database
+	if err := json.Unmarshal(raw, &loaded); err != nil {
+		t.Fatal(err)
+	}
+	loaded.RestoreASTParents()
+	assertReceiver(t, &loaded)
+}
+
 func TestBuildPersistsMetadataAndAnalysisDiagnostics(t *testing.T) {
 	readerDiagnostic := types.Diagnostic{
 		Code:       types.DiagnosticUnresolvedImport,

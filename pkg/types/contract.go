@@ -32,9 +32,11 @@ type Contract struct {
 	// Most derived (current contract) first, most base contract last
 	LinearizedBases []string `json:"linearizedBases,omitempty"`
 
-	// LinearizedBaseIDs is the exact file#Contract identity for each entry in
-	// LinearizedBases. It is additive to preserve schema-2.0.0 readers that use
-	// the display-name slice, while new consumers avoid short-name collisions.
+	// LinearizedBaseIDs is the compact exact file#Contract C3 chain in
+	// derived-first order. It preserves the relative order of resolvable entries
+	// but is not index-aligned with LinearizedBases when a display entry is
+	// unresolved. It is additive to preserve schema-2.0.0 readers that use the
+	// display-name slice, while new consumers avoid short-name collisions.
 	LinearizedBaseIDs []string `json:"linearizedBaseIds,omitempty"`
 
 	// InheritanceWeight is used to score main contract candidates

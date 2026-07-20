@@ -41,9 +41,13 @@ type MainContractEntry struct {
   candidate in the same file, same directory, or one a relative import in
   `fromFile` resolves to, before falling back to lex-min. Used by inheritance and
   internal-call resolution so duplicate names pick the in-scope definition.
-- `ResolveContractNameExact(name, fromFile)` - Same source-scope search but
-  returns `(nil, false)` instead of choosing a lexicographic candidate when the
-  identity remains ambiguous.
+- `ResolveContractNameExact(name, fromFile)` - Source-scoped exact search over
+  same-file declarations, structured named/namespace aliases, canonical direct
+  imports, and legacy relative provenance; returns `(nil, false)` rather than
+  guessing.
+- `ResolveContractNameExactWithStatus(name, fromFile)` - Additive diagnostic
+  view distinguishing resolved, missing, ambiguous, and missing imported
+  binding states while preserving the historical bool-returning method.
 - `LinearizedContracts(contract)` - Returns exact contract objects in C3 order
   from `LinearizedBaseIDs`; old schema-2.0.0 caches without IDs use exact self
   plus source-scoped name fallback. The lookup is read-only and never appends
@@ -57,8 +61,8 @@ type MainContractEntry struct {
 - `GetFunctionSource(fn)` - Extract raw Solidity source lines for a function (see source.go)
 - `RestoreASTParents()` - Rebuild `ASTNode.Parent` links after JSON round-trips so `inside`, guard, and taint helpers behave the same with `--db`
 - `AddDiagnostic(diagnostic)` - Append a durable structured analysis-quality record
-- `NormalizeDiagnostics()` - Enrich legacy name-only MRO ambiguity before
-  reporting, deduplicate exact records, and sort by the stable serialized total order
+- `NormalizeDiagnostics()` - Record every unresolved legacy name-only MRO entry
+  before reporting, deduplicate exact records, and sort by the stable serialized total order
 - `AnalysisComplete()` - False when any diagnostic records known incomplete analysis
 
 ### diagnostic.go
@@ -70,13 +74,16 @@ flag. These are distinct from security findings: they explain what source or
 semantic coverage the analyzer could not establish.
 
 Stable codes include `import.unresolved`, `parse.skipped`, `parse.recovered`,
-`inheritance.base_unresolved`, `location.invalid`, and `identity.unresolved`.
+`inheritance.base_unresolved`, `location.invalid`, `identity.unresolved`, and
+`analysis.semantic_unsupported`. The semantic code records an exact AST shape
+that the internal lowering layer could not model and marks analysis incomplete.
 `SortDiagnostics` orders records by severity, code, file, line, import path,
 symbol, message, then deterministic tie-breakers. `Database.NormalizeDiagnostics`
 also removes records identical across every serialized field. Cache loading
-calls normalization after legacy field backfills, so ambiguous name-only MROs
-produce `identity.unresolved` before any read-only `LinearizedContracts` caller
-builds summaries, navigation, or reports.
+calls normalization after legacy field backfills, so every name-only MRO entry
+that is missing, binding-missing, or ambiguous produces an incomplete
+`identity.unresolved` before any read-only `LinearizedContracts` caller builds
+summaries, navigation, or reports.
 
 `Database.ScanTarget` persists the original source file/directory separately
 from `ProjectRoot`. Both it and `Diagnostics` are additive JSON fields, so old
@@ -111,8 +118,11 @@ an unresolved collision into a plausible but wrong contract. The builder emits
 mapped to one exact contract; dynamic/low-level external calls are expected to
 remain unresolved and do not produce this diagnostic.
 
-`ResolveContractNameExact` checks the caller's canonical
-`SourceFile.ResolvedImports` before directory proximity, so `../vendor/Token.sol`
+`ResolveContractNameExact` checks the caller's structured
+`SourceFile.ImportBindings` and canonical `ResolvedImports` before any
+compatibility fallback. `import {Base as Parent}` maps only `Parent` to the
+exact imported `Base`, while `import * as V` maps only `V.Base`; aliases do not
+expose the original bare symbol. A direct `../vendor/Token.sol`
 or a remapped dependency wins over an unrelated `src/Token.sol` beside the
 caller. Older caches without provenance reconstruct only relative raw imports,
 and otherwise remain ambiguous; exact resolution never uses directory proximity.
@@ -164,9 +174,14 @@ type SourceFile struct {
     Contracts []string
     Imports   []string
     ResolvedImports []string // canonical files actually selected by reader
+    ImportBindings []ImportBinding // occurrence-level exact path + aliases
     AST       interface{}   // NOT serialized (json:"-"); holds the Phase-1 *ast.SourceUnit
 }
 ```
+
+`ImportBinding{ImportPath, ResolvedFile, UnitAlias, Symbols}` is additive JSON.
+Each `ImportSymbolBinding{Symbol, Alias}` preserves one named import. Older
+caches without the field retain the strict direct-import fallback.
 
 > The Phase-1 parsed tree is stashed on `AST` and reused by the call-graph phase
 > to avoid re-parsing every file. It is not serialized; a database reloaded from
@@ -249,8 +264,10 @@ type Function struct {
 > **Precise locations (v0.4):** `StartCol`/`EndCol`/`StartByte`/`EndByte` are new
 > alongside the pre-existing `StartLine`/`EndLine`. Columns are 1-based
 > Unicode-code-point counts; byte offsets are 0-based UTF-8 offsets into the
-> source file's `Content`, with half-open `[start, end)` ranges. All four are zero for synthetic nodes that have
-> no source counterpart (e.g. the engine's synthetic `decl.contract` roots).
+> source file's `Content`, with half-open `[start, end)` ranges. All four are
+> zero only for synthetic nodes with no source counterpart. Engine declaration
+> clones, including `decl.contract` roots, copy the exact stored declaration
+> spans instead of guessing them from source text.
 > The same six fields (`StartLine/EndLine/StartCol/EndCol/StartByte/EndByte`)
 > also exist on `Modifier`, `Contract`, `StateVariable`, `Event`, `Struct`,
 > `Enum`, and `Parameter` (declared in `contract.go`/`function.go`) — not
@@ -268,12 +285,36 @@ type Function struct {
 - `IsEntrypoint()` - true for public/external functions that are not view/pure and not the constructor
 - `GetSelector(structDefs)` - Calculate canonical signature text (with struct→tuple resolution)
 - `GetSignature(structDefs)` - Generate the 4-byte hash
-- `IsAccessControlled(db)` - Detect **privileged** access control: auth modifiers, recursive internal auth checks, and caller-identity guards. Recognized role-style modifiers include owner/admin/operator/role/guardian/governance/manager/controller/minter/pauser variants. Modifier and recursive-callee lookup starts from the function's exact `SourceFile#ContractName` owner and walks `Database.LinearizedContracts`; duplicate short names cannot lend each other modifiers or auth helpers. When a modifier name matches the auth pattern, the helper additionally validates the modifier's **body** and requires at least one auth-shaped signal (a guard, an `if`/ternary, or a `msg.sender`/`tx.origin` reference) before trusting the name. This catches the empty-decoy bypass (`modifier auth() { _; }`) while preserving compatibility with synthetic tests where no body is available (falls back to trusting the name when the definition can't be resolved). The internal-auth-call fallback recognizes verb+noun helper names — a guard verb (`check`/`require`/`verify`/`validate`/`enforce`) followed by an auth noun (`owner`/`auth`/`admin`/`role`/`sender`/`access`/`permission`), joined directly or by underscores — so both camelCase (`_checkOwner`) and snake_case (`_check_owner`) helpers match.
-  - **Caller-identity guard rule (storage-anchored):** a comparison of a caller identity (`msg.sender`/`tx.origin`/`_msgSender()`) counts as access control **only** when the other operand is a **contract-fixed authority** the caller cannot control — a state variable, a fixed getter (`owner()`, `getOwner()`), a role check (`hasRole(ROLE, msg.sender)`), a state mapping/struct, an immutable, a constant, `address(this)`, or a **hardcoded literal address** (`require(msg.sender == 0xAbC…)`). Comparing against a **function argument** (or an argument-derived local) is *self-authorization*, not a privileged gate, and does NOT count — e.g. `require(from == msg.sender)` where `from` is a parameter is permissionless. Provenance is read from the AST node's `RefKind` (`parameter`/`state_var`/`local_var`) and `TaintSources` (a local is caller-controlled only when tainted solely from `parameter`), with the function's parameter set as a backstop. `_msgSender()` (all forms, including custom calldata-decoding overrides) is accepted as a caller-identity source; an insecure custom `_msgSender()` is a separate concern for a WQL template, not this heuristic.
+- `IsAccessControlled(db)` - Detect **privileged** access control from exact
+  bodies and call-site bindings. Modifier and helper names are descriptive only:
+  applied modifiers require a resolved `CallTypeModifier` target, internal
+  helpers require a resolved exact contract ID plus full selector, and their
+  actual AST or recursive behavior must prove caller authorization. Modifier
+  invocation argument ASTs bind guarded parameters to expressions such as
+  `isOperator[msg.sender]`. The recursive analysis uses a per-call recursion
+  stack and memo keyed by exact body identity plus sorted forwarded-caller,
+  authorization-boolean, and fixed-operand parameter sets, so one binding
+  context cannot suppress another. Recursive internal calls bind arguments from
+  the one AST call site matching exact recorded line/byte metadata, then
+  propagate all three sets into the exact resolved callee; same-name call sites
+  are never merged.
+  Authorization is polarity-aware and enforcement-positive: normal execution
+  must require the predicate to be true through `require`/`assert`, or require
+  it through an equivalent failing `if (...) revert` branch. Observational
+  `if` statements and `require(allowed == false)` do not authorize. Standard
+  `hasRole(FIXED_ROLE, caller)` checks require a direct or forwarded caller and
+  a contract-fixed role operand. The `hasRole` AST call must correlate to one
+  exact resolved internal call whose concrete body returns membership from an
+  access mapping under the same fixed-role/caller bindings. Unresolved,
+  ambiguous, external, bodyless, or decoy implementations fail closed. Nested
+  access mappings require exactly one caller-identity selector and every other
+  key to be fixed. No package-global auth cache is used.
+  - **Caller-identity guard rule (storage-anchored):** a comparison of a caller identity (`msg.sender`/`tx.origin`/`_msgSender()`) counts as access control **only** when the other operand is a **contract-fixed authority** the caller cannot control — a state variable, a fixed getter (`owner()`, `getOwner()`), a role check (`hasRole(ROLE, msg.sender)`), a state mapping/struct, an immutable, a constant, `address(this)`, or a **hardcoded literal address** (`require(msg.sender == 0xAbC…)`). Comparing against a **function argument** (or an argument-derived local) is *self-authorization*, not a privileged gate, and does NOT count — e.g. `require(from == msg.sender)` where `from` is a parameter is permissionless. Provenance is read from the AST node's `RefKind` (`parameter`/`state_var`/`local_var`) and `TaintSources` (a local is caller-controlled only when tainted solely from `parameter`), with the function's parameter set as a backstop. `_msgSender()` is accepted only as an exact zero-argument `call.internal` whose recorded metadata, when present, is internal/inherited/super with selector `_msgSender()`. Database resolution becomes authoritative only after it identifies the exact owning contract/MRO: a resolved owner with no zero-parameter helper, or only a nonzero overload, disproves caller identity. A non-nil empty or unresolvable database is unavailable context, so the exact synthetic zero-argument internal-call compatibility shape remains valid. Same-named state/local/parameter identifiers and external/self/unresolved calls remain ordinary values.
+    - **Exact owner availability:** when `Function.SourceFile` is present, only the exact `SourceFile#ContractName` database ID makes resolution authoritative. A unique same-named contract in another file is unavailable context and cannot disprove the synthetic compatibility shape.
     - **Privileged access control vs. owner-of-item check:** these are distinct and must not be conflated. `msg.sender == owner()` / `hasRole(ROLE, msg.sender)` gate to a **contract-fixed principal** → access control. `ownerOf(tokenId) == msg.sender` only asserts *"you own the item you named"* — a getter the **caller indexes with a resource id of their own choosing** → **item-ownership self-scoping**, the NFT analogue of `require(from == msg.sender)`. It does NOT restrict *who* can call (anyone holding some token qualifies), so it is treated as caller-controlled (`getterIsResourceScoped`) and does **not** count toward `IsAccessControlled`. It belongs to `ComparesCallerIdentity` instead.
     - **Getter vs. type-cast operand:** the authority operand is unwrapped only for genuine *type casts* (`address(x)`, `payable(x)`, `uintN`/`bytesN`, …, via `isTypeCastName`). A single-argument call to a non-type callee is a **getter, not a cast** — `ownerOf(tokenId)` is kept intact (then classified as resource-scoped per above) rather than collapsed to its `tokenId` argument.
-    - **Forwarded caller identity (interprocedural):** when the recursive descent follows an internal call, parameters bound to a caller-identity argument at the call site (`_withdraw(msg.sender, …)`) are tracked (`forwardedCallerParams`) and treated as caller-identity sources inside the callee. A forwarded caller compared to a **contract-fixed authority** (`owner() == caller`) counts as access control; compared to a **caller-selected resource getter** (`ownerOf(tokenId) != caller`) it is self-scoping (see `ComparesCallerIdentity`), not access control. The descent matches the stored full selector exactly when built data provides one and uses a bare-name compatibility fallback only for legacy/synthetic functions without materialized selectors (`resolveInternalCallee`/`calleeNameMatches`/`bareFuncName`).
-- `ComparesCallerIdentity(db)` - Detect caller **self-scoping**: a caller identity compared (inside a guard/condition) against any operand — `require(from == msg.sender)`, `if (from != msg.sender) revert`, and **item-ownership** scopes like `ownerOf(tokenId) == msg.sender`. **Interprocedural:** it follows the same forwarded-caller-identity descent as `IsAccessControlled` (`resolveInternalCallee` + `forwardedCallerParams`), so an entry point that forwards `msg.sender` into a helper which checks `ownerOf(tokenId) != caller` is recognized. This is NOT privileged access control — it binds the action to the caller's own resource ("you can only act on your own behalf/asset"). Used by the `unCheckedSender` preset (arbitrary `transferFrom`, arbitrary-send-eth) that treats self-scoping as a valid mitigation. Keep distinct from `IsAccessControlled` so entry-point classification still treats self-scoped functions as permissionless.
+    - **Forwarded caller identity (interprocedural):** when the recursive descent follows an internal call, parameters bound to a caller-identity argument at the call site (`_withdraw(msg.sender, …)`) are tracked (`forwardedCallerParams`) and treated as caller-identity sources inside the callee. A forwarded caller compared to a **contract-fixed authority** (`owner() == caller`) counts as access control; compared to a **caller-selected resource getter** (`ownerOf(tokenId) != caller`) it is self-scoping (see `ComparesCallerIdentity`), not access control. Privileged access-control descent requires exact resolved contract and selector metadata; self-scoping retains its documented legacy/synthetic compatibility resolver.
+- `ComparesCallerIdentity(databases ...*Database)` - Detect caller **self-scoping**: a caller identity compared (inside a guard/condition) against any operand – `require(from == msg.sender)`, `if (from != msg.sender) revert`, and **item-ownership** scopes like `ownerOf(tokenId) == msg.sender`. **Interprocedural:** it follows the same forwarded-caller-identity descent as `IsAccessControlled` (`resolveInternalCallee` + `forwardedCallerParams`), so an entry point that forwards `msg.sender` into a helper which checks `ownerOf(tokenId) != caller` is recognized. This is NOT privileged access control – it binds the action to the caller's own resource ("you can only act on your own behalf/asset"). The canonical `caller_checked` preset treats this self-scoping as a valid mitigation for arbitrary `transferFrom` and arbitrary-send-ETH detectors. Keep it distinct from `IsAccessControlled` so entry-point classification still treats self-scoped functions as permissionless. The first non-nil database enables exact recursive resolution; the zero-argument call remains compatible.
 - `UniqueID(structDefs)` hashes the exact `MakeFunctionID(SourceFile, ContractName, selector)` identity; selector-less declarations fall back to their function name. Legacy/synthetic functions without `SourceFile` retain the old short-name-compatible behavior.
 
 ### ast.go
@@ -313,7 +354,7 @@ type ASTNode struct {
 |----------|-------|
 | **Call** | `call.internal`, `call.external`, `call.lowlevel.call`, `call.lowlevel.delegatecall`, `call.lowlevel.staticcall`, `call.builtin.transfer`, `call.builtin.send`, `call.builtin.selfdestruct`, `call.create` |
 | **Check** | `check.require`, `check.assert`, `check.revert` |
-| **Statement** | `stmt.assign`, `stmt.if`, `stmt.loop`, `stmt.return`, `stmt.emit`, `stmt.try_catch`, `stmt.block`, `stmt.unchecked` |
+| **Statement** | `stmt.assign`, `stmt.state_mutation`, `stmt.if`, `stmt.loop`, `stmt.return`, `stmt.emit`, `stmt.try_catch`, `stmt.block`, `stmt.unchecked` |
 | **Expression** | `expr.identifier`, `expr.literal`, `expr.binary_op`, `expr.unary_op`, `expr.member_access`, `expr.index_access`, `expr.conditional` |
 | **Declaration** | `decl.function`, `decl.contract`, `decl.variable`, `decl.parameter`, `decl.modifier` |
 | **Assembly** | `asm.call`, `asm.delegatecall`, `asm.staticcall`, `asm.sstore`, `asm.sload`, `asm.selfdestruct`, `asm.create`, `asm.create2`, `asm.log0`, `asm.log1`, `asm.log2`, `asm.log3`, `asm.log4`, `asm.revert`, `asm.return`, `asm.operation` |
@@ -321,9 +362,13 @@ type ASTNode struct {
 > **Synthetic contract ASTs:** persisted function ASTs are rooted at
 > `decl.function`. The engine creates synthetic `decl.contract` roots at
 > contract scopes (`main_contract`, `all_contract`, `contract`, `library`,
-> `abstract`) and attaches cloned resolved function ASTs from the contract's C3
-> linearized inheritance chain. These synthetic roots are execution context for
-> WQL and are not stored as source-file ASTs in the database.
+> `abstract`). Each root carries the exact contract declaration span and source
+> file. Its exact-MRO children include active functions deduplicated by
+> canonical selector, state-variable and modifier declarations, and function,
+> return, or modifier parameter declarations tagged by `parameter_role`. Every
+> inherited declaration retains its exact owning source file and stored span.
+> These trees are execution context for WQL and are not persisted as
+> source-file ASTs in the database.
 
 **Semantic Group Functions:**
 
@@ -334,16 +379,19 @@ type ASTNode struct {
 | `IsDelegatecall()` | delegatecall operations | `delegatecall` |
 | `IsCheck()` | require/assert/revert | `check` |
 | `IsGuard()` | require/assert/revert (alias for IsCheck) | `guard`, `guard.require`, `guard.assert`, `guard.revert` |
-| `IsTokenCall()` | call.external (pair with `name:` for ERC20/ERC721) | `token_call` |
+| `IsTokenCall()` | call.external (pair with `name:` for ERC20/ERC721) | `external_call` plus `name:` |
 | `IsAnyCall()` | All call types including internal | `any_call` |
 | `IsKnownKind()` | Returns true for any registered AST kind, semantic group, or dotted prefix. Used by `engine.validateKinds` at template-load time | — |
 
-> `IsGuard()` is an alias for `IsCheck()` — enables `kind: guard`, `kind: guard.require`, etc. in WQL templates. `IsTokenCall()` maps to `call.external` for ERC20/ERC721 semantic matching with `kind: token_call`.
+> `IsGuard()` is an alias for `IsCheck()` and backs public `block: guard`,
+> `block: require`, `block: assert`, and `block: revert`. `IsTokenCall()` is an
+> evaluator helper; public ERC20/ERC721 matching uses `block: external_call`
+> plus `name:`.
 
 > **`selfdestruct` semantic group** unions `call.builtin.selfdestruct`
 > (the Solidity-level `selfdestruct(addr)` / `suicide(addr)` builtin) with
 > `asm.selfdestruct` (the inline-assembly `selfdestruct` opcode). Templates
-> using `kind: selfdestruct` match both forms.
+> using `block: selfdestruct` match both forms.
 
 **Closed sets exposed for engine validation:**
 - `KnownSemanticGroups` (`map[string]bool`) — every semantic-group name accepted by `matchKind`
@@ -362,11 +410,14 @@ type ASTNode struct {
 | Attribute | Used In | Description |
 |-----------|---------|-------------|
 | `parent` | `member_access` | Parent expression name (e.g., "tx" for `tx.origin`) |
-| `operator` | `binary_op`, `assignment` | Operator string (e.g., "==", "=") |
+| `operator` | `binary_op`, `assignment`, `state_mutation`, `unary_op` | Operator string (for example, `==`, `=`, `push`, `pop`, `delete`, `++`, `--`) |
+| `is_state_var` | `assignment`, `state_mutation` | True when the write target is a directly identified state variable or one of its indexed/member descendants |
 | `called_signature` | `external_call` | Function selector for low-level calls |
 | `call_receiver` | call receiver child | Marks the receiver expression of a member call, e.g. `target` in `target.delegatecall(data)` |
+| `receiver_name` | member call node | Name of the direct tagged receiver child when available; nested argument/call-option receivers do not affect it |
 | `call_option` | call option child | Marks `{value:}`, `{gas:}`, or related call option expressions attached to a call node |
 | `type` / `type_kind` / `type_confidence` | typed expressions | Lightweight inferred type facts on identifiers, casts, index expressions, member accesses, and cast calls |
+| `data_location` | identifiers | Raw Solidity `storage`/`memory`/`calldata` location retained privately by the builder and mirrored when present |
 | `receiver_type` / `receiver_type_kind` | calls | Inferred member-call receiver type used for type-aware classification; available to WQL through `attr` |
 
 ### semantic.go
@@ -399,10 +450,14 @@ type FunctionEffects struct {
     Guards      []Guard      // require/assert/revert + if conditions, in order
     Auth        AuthInfo     // modifiers, msg.sender checks, tx.origin, controlled?
 }
-type StateWrite struct { Var, Kind string; Line int }   // kind: assign|compound|delete|sstore
+type StateWrite struct { Var, Kind string; Line int }   // kind: assign|compound|push|pop|delete|increment|decrement|sstore
 type Guard      struct { Kind, Expr string; Line int }   // kind: require|assert|revert|if
 type AuthInfo   struct { Modifiers, SenderChecks []string; UsesTxOrigin, Controlled bool }
 ```
+
+`AuthInfo.Modifiers` is descriptive. `AuthInfo.Controlled` is true only when
+`Function.IsAccessControlled(db)` proves privileged access from exact modifier
+bodies, inline caller checks, or recursively resolved internal auth helpers.
 
 `SetFunctionEffects` / `GetFunctionEffects` access the map by function ID
 (`MakeFunctionID(sourceFile, contract, selector)`). These facts serialize into
@@ -441,7 +496,8 @@ type FunctionCall struct {
     Col              int          // 1-based Unicode-code-point column (v0.4)
     Byte             int          // 0-based UTF-8 byte offset (v0.4)
     Resolved         bool
-    ArgCount         int          // -1 means unknown (old JSON)
+    ArgCount         int          // -1 means absent/unknown legacy JSON; 0 is real
+    Arguments        []*ASTNode   // detached modifier call-site arguments, when recorded
 }
 
 // CallEdge (callgraph.go) carries the same ResolvedContractID and Col/Byte
@@ -462,6 +518,19 @@ type CallGraph struct {
 only when the resolver has one exact contract object. Older schema-2.0.0 cache
 files load with it empty and retain their existing name fields.
 
+Builder calls with known parsed arguments do not use a unique-name fallback
+when no declaration has the observed arity. Their call and edge remain
+unresolved with empty exact target fields, and one durable
+`identity.unresolved` diagnostic records the target name and arity.
+
+`FunctionCall` uses presence-aware JSON decoding for `argCount`. Legacy cache
+objects with no field load as `-1`; newly serialized zero-argument calls always
+emit `"argCount": 0`, and repeated JSON round trips preserve zero.
+
+Resolved modifier invocations additionally serialize simplified argument ASTs
+in `FunctionCall.Arguments`. `Database.RestoreASTParents` restores these trees
+after cache loading so source and `--db` access-control analysis agree.
+
 **Call Types:**
 
 | Category | Types |
@@ -473,6 +542,12 @@ files load with it empty and retain their existing name fields.
 | ETH Transfer | `transfer_eth` |
 
 ## Design Philosophy
+
+`ResolveContractNameExact` accepts a sole global candidate only without source
+context; a non-empty referring file still requires same-file or import
+provenance. `ComparesCallerIdentity(db ...*Database)` preserves the historical
+zero-argument SDK call and uses the first non-nil database for exact recursive
+analysis.
 
 - **Immutable IDs** - Contract/function IDs include file path for uniqueness
 - **Rich metadata** - Capture all relevant Solidity information

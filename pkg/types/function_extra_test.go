@@ -208,10 +208,32 @@ func TestUniqueIDFormatAndStability(t *testing.T) {
 
 func TestAccessControlModifierLookupUsesExactFunctionOwner(t *testing.T) {
 	db := NewDatabase()
-	aGuard := NewASTNode(KindCheckRequire)
+	aGuard := NewASTNode(KindDeclModifier)
+	aRequire := NewASTNode(KindCheckRequire)
+	aComparison := NewASTNode(KindExprBinaryOp)
+	aComparison.SetAttribute("operator", "==")
+	aComparison.AddChild(testMsgSenderNode())
+	aOwner := NewASTNode(KindExprIdentifier)
+	aOwner.Name = "owner"
+	aOwner.RefKind = "state_var"
+	aComparison.AddChild(aOwner)
+	aRequire.AddChild(aComparison)
+	aGuard.AddChild(aRequire)
 	zNoOp := NewASTNode(KindDeclModifier)
-	aFn := &Function{Name: "run", ContractName: "Token", SourceFile: "/a/Token.sol", Modifiers: []string{"onlyOwner"}}
-	zFn := &Function{Name: "run", ContractName: "Token", SourceFile: "/z/Token.sol", Modifiers: []string{"onlyOwner"}}
+	aFn := &Function{
+		Name: "run", ContractName: "Token", SourceFile: "/a/Token.sol", Modifiers: []string{"onlyOwner"},
+		Calls: []*FunctionCall{{
+			Target: "onlyOwner", ResolvedFunction: "onlyOwner", ResolvedContractID: "/a/Token.sol#Token",
+			CallType: CallTypeModifier, Resolved: true, ArgCount: 0,
+		}},
+	}
+	zFn := &Function{
+		Name: "run", ContractName: "Token", SourceFile: "/z/Token.sol", Modifiers: []string{"onlyOwner"},
+		Calls: []*FunctionCall{{
+			Target: "onlyOwner", ResolvedFunction: "onlyOwner", ResolvedContractID: "/z/Token.sol#Token",
+			CallType: CallTypeModifier, Resolved: true, ArgCount: 0,
+		}},
+	}
 	a := &Contract{
 		ID: "/a/Token.sol#Token", Name: "Token", SourceFile: "/a/Token.sol",
 		LinearizedBases: []string{"Token"}, LinearizedBaseIDs: []string{"/a/Token.sol#Token"},
@@ -286,41 +308,208 @@ func TestIsAccessControlledNoModifier(t *testing.T) {
 	}
 }
 
-func TestIsAccessControlledViaInternalAuthCall(t *testing.T) {
-	// The auth-function heuristic matches verb+noun helper names in both
-	// camelCase and snake_case, joined directly or by underscores. Names with
-	// no auth noun (checkBalance) or non-auth callees must NOT match.
-	cases := []struct {
-		target string
-		want   bool
-	}{
-		{"_checkOwner", true},   // camelCase, leading underscore (OpenZeppelin style)
-		{"checkOwner", true},    // camelCase, no underscore
-		{"requireAuth", true},   // verb+noun, no separator
-		{"validateAdmin", true}, // verb+noun, no separator
-		{"verifyRole", true},
-		{"enforceAccess", true},
-		{"checkPermission", true},
-		{"_check_Owner", true}, // snake_case with underscore separator
-		{"check_owner", true},
-		{"checkSender", true},
-		{"checkBalance", false}, // "check" verb but no auth noun
-		{"checkSupply", false},
-		{"getOwner", false}, // auth noun but not a guard verb
-		{"transfer", false},
-		{"withdraw", false},
-	}
-	for _, tc := range cases {
+func TestIsAccessControlledDoesNotTrustInternalHelperNames(t *testing.T) {
+	for _, target := range []string{
+		"_checkOwner", "checkOwner", "requireAuth", "validateAdmin",
+		"verifyRole", "enforceAccess", "checkPermission", "_check_Owner",
+		"check_owner", "checkSender", "checkBalance", "checkSupply",
+		"getOwner", "transfer", "withdraw",
+	} {
 		fn := &Function{
 			Name:       "guarded",
 			Visibility: VisibilityPublic,
-			Calls:      []*FunctionCall{{Target: tc.target, CallType: CallTypeInternal}},
+			Calls:      []*FunctionCall{{Target: target, CallType: CallTypeInternal}},
 		}
-		got := fn.IsAccessControlled(NewDatabase())
-		if got != tc.want {
-			t.Errorf("IsAccessControlled with internal call %q = %v, want %v", tc.target, got, tc.want)
+		if fn.IsAccessControlled(NewDatabase()) {
+			t.Errorf("internal helper name %q must not prove access control", target)
 		}
 	}
+}
+
+func TestIsAccessControlledRejectsAuthNamedDecoys(t *testing.T) {
+	file := "/exact/Auth.sol"
+	contractID := MakeContractID(file, "Auth")
+	unrelatedGuard := NewASTNode(KindDeclModifier)
+	requireAmount := NewASTNode(KindCheckRequire)
+	amountComparison := NewASTNode(KindExprBinaryOp)
+	amountComparison.SetAttribute("operator", ">")
+	amount := NewASTNode(KindExprIdentifier)
+	amount.Name = "amount"
+	amount.RefKind = "parameter"
+	amountComparison.AddChild(amount)
+	amountComparison.AddChild(NewASTNode(KindExprLiteral))
+	requireAmount.AddChild(amountComparison)
+	unrelatedGuard.AddChild(requireAmount)
+
+	modifierDecoy := &Function{
+		Name: "modifierDecoy", Selector: "modifierDecoy(uint256)", ContractName: "Auth", SourceFile: file,
+		Modifiers: []string{"onlyOwner"},
+		Calls: []*FunctionCall{{
+			Target: "onlyOwner", ResolvedFunction: "onlyOwner", ResolvedContractID: contractID,
+			CallType: CallTypeModifier, Resolved: true, ArgCount: 1,
+		}},
+	}
+	helperDecoy := &Function{
+		Name: "helperDecoy", Selector: "helperDecoy()", ContractName: "Auth", SourceFile: file,
+		Calls: []*FunctionCall{{
+			Target: "_checkOwner", ResolvedFunction: "_checkOwner()",
+			ResolvedContractID: contractID, CallType: CallTypeInternal, ArgCount: 0, Resolved: true,
+		}},
+	}
+	emptyHelper := &Function{
+		Name: "_checkOwner", Selector: "_checkOwner()", ContractName: "Auth", SourceFile: file,
+		AST: NewASTNode(KindDeclFunction),
+	}
+	contract := &Contract{
+		ID: contractID, Name: "Auth", SourceFile: file,
+		LinearizedBases: []string{"Auth"}, LinearizedBaseIDs: []string{contractID},
+		Functions: []*Function{modifierDecoy, helperDecoy, emptyHelper},
+		Modifiers: []*Modifier{{
+			Name: "onlyOwner", Parameters: []*Parameter{{Name: "amount", TypeName: "uint256"}}, AST: unrelatedGuard,
+		}},
+	}
+	db := NewDatabase()
+	db.AddContract(contract)
+
+	if modifierDecoy.IsAccessControlled(db) {
+		t.Fatal("auth-named modifier with unrelated require must not prove access control")
+	}
+	if helperDecoy.IsAccessControlled(db) {
+		t.Fatal("empty auth-named helper must not prove access control")
+	}
+}
+
+func TestIsAccessControlledRecursiveContextIsOrderIndependent(t *testing.T) {
+	for _, forwardedFirst := range []bool{false, true} {
+		name := "plain_then_forwarded"
+		if forwardedFirst {
+			name = "forwarded_then_plain"
+		}
+		t.Run(name, func(t *testing.T) {
+			db, entry := recursiveCallerContextFixture(forwardedFirst)
+			if !entry.IsAccessControlled(db) {
+				t.Fatal("forwarded caller context must authorize regardless of call order")
+			}
+		})
+	}
+}
+
+func TestIsAccessControlledRecursiveCyclesTerminate(t *testing.T) {
+	t.Run("self recursive", func(t *testing.T) {
+		file := "/exact/Self.sol"
+		contractID := MakeContractID(file, "Self")
+		fn := &Function{Name: "loop", Selector: "loop()", ContractName: "Self", SourceFile: file}
+		fn.Calls = []*FunctionCall{{
+			Target: "loop", ResolvedFunction: "loop()", ResolvedContractID: contractID,
+			CallType: CallTypeInternal, Resolved: true, ArgCount: 0,
+		}}
+		contract := &Contract{
+			ID: contractID, Name: "Self", SourceFile: file,
+			LinearizedBases: []string{"Self"}, LinearizedBaseIDs: []string{contractID},
+			Functions: []*Function{fn},
+		}
+		db := NewDatabase()
+		db.AddContract(contract)
+		if fn.IsAccessControlled(db) {
+			t.Fatal("self-recursive function without a guard must not be controlled")
+		}
+	})
+
+	t.Run("mutually recursive", func(t *testing.T) {
+		file := "/exact/Mutual.sol"
+		contractID := MakeContractID(file, "Mutual")
+		a := &Function{Name: "a", Selector: "a()", ContractName: "Mutual", SourceFile: file}
+		b := &Function{Name: "b", Selector: "b()", ContractName: "Mutual", SourceFile: file}
+		a.Calls = []*FunctionCall{{
+			Target: "b", ResolvedFunction: "b()", ResolvedContractID: contractID,
+			CallType: CallTypeInternal, Resolved: true, ArgCount: 0,
+		}}
+		b.Calls = []*FunctionCall{{
+			Target: "a", ResolvedFunction: "a()", ResolvedContractID: contractID,
+			CallType: CallTypeInternal, Resolved: true, ArgCount: 0,
+		}}
+		contract := &Contract{
+			ID: contractID, Name: "Mutual", SourceFile: file,
+			LinearizedBases: []string{"Mutual"}, LinearizedBaseIDs: []string{contractID},
+			Functions: []*Function{a, b},
+		}
+		db := NewDatabase()
+		db.AddContract(contract)
+		if a.IsAccessControlled(db) || b.IsAccessControlled(db) {
+			t.Fatal("mutually recursive functions without guards must not be controlled")
+		}
+	})
+}
+
+func recursiveCallerContextFixture(forwardedFirst bool) (*Database, *Function) {
+	file := "/exact/Forwarded.sol"
+	contractID := MakeContractID(file, "Forwarded")
+
+	gateRoot := NewASTNode(KindDeclFunction)
+	require := NewASTNode(KindCheckRequire)
+	comparison := NewASTNode(KindExprBinaryOp)
+	comparison.SetAttribute("operator", "==")
+	caller := NewASTNode(KindExprIdentifier)
+	caller.Name = "caller"
+	caller.RefKind = "parameter"
+	owner := NewASTNode(KindExprIdentifier)
+	owner.Name = "owner"
+	owner.RefKind = "state_var"
+	comparison.AddChild(caller)
+	comparison.AddChild(owner)
+	require.AddChild(comparison)
+	gateRoot.AddChild(require)
+	gate := &Function{
+		Name: "gate", Selector: "gate(address)", ContractName: "Forwarded", SourceFile: file,
+		Parameters: []*Parameter{{Name: "caller", TypeName: "address"}}, AST: gateRoot,
+	}
+
+	plainNode := NewASTNode(KindCallInternal)
+	plainNode.Name = "plainGate"
+	plainArg := NewASTNode(KindExprIdentifier)
+	plainArg.Name = "user"
+	plainArg.RefKind = "parameter"
+	plainNode.AddChild(plainArg)
+	forwardedNode := NewASTNode(KindCallInternal)
+	forwardedNode.Name = "forwardedGate"
+	forwardedNode.AddChild(testMsgSenderNode())
+	entryRoot := NewASTNode(KindDeclFunction)
+	entryRoot.AddChild(plainNode)
+	entryRoot.AddChild(forwardedNode)
+
+	plainCall := &FunctionCall{
+		Target: "plainGate", ResolvedFunction: "gate(address)", ResolvedContractID: contractID,
+		CallType: CallTypeInternal, ArgCount: 1, Resolved: true,
+	}
+	forwardedCall := &FunctionCall{
+		Target: "forwardedGate", ResolvedFunction: "gate(address)", ResolvedContractID: contractID,
+		CallType: CallTypeInternal, ArgCount: 1, Resolved: true,
+	}
+	calls := []*FunctionCall{plainCall, forwardedCall}
+	if forwardedFirst {
+		calls = []*FunctionCall{forwardedCall, plainCall}
+	}
+	entry := &Function{
+		Name: "entry", Selector: "entry(address)", ContractName: "Forwarded", SourceFile: file,
+		Parameters: []*Parameter{{Name: "user", TypeName: "address"}}, AST: entryRoot, Calls: calls,
+	}
+	contract := &Contract{
+		ID: contractID, Name: "Forwarded", SourceFile: file,
+		LinearizedBases: []string{"Forwarded"}, LinearizedBaseIDs: []string{contractID},
+		Functions: []*Function{entry, gate},
+	}
+	db := NewDatabase()
+	db.AddContract(contract)
+	return db, entry
+}
+
+func testMsgSenderNode() *ASTNode {
+	sender := NewASTNode(KindExprMemberAccess)
+	sender.Name = "sender"
+	msg := NewASTNode(KindExprIdentifier)
+	msg.Name = "msg"
+	sender.AddChild(msg)
+	return sender
 }
 
 func TestIsAccessControlledIgnoresUnrelatedModifier(t *testing.T) {
@@ -342,6 +531,7 @@ func TestIsAccessControlledViaMsgSenderRequire(t *testing.T) {
 	root := NewASTNode(KindDeclFunction)
 	require := NewASTNode(KindCheckRequire)
 	binop := NewASTNode(KindExprBinaryOp)
+	binop.SetAttribute("operator", "==")
 
 	memberAccess := NewASTNode(KindExprMemberAccess)
 	memberAccess.Name = "sender"
@@ -368,6 +558,166 @@ func TestIsAccessControlledViaMsgSenderRequire(t *testing.T) {
 	}
 }
 
+func TestSyntheticMsgSenderFallbackWithEmptyDatabase(t *testing.T) {
+	fn, _ := syntheticMsgSenderGuardFunction()
+	assertCallerIdentityAnalyses(t, fn, NewDatabase(), true)
+}
+
+func TestSyntheticMsgSenderFallbackIgnoresMismatchedFileOwner(t *testing.T) {
+	fn, _ := syntheticMsgSenderGuardFunction()
+	otherFile := "/other/SyntheticGuard.sol"
+	other := &Contract{
+		ID:         MakeContractID(otherFile, fn.ContractName),
+		Name:       fn.ContractName,
+		SourceFile: otherFile,
+		Functions:  []*Function{{Name: "unrelated", ContractName: fn.ContractName, SourceFile: otherFile}},
+	}
+	db := NewDatabase()
+	db.AddContract(other)
+
+	assertCallerIdentityAnalyses(t, fn, db, true)
+}
+
+func TestSyntheticMsgSenderMetadataDisproof(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		call *FunctionCall
+	}{
+		{
+			name: "external call",
+			call: &FunctionCall{
+				Target: "_msgSender", CallType: CallTypeExternal,
+				ResolvedFunction: "_msgSender()", ArgCount: 0,
+			},
+		},
+		{
+			name: "self call",
+			call: &FunctionCall{
+				Target: "_msgSender", CallType: CallTypeSelf,
+				ResolvedFunction: "_msgSender()", ArgCount: 0,
+			},
+		},
+		{
+			name: "wrong selector",
+			call: &FunctionCall{
+				Target: "_msgSender", CallType: CallTypeInternal,
+				ResolvedFunction: "_msgSender(address)", ArgCount: 0,
+			},
+		},
+		{
+			name: "nonzero arity",
+			call: &FunctionCall{
+				Target: "_msgSender", CallType: CallTypeInternal,
+				ResolvedFunction: "_msgSender()", ArgCount: 1,
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fn, callNode := syntheticMsgSenderGuardFunction()
+			tc.call.Line = callNode.StartLine
+			tc.call.Byte = callNode.StartByte
+			fn.Calls = []*FunctionCall{tc.call}
+			assertCallerIdentityAnalyses(t, fn, NewDatabase(), false)
+		})
+	}
+}
+
+func TestSyntheticMsgSenderDatabaseDisproof(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		helper *Function
+	}{
+		{name: "no helper"},
+		{
+			name: "nonzero overload only",
+			helper: &Function{
+				Name: "_msgSender", Selector: "_msgSender(address)",
+				Parameters: []*Parameter{{Name: "forwarder", TypeName: "address"}},
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fn, _ := syntheticMsgSenderGuardFunction()
+			id := MakeContractID(fn.SourceFile, fn.ContractName)
+			functions := []*Function{fn}
+			if tc.helper != nil {
+				tc.helper.ContractName = fn.ContractName
+				tc.helper.SourceFile = fn.SourceFile
+				functions = append(functions, tc.helper)
+			}
+			contract := &Contract{
+				ID: id, Name: fn.ContractName, SourceFile: fn.SourceFile,
+				LinearizedBases: []string{fn.ContractName}, LinearizedBaseIDs: []string{id},
+				Functions: functions,
+			}
+			db := NewDatabase()
+			db.AddContract(contract)
+			assertCallerIdentityAnalyses(t, fn, db, false)
+		})
+	}
+}
+
+func syntheticMsgSenderGuardFunction() (*Function, *ASTNode) {
+	root := NewASTNode(KindDeclFunction)
+	require := NewASTNode(KindCheckRequire)
+	comparison := NewASTNode(KindExprBinaryOp)
+	comparison.SetAttribute("operator", "==")
+	owner := NewASTNode(KindExprIdentifier)
+	owner.Name = "owner"
+	owner.RefKind = "state_var"
+	msgSender := NewASTNode(KindCallInternal)
+	msgSender.Name = "_msgSender"
+	msgSender.StartLine = 3
+	msgSender.StartByte = 24
+
+	comparison.AddChild(owner)
+	comparison.AddChild(msgSender)
+	require.AddChild(comparison)
+	root.AddChild(require)
+
+	return &Function{
+		Name: "guarded", ContractName: "SyntheticGuard", SourceFile: "/virtual/SyntheticGuard.sol",
+		Visibility: VisibilityExternal, AST: root,
+	}, msgSender
+}
+
+func assertCallerIdentityAnalyses(t *testing.T, fn *Function, db *Database, want bool) {
+	t.Helper()
+	if got := fn.IsAccessControlled(db); got != want {
+		t.Errorf("IsAccessControlled = %v, want %v", got, want)
+	}
+	if got := fn.ComparesCallerIdentity(db); got != want {
+		t.Errorf("ComparesCallerIdentity = %v, want %v", got, want)
+	}
+}
+
+func TestComparesCallerIdentityNoDatabaseCompatibility(t *testing.T) {
+	root := NewASTNode(KindDeclFunction)
+	require := NewASTNode(KindCheckRequire)
+	comparison := NewASTNode(KindExprBinaryOp)
+	comparison.SetAttribute("operator", "==")
+	parameter := NewASTNode(KindExprIdentifier)
+	parameter.Name = "from"
+	parameter.RefKind = "parameter"
+	caller := NewASTNode(KindExprMemberAccess)
+	caller.Name = "sender"
+	msg := NewASTNode(KindExprIdentifier)
+	msg.Name = "msg"
+	caller.AddChild(msg)
+	comparison.AddChild(parameter)
+	comparison.AddChild(caller)
+	require.AddChild(comparison)
+	root.AddChild(require)
+
+	fn := &Function{Name: "scoped", ContractName: "Compat", AST: root}
+	if !fn.ComparesCallerIdentity() {
+		t.Fatal("no-argument ComparesCallerIdentity must preserve local caller comparison analysis")
+	}
+	if !fn.ComparesCallerIdentity(NewDatabase()) {
+		t.Fatal("database-aware ComparesCallerIdentity must remain callable")
+	}
+}
+
 // TestIsAccessControlledRejectsParameterCompare documents the false positive fix:
 // require(from == msg.sender) where `from` is a function argument is self-auth,
 // not a privileged access gate, so it must NOT count as access control.
@@ -380,6 +730,7 @@ func TestIsAccessControlledRejectsParameterCompare(t *testing.T) {
 	root := NewASTNode(KindDeclFunction)
 	req := NewASTNode(KindCheckRequire)
 	binop := NewASTNode(KindExprBinaryOp)
+	binop.SetAttribute("operator", "==")
 
 	fromIdent := NewASTNode(KindExprIdentifier)
 	fromIdent.Name = "from"
@@ -416,6 +767,7 @@ func TestIsAccessControlledAcceptsHardcodedAddress(t *testing.T) {
 	root := NewASTNode(KindDeclFunction)
 	req := NewASTNode(KindCheckRequire)
 	binop := NewASTNode(KindExprBinaryOp)
+	binop.SetAttribute("operator", "==")
 
 	memberAccess := NewASTNode(KindExprMemberAccess)
 	memberAccess.Name = "sender"
@@ -450,7 +802,7 @@ func TestIsAccessControlledAcceptsHardcodedAddress(t *testing.T) {
 // privileged access control. IsAccessControlled must stay false (the function
 // is not gated to an owner/role), while ComparesCallerIdentity must follow the
 // forwarded caller and report true so detectors like arbitrary-send-eth
-// (preset unCheckedSender) treat it as a valid mitigation.
+// (the canonical caller_checked preset) treat it as a valid mitigation.
 func TestForwardedOwnerOfIsSelfScopingNotAccessControl(t *testing.T) {
 	db := NewDatabase()
 

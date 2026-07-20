@@ -18,7 +18,7 @@ func (b *Builder) analyzeEffects() {
 	}
 	for _, contract := range b.db.Contracts {
 		for _, fn := range contract.Functions {
-			fe := analyzeFunctionEffects(fn)
+			fe := analyzeFunctionEffects(fn, b.db)
 			selector := fn.Selector
 			if selector == "" {
 				selector = fn.Name
@@ -30,8 +30,11 @@ func (b *Builder) analyzeEffects() {
 }
 
 // analyzeFunctionEffects computes the effects of a single function.
-func analyzeFunctionEffects(fn *types.Function) *types.FunctionEffects {
+func analyzeFunctionEffects(fn *types.Function, db *types.Database) *types.FunctionEffects {
 	fe := &types.FunctionEffects{}
+	if fn == nil {
+		return fe
+	}
 	fe.Auth.Modifiers = append([]string(nil), fn.Modifiers...)
 
 	if fn.AST != nil {
@@ -45,11 +48,25 @@ func analyzeFunctionEffects(fn *types.Function) *types.FunctionEffects {
 						})
 					}
 				}
+			case types.KindStmtStateMutation:
+				if name := stateWriteTargetName(n); name != "" {
+					fe.StateWrites = append(fe.StateWrites, types.StateWrite{
+						Var:  name,
+						Kind: n.GetAttributeString("operator"),
+						Line: n.StartLine,
+					})
+				}
 			case types.KindExprUnaryOp:
-				if op, _ := n.Attributes["operator"].(string); op == "delete" {
-					if name := firstStateVar(n); name != "" {
+				op, _ := n.Attributes["operator"].(string)
+				kind := map[string]string{
+					"delete": "delete",
+					"++":     "increment",
+					"--":     "decrement",
+				}[op]
+				if kind != "" {
+					if name := stateWriteTargetName(n); name != "" {
 						fe.StateWrites = append(fe.StateWrites, types.StateWrite{
-							Var: name, Kind: "delete", Line: n.StartLine,
+							Var: name, Kind: kind, Line: n.StartLine,
 						})
 					}
 				}
@@ -78,7 +95,7 @@ func analyzeFunctionEffects(fn *types.Function) *types.FunctionEffects {
 			fe.Auth.UsesTxOrigin = true
 		}
 	}
-	fe.Auth.Controlled = len(fe.Auth.Modifiers) > 0 || len(fe.Auth.SenderChecks) > 0
+	fe.Auth.Controlled = fn.IsAccessControlled(db)
 
 	fe.StateWrites = dedupWrites(fe.StateWrites)
 	return fe
@@ -142,6 +159,42 @@ func firstStateVar(n *types.ASTNode) string {
 		return x.Kind == types.KindExprIdentifier
 	}); d != nil {
 		return d.Name
+	}
+	return ""
+}
+
+func stateWriteTargetName(n *types.ASTNode) string {
+	if n == nil {
+		return ""
+	}
+	switch n.Kind {
+	case types.KindStmtStateMutation:
+		for _, child := range n.Children {
+			if child.GetAttributeBool("call_receiver") {
+				return lvalueStateVarName(child)
+			}
+		}
+	case types.KindExprUnaryOp:
+		if len(n.Children) > 0 {
+			return lvalueStateVarName(n.Children[0])
+		}
+	}
+	return ""
+}
+
+func lvalueStateVarName(n *types.ASTNode) string {
+	if n == nil {
+		return ""
+	}
+	switch n.Kind {
+	case types.KindExprIdentifier:
+		if n.RefKind == "state_var" {
+			return n.Name
+		}
+	case types.KindExprIndexAccess, types.KindExprMemberAccess:
+		if len(n.Children) > 0 {
+			return lvalueStateVarName(n.Children[0])
+		}
 	}
 	return ""
 }

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.0;
 
-// Exercises WQL feature: contains + inside (ancestor traversal).
+// Exercises WQL feature: has: + in: (ancestor traversal).
 // Pattern: a `tx.origin` member access nested inside a require/if guard.
 
 // VULNERABLE: tx.origin used inside a require() guard for authentication.

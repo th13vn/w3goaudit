@@ -51,13 +51,13 @@ Dockerfile also verifies the reviewed generated-lock hash for its pinned
 
 ## Write your first detector in 5 minutes
 
-A WQL detector is a YAML file with metadata + a query. Example: flag
+A WQL document is meta plus one query: block. Example: flag
 `block.timestamp` used inside a `require` (a weak time guard).
 
 1. **Write the template** — `templates/official/medium/timestamp-guard.yaml`
    (official templates live under a `critical/`, `high/`, or `medium/` severity
    subdirectory), in
-   **WQL** (`select`/`from`/`where` — the syntax used by all 106
+   **WQL** (`query:` containing `select`/`from`/`where` — the syntax used by all 106
    official/benchmark/feature-test templates):
 
    ```yaml
@@ -82,7 +82,7 @@ A WQL detector is a YAML file with metadata + a query. Example: flag
    See `docs/wql-syntax.md` for the full `select`/`from`/`where` reference
    (block-kind, attribute, and preset catalogs, plus query-level `and:`/`or:`
    composition), and the existing `templates/official/` tree for idiomatic
-   examples. WQL (`meta` plus `query:`) is the only accepted public YAML
+   examples. WQL (`meta` plus one `query:` block) is the only accepted public YAML
    schema; unknown keys are rejected at load.
 
 2. **Write fixtures** — `test-data/security/timestamp-guard.sol` with a
@@ -115,8 +115,8 @@ one). Common entry points:
 - Report formats — `pkg/report/`
 - CLI flags — `cmd/w3goaudit/`
 
-Public template YAML contains only `meta`/`select`/`from`/`where`. Internally,
-lowering compiles that source into evaluator `Template`/`QueryBlock`/`Rule` IR;
+Public template YAML contains `meta` plus one `query:` block. Internally,
+lowering compiles that WQL into evaluator `Template`/`QueryBlock`/`Rule` IR;
 when changing that IR, keep its context `filter` and AST `match` layers cleanly
 separated because validation and execution depend on the distinction.
 

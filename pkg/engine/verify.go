@@ -15,21 +15,41 @@ import (
 // Guards against unbounded recursion (e.g. `not: { not: { not: ... } }` chains)
 // by tracking depth on the Engine. When depth exceeds MaxRuleRecursionDepth,
 // returns false and logs once at verbose; the scan continues with other rules.
-func (e *Engine) Verify(node *types.ASTNode, r Rule) (matched bool) {
+func (e *Engine) Verify(node *types.ASTNode, r Rule) bool {
+	normalized, ok := e.preparedRule(r, "Verify")
+	if !ok {
+		return false
+	}
+	return e.verify(node, normalized)
+}
+
+func (e *Engine) preparedRule(rule Rule, entrypoint string) (Rule, bool) {
+	normalized, err := prepareRuleForEvaluation(rule, "rule")
+	if err != nil {
+		e.logf("%s rule preparation failed: %v", entrypoint, err)
+		return Rule{}, false
+	}
+	return normalized, true
+}
+
+func (e *Engine) verify(node *types.ASTNode, r Rule) (matched bool) {
 	if node == nil {
 		return false
 	}
 
 	var oldPrimary *types.ASTNode
+	var oldPrimaryPriority uint8
 	traceActive := e.match != nil
 	if traceActive {
 		oldPrimary = e.match.Primary
+		oldPrimaryPriority = e.match.primaryPriority
 	}
 
 	e.recursionDepth++
 	defer func() {
 		if traceActive && !matched {
 			e.match.Primary = oldPrimary
+			e.match.primaryPriority = oldPrimaryPriority
 		}
 		e.recursionDepth--
 	}()
@@ -48,9 +68,7 @@ func (e *Engine) Verify(node *types.ASTNode, r Rule) (matched bool) {
 	// Capture the first provisionally matched atomic node as the finding's
 	// primary AST node. The defer above rolls this back if later constraints
 	// in the same branch fail.
-	if e.match != nil && e.match.Primary == nil && hasAtomicPredicate(r) {
-		e.match.Primary = node
-	}
+	e.capturePrimary(node, primaryPriorityForRule(r))
 
 	// ========== LEFT/RIGHT MATCHING ==========
 
@@ -108,7 +126,7 @@ func (e *Engine) Verify(node *types.ASTNode, r Rule) (matched bool) {
 
 	// Handle NOT (negation)
 	if r.Not != nil {
-		if e.Verify(node, *r.Not) {
+		if e.verify(node, *r.Not) {
 			return false
 		}
 	}
@@ -142,7 +160,7 @@ func (e *Engine) Verify(node *types.ASTNode, r Rule) (matched bool) {
 // verifyAll checks if ALL rules match (AND logic)
 func (e *Engine) verifyAll(node *types.ASTNode, rules []Rule) bool {
 	for _, subRule := range rules {
-		if !e.Verify(node, subRule) {
+		if !e.verify(node, subRule) {
 			return false
 		}
 	}
@@ -152,75 +170,396 @@ func (e *Engine) verifyAll(node *types.ASTNode, rules []Rule) bool {
 // verifyAny checks if ANY rule matches (OR logic)
 func (e *Engine) verifyAny(node *types.ASTNode, rules []Rule) bool {
 	for _, subRule := range rules {
-		if e.Verify(node, subRule) {
+		if e.verify(node, subRule) {
 			return true
 		}
 	}
 	return false
 }
 
-// verifySeq checks if descendants match the rules in order on a single
-// execution path.
-//
-// Rules are matched in DFS source order across descendants, with one
-// control-flow constraint applied between consecutive matches: two matches may
-// not land in mutually-exclusive arms of the same conditional (the then/else of
-// an `stmt.if`, or the two arms of an `expr.conditional`). This removes the
-// dominant false positive where
-// `if (cond) { externalCall(); } else { state = x; }` spuriously matched
-// `sequence: [outgoing_call, state_write]` even though the two operations can
-// never both execute. It is a branch-arm check rather than a full CFG: loops
-// and other constructs are still treated as straight-line, which is the
-// conservative (match-more) direction.
+// verifySeq checks whether the rules can match one linear extension of the
+// descendants' execution partial order. Sequential statements retain source
+// order. A Solidity call's receiver, options, and explicit argument subtrees
+// all precede the call event, while distinct pre-call sibling subtrees remain
+// unordered because Solidity does not guarantee their relative order.
 func (e *Engine) verifySeq(node *types.ASTNode, rules []Rule) bool {
 	if len(rules) == 0 {
 		return true
 	}
-
-	// Collect all descendants in order (depth-first)
-	var descendants []*types.ASTNode
-	node.WalkDescendants(func(n *types.ASTNode) bool {
-		descendants = append(descendants, n)
-		return true // Continue walking
-	})
-
-	// Try to find sequence pattern in descendants
-	return e.findSequenceInNodes(descendants, rules, 0, nil)
+	plan := newSequencePlan()
+	builder := sequencePlanBuilder{engine: e, plan: plan}
+	builder.buildChildren(node, nil, nil, nil, 0, ipPath{}, nil, builder.newASTOccurrence())
+	return e.findSequenceInEvents(plan, rules, nil, make(map[int]bool))
 }
 
-// findSequenceInNodes searches for the rule sequence in node order. prevMatch is
-// the node that satisfied the previous rule (nil for the first rule); a
-// candidate for the current rule is skipped when it cannot execute on the same
-// path as prevMatch (mutually-exclusive branch arms).
-func (e *Engine) findSequenceInNodes(nodes []*types.ASTNode, rules []Rule, startIdx int, prevMatch *types.ASTNode) bool {
+type sequenceEvent struct {
+	node          *types.ASTNode
+	path          ipPath
+	arms          map[int]string
+	astOccurrence int
+}
+
+type sequencePlan struct {
+	events []sequenceEvent
+	edges  map[int]map[int]struct{}
+}
+
+type sequenceRegion struct {
+	entries []int
+	exits   []int
+}
+
+type sequencePlanBuilder struct {
+	engine            *Engine
+	plan              *sequencePlan
+	inlineCallees     bool
+	visiting          map[string]bool
+	nextArmOccurrence int
+	nextASTOccurrence int
+}
+
+func newSequencePlan() *sequencePlan {
+	return &sequencePlan{edges: make(map[int]map[int]struct{})}
+}
+
+func (plan *sequencePlan) addEvent(node *types.ASTNode, path ipPath, arms map[int]string, astOccurrence int) int {
+	index := len(plan.events)
+	plan.events = append(plan.events, sequenceEvent{
+		node:          node,
+		path:          cloneIPPath(path),
+		arms:          cloneSequenceArms(arms),
+		astOccurrence: astOccurrence,
+	})
+	return index
+}
+
+func (builder *sequencePlanBuilder) newASTOccurrence() int {
+	occurrence := builder.nextASTOccurrence
+	builder.nextASTOccurrence++
+	return occurrence
+}
+
+func (plan *sequencePlan) order(before, after []int) {
+	for _, from := range before {
+		if plan.edges[from] == nil {
+			plan.edges[from] = make(map[int]struct{})
+		}
+		for _, to := range after {
+			if from != to {
+				plan.edges[from][to] = struct{}{}
+			}
+		}
+	}
+}
+
+func (plan *sequencePlan) mustExecuteBefore(from, to int) bool {
+	if from == to {
+		return false
+	}
+	visited := make(map[int]bool)
+	var reaches func(int) bool
+	reaches = func(current int) bool {
+		if current == to {
+			return true
+		}
+		if visited[current] {
+			return false
+		}
+		visited[current] = true
+		for next := range plan.edges[current] {
+			if reaches(next) {
+				return true
+			}
+		}
+		return false
+	}
+	return reaches(from)
+}
+
+func (builder *sequencePlanBuilder) buildChildren(parent *types.ASTNode, fn *types.Function, contract *types.Contract, env map[string][]string, depth int, chain ipPath, arms map[int]string, astOccurrence int) sequenceRegion {
+	if parent == nil {
+		return sequenceRegion{}
+	}
+	armOccurrence := -1
+	if sequenceConditionalNode(parent) {
+		armOccurrence = builder.nextArmOccurrence
+		builder.nextArmOccurrence++
+	}
+	var result sequenceRegion
+	for childIndex, child := range parent.Children {
+		childArms := arms
+		if arm, ok := sequenceConditionalArm(parent, child, childIndex); ok {
+			childArms = cloneSequenceArms(arms)
+			childArms[armOccurrence] = arm
+		}
+		region := builder.buildNode(child, fn, contract, env, depth, chain, childArms, astOccurrence)
+		if len(region.entries) == 0 {
+			continue
+		}
+		if len(result.entries) == 0 {
+			result.entries = append([]int(nil), region.entries...)
+		} else {
+			builder.plan.order(result.exits, region.entries)
+		}
+		result.exits = append([]int(nil), region.exits...)
+	}
+	return result
+}
+
+func (builder *sequencePlanBuilder) buildNode(node *types.ASTNode, fn *types.Function, contract *types.Contract, env map[string][]string, depth int, chain ipPath, arms map[int]string, astOccurrence int) sequenceRegion {
+	if node == nil {
+		return sequenceRegion{}
+	}
+	if isSequenceCallEventNode(node) {
+		return builder.buildCallNode(node, fn, contract, env, depth, chain, arms, astOccurrence)
+	}
+	if sequenceEventFollowsChildren(node) {
+		return builder.buildEffectNode(node, fn, contract, env, depth, chain, arms, astOccurrence)
+	}
+
+	event := builder.plan.addEvent(node, chain, arms, astOccurrence)
+	children := builder.buildChildren(node, fn, contract, env, depth, chain, arms, astOccurrence)
+	if len(children.entries) == 0 {
+		return sequenceRegion{entries: []int{event}, exits: []int{event}}
+	}
+	builder.plan.order([]int{event}, children.entries)
+	return sequenceRegion{entries: []int{event}, exits: children.exits}
+}
+
+// buildEffectNode models an enclosing effect only after its operand/value
+// expressions have completed. Sibling operand subtrees remain unordered because
+// Solidity does not generally guarantee their relative evaluation order.
+func (builder *sequencePlanBuilder) buildEffectNode(node *types.ASTNode, fn *types.Function, contract *types.Contract, env map[string][]string, depth int, chain ipPath, arms map[int]string, astOccurrence int) sequenceRegion {
+	var operands sequenceRegion
+	for _, child := range node.Children {
+		region := builder.buildNode(child, fn, contract, env, depth, chain, arms, astOccurrence)
+		operands.entries = append(operands.entries, region.entries...)
+		operands.exits = append(operands.exits, region.exits...)
+	}
+	event := builder.plan.addEvent(node, chain, arms, astOccurrence)
+	if len(operands.exits) == 0 {
+		return sequenceRegion{entries: []int{event}, exits: []int{event}}
+	}
+	builder.plan.order(operands.exits, []int{event})
+	return sequenceRegion{entries: operands.entries, exits: []int{event}}
+}
+
+func sequenceEventFollowsChildren(node *types.ASTNode) bool {
+	if node == nil {
+		return false
+	}
+	switch node.Kind {
+	case types.KindStmtAssign,
+		types.KindStmtReturn,
+		types.KindStmtEmit,
+		types.KindDeclVariable,
+		types.KindAsmCall,
+		types.KindAsmDelegatecall,
+		types.KindAsmStaticcall,
+		types.KindAsmSstore,
+		types.KindAsmSload,
+		types.KindAsmSelfdestruct,
+		types.KindAsmCreate,
+		types.KindAsmCreate2,
+		types.KindAsmLog0,
+		types.KindAsmLog1,
+		types.KindAsmLog2,
+		types.KindAsmLog3,
+		types.KindAsmLog4,
+		types.KindAsmRevert,
+		types.KindAsmReturn,
+		types.KindAsmOperation:
+		return true
+	default:
+		return false
+	}
+}
+
+func (builder *sequencePlanBuilder) buildCallNode(node *types.ASTNode, fn *types.Function, contract *types.Contract, env map[string][]string, depth int, chain ipPath, arms map[int]string, astOccurrence int) sequenceRegion {
+	var prelude sequenceRegion
+	for _, child := range node.Children {
+		region := builder.buildNode(child, fn, contract, env, depth, chain, arms, astOccurrence)
+		prelude.entries = append(prelude.entries, region.entries...)
+		prelude.exits = append(prelude.exits, region.exits...)
+	}
+
+	callEvent := builder.plan.addEvent(node, chain, arms, astOccurrence)
+	if len(prelude.exits) > 0 {
+		builder.plan.order(prelude.exits, []int{callEvent})
+	} else {
+		prelude.entries = []int{callEvent}
+	}
+	result := sequenceRegion{entries: prelude.entries, exits: []int{callEvent}}
+
+	if !builder.inlineCallees || !isSolidityCallNode(node) || depth >= MaxInterproceduralTaintDepth {
+		return result
+	}
+	callee, calleeContract := builder.engine.resolveInternalCalleeFrom(fn, contract, node)
+	if callee == nil {
+		return result
+	}
+	seed := builder.engine.bindCalleeTaint(callee, callArgumentChildren(node), env)
+	calleeEnv := builder.engine.buildFunctionTaintEnv(callee, seed)
+	nextChain := ipPath{
+		Functions: append(append([]*types.Function{}, chain.Functions...), callee),
+		Contracts: append(append([]*types.Contract{}, chain.Contracts...), calleeContract),
+	}
+	calleeRegion := builder.buildFunction(callee, calleeContract, calleeEnv, depth+1, nextChain, arms)
+	if len(calleeRegion.entries) == 0 {
+		return result
+	}
+	builder.plan.order([]int{callEvent}, calleeRegion.entries)
+	result.exits = calleeRegion.exits
+	return result
+}
+
+func (builder *sequencePlanBuilder) buildFunction(fn *types.Function, contract *types.Contract, env map[string][]string, depth int, chain ipPath, arms map[int]string) sequenceRegion {
+	if fn == nil || fn.AST == nil {
+		return sequenceRegion{}
+	}
+	key := functionVisitKey(fn, env)
+	if builder.visiting[key] {
+		return sequenceRegion{}
+	}
+	builder.visiting[key] = true
+	defer delete(builder.visiting, key)
+	return builder.buildChildren(fn.AST, fn, contract, env, depth, chain, arms, builder.newASTOccurrence())
+}
+
+func cloneIPPath(path ipPath) ipPath {
+	return ipPath{
+		Functions: append([]*types.Function(nil), path.Functions...),
+		Contracts: append([]*types.Contract(nil), path.Contracts...),
+	}
+}
+
+func cloneSequenceArms(arms map[int]string) map[int]string {
+	if len(arms) == 0 {
+		return make(map[int]string)
+	}
+	cloned := make(map[int]string, len(arms))
+	for occurrence, arm := range arms {
+		cloned[occurrence] = arm
+	}
+	return cloned
+}
+
+func sequenceConditionalNode(node *types.ASTNode) bool {
+	if node == nil {
+		return false
+	}
+	switch node.Kind {
+	case types.KindStmtIf, types.KindExprConditional, types.KindStmtTryCatch:
+		return true
+	default:
+		return false
+	}
+}
+
+func sequenceConditionalArm(parent, child *types.ASTNode, childIndex int) (string, bool) {
+	if parent == nil || child == nil {
+		return "", false
+	}
+	switch parent.Kind {
+	case types.KindStmtIf:
+		if isConditionExpr(child) {
+			return "", false
+		}
+		return strconv.Itoa(childIndex), true
+	case types.KindExprConditional:
+		part := child.GetAttributeString("conditional_part")
+		return part, part == "true" || part == "false"
+	case types.KindStmtTryCatch:
+		part := child.GetAttributeString("try_part")
+		return part, isTryArm(part)
+	default:
+		return "", false
+	}
+}
+
+func sequenceEventsCompatible(left, right sequenceEvent) bool {
+	for occurrence, leftArm := range left.arms {
+		if rightArm, ok := right.arms[occurrence]; ok && rightArm != leftArm {
+			return false
+		}
+	}
+	return true
+}
+
+func isSequenceCallEventNode(node *types.ASTNode) bool {
+	return isSolidityCallNode(node) || (node != nil && types.IsCheck(node.Kind))
+}
+
+// findSequenceInEvents searches for a sequence in any linear extension of the
+// event partial order. A candidate may be appended when it is not forced to
+// execute before a previously chosen event and all chosen nodes can co-execute.
+func (e *Engine) findSequenceInEvents(plan *sequencePlan, rules []Rule, chosen []int, used map[int]bool) bool {
 	if len(rules) == 0 {
 		return true
 	}
 
-	// Try to match first rule starting from each position
-	for i := startIdx; i < len(nodes); i++ {
-		if !e.Verify(nodes[i], rules[0]) {
+	for i, event := range plan.events {
+		if used[i] {
 			continue
 		}
-		// A later step must not match inside the previous step's own subtree.
-		// In DFS order a node's descendants follow it, so without this guard
-		// `sequence: [state_write, outgoing_call]` would match the single
-		// statement `total = token.balanceOf(x)` (the call is a child of the
-		// assign) — a false "write-then-call" ordering.
-		if prevMatch != nil && isWithinSubtree(nodes[i], prevMatch) {
+		var primaryCheckpoint *types.ASTNode
+		var primaryPriorityCheckpoint uint8
+		var chainCheckpoint []*types.Function
+		var chainContractsCheckpoint []*types.Contract
+		if e.match != nil {
+			primaryCheckpoint = e.match.Primary
+			primaryPriorityCheckpoint = e.match.primaryPriority
+			chainCheckpoint = e.match.Chain
+			chainContractsCheckpoint = e.match.ChainContracts
+		}
+		if !e.verify(event.node, rules[0]) {
+			if e.match != nil {
+				e.match.Primary = primaryCheckpoint
+				e.match.primaryPriority = primaryPriorityCheckpoint
+				e.match.Chain = chainCheckpoint
+				e.match.ChainContracts = chainContractsCheckpoint
+			}
 			continue
 		}
-		// Consecutive matches must be able to co-execute.
-		if prevMatch != nil && !sameExecutionPath(prevMatch, nodes[i]) {
+		if e.match != nil && len(event.path.Functions) > 0 &&
+			(e.match.Primary != primaryCheckpoint || e.match.primaryPriority != primaryPriorityCheckpoint) {
+			e.match.Chain = append([]*types.Function(nil), event.path.Functions...)
+			e.match.ChainContracts = append([]*types.Contract(nil), event.path.Contracts...)
+		}
+		restorePrimary := func() {
+			if e.match != nil {
+				e.match.Primary = primaryCheckpoint
+				e.match.primaryPriority = primaryPriorityCheckpoint
+				e.match.Chain = chainCheckpoint
+				e.match.ChainContracts = chainContractsCheckpoint
+			}
+		}
+		compatible := true
+		for _, previous := range chosen {
+			previousEvent := plan.events[previous]
+			previousNode := previousEvent.node
+			sameASTOccurrence := previousEvent.astOccurrence == event.astOccurrence
+			if plan.mustExecuteBefore(i, previous) ||
+				(sameASTOccurrence && isWithinSubtree(event.node, previousNode)) ||
+				(sameASTOccurrence && !sameExecutionPath(previousNode, event.node)) ||
+				!sequenceEventsCompatible(previousEvent, event) {
+				compatible = false
+				break
+			}
+		}
+		if !compatible {
+			restorePrimary()
 			continue
 		}
 		if len(rules) == 1 {
-			return true // Last rule matched
-		}
-		// Recursively find remaining rules after this position.
-		if e.findSequenceInNodes(nodes, rules[1:], i+1, nodes[i]) {
 			return true
 		}
+		used[i] = true
+		if e.findSequenceInEvents(plan, rules[1:], append(chosen, i), used) {
+			return true
+		}
+		delete(used, i)
+		restorePrimary()
 	}
 
 	return false
@@ -333,7 +672,7 @@ func isTryArm(part string) bool {
 func (e *Engine) verifyHas(node *types.ASTNode, rule Rule) bool {
 	found := false
 	node.WalkDescendants(func(n *types.ASTNode) bool {
-		if e.Verify(n, rule) {
+		if e.verify(n, rule) {
 			found = true
 			return false // Stop walking
 		}
@@ -346,7 +685,7 @@ func (e *Engine) verifyHas(node *types.ASTNode, rule Rule) bool {
 func (e *Engine) verifyInside(node *types.ASTNode, rule Rule) bool {
 	found := false
 	node.WalkAncestors(func(n *types.ASTNode) bool {
-		if e.Verify(n, rule) {
+		if e.verify(n, rule) {
 			found = true
 			return false // Stop walking
 		}
@@ -493,23 +832,21 @@ func (e *Engine) matchMemberAccessLeftRight(node *types.ASTNode, r Rule) bool {
 	if r.Left != nil {
 		parentName := node.GetAttributeString("parent")
 
-		// If Left rule carries any structural/semantic predicate, verify it
-		// against the child expression node. attr/tainted_from/not are included
-		// here — omitting them made a `left:` using only those predicates match
-		// neither branch and pass vacuously (silent over-match).
-		if r.Left.Kind != "" || r.Left.Contains != nil || r.Left.Inside != nil ||
-			len(r.Left.All) > 0 || len(r.Left.Any) > 0 || r.Left.Not != nil ||
-			len(r.Left.Attr) > 0 || r.Left.TaintedFrom != "" {
+		// Verify every non-name predicate against the child expression. Using
+		// the shared Rule emptiness check keeps this path aligned with newly
+		// added recursive fields such as ArgAny.
+		if hasNonNameRulePredicate(r.Left) {
 			// Check against the child node (parent expression)
 			if len(node.Children) > 0 {
-				if !e.Verify(node.Children[0], *r.Left) {
+				if !e.verify(node.Children[0], *r.Left) {
 					return false
 				}
 			} else {
 				return false
 			}
-		} else if r.Left.Name != "" {
-			// Simple regex check on parent name
+		}
+		if r.Left.Name != "" {
+			// Apply the parent-name regex independently from child verification.
 			if !MatchesRegex(r.Left.Name, parentName) {
 				return false
 			}
@@ -526,22 +863,27 @@ func (e *Engine) matchMemberAccessLeftRight(node *types.ASTNode, r Rule) bool {
 				return false
 			}
 		}
-		if rightHasUnsupportedMemberPredicate(r.Right) {
+		if hasNonNameRulePredicate(r.Right) {
 			return false
 		}
+	}
+	if (r.Left != nil && r.Left.Name != "") || (r.Right != nil && r.Right.Name != "") {
+		e.capturePrimary(node, primaryPriorityTraceableAST)
 	}
 
 	return true
 }
 
-// rightHasUnsupportedMemberPredicate reports whether a `right:` rule for a
-// member access uses a predicate other than `name`, which member access cannot
-// satisfy (the member has no child node).
-func rightHasUnsupportedMemberPredicate(r *Rule) bool {
-	return r.Kind != "" || r.Contains != nil || r.Inside != nil ||
-		len(r.All) > 0 || len(r.Any) > 0 || r.Not != nil ||
-		len(r.Sequence) > 0 || len(r.Attr) > 0 || len(r.Args) > 0 ||
-		r.TaintedFrom != "" || r.Left != nil || r.Right != nil
+// hasNonNameRulePredicate reports whether r carries any matching semantics
+// beyond Name. Member-access right sides have no child node for those
+// predicates, while left sides must evaluate them against the receiver child.
+func hasNonNameRulePredicate(r *Rule) bool {
+	if r == nil {
+		return false
+	}
+	cp := *r
+	cp.Name = ""
+	return !cp.IsEmpty()
 }
 
 // matchBinaryLeftRight checks left/right for assignment and binary_op nodes
@@ -552,7 +894,7 @@ func (e *Engine) matchBinaryLeftRight(node *types.ASTNode, r Rule) bool {
 		if len(node.Children) < 1 {
 			return false
 		}
-		if !e.Verify(node.Children[0], *r.Left) {
+		if !e.verify(node.Children[0], *r.Left) {
 			return false
 		}
 	}
@@ -562,12 +904,48 @@ func (e *Engine) matchBinaryLeftRight(node *types.ASTNode, r Rule) bool {
 		if len(node.Children) < 2 {
 			return false
 		}
-		if !e.Verify(node.Children[1], *r.Right) {
+		if !e.verify(node.Children[1], *r.Right) {
 			return false
 		}
 	}
 
 	return true
+}
+
+func stateWriteTargetName(node *types.ASTNode) string {
+	if node == nil {
+		return ""
+	}
+	switch node.Kind {
+	case types.KindStmtStateMutation:
+		for _, child := range node.Children {
+			if child.GetAttributeBool("call_receiver") {
+				return lvalueStateVarName(child)
+			}
+		}
+	case types.KindExprUnaryOp:
+		if len(node.Children) > 0 {
+			return lvalueStateVarName(node.Children[0])
+		}
+	}
+	return ""
+}
+
+func lvalueStateVarName(node *types.ASTNode) string {
+	if node == nil {
+		return ""
+	}
+	switch node.Kind {
+	case types.KindExprIdentifier:
+		if node.RefKind == "state_var" {
+			return node.Name
+		}
+	case types.KindExprIndexAccess, types.KindExprMemberAccess:
+		if len(node.Children) > 0 {
+			return lvalueStateVarName(node.Children[0])
+		}
+	}
+	return ""
 }
 
 // matchKind checks if a node matches the specified kind.
@@ -600,12 +978,21 @@ func (e *Engine) matchKind(node *types.ASTNode, kind string) bool {
 	case "any_call":
 		return types.IsAnyCall(node.Kind)
 	case "state_write":
-		// stmt.assign with is_state_var=true, or asm.sstore
-		if node.Kind == types.KindAsmSstore {
+		switch node.Kind {
+		case types.KindAsmSstore:
 			return true
-		}
-		if node.Kind == types.KindStmtAssign {
+		case types.KindStmtAssign:
 			return node.GetAttributeBool("is_state_var")
+		case types.KindStmtStateMutation:
+			return node.GetAttributeBool("is_state_var") && stateWriteTargetName(node) != ""
+		case types.KindExprUnaryOp:
+			if stateWriteTargetName(node) == "" {
+				return false
+			}
+			switch node.GetAttributeString("operator") {
+			case "delete", "++", "--":
+				return true
+			}
 		}
 		return false
 	case "state_read":
@@ -651,6 +1038,18 @@ func (e *Engine) matchKind(node *types.ASTNode, kind string) bool {
 // matchAttributeValue checks if a node attribute matches the expected value
 func (e *Engine) matchAttributeValue(node *types.ASTNode, key string, expectedValue interface{}) bool {
 	actualValue, exists := node.GetAttribute(key)
+	if !exists && key == "receiver_name" {
+		// Older schema-2.0.0 caches still retain the structurally authoritative
+		// direct receiver child. Derive the additive fact without mutating the
+		// caller-owned or loaded AST.
+		for _, child := range node.Children {
+			if child != nil && child.GetAttributeBool("call_receiver") && child.Name != "" {
+				actualValue = child.Name
+				exists = true
+				break
+			}
+		}
+	}
 	if !exists {
 		return false
 	}
@@ -724,7 +1123,7 @@ func (e *Engine) matchArgAny(node *types.ASTNode, rule Rule) bool {
 		return false
 	}
 	for _, arg := range callArgumentChildren(node) {
-		if e.Verify(arg, rule) {
+		if e.verify(arg, rule) {
 			return true
 		}
 	}
@@ -741,10 +1140,10 @@ func (e *Engine) matchArgs(node *types.ASTNode, args map[int]Rule) bool {
 
 	// Check each specified argument
 	for argIndex, argRule := range args {
-		if argIndex >= len(callArgs) {
+		if argIndex < 0 || argIndex >= len(callArgs) {
 			return false // Argument index out of range
 		}
-		if !e.Verify(callArgs[argIndex], argRule) {
+		if !e.verify(callArgs[argIndex], argRule) {
 			return false
 		}
 	}
@@ -774,11 +1173,18 @@ func callArgumentChildren(node *types.ASTNode) []*types.ASTNode {
 // internal calls can distinguish _helper(from) from _helper(msg.sender).
 func (e *Engine) checkTaint(node *types.ASTNode, sourceType string) bool {
 	for _, source := range e.expressionTaints(node, e.currentTaintEnv) {
-		if source == sourceType {
+		if taintSourceMatches(source, sourceType) {
 			return true
 		}
 	}
 	return false
+}
+
+func taintSourceMatches(actual, requested string) bool {
+	if requested == "user_controlled" {
+		return actual == "parameter" || actual == "sender"
+	}
+	return actual == requested
 }
 
 func (e *Engine) expressionTaints(node *types.ASTNode, env map[string][]string) []string {
@@ -808,7 +1214,7 @@ func (e *Engine) directNodeTaints(node *types.ASTNode, env map[string][]string) 
 	if node == nil {
 		return nil
 	}
-	if isMsgSenderNode(node) {
+	if e.isCallerIdentityNode(node) {
 		return []string{"sender"}
 	}
 	if node.Kind == types.KindExprIdentifier && env != nil {
@@ -827,17 +1233,63 @@ func (e *Engine) directNodeTaints(node *types.ASTNode, env map[string][]string) 
 	}
 }
 
-func isMsgSenderNode(node *types.ASTNode) bool {
-	if node == nil || node.Kind != types.KindExprMemberAccess || node.Name != "sender" {
+func (e *Engine) isCallerIdentityNode(node *types.ASTNode) bool {
+	if node == nil {
 		return false
 	}
-	if node.GetAttributeString("parent") == "msg" {
-		return true
+	if node.Kind == types.KindExprMemberAccess {
+		member := node.Name
+		var parent string
+		if len(node.Children) > 0 {
+			receiver := node.Children[0]
+			if receiver == nil || receiver.Kind != types.KindExprIdentifier {
+				return false
+			}
+			parent = receiver.Name
+		} else {
+			parent = node.GetAttributeString("parent")
+		}
+		return (parent == "msg" && member == "sender") ||
+			(parent == "tx" && member == "origin")
 	}
-	if len(node.Children) > 0 && node.Children[0].Kind == types.KindExprIdentifier {
-		return node.Children[0].Name == "msg"
+	if node.Name != "_msgSender" || len(callArgumentChildren(node)) != 0 {
+		return false
 	}
-	return false
+
+	if call := e.recordedCallForNode(node); call != nil {
+		switch call.CallType {
+		case types.CallTypeInternal, types.CallTypeInherited, types.CallTypeSuper:
+		default:
+			return false
+		}
+		if call.ArgCount > 0 || (call.ResolvedFunction != "" && call.ResolvedFunction != "_msgSender()") {
+			return false
+		}
+		if e.currentContract != nil {
+			callee, _ := e.resolveInternalCallee(e.currentContract, node)
+			return isMsgSenderHelper(callee)
+		}
+		return call.Resolved && call.ResolvedFunction == "_msgSender()" && call.ResolvedContractID != ""
+	}
+
+	if e.currentContract != nil {
+		if node.Kind != types.KindCallInternal {
+			return false
+		}
+		callee, _ := e.resolveInternalCallee(e.currentContract, node)
+		return isMsgSenderHelper(callee)
+	}
+
+	// Compatibility for synthetic/programmatic ASTs without function/database
+	// context: accept only the exact zero-argument internal-call shape.
+	return node.Kind == types.KindCallInternal
+}
+
+func isMsgSenderHelper(fn *types.Function) bool {
+	if fn == nil || fn.Name != "_msgSender" || len(fn.Parameters) != 0 {
+		return false
+	}
+	return fn.Selector == "" || fn.Selector == "_msgSender()"
 }
 
 func sortedTaintSet(taintSet map[string]bool) []string {
@@ -851,8 +1303,12 @@ func sortedTaintSet(taintSet map[string]bool) []string {
 
 // VerifyAtFunction is the top-level entry point for function-scope verification
 func (e *Engine) VerifyAtFunction(fn *types.Function, r Rule, contract *types.Contract) bool {
+	normalized, ok := e.preparedRule(r, "VerifyAtFunction")
+	if !ok {
+		return false
+	}
 	env := e.buildFunctionTaintEnv(fn, nil)
-	return e.verifyAtFunctionWithEnv(fn, r, contract, env)
+	return e.verifyAtFunctionWithEnv(fn, normalized, contract, env)
 }
 
 // VerifyAtFunctionWithCallees verifies a function and recursively follows
@@ -860,8 +1316,12 @@ func (e *Engine) VerifyAtFunction(fn *types.Function, r Rule, contract *types.Co
 // entrypoint match rules so helper functions inherit the caller's actual
 // argument sources.
 func (e *Engine) VerifyAtFunctionWithCallees(fn *types.Function, r Rule, contract *types.Contract) bool {
+	normalized, ok := e.preparedRule(r, "VerifyAtFunctionWithCallees")
+	if !ok {
+		return false
+	}
 	visiting := make(map[string]bool)
-	return e.verifyAtFunctionWithCallees(fn, r, contract, nil, visiting, 0, nil, nil)
+	return e.verifyAtFunctionWithCallees(fn, normalized, contract, nil, visiting, 0, nil, nil)
 }
 
 func (e *Engine) verifyAtFunctionWithCallees(fn *types.Function, r Rule, contract *types.Contract, seed map[string][]string, visiting map[string]bool, depth int, chain []*types.Function, chainContracts []*types.Contract) bool {
@@ -898,14 +1358,14 @@ func (e *Engine) verifyAtFunctionWithCallees(fn *types.Function, r Rule, contrac
 
 	matched := false
 	fn.AST.WalkDescendants(func(node *types.ASTNode) bool {
-		if node.Kind != types.KindCallInternal {
+		if !isSolidityCallNode(node) {
 			return true
 		}
-		callee, calleeContract := e.resolveInternalCallee(contract, node)
+		callee, calleeContract := e.resolveInternalCalleeFrom(fn, contract, node)
 		if callee == nil {
 			return true
 		}
-		calleeSeed := e.bindCalleeTaint(callee, node.Children, env)
+		calleeSeed := e.bindCalleeTaint(callee, callArgumentChildren(node), env)
 		if e.verifyAtFunctionWithCallees(callee, r, calleeContract, calleeSeed, visiting, depth+1, curChain, curContracts) {
 			matched = true
 			return false
@@ -995,99 +1455,35 @@ func (e *Engine) verifyAtFunctionWithEnv(fn *types.Function, r Rule, contract *t
 		}
 	}
 
-	return e.Verify(fn.AST, astRule)
+	return e.verify(fn.AST, astRule)
 }
 
 func (e *Engine) verifyInterproceduralSequence(fn *types.Function, contract *types.Contract, env map[string][]string, rules []Rule) bool {
-	// Allocate a chain map for this match attempt; the walker populates it
-	// alongside the node slice so we can reconstruct the entry -> host call
-	// chain for whichever node ends up matching the rule's primary atom.
-	prevChains := e.ipChains
-	e.ipChains = make(map[*types.ASTNode]ipPath)
-	defer func() { e.ipChains = prevChains }()
-
-	nodes := e.interproceduralDescendants(fn, contract, env, make(map[string]bool), 0, ipPath{
+	chain := ipPath{
 		Functions: []*types.Function{fn},
 		Contracts: []*types.Contract{contract},
-	})
-	// Nodes here are inlined from multiple functions, so they share no common
-	// ancestor and sameExecutionPath does not constrain across the boundary.
-	if !e.findSequenceInNodes(nodes, rules, 0, nil) {
-		return false
 	}
-	// On success, surface the chain that led to the matched primary so the
-	// caller can build Reachability/EntryPoint.
-	if e.match != nil && e.match.Primary != nil {
-		if path, ok := e.ipChains[e.match.Primary]; ok {
-			e.match.Chain = path.Functions
-			e.match.ChainContracts = path.Contracts
-		}
+	plan := newSequencePlan()
+	builder := sequencePlanBuilder{
+		engine:        e,
+		plan:          plan,
+		inlineCallees: true,
+		visiting:      make(map[string]bool),
 	}
-	return true
-}
-
-func (e *Engine) interproceduralDescendants(fn *types.Function, contract *types.Contract, env map[string][]string, visiting map[string]bool, depth int, chain ipPath) []*types.ASTNode {
-	if fn == nil || fn.AST == nil {
-		return nil
-	}
-	key := functionVisitKey(fn, env)
-	if visiting[key] {
-		return nil
-	}
-	visiting[key] = true
-	defer delete(visiting, key)
-
-	var out []*types.ASTNode
-	fn.AST.WalkDescendants(func(node *types.ASTNode) bool {
-		out = append(out, node)
-		// Record the call chain that reached this node so a successful
-		// later match can recover the entry -> host path.
-		if e.ipChains != nil {
-			e.ipChains[node] = chain
-		}
-		if node.Kind != types.KindCallInternal || depth >= MaxInterproceduralTaintDepth {
-			return true
-		}
-		callee, calleeContract := e.resolveInternalCallee(contract, node)
-		if callee == nil {
-			return true
-		}
-		seed := e.bindCalleeTaint(callee, node.Children, env)
-		calleeEnv := e.buildFunctionTaintEnv(callee, seed)
-
-		// Extend the chain for the callee subtree: a fresh slice per recursion
-		// so sibling branches don't pollute each other's path records.
-		nextChain := ipPath{
-			Functions: append(append([]*types.Function{}, chain.Functions...), callee),
-			Contracts: append(append([]*types.Contract{}, chain.Contracts...), calleeContract),
-		}
-		out = append(out, e.interproceduralDescendants(callee, calleeContract, calleeEnv, visiting, depth+1, nextChain)...)
-		return true
-	})
-	return out
+	builder.buildFunction(fn, contract, env, 0, chain, nil)
+	return e.findSequenceInEvents(plan, rules, nil, make(map[int]bool))
 }
 
 func rulesUseContextSensitiveMatchers(rules []Rule) bool {
-	for _, rule := range rules {
-		if rule.TaintedFrom != "" || len(rule.Args) > 0 {
-			return true
-		}
-		if rulesUseContextSensitiveMatchers(rule.All) || rulesUseContextSensitiveMatchers(rule.Any) || rulesUseContextSensitiveMatchers(rule.Sequence) {
-			return true
-		}
-		if rule.Contains != nil && rulesUseContextSensitiveMatchers([]Rule{*rule.Contains}) {
-			return true
-		}
-		if rule.Inside != nil && rulesUseContextSensitiveMatchers([]Rule{*rule.Inside}) {
-			return true
-		}
-		if rule.Left != nil && rulesUseContextSensitiveMatchers([]Rule{*rule.Left}) {
-			return true
-		}
-		if rule.Right != nil && rulesUseContextSensitiveMatchers([]Rule{*rule.Right}) {
-			return true
-		}
-		if rule.Not != nil && rulesUseContextSensitiveMatchers([]Rule{*rule.Not}) {
+	usesContext := false
+	for i := range rules {
+		_ = walkRules(&rules[i], func(rule *Rule) error {
+			if rule.TaintedFrom != "" || len(rule.Args) > 0 || rule.ArgAny != nil {
+				usesContext = true
+			}
+			return nil
+		})
+		if usesContext {
 			return true
 		}
 	}
@@ -1201,84 +1597,277 @@ func assignmentTargetNames(node *types.ASTNode) []string {
 }
 
 func (e *Engine) resolveInternalCallee(contract *types.Contract, callNode *types.ASTNode) (*types.Function, *types.Contract) {
-	if contract == nil || callNode == nil || callNode.Name == "" {
+	return e.resolveInternalCalleeFrom(e.currentFunction, contract, callNode)
+}
+
+func (e *Engine) resolveInternalCalleeFrom(hostFn *types.Function, contract *types.Contract, callNode *types.ASTNode) (*types.Function, *types.Contract) {
+	if contract == nil || callNode == nil || callNode.Name == "" || !isSolidityCallNode(callNode) {
 		return nil, nil
 	}
 
-	// Explicit non-virtual targets (notably super/library) carry the exact
-	// file#Contract identity from the call-graph builder. Prefer it over any
-	// short-name/MRO inference. Internal/self/inherited calls stay virtual and
-	// are resolved against the deployment contract's exact MRO below.
-	if call := e.recordedCallForNode(callNode); call != nil &&
-		(call.CallType == types.CallTypeSuper || call.CallType == types.CallTypeLibrary) {
-		if targetContract := e.db.GetContractByID(call.ResolvedContractID); targetContract != nil {
-			target := call.ResolvedFunction
-			if target == "" {
-				target = call.Target
-			}
-			if fn := findFunctionBySelectorNameAndArity(targetContract.Functions, target, call.ArgCount); fn != nil {
-				return fn, targetContract
-			}
+	mro := e.runtimeContracts(contract)
+	recorded := e.recordedCallsForNodeFrom(hostFn, callNode)
+	for _, call := range recorded {
+		if call == nil || !isTraversableRecordedCallType(call.CallType) {
+			return nil, nil
 		}
+	}
+	exact := make([]*types.FunctionCall, 0, len(recorded))
+	for _, call := range recorded {
+		if call != nil && call.Resolved && call.ResolvedContractID != "" && strings.Contains(call.ResolvedFunction, "(") {
+			exact = append(exact, call)
+		}
+	}
+	if len(exact) > 0 {
+		return e.resolveExactRecordedCalleeFrom(hostFn, mro, exact)
+	}
+	if callNode.Kind != types.KindCallInternal {
+		return nil, nil
 	}
 
-	argCount := len(callNode.Children)
-	for _, candidateContract := range e.db.LinearizedContracts(contract) {
-		if fn := findFunctionByNameAndArity(candidateContract.Functions, callNode.Name, argCount); fn != nil {
-			return fn, candidateContract
-		}
+	return uniqueFunctionByNameAndArity(mro, callNode.Name, len(callArgumentChildren(callNode)))
+}
+
+func isSolidityCallNode(node *types.ASTNode) bool {
+	return node != nil && strings.HasPrefix(node.Kind, "call.")
+}
+
+func isTraversableRecordedCallType(callType types.CallType) bool {
+	switch callType {
+	case types.CallTypeInternal, types.CallTypeInherited, types.CallTypeSelf,
+		types.CallTypeSuper, types.CallTypeLibrary:
+		return true
+	default:
+		return false
 	}
-	if fn := findFunctionByNameAndArity(contract.Functions, callNode.Name, argCount); fn != nil {
-		return fn, contract
-	}
-	return nil, nil
 }
 
 func (e *Engine) recordedCallForNode(node *types.ASTNode) *types.FunctionCall {
-	if e == nil || e.currentFunction == nil || node == nil {
+	matches := e.recordedCallsForNode(node)
+	if len(matches) == 0 {
 		return nil
 	}
-	var lineMatch *types.FunctionCall
-	for _, call := range e.currentFunction.Calls {
+	return matches[0]
+}
+
+func (e *Engine) recordedCallsForNode(node *types.ASTNode) []*types.FunctionCall {
+	return e.recordedCallsForNodeFrom(e.currentFunction, node)
+}
+
+func (e *Engine) recordedCallsForNodeFrom(hostFn *types.Function, node *types.ASTNode) []*types.FunctionCall {
+	if e == nil || hostFn == nil || node == nil {
+		return nil
+	}
+	var byteMatches, columnMatches, lineMatches []*types.FunctionCall
+	for _, call := range hostFn.Calls {
 		if call == nil || call.Target != node.Name {
 			continue
 		}
 		if node.StartByte > 0 && call.Byte == node.StartByte {
-			return call
+			byteMatches = append(byteMatches, call)
 		}
-		if node.StartLine > 0 && call.Line == node.StartLine && lineMatch == nil {
-			lineMatch = call
-		}
-	}
-	return lineMatch
-}
-
-func findFunctionBySelectorNameAndArity(functions []*types.Function, target string, argCount int) *types.Function {
-	if strings.Contains(target, "(") {
-		for _, fn := range functions {
-			if fn != nil && fn.Selector == target {
-				return fn
+		if node.StartLine > 0 && call.Line == node.StartLine {
+			lineMatches = append(lineMatches, call)
+			if node.StartCol > 0 && call.Col == node.StartCol {
+				columnMatches = append(columnMatches, call)
 			}
 		}
-		return nil
 	}
-	return findFunctionByNameAndArity(functions, target, argCount)
+	if len(byteMatches) > 0 {
+		return byteMatches
+	}
+	if len(columnMatches) > 0 {
+		return columnMatches
+	}
+	if len(lineMatches) == 1 {
+		return lineMatches
+	}
+	if len(lineMatches) > 1 {
+		first := lineMatches[0]
+		samePhysicalSite := first.Byte > 0 || first.Col > 0
+		for _, call := range lineMatches[1:] {
+			if call.Byte != first.Byte || call.Col != first.Col {
+				samePhysicalSite = false
+				break
+			}
+		}
+		if samePhysicalSite {
+			return lineMatches
+		}
+	}
+	return nil
 }
 
-func findFunctionByNameAndArity(functions []*types.Function, name string, argCount int) *types.Function {
-	var fallback *types.Function
-	for _, fn := range functions {
-		if fn == nil || fn.Name != name {
-			continue
-		}
-		if len(fn.Parameters) == argCount {
-			return fn
-		}
-		if fallback == nil {
-			fallback = fn
+func (e *Engine) runtimeContracts(contract *types.Contract) []*types.Contract {
+	if contract == nil {
+		return nil
+	}
+	mro := e.db.LinearizedContracts(contract)
+	if len(mro) > 0 {
+		return mro
+	}
+	return []*types.Contract{contract}
+}
+
+func (e *Engine) resolveExactRecordedCalleeFrom(hostFn *types.Function, mro []*types.Contract, calls []*types.FunctionCall) (*types.Function, *types.Contract) {
+	allSuper := len(calls) > 0
+	for _, call := range calls {
+		if call.CallType != types.CallTypeSuper {
+			allSuper = false
+			break
 		}
 	}
-	return fallback
+	if allSuper {
+		if fn, owner, ok := e.resolveRuntimeSuperFrom(hostFn, mro, calls); ok {
+			return fn, owner
+		}
+		return nil, nil
+	}
+
+	type candidate struct {
+		fn    *types.Function
+		owner *types.Contract
+	}
+	candidates := make(map[string]candidate)
+	for _, call := range calls {
+		fn, owner := e.resolveExactRecordedCall(mro, call)
+		if fn == nil || owner == nil {
+			return nil, nil
+		}
+		key := owner.ID + "\x00" + evaluatorFunctionSelector(fn)
+		candidates[key] = candidate{fn: fn, owner: owner}
+	}
+	if len(candidates) != 1 {
+		return nil, nil
+	}
+	for _, resolved := range candidates {
+		return resolved.fn, resolved.owner
+	}
+	return nil, nil
+}
+
+func (e *Engine) resolveExactRecordedCall(mro []*types.Contract, call *types.FunctionCall) (*types.Function, *types.Contract) {
+	if call == nil || e.db == nil {
+		return nil, nil
+	}
+	targetContract := e.db.GetContractByID(call.ResolvedContractID)
+	if targetContract == nil {
+		return nil, nil
+	}
+	switch call.CallType {
+	case types.CallTypeSuper, types.CallTypeLibrary:
+		return findFunctionByExactSelector(targetContract, call.ResolvedFunction)
+	case types.CallTypeInternal, types.CallTypeInherited, types.CallTypeSelf:
+		if !contractInExactMRO(mro, targetContract.ID) {
+			return nil, nil
+		}
+		for _, candidateContract := range mro {
+			if fn, owner := findFunctionByExactSelector(candidateContract, call.ResolvedFunction); fn != nil {
+				return fn, owner
+			}
+		}
+	}
+	return nil, nil
+}
+
+func (e *Engine) resolveRuntimeSuperFrom(hostFn *types.Function, mro []*types.Contract, calls []*types.FunctionCall) (*types.Function, *types.Contract, bool) {
+	if hostFn == nil || hostFn.SourceFile == "" {
+		if len(calls) != 1 {
+			return nil, nil, false
+		}
+		fn, owner := e.resolveExactRecordedCall(mro, calls[0])
+		return fn, owner, fn != nil
+	}
+	hostID := types.MakeContractID(hostFn.SourceFile, hostFn.ContractName)
+	hostIndex := -1
+	for i, candidate := range mro {
+		if candidate != nil && candidate.ID == hostID {
+			hostIndex = i
+			break
+		}
+	}
+	if hostIndex < 0 {
+		return nil, nil, false
+	}
+	selector := calls[0].ResolvedFunction
+	for _, call := range calls[1:] {
+		if call.ResolvedFunction != selector {
+			return nil, nil, false
+		}
+	}
+	for _, candidateContract := range mro[hostIndex+1:] {
+		fn, owner := findFunctionByExactSelector(candidateContract, selector)
+		if fn == nil {
+			continue
+		}
+		for _, call := range calls {
+			if call.ResolvedContractID == owner.ID {
+				return fn, owner, true
+			}
+		}
+		return nil, nil, false
+	}
+	return nil, nil, false
+}
+
+func findFunctionByExactSelector(contract *types.Contract, selector string) (*types.Function, *types.Contract) {
+	if contract == nil || selector == "" {
+		return nil, nil
+	}
+	for _, fn := range contract.Functions {
+		if fn != nil && evaluatorFunctionSelector(fn) == selector {
+			return fn, contract
+		}
+	}
+	return nil, nil
+}
+
+func uniqueFunctionByNameAndArity(mro []*types.Contract, name string, argCount int) (*types.Function, *types.Contract) {
+	type candidate struct {
+		fn    *types.Function
+		owner *types.Contract
+	}
+	bySelector := make(map[string]candidate)
+	for _, contract := range mro {
+		if contract == nil {
+			continue
+		}
+		for _, fn := range contract.Functions {
+			if fn == nil || fn.Name != name || len(fn.Parameters) != argCount {
+				continue
+			}
+			selector := evaluatorFunctionSelector(fn)
+			if _, exists := bySelector[selector]; !exists {
+				bySelector[selector] = candidate{fn: fn, owner: contract}
+			}
+		}
+	}
+	if len(bySelector) != 1 {
+		return nil, nil
+	}
+	for _, resolved := range bySelector {
+		return resolved.fn, resolved.owner
+	}
+	return nil, nil
+}
+
+func evaluatorFunctionSelector(fn *types.Function) string {
+	if fn == nil {
+		return ""
+	}
+	if fn.Selector != "" {
+		return fn.Selector
+	}
+	return fn.GetSelector(nil)
+}
+
+func contractInExactMRO(mro []*types.Contract, contractID string) bool {
+	for _, contract := range mro {
+		if contract != nil && contract.ID == contractID {
+			return true
+		}
+	}
+	return false
 }
 
 func (e *Engine) bindCalleeTaint(callee *types.Function, args []*types.ASTNode, callerEnv map[string][]string) map[string][]string {
@@ -1361,7 +1950,7 @@ func (e *Engine) checkFunctionContext(fn *types.Function, contract *types.Contra
 	if r.Preset != "" && !e.checkPreset(fn, contract, r.Preset) {
 		return false
 	}
-	if !hasNamedParameter(fn, r.HasParam) || !e.hasMatchingGuard(fn, r.HasGuard) {
+	if !hasNamedParameter(fn, r.HasParam) || !e.hasMatchingGuard(fn, contract, r.HasGuard) {
 		return false
 	}
 	if !e.matchesAllContextRules(fn, contract, r.All) || !e.matchesAnyContextRule(fn, contract, r.Any) {
@@ -1425,19 +2014,40 @@ func hasNamedParameter(fn *types.Function, name string) bool {
 	return false
 }
 
-func (e *Engine) hasMatchingGuard(fn *types.Function, rule *Rule) bool {
-	if rule == nil || fn.AST == nil {
+func (e *Engine) verifyContextNode(node *types.ASTNode, rule Rule) bool {
+	trace := e.match
+	e.match = nil
+	defer func() { e.match = trace }()
+	return e.verify(node, rule)
+}
+
+func (e *Engine) hasMatchingGuard(fn *types.Function, contract *types.Contract, rule *Rule) bool {
+	if rule == nil {
 		return true
 	}
-	found := false
-	fn.AST.WalkDescendants(func(node *types.ASTNode) bool {
-		if types.IsCheck(node.Kind) && e.Verify(node, *rule) {
-			found = true
-			return false
+	if fn != nil && fn.AST != nil {
+		found := false
+		fn.AST.WalkDescendants(func(node *types.ASTNode) bool {
+			if types.IsCheck(node.Kind) && e.verifyContextNode(node, *rule) {
+				found = true
+				return false
+			}
+			return true
+		})
+		if found {
+			return true
 		}
-		return true
-	})
-	return found
+	}
+	if fn == nil {
+		return false
+	}
+	for _, applied := range fn.Modifiers {
+		if modifier := e.appliedModifierDeclaration(contract, applied); modifier != nil &&
+			e.verifyContextNode(modifier, *rule) {
+			return true
+		}
+	}
+	return false
 }
 
 func (e *Engine) matchesAllContextRules(fn *types.Function, contract *types.Contract, rules []Rule) bool {
@@ -1578,6 +2188,10 @@ func (e *Engine) VerifyAtContract(contract *types.Contract, r Rule) bool {
 	if contract == nil {
 		return false
 	}
+	normalized, ok := e.preparedRule(r, "VerifyAtContract")
+	if !ok {
+		return false
+	}
 
 	prevContract := e.currentContract
 	prevSourceFile := e.currentSourceFile
@@ -1588,7 +2202,7 @@ func (e *Engine) VerifyAtContract(contract *types.Contract, r Rule) bool {
 		e.currentSourceFile = prevSourceFile
 	}()
 
-	return e.verifyAtContract(contract, r)
+	return e.verifyAtContract(contract, normalized)
 }
 
 func (e *Engine) verifyAtContract(contract *types.Contract, r Rule) bool {
@@ -1601,7 +2215,7 @@ func (e *Engine) verifyAtContract(contract *types.Contract, r Rule) bool {
 		if root == nil {
 			return false
 		}
-		return e.Verify(root, r)
+		return e.verify(root, r)
 	}
 
 	if r.Extends != "" {
@@ -1676,23 +2290,83 @@ func (e *Engine) contractAST(contract *types.Contract) *types.ASTNode {
 	return root
 }
 
-// buildContractAST constructs the synthetic `decl.contract` AST: a root whose
-// children are cloned `decl.function` ASTs from the contract's linearized
-// inheritance chain.
-func (e *Engine) buildContractAST(contract *types.Contract) *types.ASTNode {
-	root := types.NewASTNode(types.KindDeclContract)
-	root.Name = contract.Name
-	root.SetAttribute("kind", string(contract.Kind))
-	if content := e.sourceContent(contract.SourceFile); content != "" {
-		root.StartLine, root.EndLine = sourceContractRange(content, contract.Name)
+func setDeclarationSpan(node *types.ASTNode, sourceFile string,
+	startLine, endLine, startCol, endCol, startByte, endByte int,
+) {
+	node.StartLine = startLine
+	node.EndLine = endLine
+	node.StartCol = startCol
+	node.EndCol = endCol
+	node.StartByte = startByte
+	node.EndByte = endByte
+	if sourceFile != "" {
+		node.SetAttribute("source_file", sourceFile)
 	}
+}
 
-	for _, base := range e.db.LinearizedContracts(contract) {
+type ownedFunction struct {
+	fn    *types.Function
+	owner *types.Contract
+}
+
+func activeFunctionKey(fn *types.Function) string {
+	switch {
+	case fn == nil:
+		return ""
+	case fn.IsConstructor:
+		return "<constructor>"
+	case fn.IsReceive:
+		return "<receive>"
+	case fn.IsFallback:
+		return "<fallback>"
+	default:
+		return evaluatorFunctionSelector(fn)
+	}
+}
+
+func (e *Engine) activeContractFunctions(contract *types.Contract) []ownedFunction {
+	var out []ownedFunction
+	seen := make(map[string]bool)
+	for mroIndex, base := range e.db.LinearizedContracts(contract) {
 		for _, fn := range base.Functions {
 			if fn == nil || fn.AST == nil {
 				continue
 			}
-			root.AddChild(cloneFunctionAST(fn, base.SourceFile))
+			if fn.IsConstructor && mroIndex > 0 {
+				continue
+			}
+			key := activeFunctionKey(fn)
+			if key == "" {
+				key = base.ID + ":" + fn.Name
+			}
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+			out = append(out, ownedFunction{fn: fn, owner: base})
+		}
+	}
+	return out
+}
+
+// buildContractAST constructs the synthetic declaration tree for a contract.
+// Active functions are selected by exact C3 MRO and canonical selector, while
+// state variables and modifiers retain their exact declaration owners.
+func (e *Engine) buildContractAST(contract *types.Contract) *types.ASTNode {
+	root := types.NewASTNode(types.KindDeclContract)
+	root.Name = contract.Name
+	root.SetAttribute("kind", string(contract.Kind))
+	setDeclarationSpan(root, contract.SourceFile, contract.StartLine, contract.EndLine,
+		contract.StartCol, contract.EndCol, contract.StartByte, contract.EndByte)
+	for _, owned := range e.activeContractFunctions(contract) {
+		root.AddChild(cloneFunctionAST(owned.fn, owned.owner.SourceFile))
+	}
+	for _, base := range e.db.LinearizedContracts(contract) {
+		for _, variable := range base.StateVariables {
+			root.AddChild(stateVariableDeclarationNode(variable, base))
+		}
+		for _, modifier := range base.Modifiers {
+			root.AddChild(modifierDeclarationNode(modifier, base))
 		}
 	}
 	return root
@@ -1706,14 +2380,97 @@ func cloneFunctionAST(fn *types.Function, sourceFile string) *types.ASTNode {
 	if root == nil {
 		return nil
 	}
+	root.Kind = types.KindDeclFunction
 	root.Name = fn.Name
-	root.StartLine = fn.StartLine
-	root.EndLine = fn.EndLine
 	root.SetAttribute("contract", fn.ContractName)
-	if sourceFile != "" {
-		root.SetAttribute("source_file", sourceFile)
+	root.SetAttribute("visibility", string(fn.Visibility))
+	root.SetAttribute("mutability", string(fn.StateMutability))
+	setDeclarationSpan(root, sourceFile, fn.StartLine, fn.EndLine, fn.StartCol,
+		fn.EndCol, fn.StartByte, fn.EndByte)
+	body := append([]*types.ASTNode(nil), root.Children...)
+	root.Children = nil
+	for _, param := range fn.Parameters {
+		root.AddChild(parameterDeclarationNode(param, sourceFile, "input"))
 	}
+	for _, result := range fn.Returns {
+		root.AddChild(parameterDeclarationNode(result, sourceFile, "return"))
+	}
+	root.AddChildren(body...)
 	return root
+}
+
+func parameterDeclarationNode(param *types.Parameter, sourceFile, role string) *types.ASTNode {
+	if param == nil {
+		return nil
+	}
+	node := types.NewASTNode(types.KindDeclParameter)
+	node.Name = param.Name
+	node.SetAttribute("type", param.TypeName)
+	node.SetAttribute("parameter_role", role)
+	setDeclarationSpan(node, sourceFile, param.StartLine, param.EndLine,
+		param.StartCol, param.EndCol, param.StartByte, param.EndByte)
+	return node
+}
+
+func modifierDeclarationNode(mod *types.Modifier, owner *types.Contract) *types.ASTNode {
+	if mod == nil || owner == nil {
+		return nil
+	}
+	node := cloneASTWithSource(mod.AST, owner.SourceFile)
+	if node == nil {
+		node = types.NewASTNode(types.KindDeclModifier)
+	}
+	node.Kind = types.KindDeclModifier
+	node.Name = mod.Name
+	node.SetAttribute("contract", owner.Name)
+	setDeclarationSpan(node, owner.SourceFile, mod.StartLine, mod.EndLine,
+		mod.StartCol, mod.EndCol, mod.StartByte, mod.EndByte)
+	body := append([]*types.ASTNode(nil), node.Children...)
+	node.Children = nil
+	for _, param := range mod.Parameters {
+		node.AddChild(parameterDeclarationNode(param, owner.SourceFile, "modifier"))
+	}
+	node.AddChildren(body...)
+	return node
+}
+
+func (e *Engine) appliedModifierDeclaration(contract *types.Contract, name string) *types.ASTNode {
+	if contract == nil {
+		return nil
+	}
+	if e.modifierDeclContract != contract || e.modifierDeclByName == nil {
+		declarations := make(map[string]*types.ASTNode)
+		for _, base := range e.db.LinearizedContracts(contract) {
+			for _, modifier := range base.Modifiers {
+				if modifier == nil {
+					continue
+				}
+				if _, exists := declarations[modifier.Name]; exists {
+					continue
+				}
+				declarations[modifier.Name] = modifierDeclarationNode(modifier, base)
+			}
+		}
+		e.modifierDeclContract = contract
+		e.modifierDeclByName = declarations
+	}
+	return e.modifierDeclByName[name]
+}
+
+func stateVariableDeclarationNode(variable *types.StateVariable, owner *types.Contract) *types.ASTNode {
+	if variable == nil || owner == nil {
+		return nil
+	}
+	node := types.NewASTNode(types.KindDeclVariable)
+	node.Name = variable.Name
+	node.RefKind = "state_var"
+	node.SetAttribute("contract", owner.Name)
+	node.SetAttribute("type", variable.TypeName)
+	node.SetAttribute("visibility", variable.Visibility)
+	node.SetAttribute("is_state_var", true)
+	setDeclarationSpan(node, owner.SourceFile, variable.StartLine, variable.EndLine,
+		variable.StartCol, variable.EndCol, variable.StartByte, variable.EndByte)
+	return node
 }
 
 func cloneASTWithSource(node *types.ASTNode, sourceFile string) *types.ASTNode {
@@ -1728,6 +2485,10 @@ func cloneASTWithSource(node *types.ASTNode, sourceFile string) *types.ASTNode {
 	clone.TaintSources = append([]string(nil), node.TaintSources...)
 	clone.StartLine = node.StartLine
 	clone.EndLine = node.EndLine
+	clone.StartCol = node.StartCol
+	clone.EndCol = node.EndCol
+	clone.StartByte = node.StartByte
+	clone.EndByte = node.EndByte
 	for key, value := range node.Attributes {
 		clone.Attributes[key] = value
 	}
@@ -1740,114 +2501,396 @@ func cloneASTWithSource(node *types.ASTNode, sourceFile string) *types.ASTNode {
 	return clone
 }
 
-// operandsGuardedBefore reports whether an arithmetic binary-op node has all of
-// its operand identifiers bounded by an earlier require/assert/if guard in the
-// enclosing function/modifier. It powers the `unchecked_var:` predicate,
-// separating a deliberately range-checked `unchecked` block
-// (`require(a >= b); … a - b;`) from a genuinely unchecked one. A guard counts
-// only when it (a) references EVERY operand identifier and (b) uses an ordering
-// comparison (`<`, `<=`, `>`, `>=`) — so `require(a != b)` or `require(a == b)`
-// before `a - b` does NOT count (they don't bound the subtraction). Requiring
-// all operands and an ordering relation keeps it conservative: real overflow
-// risk is still reported.
+// operandsGuardedBefore reports whether a subtraction is protected by a local,
+// enforced fact that proves minuend >= subtrahend on the operation's execution
+// path. It recognizes direct preceding require/assert checks, an effect-free
+// dominating if arm, and effect-free fallthrough after the opposite arm
+// unconditionally exits. The first intervening statement or call ends the
+// proof, as does any call ancestor or effectful sibling on the subtraction's
+// expression path. Mere name occurrence or an unrelated ordering expression is
+// never evidence.
 func operandsGuardedBefore(node *types.ASTNode) bool {
+	left, right, ok := subtractionOperands(node)
+	if !ok {
+		return false
+	}
+	if !subtractionExpressionPathIsEffectFree(node) {
+		return false
+	}
+
+	for current := node; current != nil && current.Parent != nil; current = current.Parent {
+		parent := current.Parent
+		if parent.Kind == types.KindStmtIf && ifArmProvesBound(parent, current, node, left, right) {
+			return true
+		}
+		if isSequentialASTContainer(parent) {
+			idx := directChildIndex(parent, current)
+			if idx < 0 {
+				return false
+			}
+			if idx > 0 {
+				return precedingStatementProvesBound(parent.Children[idx-1], left, right)
+			}
+		}
+		if parent.Kind == types.KindDeclFunction || parent.Kind == types.KindDeclModifier {
+			break
+		}
+	}
+	return false
+}
+
+// subtractionExpressionPathIsEffectFree validates the complete expression path
+// from the subtraction to its enclosing sequential statement before any bound
+// proof is accepted. Only wrappers with known effect ordering and structurally
+// pure siblings are allowed. Calls and unknown wrappers fail closed.
+func subtractionExpressionPathIsEffectFree(subtraction *types.ASTNode) bool {
+	for current := subtraction; current != nil && current.Parent != nil; current = current.Parent {
+		parent := current.Parent
+		if isSequentialASTContainer(parent) {
+			return true
+		}
+		if parent.Kind == types.KindStmtIf {
+			idx := directChildIndex(parent, current)
+			return idx == 1 || idx == 2
+		}
+		if !expressionParentAllowsBoundProof(parent, current) {
+			return false
+		}
+	}
+	return false
+}
+
+func expressionParentAllowsBoundProof(parent, pathChild *types.ASTNode) bool {
+	idx := directChildIndex(parent, pathChild)
+	if idx < 0 {
+		return false
+	}
+
+	switch parent.Kind {
+	case types.KindStmtReturn:
+		return len(parent.Children) == 1 && idx == 0
+	case types.KindStmtAssign:
+		operator := parent.GetAttributeString("operator")
+		if (operator != "" && operator != "=") || idx != len(parent.Children)-1 {
+			return false
+		}
+		return expressionSiblingsAreEffectFree(parent, idx)
+	case types.KindExprBinaryOp, types.KindExprMemberAccess, types.KindExprIndexAccess,
+		types.KindExprConditional, types.KindExprTuple:
+		return expressionSiblingsAreEffectFree(parent, idx)
+	case types.KindExprUnaryOp:
+		switch parent.GetAttributeString("operator") {
+		case "++", "--", "delete":
+			return false
+		default:
+			return expressionSiblingsAreEffectFree(parent, idx)
+		}
+	default:
+		return false
+	}
+}
+
+func expressionSiblingsAreEffectFree(parent *types.ASTNode, pathIndex int) bool {
+	for i, sibling := range parent.Children {
+		if i != pathIndex && !isStructurallyEffectFreeExpression(sibling) {
+			return false
+		}
+	}
+	return true
+}
+
+func isStructurallyEffectFreeExpression(node *types.ASTNode) bool {
+	if node == nil {
+		return true
+	}
+	switch node.Kind {
+	case types.KindExprIdentifier, types.KindExprLiteral:
+		return true
+	case types.KindExprBinaryOp, types.KindExprMemberAccess, types.KindExprIndexAccess,
+		types.KindExprConditional, types.KindExprTuple:
+	case types.KindExprUnaryOp:
+		switch node.GetAttributeString("operator") {
+		case "++", "--", "delete":
+			return false
+		}
+	default:
+		return false
+	}
+	for _, child := range node.Children {
+		if !isStructurallyEffectFreeExpression(child) {
+			return false
+		}
+	}
+	return true
+}
+
+func subtractionOperands(node *types.ASTNode) (left, right *types.ASTNode, ok bool) {
+	if node == nil || len(node.Children) != 2 {
+		return nil, nil, false
+	}
+	switch {
+	case node.Kind == types.KindExprBinaryOp && node.GetAttributeString("operator") == "-":
+	case node.Kind == types.KindStmtAssign && node.GetAttributeString("operator") == "-=":
+	default:
+		return nil, nil, false
+	}
+	left, right = node.Children[0], node.Children[1]
+	if !isStableBoundExpression(left) || !isStableBoundExpression(right) ||
+		!isUnsignedIntegerBoundExpression(left) || !isUnsignedIntegerBoundExpression(right) {
+		return nil, nil, false
+	}
+	return left, right, true
+}
+
+func isStableBoundExpression(node *types.ASTNode) bool {
 	if node == nil {
 		return false
 	}
-	names := operandIdentifierNames(node)
-	if len(names) == 0 {
-		return false
-	}
-	root := node.FindAncestor(func(a *types.ASTNode) bool {
-		return a.Kind == types.KindDeclFunction || a.Kind == types.KindDeclModifier
-	})
-	if root == nil {
-		return false
-	}
-
-	// Expression/statement nodes carry no reliable StartLine here, so "before" is
-	// determined by document (DFS) order: a guard counts only if it is visited
-	// before the arithmetic node itself. An enclosing `if (a >= b) { … a - b … }`
-	// also counts — its condition is visited before the body. WalkDescendants
-	// stops the whole traversal when the visitor returns false.
-	guarded := false
-	root.WalkDescendants(func(n *types.ASTNode) bool {
-		if n == node {
-			return false // reached the arithmetic; only earlier guards count
-		}
-		if cond := guardCondition(n); cond != nil && conditionBoundsOperands(cond, names) {
-			guarded = true
-			return false
-		}
+	switch node.Kind {
+	case types.KindExprIdentifier, types.KindExprLiteral:
 		return true
-	})
-	return guarded
-}
-
-// guardCondition returns the condition expression carried by a guard node — the
-// whole require/assert node (its subtree is the condition plus optional message)
-// or an `if` statement's first child — and nil for any other node.
-func guardCondition(n *types.ASTNode) *types.ASTNode {
-	switch n.Kind {
-	case types.KindCheckRequire, types.KindCheckAssert:
-		return n
-	case types.KindStmtIf:
-		if len(n.Children) > 0 {
-			return n.Children[0]
-		}
-	}
-	return nil
-}
-
-// operandIdentifierNames collects the identifier names in a binary op's two
-// operand subtrees (e.g. {oldAllowance, value} for `oldAllowance - value`).
-func operandIdentifierNames(binop *types.ASTNode) map[string]bool {
-	names := make(map[string]bool)
-	var walk func(n *types.ASTNode)
-	walk = func(n *types.ASTNode) {
-		if n == nil {
-			return
-		}
-		if n.Kind == types.KindExprIdentifier && n.Name != "" {
-			names[n.Name] = true
-		}
-		for _, c := range n.Children {
-			walk(c)
-		}
-	}
-	for _, c := range binop.Children {
-		walk(c)
-	}
-	return names
-}
-
-// conditionBoundsOperands reports whether cond bounds the operands: every name
-// in names appears inside cond AND cond contains an ordering comparison
-// (`<`, `<=`, `>`, `>=`). Equality/inequality (`==`/`!=`) do not bound an
-// arithmetic operation, so they are intentionally excluded.
-func conditionBoundsOperands(cond *types.ASTNode, names map[string]bool) bool {
-	seen := make(map[string]bool)
-	hasOrdering := false
-	var walk func(n *types.ASTNode)
-	walk = func(n *types.ASTNode) {
-		if n == nil {
-			return
-		}
-		if n.Kind == types.KindExprIdentifier && names[n.Name] {
-			seen[n.Name] = true
-		}
-		if n.Kind == types.KindExprBinaryOp {
-			switch n.GetAttributeString("operator") {
-			case "<", "<=", ">", ">=":
-				hasOrdering = true
+	case types.KindExprMemberAccess, types.KindExprIndexAccess:
+		for _, child := range node.Children {
+			if !isStableBoundExpression(child) {
+				return false
 			}
 		}
-		for _, c := range n.Children {
-			walk(c)
+		return len(node.Children) > 0
+	default:
+		return false
+	}
+}
+
+func isUnsignedIntegerBoundExpression(node *types.ASTNode) bool {
+	typeName := node.GetAttributeString("type")
+	if typeName == "uint" {
+		return true
+	}
+	if !strings.HasPrefix(typeName, "uint") || len(typeName) == len("uint") {
+		return false
+	}
+	for _, r := range typeName[len("uint"):] {
+		if r < '0' || r > '9' {
+			return false
 		}
 	}
-	walk(cond)
-	return hasOrdering && len(seen) == len(names)
+	return true
+}
+
+func isSequentialASTContainer(node *types.ASTNode) bool {
+	if node == nil {
+		return false
+	}
+	switch node.Kind {
+	case types.KindDeclFunction, types.KindDeclModifier, types.KindStmtBlock, types.KindStmtUnchecked:
+		return true
+	default:
+		return false
+	}
+}
+
+func directChildIndex(parent, child *types.ASTNode) int {
+	if parent == nil || child == nil {
+		return -1
+	}
+	for i, candidate := range parent.Children {
+		if candidate == child {
+			return i
+		}
+	}
+	return -1
+}
+
+func precedingStatementProvesBound(statement, left, right *types.ASTNode) bool {
+	if statement == nil {
+		return false
+	}
+	switch statement.Kind {
+	case types.KindCheckRequire, types.KindCheckAssert:
+		return len(statement.Children) > 0 && guardArgumentsAreStructurallyEffectFree(statement) &&
+			conditionProvesSubtractionBound(statement.Children[0], left, right, true)
+	case types.KindStmtIf:
+		if len(statement.Children) < 2 {
+			return false
+		}
+		condition := statement.Children[0]
+		thenExits := statementAlwaysExits(statement.Children[1])
+		elseExits := len(statement.Children) > 2 && statementAlwaysExits(statement.Children[2])
+		switch {
+		case thenExits && !elseExits:
+			return survivingIfArmIsEffectFree(statement, 2) &&
+				conditionProvesSubtractionBound(condition, left, right, false)
+		case elseExits && !thenExits:
+			return survivingIfArmIsEffectFree(statement, 1) &&
+				conditionProvesSubtractionBound(condition, left, right, true)
+		}
+	}
+	return false
+}
+
+func guardArgumentsAreStructurallyEffectFree(guard *types.ASTNode) bool {
+	if guard == nil {
+		return false
+	}
+	for _, arg := range guard.Children[1:] {
+		if !isStructurallyEffectFreeExpression(arg) {
+			return false
+		}
+	}
+	return true
+}
+
+func ifArmProvesBound(statement, arm, subtraction, left, right *types.ASTNode) bool {
+	if statement == nil || len(statement.Children) < 2 {
+		return false
+	}
+	if !ifArmPathIsTransparent(arm, subtraction) {
+		return false
+	}
+	idx := directChildIndex(statement, arm)
+	switch idx {
+	case 1:
+		return conditionProvesSubtractionBound(statement.Children[0], left, right, true)
+	case 2:
+		return conditionProvesSubtractionBound(statement.Children[0], left, right, false)
+	default:
+		return false
+	}
+}
+
+// ifArmPathIsTransparent accepts an if-arm proof only when the subtraction is
+// the first executable operation reached through block/unchecked wrappers.
+func ifArmPathIsTransparent(arm, subtraction *types.ASTNode) bool {
+	if arm == nil || subtraction == nil {
+		return false
+	}
+	for current := subtraction; current != arm; current = current.Parent {
+		parent := current.Parent
+		if parent == nil {
+			return false
+		}
+		switch parent.Kind {
+		case types.KindStmtBlock, types.KindStmtUnchecked:
+			if directChildIndex(parent, current) != 0 {
+				return false
+			}
+		case types.KindStmtIf, types.KindStmtLoop, types.KindStmtTryCatch:
+			return false
+		}
+	}
+	return true
+}
+
+// survivingIfArmIsEffectFree accepts an exiting-arm fallthrough proof only
+// when the non-exiting arm is absent or contains transparent empty wrappers.
+func survivingIfArmIsEffectFree(statement *types.ASTNode, armIndex int) bool {
+	if statement == nil || armIndex >= len(statement.Children) {
+		return true
+	}
+	return transparentStatementIsEffectFree(statement.Children[armIndex])
+}
+
+func transparentStatementIsEffectFree(statement *types.ASTNode) bool {
+	if statement == nil {
+		return true
+	}
+	if statement.Kind != types.KindStmtBlock && statement.Kind != types.KindStmtUnchecked {
+		return false
+	}
+	for _, child := range statement.Children {
+		if !transparentStatementIsEffectFree(child) {
+			return false
+		}
+	}
+	return true
+}
+
+func statementAlwaysExits(statement *types.ASTNode) bool {
+	if statement == nil {
+		return false
+	}
+	switch statement.Kind {
+	case types.KindStmtReturn, types.KindCheckRevert:
+		return true
+	case types.KindStmtBlock, types.KindStmtUnchecked:
+		for _, child := range statement.Children {
+			if statementAlwaysExits(child) {
+				return true
+			}
+		}
+	case types.KindStmtIf:
+		return len(statement.Children) > 2 &&
+			statementAlwaysExits(statement.Children[1]) &&
+			statementAlwaysExits(statement.Children[2])
+	}
+	return false
+}
+
+// conditionProvesSubtractionBound proves only relations that imply
+// left >= right. `truth` says whether cond is known true or false on the
+// operation's path. Conjunctions contribute facts only when true; disjunctions
+// contribute facts only when false. Other boolean shapes fail closed.
+func conditionProvesSubtractionBound(cond, left, right *types.ASTNode, truth bool) bool {
+	if cond == nil || !isStructurallyEffectFreeExpression(cond) {
+		return false
+	}
+	if cond.Kind == types.KindExprUnaryOp && cond.GetAttributeString("operator") == "!" && len(cond.Children) == 1 {
+		return conditionProvesSubtractionBound(cond.Children[0], left, right, !truth)
+	}
+	if cond.Kind != types.KindExprBinaryOp || len(cond.Children) != 2 {
+		return false
+	}
+	lhs, rhs := cond.Children[0], cond.Children[1]
+	switch cond.GetAttributeString("operator") {
+	case "&&":
+		return truth && (conditionProvesSubtractionBound(lhs, left, right, true) ||
+			conditionProvesSubtractionBound(rhs, left, right, true))
+	case "||":
+		return !truth && (conditionProvesSubtractionBound(lhs, left, right, false) ||
+			conditionProvesSubtractionBound(rhs, left, right, false))
+	case ">=":
+		return truth && sameBoundExpression(lhs, left) && sameBoundExpression(rhs, right)
+	case "<=":
+		return truth && sameBoundExpression(lhs, right) && sameBoundExpression(rhs, left)
+	case ">":
+		if truth {
+			return sameBoundExpression(lhs, left) && sameBoundExpression(rhs, right)
+		}
+		return sameBoundExpression(lhs, right) && sameBoundExpression(rhs, left)
+	case "<":
+		if truth {
+			return sameBoundExpression(lhs, right) && sameBoundExpression(rhs, left)
+		}
+		return sameBoundExpression(lhs, left) && sameBoundExpression(rhs, right)
+	default:
+		return false
+	}
+}
+
+func sameBoundExpression(a, b *types.ASTNode) bool {
+	if a == nil || b == nil || a.Kind != b.Kind || a.Name != b.Name || a.Value != b.Value || len(a.Children) != len(b.Children) {
+		return false
+	}
+	if !isStableBoundExpression(a) || !isStableBoundExpression(b) {
+		return false
+	}
+	if a.Kind == types.KindExprIdentifier {
+		if a.RefID != "" || b.RefID != "" {
+			return a.RefID != "" && b.RefID != "" && a.RefID == b.RefID
+		}
+		if a.RefKind != "" && b.RefKind != "" && a.RefKind != b.RefKind {
+			return false
+		}
+	}
+	if a.GetAttributeString("operator") != b.GetAttributeString("operator") {
+		return false
+	}
+	for i := range a.Children {
+		if !sameBoundExpression(a.Children[i], b.Children[i]) {
+			return false
+		}
+	}
+	return true
 }
 
 // statementContains reports whether the node's nearest enclosing statement has a
@@ -1871,7 +2914,7 @@ func (e *Engine) statementContains(node *types.ASTNode, rule Rule) bool {
 		if found {
 			return false
 		}
-		if e.Verify(n, rule) {
+		if e.verify(n, rule) {
 			found = true
 			return false
 		}
@@ -1954,42 +2997,57 @@ func hasAtomicPredicate(r Rule) bool {
 		r.TaintedFrom != ""
 }
 
-// hostFunctionFor walks a matched AST node's parent chain to find the
-// enclosing decl.function (or decl.modifier) and resolves its name + contract.
-// Returns nil values when the node has no captured ancestor chain (synthetic
-// fixtures or source-scope matches with no parent link).
+const (
+	primaryPriorityNone uint8 = iota
+	primaryPriorityRegex
+	primaryPriorityTraceableAST
+)
+
+func primaryPriorityForRule(r Rule) uint8 {
+	if hasTraceableAtomicPredicate(r) {
+		return primaryPriorityTraceableAST
+	}
+	if r.Regex != "" {
+		return primaryPriorityRegex
+	}
+	return primaryPriorityNone
+}
+
+func (e *Engine) capturePrimary(node *types.ASTNode, priority uint8) {
+	if e.match == nil || node == nil || priority == primaryPriorityNone {
+		return
+	}
+	if e.match.Primary == nil || priority > e.match.primaryPriority {
+		e.match.Primary = node
+		e.match.primaryPriority = priority
+	}
+}
+
+// hostFunctionFor walks a matched AST node's parent chain to resolve the exact
+// owning declaration. Every decl.* node may contribute contract/source-file
+// identity; only decl.function and decl.modifier contribute a host name.
+// Context fallback remains for persisted or synthetic trees without owner
+// attributes.
 func (e *Engine) hostFunctionFor(node *types.ASTNode) (hostName, hostContract, hostFile string, hostLine int) {
 	if node == nil {
 		return "", "", "", 0
 	}
 	hostLine = node.StartLine
 	for n := node; n != nil; n = n.Parent {
+		if strings.HasPrefix(n.Kind, "decl.") {
+			if hostContract == "" {
+				hostContract = n.GetAttributeString("contract")
+				if hostContract == "" && n.Kind == types.KindDeclContract {
+					hostContract = n.Name
+				}
+			}
+			if hostFile == "" {
+				hostFile = n.GetAttributeString("source_file")
+			}
+		}
 		switch n.Kind {
 		case types.KindDeclFunction, types.KindDeclModifier:
 			hostName = n.Name
-			if contractName := n.GetAttributeString("contract"); contractName != "" {
-				hostContract = contractName
-			}
-			if sourceFile := n.GetAttributeString("source_file"); sourceFile != "" {
-				hostFile = sourceFile
-			}
-			if n.StartLine > 0 {
-				hostLine = n.StartLine
-			}
-			// Resolve contract via the matched node's chain map (populated
-			// by the interprocedural walker) or from the verifier context.
-			if path, ok := e.ipChains[node]; ok && len(path.Functions) > 0 {
-				lastIdx := len(path.Functions) - 1
-				last := path.Functions[lastIdx]
-				if last != nil {
-					hostContract = last.ContractName
-					hostFile = last.SourceFile
-					if hostFile == "" && lastIdx < len(path.Contracts) && path.Contracts[lastIdx] != nil {
-						hostFile = path.Contracts[lastIdx].SourceFile
-					}
-				}
-				return
-			}
 			if e.currentContract != nil && hostContract == "" {
 				hostContract = e.currentContract.Name
 			}
@@ -2004,6 +3062,9 @@ func (e *Engine) hostFunctionFor(node *types.ASTNode) (hostName, hostContract, h
 			}
 			return
 		}
+	}
+	if hostContract != "" || hostFile != "" {
+		return
 	}
 	// No ancestor — fall back to whatever context we have.
 	if e.currentFunction != nil {

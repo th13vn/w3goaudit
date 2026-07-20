@@ -2,7 +2,7 @@ package engine
 
 import "testing"
 
-const delegatecallExecutionV2YAML = `
+const delegatecallExecutionWQL = `
 meta:
   id: CRITICAL-DELEGATECALL-USER-INPUT
   title: Delegatecall to User-Controlled Address
@@ -52,7 +52,7 @@ contract Safe_OwnerGatedDelegatecall {
 `
 
 func TestWQLDelegatecallExecutesEndToEnd(t *testing.T) {
-	tmpl, err := ParseTemplate(delegatecallExecutionV2YAML)
+	tmpl, err := ParseTemplate(delegatecallExecutionWQL)
 	if err != nil {
 		t.Fatalf("ParseTemplate: %v", err)
 	}

@@ -15,7 +15,7 @@ meta:
 query:
   from: function
   where:
-    - all:
+    - and:
         - func_name: '.*burnFrom.*'
         - regex: '(?:_allowances|allowance)\s*(?:\[|\()'
     - sequence:

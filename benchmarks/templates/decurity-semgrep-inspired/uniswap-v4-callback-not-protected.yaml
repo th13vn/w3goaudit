@@ -16,7 +16,7 @@ query:
   from: entry_function
   where:
     - func_name: '^(beforeInitialize|afterInitialize|beforeAddLiquidity|afterAddLiquidity|beforeRemoveLiquidity|afterRemoveLiquidity|beforeSwap|afterSwap|beforeDonate|afterDonate)$'
-    - all:
+    - and:
         - visibility: external
     - not: { preset: access_controlled }
     - not:

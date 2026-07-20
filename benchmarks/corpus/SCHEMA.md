@@ -35,6 +35,15 @@ A map from a stable **category key** (e.g. `reentrancy`) to its metadata. The
 category key is the shared vocabulary the scorer uses to compare tools — each
 tool's native rule IDs are mapped into these keys via `aliases`.
 
+Choose category keys by vulnerability semantics, not detector lineage. Native
+rules from different template families that describe the same bug must be
+aliases of one canonical category. For example, `SLITHER-SUICIDAL` and
+`DECURITY-ACCESSIBLE-SELFDESTRUCT` both belong to `selfdestruct`, while
+`SLITHER-CONTROLLED-DELEGATECALL` and
+`DECURITY-DELEGATECALL-TO-ARBITRARY-ADDRESS` both belong to
+`controlled-delegatecall`. Do not create parallel category keys solely because
+the rule IDs use different names.
+
 ```json
 "categories": {
   "reentrancy": {

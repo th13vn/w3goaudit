@@ -2,8 +2,9 @@
 pragma solidity ^0.8.20;
 
 // Fixtures for SEC-DEST-001 (unprotected selfdestruct). The detector uses the
-// unAuthenticated preset, so it must flag the truly-unprotected case and NOT
-// flag functions guarded by a modifier OR an inline msg.sender check.
+// canonical access_controlled property check, so it must flag the truly
+// unprotected case and NOT flag functions guarded by a modifier or an inline
+// msg.sender check.
 
 contract VulnerableSelfdestruct {
     // VULNERABLE: anyone can destroy the contract.

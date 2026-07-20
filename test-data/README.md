@@ -13,7 +13,7 @@ duplicated as aggregate files here.
 
 | Group | What it holds | Used by |
 |---|---|---|
-| [`security/`](security/) | W3GoAudit-native fixtures for the official pack in [`../templates/official/`](../templates/official/) — deep bug-class matrices, focused engine regressions, and promoted-detector fixtures with their safe controls. See [`security/README.md`](security/README.md). | `pkg/engine/*_test.go`, the documented full-pack scan |
+| [`security/`](security/) | W3GoAudit-native fixtures for the official pack in [`../templates/official/`](../templates/official/) — deep bug-class matrices, focused engine regressions including metadata/MRO-exact caller identity and structurally pure unchecked-subtraction bounds, and promoted-detector fixtures with their safe controls. See [`security/README.md`](security/README.md). | `pkg/engine/*_test.go`, the documented full-pack scan |
 | [`core/`](core/) | Core-pipeline / tool fixtures (not security detection) — see the sub-table below. | builder/reader/engine unit tests, the documented `build` + `engine-features` smoke tests |
 
 ### `core/` — pipeline & tool fixtures
@@ -21,7 +21,8 @@ duplicated as aggregate files here.
 | Subdirectory | What it exercises | Used by |
 |---|---|---|
 | [`core/build-database/`](core/build-database/) | Sixteen parser/builder/report fixtures numbered `01-..` through `15-..`. There are two distinct `10-*` cases: `10-interface-impl.sol` pins interface-to-implementation navigation, while `10-override-state-order.sol` pins asymmetric-diamond C3 order, storage order, and override binding. See the [folder README](core/build-database/README.md) for the complete matrix. | `pkg/builder/*_test.go`, `pkg/reader/*_test.go`, `pkg/report/nav_test.go`, the documented `w3goaudit build` smoke test |
-| [`core/engine-features/`](core/engine-features/) | WQL engine operators (`sequence`, `in`, semantic groups, `arg.N` + `tainted`). Paired with [`../templates/test/`](../templates/test/). Also `type-cast-guards.sol` and the `path-collision/{pkg-a,pkg-b}/tx-origin.sol` pair (same-named files in sibling packages). | `pkg/engine/*_test.go`, the documented `w3goaudit … --template templates/test/` smoke test |
+| [`core/engine-features/`](core/engine-features/) | Canonical WQL operators (`and`, `any`, `sequence`, `in`, semantic groups, `arg.N`, and `tainted` including `user_controlled`). Paired with [`../templates/test/`](../templates/test/). Also `type-cast-guards.sol` and the `path-collision/{pkg-a,pkg-b}/tx-origin.sol` pair (same-named files in sibling packages). | `pkg/engine/*_test.go`, the documented `w3goaudit … --template templates/test/` smoke test |
+| [`core/semantic-hardening/`](core/semantic-hardening/) | Reserved fixture lane for the internal program-point semantic analyzer, including future access-path, value-provenance, control-state merge, and CFG cases. No Solidity fixture is required by the initial model task. | `pkg/engine/semantic_*_test.go` as analyzer stages adopt source fixtures |
 | [`core/extract/`](core/extract/) | CLI `extract` subcommands (entry, inheritance, source, context, bundle, workflow). Realistic multi-bug DeFi vault fixture. | `cmd/w3goaudit/extract_test.go`, `cmd/w3goaudit/extract*.go` examples, `docs/usage.md` |
 | [`core/identity-collision/`](core/identity-collision/) | Same-named contracts in separate source paths, with intentionally distinct state/effects. | exact-identity builder, engine, navigation, and report regressions |
 

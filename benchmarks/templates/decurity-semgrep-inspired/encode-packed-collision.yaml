@@ -15,7 +15,7 @@ meta:
 query:
   from: function
   where:
-    - all:
+    - and:
         - visibility: public,external
         - regex: '(?s)function\s+\w+\([^)]*(?:bytes|string|address\[\]|uint256\[\])\s+\w+[^)]*(?:bytes|string|address\[\]|uint256\[\])\s+\w+'
     - any:

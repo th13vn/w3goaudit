@@ -21,5 +21,5 @@ query:
     - not: { preset: access_controlled }
     - has:
         receiver: true
-        tainted: parameter
-    - arg.0: { tainted: parameter }
+        tainted: user_controlled
+    - arg.0: { tainted: user_controlled }

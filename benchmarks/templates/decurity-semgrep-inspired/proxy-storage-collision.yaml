@@ -16,7 +16,7 @@ query:
   from: contract
   where:
     - base: '(UpgradeabilityProxy|AdminUpgradeabilityProxy|OwnedUpgradeabilityProxy|TransparentUpgradeableProxy|ERC1967Proxy)'
-    - all:
+    - and:
         - has:
             regex: '(?m)^\s*[A-Za-z_][A-Za-z0-9_<>,\[\] ]+\s+(?:public|private|internal)?\s*[A-Za-z_][A-Za-z0-9_]*\s*(?:=|;)'
         - has:

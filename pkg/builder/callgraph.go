@@ -1,6 +1,7 @@
 package builder
 
 import (
+	"fmt"
 	"sort"
 	"strings"
 
@@ -23,7 +24,18 @@ type CallGraphBuilder struct {
 	currentModifier *types.Modifier
 	currentFile     *types.SourceFile
 	symbolTypes     map[string]types.TypeInfo
+	symbolLocations map[string]string
+	symbolScopes    []callGraphSymbolScope
 }
+
+type callGraphSymbolSnapshot struct {
+	typeInfo   types.TypeInfo
+	typeExists bool
+	location   string
+	locExists  bool
+}
+
+type callGraphSymbolScope map[string]callGraphSymbolSnapshot
 
 // NewCallGraphBuilder creates a new call graph builder
 func NewCallGraphBuilder(db *types.Database) *CallGraphBuilder {
@@ -155,12 +167,17 @@ func (cgb *CallGraphBuilder) analyzeModifierDefinition(mod *ast.ModifierDefiniti
 
 	cgb.currentFunction = nil
 	cgb.symbolTypes = make(map[string]types.TypeInfo)
-	for _, sv := range cgb.currentContract.StateVariables {
+	cgb.symbolLocations = make(map[string]string)
+	cgb.symbolScopes = nil
+	for _, binding := range linearizedStateVariablesForCallGraph(cgb.db, cgb.currentContract) {
+		sv := binding.variable
 		cgb.symbolTypes[sv.Name] = cgb.typeInfoFromTypeName(sv.TypeName, "state_var")
+		cgb.symbolLocations[sv.Name] = "storage"
 	}
 	for _, param := range mod.Parameters {
 		if param.Name != "" {
 			cgb.symbolTypes[param.Name] = cgb.typeInfoFromTypeName(getTypeName(param.TypeName), "parameter")
+			cgb.symbolLocations[param.Name] = param.StorageLocation
 		}
 	}
 
@@ -189,8 +206,12 @@ func (cgb *CallGraphBuilder) analyzeFunction(fn *ast.FunctionDefinition) {
 	cgb.currentFunction = nil
 	cgb.currentModifier = nil
 	cgb.symbolTypes = make(map[string]types.TypeInfo)
-	for _, sv := range cgb.currentContract.StateVariables {
+	cgb.symbolLocations = make(map[string]string)
+	cgb.symbolScopes = nil
+	for _, binding := range linearizedStateVariablesForCallGraph(cgb.db, cgb.currentContract) {
+		sv := binding.variable
 		cgb.symbolTypes[sv.Name] = cgb.typeInfoFromTypeName(sv.TypeName, "state_var")
+		cgb.symbolLocations[sv.Name] = "storage"
 	}
 	// Tolerant error recovery can produce a definition without a location;
 	// sourceLocator.span is nil-safe and keeps the match deterministic.
@@ -201,9 +222,12 @@ func (cgb *CallGraphBuilder) analyzeFunction(fn *ast.FunctionDefinition) {
 			"function AST could not be matched inside its exact contract")
 		return
 	}
-	for _, param := range cgb.currentFunction.Parameters {
+	for i, param := range cgb.currentFunction.Parameters {
 		if param.Name != "" {
 			cgb.symbolTypes[param.Name] = cgb.typeInfoFromTypeName(param.TypeName, "parameter")
+			if i < len(fn.Parameters) && fn.Parameters[i] != nil {
+				cgb.symbolLocations[param.Name] = fn.Parameters[i].StorageLocation
+			}
 		}
 	}
 
@@ -262,6 +286,8 @@ func (cgb *CallGraphBuilder) analyzeBlock(block *ast.Block) {
 	if block == nil {
 		return
 	}
+	cgb.pushSymbolScope()
+	defer cgb.popSymbolScope()
 	for _, stmt := range block.Statements {
 		cgb.analyzeNode(stmt)
 	}
@@ -299,10 +325,7 @@ func (cgb *CallGraphBuilder) analyzeNode(node ast.Node) {
 		cgb.analyzeNode(n.Body)
 
 	case *ast.ForStatement:
-		cgb.analyzeNode(n.InitExpression)
-		cgb.analyzeNode(n.ConditionExpression)
-		cgb.analyzeNode(n.LoopExpression)
-		cgb.analyzeNode(n.Body)
+		cgb.analyzeForStatement(n)
 
 	case *ast.ReturnStatement:
 		cgb.analyzeNode(n.Expression)
@@ -359,11 +382,66 @@ func (cgb *CallGraphBuilder) analyzeVariableDeclaration(stmt *ast.VariableDeclar
 		if !typeInfo.IsKnown() && stmt.InitialValue != nil {
 			typeInfo = cgb.expressionType(stmt.InitialValue)
 		}
-		if typeInfo.IsKnown() {
-			cgb.symbolTypes[decl.Name] = typeInfo
-		}
+		cgb.declareSymbol(decl.Name, typeInfo, decl.StorageLocation)
 	}
 	cgb.analyzeNode(stmt.InitialValue)
+}
+
+func (cgb *CallGraphBuilder) analyzeForStatement(stmt *ast.ForStatement) {
+	if stmt == nil {
+		return
+	}
+	cgb.pushSymbolScope()
+	defer cgb.popSymbolScope()
+	cgb.analyzeNode(stmt.InitExpression)
+	cgb.analyzeNode(stmt.ConditionExpression)
+	cgb.analyzeNode(stmt.LoopExpression)
+	cgb.analyzeNode(stmt.Body)
+}
+
+func (cgb *CallGraphBuilder) pushSymbolScope() {
+	cgb.symbolScopes = append(cgb.symbolScopes, make(callGraphSymbolScope))
+}
+
+func (cgb *CallGraphBuilder) popSymbolScope() {
+	if len(cgb.symbolScopes) == 0 {
+		return
+	}
+	scope := cgb.symbolScopes[len(cgb.symbolScopes)-1]
+	cgb.symbolScopes = cgb.symbolScopes[:len(cgb.symbolScopes)-1]
+	for name, snapshot := range scope {
+		if snapshot.typeExists {
+			cgb.symbolTypes[name] = snapshot.typeInfo
+		} else {
+			delete(cgb.symbolTypes, name)
+		}
+		if snapshot.locExists {
+			cgb.symbolLocations[name] = snapshot.location
+		} else {
+			delete(cgb.symbolLocations, name)
+		}
+	}
+}
+
+func (cgb *CallGraphBuilder) declareSymbol(name string, typeInfo types.TypeInfo, dataLocation string) {
+	if name == "" {
+		return
+	}
+	if len(cgb.symbolScopes) > 0 {
+		scope := cgb.symbolScopes[len(cgb.symbolScopes)-1]
+		if _, recorded := scope[name]; !recorded {
+			oldType, typeExists := cgb.symbolTypes[name]
+			oldLocation, locExists := cgb.symbolLocations[name]
+			scope[name] = callGraphSymbolSnapshot{
+				typeInfo:   oldType,
+				typeExists: typeExists,
+				location:   oldLocation,
+				locExists:  locExists,
+			}
+		}
+	}
+	cgb.symbolTypes[name] = typeInfo
+	cgb.symbolLocations[name] = dataLocation
 }
 
 func (cgb *CallGraphBuilder) analyzeTryStatement(stmt *ast.TryStatement) {
@@ -381,6 +459,11 @@ func (cgb *CallGraphBuilder) analyzeTryStatement(stmt *ast.TryStatement) {
 
 func (cgb *CallGraphBuilder) analyzeCallAndArguments(call *ast.FunctionCall) {
 	cgb.analyzeFunctionCall(call)
+	// The outer call is recorded above. Its expression may still contain nested
+	// calls in a receiver (`helper().ping()`) or call options
+	// (`target.ping{gas: helper()}()`), so traverse that expression exactly once
+	// before the positional arguments.
+	cgb.analyzeNode(call.Expression)
 	for _, arg := range call.Arguments {
 		cgb.analyzeNode(arg)
 	}
@@ -427,6 +510,10 @@ func (cgb *CallGraphBuilder) analyzeFunctionCall(call *ast.FunctionCall) {
 	target := cgb.resolveTarget(descriptor.calledName, descriptor.targetContract, descriptor.callType, call.Arguments, descriptor.libraryExtension, descriptor.receiverType)
 	if descriptor.identityRequired && descriptor.targetContract == nil {
 		cgb.addTargetIdentityDiagnostic(descriptor.targetContractName, descriptor.calledName, line)
+	}
+	if target.arityMismatch {
+		cgb.addIdentityDiagnostic(descriptor.calledName, line,
+			fmt.Sprintf("call target %q has no declaration matching known arity %d", descriptor.calledName, target.observedArity))
 	}
 
 	to := descriptor.calledName
@@ -485,7 +572,7 @@ func (cgb *CallGraphBuilder) classifyFunctionCall(call *ast.FunctionCall) (funct
 	case *ast.MemberAccess:
 		return cgb.classifyMemberCall(call, expression, descriptor)
 	case *ast.FunctionCallOptions:
-		return cgb.classifyCallWithOptions(expression, descriptor)
+		return cgb.classifyCallWithOptions(call, expression, descriptor)
 	case *ast.NewExpression:
 		descriptor.calledName = getTypeName(expression.TypeName)
 		descriptor.callType = types.CallTypeExternal
@@ -518,6 +605,9 @@ func (cgb *CallGraphBuilder) classifyIdentifierCall(call *ast.FunctionCall, iden
 func (cgb *CallGraphBuilder) classifyMemberCall(call *ast.FunctionCall, member *ast.MemberAccess, descriptor functionCallDescriptor) (functionCallDescriptor, bool) {
 	descriptor.calledName = member.MemberName
 	descriptor.receiverType = cgb.expressionType(member.Expression)
+	if isBuiltinStorageArrayMutation(descriptor.calledName, len(call.Arguments), descriptor.receiverType, cgb.expressionDataLocation(member.Expression)) {
+		return descriptor, false
+	}
 	switch receiver := member.Expression.(type) {
 	case *ast.Identifier:
 		if receiver.Name == "abi" || receiver.Name == "msg" {
@@ -566,7 +656,7 @@ func (cgb *CallGraphBuilder) classifyIdentifierReceiver(name string, descriptor 
 	case descriptor.receiverType.IsPrimitiveAddress() && isETHTransferName(descriptor.calledName):
 		descriptor.callType = types.CallTypeTransferETH
 		descriptor.targetContractName = name
-	case descriptor.receiverType.IsKnown() && descriptor.receiverType.Kind != types.TypeKindPrimitive && descriptor.receiverType.BaseName != "":
+	case descriptor.receiverType.IsKnown() && isContractLikeTypeKind(descriptor.receiverType.Kind) && descriptor.receiverType.BaseName != "":
 		descriptor.targetContractName = descriptor.receiverType.BaseName
 		descriptor.identityRequired = true
 		if descriptor.receiverType.Kind == types.TypeKindLibrary {
@@ -579,6 +669,31 @@ func (cgb *CallGraphBuilder) classifyIdentifierReceiver(name string, descriptor 
 		descriptor.targetContractName = name
 	}
 	return descriptor
+}
+
+func isContractLikeTypeKind(kind string) bool {
+	switch kind {
+	case types.TypeKindContract, types.TypeKindInterface, types.TypeKindLibrary, types.TypeKindAbstract, types.TypeKindStruct:
+		return true
+	default:
+		return false
+	}
+}
+
+func (cgb *CallGraphBuilder) expressionDataLocation(expr ast.Node) string {
+	if expr == nil {
+		return ""
+	}
+	switch e := expr.(type) {
+	case *ast.Identifier:
+		return cgb.symbolLocations[e.Name]
+	case *ast.IndexAccess:
+		return cgb.expressionDataLocation(e.Base)
+	case *ast.MemberAccess:
+		return cgb.expressionDataLocation(e.Expression)
+	default:
+		return ""
+	}
 }
 
 func (cgb *CallGraphBuilder) classifyCallReceiver(call *ast.FunctionCall, descriptor functionCallDescriptor) functionCallDescriptor {
@@ -622,17 +737,12 @@ func (cgb *CallGraphBuilder) classifyLibraryExtension(call *ast.FunctionCall, de
 	return descriptor
 }
 
-func (cgb *CallGraphBuilder) classifyCallWithOptions(options *ast.FunctionCallOptions, descriptor functionCallDescriptor) (functionCallDescriptor, bool) {
+func (cgb *CallGraphBuilder) classifyCallWithOptions(call *ast.FunctionCall, options *ast.FunctionCallOptions, descriptor functionCallDescriptor) (functionCallDescriptor, bool) {
 	member, ok := options.Expression.(*ast.MemberAccess)
 	if !ok {
 		return descriptor, false
 	}
-	descriptor.calledName = member.MemberName
-	descriptor.callType = cgb.getLowLevelCallType(descriptor.calledName)
-	if identifier, ok := member.Expression.(*ast.Identifier); ok {
-		descriptor.targetContractName = identifier.Name
-	}
-	return descriptor, true
+	return cgb.classifyMemberCall(call, member, descriptor)
 }
 
 func isETHTransferName(name string) bool {
@@ -640,10 +750,12 @@ func isETHTransferName(name string) bool {
 }
 
 type resolvedTarget struct {
-	contract *types.Contract
-	function *types.Function
-	kind     types.ContractKind
-	resolved bool
+	contract      *types.Contract
+	function      *types.Function
+	kind          types.ContractKind
+	resolved      bool
+	arityMismatch bool
+	observedArity int
 }
 
 // superSite is a single `super.g()` call discovered during call-graph building:
@@ -845,20 +957,6 @@ func (cgb *CallGraphBuilder) checkLowLevelCall(memberName string, currentType ty
 	return currentType
 }
 
-// getLowLevelCallType returns the specific low-level call type
-func (cgb *CallGraphBuilder) getLowLevelCallType(memberName string) types.CallType {
-	switch memberName {
-	case "call":
-		return types.CallTypeLowLevelCall
-	case "delegatecall":
-		return types.CallTypeLowLevelDelegate
-	case "staticcall":
-		return types.CallTypeLowLevelStatic
-	default:
-		return types.CallTypeLowLevel
-	}
-}
-
 // resolveLibraryCall checks if a call on a variable is actually a library call
 // via a `using` directive. Receiver type facts handle direct typed receivers;
 // this fallback still checks whether a matching function exists in any active
@@ -991,12 +1089,7 @@ func (cgb *CallGraphBuilder) resolveTarget(funcName string, targetContract *type
 		}
 		return result
 	}
-	if len(named) == 1 {
-		// Compatibility fallback for malformed/tolerantly-parsed code where the
-		// call arity is unavailable or inconsistent but only one target exists.
-		return resolvedCallTarget(named[0])
-	}
-	return result
+	return resolvedTarget{arityMismatch: true, observedArity: len(args)}
 }
 
 type callCandidate struct {
@@ -1271,6 +1364,12 @@ func (cgb *CallGraphBuilder) analyzeModifiers(modifiers []*ast.ModifierInvocatio
 			Col:          col,
 			Byte:         byteOff,
 			Resolved:     resolved,
+			ArgCount:     len(modInv.Arguments),
+		}
+		for _, argument := range modInv.Arguments {
+			if argumentAST := buildDetachedExpressionAST(argument, cgb.currentFunction, cgb.currentContract, cgb.db, cgb.locator, cgb.symbolLocations); argumentAST != nil {
+				call.Arguments = append(call.Arguments, argumentAST)
+			}
 		}
 		if resolvedContract != nil {
 			call.ResolvedContract = resolvedContract.Name

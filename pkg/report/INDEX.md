@@ -63,9 +63,12 @@ are byte-stable across runs and diff cleanly.
 per-entry call graphs, and virtual/super recursion walk
 `Database.LinearizedContracts`. Mermaid node keys are built from exact
 `file#Contract.selector` identities while labels remain human-readable short
-names; static call targets prefer `FunctionCall.ResolvedContractID`. Recursive
-trace rendering is decomposed into private call-plan, target-resolution,
-edge-writing, and next-contract helpers without changing graph IDs or ordering.
+names. Generator graphs, state matrices, and workflow reachability share one
+private exact call resolver: `ResolvedContractID` plus a full selector is
+verified first; legacy metadata searches only exact runtime-MRO objects and
+succeeds only when known arity or unknown arity leaves one distinct selector.
+Ambiguity and mismatch omit the edge instead of selecting a declaration by
+name or order.
 
 **Key Functions:**
 - `NewGenerator(db)` - Create a generator using deprecated package-global verbose logging
@@ -200,7 +203,9 @@ consumed by the VSCode extension:
   (function, via `types.MakeFunctionID`), `contractID.varName` (state var).
   Selector-less functions (fallback/receive/constructor) fall back to the
   function name in the ID so they don't all collapse to `file#Contract.`.
-- `callers[]` (`NavCaller`) — one entry per `db.CallGraph.Edges` edge:
+- `callers[]` (`NavCaller`) – one entry per resolved `db.CallGraph.Edges` edge
+  whose fully qualified target ID maps to an existing exact function;
+  unresolved/bare/malformed targets are omitted. Each entry carries
   `callee`/`caller` function IDs plus `site` (the call-site `SrcRange`).
 - `interfaceImpl[]` (`NavInterfaceImpl`, via `resolveInterfaceImpls`) — for
   each interface method, the most-derived concrete override found by walking
@@ -240,13 +245,13 @@ the workflow files' State-Effects section.
   the functions that write it (`Written By`) and the entry points that reach a
   writer transitively (`Reachable From`).
 - `stateMatrixBuilder` resolves functions across the exact
-  `Database.LinearizedContracts(main)` MRO (most-derived wins), follows
+  `Database.LinearizedContracts(main)` MRO, follows
   intra-contract calls (`isIntraContractCall`:
   internal/self/inherited/super/library/modifier) for the reachability closure,
-  prefers `FunctionCall.ResolvedContractID` for explicit super/library targets,
-  and reads writes from `Database.Semantics.GetFunctionEffects` by exact
-  function ID. Workflow Markdown uses the same resolver, so duplicate contract
-  names cannot cross-contaminate state effects.
+  and routes every call through the same exact resolver as generator graphs.
+  It reads writes from `Database.Semantics.GetFunctionEffects` by exact function
+  ID. Workflow Markdown uses the same closure, so duplicate contract names and
+  overloads cannot cross-contaminate state effects.
 
 ### html.go
 Interactive HTML report renderer.

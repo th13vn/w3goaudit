@@ -17,7 +17,7 @@ query:
   select: external_call
   where:
     - name: '^get_virtual_price$'
-    - all:
+    - and:
         - not:
             regex: 'remove_liquidity\s*\('
         - not:

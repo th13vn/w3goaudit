@@ -15,7 +15,7 @@ detected with a `Safe*` counterpart that should not.
 
 | Bypass file | Evasion technique | w3goaudit | semgrep |
 |---|---|:---:|:---:|
-| `accessible-selfdestruct-asm.sol` | Yul `assembly { selfdestruct(...) }` instead of the Solidity-level builtin | ✗ | ✗ |
+| `accessible-selfdestruct-asm.sol` | Yul `assembly { selfdestruct(...) }` instead of the Solidity-level builtin | ✓ | ✗ |
 | `accessible-selfdestruct-cast.sol` | `payable(address(uint160(...)))` round-trip on the beneficiary | ✓ | ✗ |
 | `bad-transfer-from-inherited.sol` | Dangerous helper defined in an `abstract` base, exposed via no-modifier derived wrapper | ✓ | ✗ |
 | `arbitrary-low-level-call-conditional.sol` | Caller-controlled target dispatched to `.call` **or** `.staticcall` via if/else | ✓ | ✓ |
@@ -27,10 +27,9 @@ detected with a `Safe*` counterpart that should not.
 - **5 of 6** evade Semgrep — every indirection / type-cast / assembly form.
   Surface-syntactic matching can't follow taint through helpers, struct
   fields, inheritance chains, or assembly operands.
-- **1 of 6** still evades w3goaudit: `accessible-selfdestruct-asm.sol`. Yul
-  opcode operands are currently emitted as plain identifier children of the
-  asm block; the engine's `tainted_from: parameter` predicate does not resolve
-  through them. Tracked as an engine architecture limitation.
+- **All 6** are detected by w3goaudit. The accessible-selfdestruct rule models
+  unauthenticated reachability, not beneficiary taint, so Solidity, helper,
+  cast, fixed-beneficiary, and Yul forms share the same canonical category.
 - **The empty-`auth`-modifier bypass surfaced a real heuristic bug** in
   `pkg/types/function.go`: the `IsAccessControlled` regex trusted modifier
   *names* without inspecting bodies. Fixed in this session — the helper now
@@ -54,8 +53,8 @@ detected with a `Safe*` counterpart that should not.
 | `bad-transfer-from-internal-flow.sol` | `VulnerableBadTransferFromInternalFlow` |
 | `balancer-get-rate.sol` | `VulnerableBalancerGetRate` |
 | `balancer-pool-tokens.sol` | `VulnerableBalancerPoolTokens` |
-| `basic-arithmetic-underflow-alias.sol` | `VulnerableBasicArithmeticUnderflowAlias` |
-| `basic-arithmetic-underflow.sol` | `VulnerableBasicArithmeticUnderflow` |
+| `basic-arithmetic-underflow-alias.sol` | `VulnerableBasicArithmeticUnderflowAlias` with an explicit Solidity 0.8 `unchecked` subtraction alias true positive |
+| `basic-arithmetic-underflow.sol` | `VulnerableBasicArithmeticUnderflow` with explicit Solidity 0.8 `unchecked` binary/assignment overloads and guarded `unchecked` controls |
 | `basic-oracle-manipulation.sol` | `VulnerableBasicOracleManipulation` |
 | `bidi-characters.sol` | `VulnerableBidiCharacters` |
 | `compound-borrow-fresh.sol` | `VulnerableCompoundBorrowFresh` |
@@ -105,7 +104,7 @@ detected with a `Safe*` counterpart that should not.
 | `uniswap-callback-not-protected.sol` | `VulnerableUniswapCallbackNotProtected` |
 | `uniswap-callback-verified.sol` | `SafeUniswapCallbackVerified` |
 | `uniswap-v4-callback-not-protected.sol` | `VulnerableUniswapV4CallbackNotProtected` |
-| `uniswap-v4-callback-only-manager.sol` | `SafeUniswapV4CallbackOnlyManager` |
+| `uniswap-v4-callback-only-manager.sol` | `SafeUniswapV4CallbackOnlyManager` with a configured manager sender check |
 | `unrestricted-transfer-ownership-helper.sol` | `VulnerableUnrestrictedTransferOwnershipHelper` |
 | `unrestricted-transfer-ownership.sol` | `VulnerableUnrestrictedTransferOwnership` |
 

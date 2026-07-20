@@ -21,4 +21,4 @@ query:
     - left:
         name: '(?i)owner'
     - right:
-        tainted: parameter
+        tainted: user_controlled

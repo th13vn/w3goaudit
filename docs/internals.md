@@ -102,6 +102,11 @@ remappings**:
   context then prefix specificity, and a missing/non-file target falls through
   to later mappings and project fallbacks. `SourceFile.ResolvedImports` records
   the canonical selected targets for exact identity and cache parity.
+- Every authored import occurrence also becomes one serialized
+  `SourceFile.ImportBindings` entry. The reader records the raw path and
+  canonical resolved file without deduplicating repeated directives; Phase 1
+  enriches that occurrence with unit and named-symbol aliases. Named and
+  namespace aliases therefore survive database-cache round trips.
 
 ---
 
@@ -158,6 +163,14 @@ dot-notation `ASTNode` kinds (see §6.2 for the full list). Key decisions:
 - **Coverage fixes** baked in: `unchecked { }`, do/while bodies, and the *success*
   body of `try/catch` (`try_part` tags) are all walked — earlier they were dropped,
   causing false negatives.
+- **Solidity `for` runtime order:** the simplified loop node stores
+  initialization, condition, body, then post. Missing optional clauses are
+  omitted, so sequence traversal observes the same relative execution order
+  as Solidity.
+- **Expression-owned spans:** an `ExpressionStatement` returns its semantic
+  expression node directly. The statement dispatcher does not overwrite that
+  node with the enclosing semicolon-inclusive statement range, so calls and
+  other expression findings end before `;` in both ASCII and Unicode source.
 
 ### 4.2 C3 linearization (`inheritance.go`) — *algorithm & why*
 
@@ -181,15 +194,25 @@ ancestors). Output is derived-first. Pinned by `TestC3DiamondMatchesSolc`,
 resolution, and `super` resolution all walk `LinearizedBases` derived-first to
 pick the *runtime* implementation.
 
+`LinearizedBases` is display/compatibility data and may retain unresolved base
+names. `LinearizedBaseIDs` is the compact exact chain, so the slices are not
+assumed to be index-aligned. Display consumers map a name only when one exact
+contract of that name exists in the selected contract's exact MRO.
+
 ### 4.3 Builder-time taint / dataflow
 
-Within a function, `buildSymbolTable` seeds parameters as `["parameter"]` and
-state vars as `["state_var"]`; assignments propagate taint to their LHS (updating
-the symbol table so later uses inherit it) and emit `db.DataFlow` edges.
+Within a function, `buildSymbolTable` seeds exact inherited state variables
+base-first, then derived state, function parameters, and named returns. Later
+local declarations overlay those bindings. Parameters are tainted as
+`["parameter"]` and state variables as `["state_var"]`; assignments propagate
+taint to their LHS (updating the symbol table so later uses inherit it) and emit
+`db.DataFlow` edges.
 `computeTaint` aggregates a subtree's sources (deduped, sorted). This is a
-*single-pass, intra-procedural* pass that populates `ASTNode.TaintSources` —
-distinct from the engine's context-sensitive fixpoint (§7.5). Known limitation:
-flat per-function symbol table mis-handles block-scoped shadowing.
+*single-pass, intra-procedural* pass that populates `ASTNode.TaintSources` -
+distinct from the engine's context-sensitive fixpoint (§7.5). Declaration-aware
+scope frames cover Solidity blocks and for-loop initializers. They restore only
+names declared in that scope, including kind, type, taint, raw data location,
+and exact state RefID; assignments to existing outer symbols remain in flow.
 
 ### 4.4 Call graph (`callgraph.go`)
 
@@ -197,7 +220,10 @@ flat per-function symbol table mis-handles block-scoped shadowing.
 classifying call sites by type (`internal`/`external`/`self`/`super`/`library`/
 `lowlevel_*`/`modifier`). Modifier bodies are also walked (so auth helpers called
 from modifiers are visible). Target resolution disambiguates overloads by arg
-count, and resolves through the C3 MRO. `ResolveSuperAcrossLeaves` is a
+count, and resolves through the C3 MRO. A parsed known-arity call with no
+same-name declaration of that arity remains unresolved with empty exact target
+fields and one `identity.unresolved` diagnostic; a unique wrong-arity target is
+never selected by name. `ResolveSuperAcrossLeaves` is a
 post-phase that, for every contract treated as an instantiation leaf, binds each
 `super` call to the next definition in *that leaf's* MRO — additive and deduped,
 so a function only reachable via `super` from a specific leaf isn't falsely
@@ -234,9 +260,21 @@ Lookup hardening:
 - `GetContractByName` / `ResolveContractName` — deterministic compatibility
   helpers for callers that knowingly accept name-only behavior.
 - `ResolveContractNameExact(name, fromFile)` — exact-only: use the current file
-  and canonical resolved imports, then return ambiguity rather than guessing.
+  plus occurrence-level `ImportBindings` and canonical resolved imports, then
+  return ambiguity rather than guessing. Named aliases expose only their local
+  name, while namespace aliases resolve qualified names such as `V.Base` in the
+  exact imported source.
+  A sole repository-wide candidate is exact only when `fromFile` is empty;
+  source-scoped calls still require same-file or import provenance.
+- `ResolveContractNameExactWithStatus(name, fromFile)` — returns
+  `Resolved`, `Missing`, `Ambiguous`, or `BindingMissing` status so diagnostics
+  can distinguish an authored alias whose imported declaration is absent.
 - `LinearizedContracts(contract)` — materialize the exact
   `LinearizedBaseIDs` C3 chain for identity-sensitive consumers.
+
+When a legacy cache has only display `LinearizedBases`, normalization records
+one incomplete `identity.unresolved` diagnostic for every base entry that exact
+source/import resolution reports missing, binding-missing, or ambiguous.
 
 Core inheritance, call graph, engine, report, navigation, state, workflow, and
 extract paths use exact objects/IDs. Same-directory proximity is never accepted
@@ -255,8 +293,8 @@ drives taint provenance.
   `call.lowlevel.delegatecall`, `call.lowlevel.staticcall`, `call.builtin.transfer`,
   `call.builtin.send`, `call.builtin.selfdestruct`, `call.create`
 - **Checks:** `check.require`, `check.assert`, `check.revert`
-- **Statements:** `stmt.assign`, `stmt.if`, `stmt.loop`, `stmt.return`, `stmt.emit`,
-  `stmt.try_catch`, `stmt.block`, `stmt.unchecked`
+- **Statements:** `stmt.assign`, `stmt.state_mutation`, `stmt.if`, `stmt.loop`,
+  `stmt.return`, `stmt.emit`, `stmt.try_catch`, `stmt.block`, `stmt.unchecked`
 - **Expressions:** `expr.identifier`, `expr.literal`, `expr.binary_op`,
   `expr.unary_op`, `expr.member_access`, `expr.index_access`, `expr.conditional`,
   `expr.tuple`
@@ -277,11 +315,34 @@ Implemented as `Is*` helpers in `ast.go`; the engine's `matchKind` calls them:
 | `any_call` | the Solidity call kinds incl. `call.internal` + `call.builtin.selfdestruct` (no asm) |
 | `eth_transfer` | `call.builtin.transfer`, `call.builtin.send`, `call.lowlevel.call`, `asm.call` |
 | `delegatecall` | `call.lowlevel.delegatecall`, `asm.delegatecall` |
-| `token_call` | `call.external` (pair with a `name:` regex for ERC-20/721) |
+| `external_call` | `call.external` (pair with a `name:` regex for ERC-20/721 token methods) |
 | `check` / `guard` | `check.require`/`assert`/`revert` (`guard.*` aliases to `check.*`) |
-| `state_write` | `stmt.assign` with `is_state_var` + `asm.sstore` |
+| `state_write` | `stmt.assign` with `is_state_var`; `stmt.state_mutation` storage-array `push`/`pop`; state-targeted unary `delete`/`++`/`--`; `asm.sstore` |
 | `state_read` | `expr.identifier` with `RefKind==state_var` + `asm.sload` |
 | `selfdestruct` | `call.builtin.selfdestruct` + `asm.selfdestruct` |
+
+Builtin dynamic-storage-array `push`/`pop` is represented by
+`stmt.state_mutation`, not by a `call.*` node or callgraph edge. Classification
+requires raw `storage` data location plus valid builtin arity (`push` 0/1,
+`pop` 0). Memory/calldata calls, fixed arrays, and extension-only arities retain
+library resolution and exact callgraph edges. State-target detection follows only the
+mutated lvalue root: identifiers must resolve as state variables, while index
+and member accesses recurse only through their base or receiver. A state
+variable used merely as an index into a local array does not make the local
+mutation a state write. The builder also consults the active symbol
+classification, so a local storage alias that shadows a state-array name fails
+closed rather than inheriting the shadowed declaration's state identity.
+A `stmt.state_mutation` storage mutation is not a `call.*` node.
+AST symbol construction seeds contract state first, then overlays function or
+modifier parameters, named returns, and later local declarations. Detached
+modifier-argument expressions use the same order. This keeps `RefKind`, type
+facts, taint, and mutation classification aligned when a storage-array or
+scalar parameter has the same name as a state variable.
+Known storage parameters and local storage aliases may use
+`stmt.state_mutation` with `is_state_var=false`; this models the non-call
+builtin while effects and WQL remain fail closed. Inherited state symbols are
+seeded exactly before Phase 4 by recursively resolving authored bases through
+source/import provenance, while Phase 5 consumes the completed exact C3 MRO.
 
 ### 5.4 The Selector/Signature naming inversion
 
@@ -291,8 +352,14 @@ from common usage, kept for JSON back-compat — see the field comment.
 
 ### 5.5 JSON caching & `RestoreASTParents`
 
-Round-trips (serialized): `SourceFile.Content`, `Function.AST`, `CallGraph.Edges`,
-`Database.Semantics`, `LinearizedBases`. **Not** serialized: `SourceFile.AST`
+Round-trips (serialized): `SourceFile.Content`, `SourceFile.ImportBindings`,
+`Function.AST`, `CallGraph.Edges`, `Database.Semantics`, `LinearizedBases`.
+`FunctionCall.argCount` is presence-aware: an absent legacy field decodes to
+`-1`, while explicit zero is always serialized and survives repeated round
+trips.
+Each additive `ImportBinding` carries `importPath`, optional canonical
+`resolvedFile`, optional `unitAlias`, and optional `symbols[]` entries with
+`symbol` plus local `alias`. **Not** serialized: `SourceFile.AST`
 (re-parsed from Content), `ASTNode.Parent` (rebuilt by `RestoreASTParents`),
 `CallGraph.outgoing/incoming` (rebuilt by `EnsureIndex`). Parents are dropped to
 keep JSON compact and reconstructed on load, so ancestor-based helpers (`inside`,
@@ -304,14 +371,37 @@ guards, taint) behave identically with `--db`.
 
 ### 6.1 Template lifecycle
 
-Public WQL YAML (`meta` plus `query:`) → strict parse →
+A WQL document is meta plus one query: block. Strict parsing then performs:
 `TemplateDoc.lower()` → evaluator `Template`/`QueryBlock`/`Rule` IR →
 `finalizeTemplate` (per query block). Unknown keys at any level are rejected
 by the strict parser. A query-level `or:` lowers to one QueryBlock per
 branch (`Template.Queries`), executed as a location-deduplicated union;
-`and:` lowers to one block of labeled `all:` branches at the join scope. The
-exported IR values describe evaluator execution and are not a supported YAML
-schema.
+`and:` lowers to one block of labeled `Rule.All` branches at the join scope.
+Each joined branch must guarantee a positive reportable anchor and traceable
+AST evidence; absence-only and regex-only branches are rejected before
+execution, while regex may refine an AST-anchored branch. Traceable AST evidence
+has higher capture priority than a coarse regex/root fallback, so it owns the
+branch's Primary/Related span. Every positive-polarity sequence nested in a
+select-less match must obtain positive actionable evidence from its first step;
+negative-polarity sequences under `not:` remain refinement evidence. The
+exported IR values
+describe evaluator execution and are not a supported YAML schema.
+Deprecated evaluator-IR Go/JSON fields `source_regex`, `visibility_filter`, and
+`mutability_filter` normalize into canonical fields before validation or
+execution. Conflicting non-empty values fail closed, and the aliases are never
+accepted by the WQL YAML decoder.
+Before typed decoding/lowering, raw query nodes require every explicitly
+authored `select`/`from`/branch `label` to be a non-null, non-empty scalar and
+every explicitly authored `where` to be a non-null, non-empty sequence.
+This validation is composition-neutral: all four authored fields are checked
+for both `and:` and `or:` branches before composition-specific lowering.
+Lowering rejects vacuous nested matcher maps/lists, empty required strings,
+`unchecked_var: false`, and signed or non-decimal `arg.N` keys.
+
+When `mergeRuleInto` receives repeated sibling `not:` fragments, it delegates
+them to `mergeNotInto`: the first occupies `Rule.Not`, while each later sibling
+is appended as `Rule{Not: ...}` in `Rule.All`. Thus `not A` plus `not B` remains
+`(not A) and (not B)`, rather than the weaker `not (A and B)`.
 
 Finalization runs:
 `validateTemplateMeta` (requires id+severity) → `validateScope` (rejects unknown
@@ -354,10 +444,22 @@ contract evicts the previous (bounded memory, since each contract is visited onc
 `Verify(node, rule)` is the heart. Order (fail-fast):
 `matchAtomic` → `left`/`right` → `args` → `unchecked_var` → `statement_contains`
 → `all`/`any`/`not` → `sequence` → `contains`/`inside`. Guarded by
-`MaxRuleRecursionDepth = 64` against pathological nesting. On the first atomic
-match it records the node as `matchTrace.Primary` (the "dangerous statement"),
-rolling back if a later constraint fails — so a finding points at the node that
-actually satisfied the rule.
+`MaxRuleRecursionDepth = 64` against pathological nesting. Before compatibility
+normalization, a deep-copy pass applies the same bound across pointer, slice,
+and `Args` map Rule shapes while tracking active source pointers for cycles.
+Supported nested `Attr` maps and slices, including values supplied through
+exported `Rule.IsStateVar`, share that depth budget and active
+container tracking: self/mixed cycles and depth 65 fail closed, while depth 64
+and shared DAGs remain valid. Malformed programmatic graphs therefore fail
+closed before `walkRules` or `Verify` can recurse. On the first atomic match it records the node as
+`matchTrace.Primary` (the "dangerous statement"), rolling back if a later
+constraint fails — so a finding points at the node that actually satisfied the
+rule.
+Sequence candidates add their own checkpoint: a subtree/path rejection or
+failed suffix restores the prior primary, while a complete suffix commits it.
+Name-only member-side matching captures the enclosing member-access node when
+no deeper primary exists. Placement validation also recurses through
+`statement_contains` at the current AST layer.
 
 - `matchKind` resolves **exact kinds**, **semantic groups** (§5.3), **prefixes**
   (`call` matches all `call.*`, `call.lowlevel` matches `call.lowlevel.*`), and
@@ -371,27 +473,52 @@ actually satisfied the rule.
 
 - **`contains`** (`verifyHas`): DFS descendants for the first match.
 - **`inside`** (`verifyInside`): walk ancestors.
-- **`sequence`** (`verifySeq`): ordered, non-contiguous descendant matches on a
-  single execution path. `sameExecutionPath`/`areExclusiveArms` reject two matches
-  that land in mutually-exclusive arms (then/else of an `if`, the two ternary arms,
-  body-vs-catch of a try). This kills the dominant reentrancy FP where
+- **`sequence`** (`verifySeq`): ordered, non-contiguous matches in one linear
+  extension of an execution-event partial order. Ordinary sibling statements
+  retain source order. Receiver, option, argument, assignment RHS, return,
+  emit, check, and similar value subtrees precede their enclosing effect; calls
+  precede inlined callees. Distinct pre-effect sibling subtrees are unordered
+  and may match either relative order. `sameExecutionPath`/
+  `areExclusiveArms` still reject mutually-exclusive arms (then/else of an
+  `if`, ternary arms, and try body/catch). This kills the dominant reentrancy FP where
   `if (c){ call(); } else { state = x; }` matched `sequence:[outgoing_call, state_write]`
-  even though they can never both execute.
+  even though they can never both execute. Interprocedural events additionally
+  own a unique occurrence, exact reachability path, and accumulated
+  caller/callee arm tokens. Conflicting tokens reject mutually exclusive
+  cross-tree matches, and reused callee AST pointers cannot overwrite the
+  selected occurrence's path. Raw subtree ancestry and `sameExecutionPath`
+  apply only when both events belong to the same function expansion; repeated
+  expansions of one AST are ordered by event edges and checked with their
+  occurrence-specific arm tokens.
 - **`statement_contains`** (`statementContains`): searches the **nearest enclosing
   statement** (closest `stmt.*`/`check.*`/`decl.variable` ancestor) for a sub-rule
   — narrower than `inside`, wider than `contains`. Generic: the operator vocabulary
   lives in the template. Used (with `not:`) by `incorrect-exp` to exclude a `^`
   that shares a statement with another bitwise operator.
-- **`unchecked_var`** (`operandsGuardedBefore` + `conditionBoundsOperands`): on an
-  arithmetic `binary_op`, matches only when no earlier `require`/`assert`/`if`
-  guard *both* references **every** operand identifier **and** uses an **ordering**
-  comparison (`<`/`<=`/`>`/`>=`). "Before" is **document/DFS order**, not line
-  number (expression nodes have no reliable `StartLine`). `require(a != b)` does
-  not count (equality doesn't bound a subtraction).
+- **`unchecked_var`** (`operandsGuardedBefore`): for unsigned `left - right` and
+  `left -= right`, matches unless the local AST path proves `left >= right`.
+  The proof structurally normalizes the actual stable operands, accepts exact
+  `left >= right` / `right <= left` relations in an immediately preceding
+  `require`/`assert`, a dominating safe `if` arm whose subtraction is the first
+  executable operation through `stmt.block`/`stmt.unchecked` wrappers, or
+  fallthrough after the unsafe arm unconditionally exits with no effect in the
+  surviving arm. At each sequential container, a prior sibling must itself be
+  the accepted proof; otherwise the search stops instead of trusting an outer
+  condition. The complete condition and every additional `require`/`assert`
+  argument must be structurally effect-free before any fact is accepted.
+  Assignments, declarations, emits, internal calls, external calls,
+  and nested control statements therefore fail closed. Before any proof is
+  accepted, `subtractionExpressionPathIsEffectFree` validates the complete
+  intra-statement path. Pure binary/member/index/tuple/conditional wrappers,
+  non-mutating unary wrappers, returns, and simple assignments are allowlisted
+  only when every sibling is structurally effect-free. Call ancestors,
+  assignment-expression siblings, creation, increment/decrement, delete,
+  unknown wrappers, unstable operands, and signed subtraction fail closed.
 
 ### 6.5 Taint matching
 
-`tainted_from: parameter|state_var|local_var|sender` is checked via `checkTaint`
+Public `tainted: parameter|state_var|local_var|sender|user_controlled` lowers to
+`Rule.TaintedFrom` and is checked via `checkTaint`
 → `expressionTaints`, consulting the active `currentTaintEnv`. The engine builds
 that env with `buildFunctionTaintEnv` — a **bounded dataflow fixpoint**
 (`MaxTaintFixpointPasses = 8`): parameters seed as `"parameter"`, each assignment
@@ -402,38 +529,93 @@ generic parameter taint. Interprocedural matching binds a callee's parameters to
 the taint of the caller's arguments (`bindCalleeTaint`), bounded by
 `MaxInterproceduralTaintDepth = 12`.
 
+Internal-callee resolution identifies the exact call site by UTF-8 byte, then
+line plus Unicode column, and uses line-only metadata only for one physical
+same-name site. Resolved internal, inherited, self, super, and library calls
+consume the recorded exact contract ID and full selector. Both interprocedural
+walkers pass the current caller function explicitly at every recursion depth,
+so nested overloads and runtime `super` binding use the correct call metadata.
+They consider every Solidity `call.*` node but follow only recorded internal,
+inherited, self, super, or library call types; non-internal AST shapes require
+usable metadata. Callee parameters bind only Solidity arguments, excluding
+member receivers and call options. Legacy name/arity fallback is restricted to
+genuine `call.internal` nodes and succeeds only for one distinct selector in
+the runtime exact MRO; overload ambiguity and arity mismatch return no callee.
+
+Caller identity is `msg.sender`, `tx.origin`, or the exact zero-argument
+internal context helper `_msgSender()`. Recorded metadata, when present, must
+identify an internal/inherited/super arity-zero call with selector
+`_msgSender()`. Database-backed checks become authoritative only after exact
+owner/MRO resolution is available; that usable context disproves identity when
+the zero-parameter helper is absent or only a nonzero overload exists. A
+non-nil empty or unresolvable database is unavailable context, so an exact
+synthetic zero-argument `call.internal` keeps the compatibility fallback. Bare
+identifiers, state/local/parameter names, external/self calls, and unresolved
+calls keep their ordinary parameter/local/state provenance.
+
 ### 6.6 Access-control analysis (the crown jewel) — `pkg/types/function.go`
 
 Two distinct concepts, deliberately separated:
 
-**`IsAccessControlled(db)` — privileged access control.** Returns true when the
-function is gated to a contract-fixed principal, via (recursive, cycle-guarded):
-1. an **auth-named modifier** (`onlyOwner`/`onlyRole`/…) whose body actually
-   carries an auth signal (guard / `if` / `msg.sender` ref) — empty decoy
-   modifiers `modifier auth(){ _; }` are rejected (`modifierLooksProtective`);
-2. a modifier that **calls an auth helper** (`modifierCallsAuthHelper`);
-3. an **internal call to an auth-named helper** (verb+noun: `_checkOwner`,
-   `requireAuth`, …);
-4. an **AST guard** comparing a caller identity against a *contract-fixed
-   authority* (`isAuthCheck`), or
-5. the same found **interprocedurally** by descending into internal callees
-   (`resolveInternalCallee`, which matches by the **bare** function name extracted
-   from the stored selector via `calleeNameMatches`/`bareFuncName`, preferring the
-   runtime impl via the deployment contract's MRO), forwarding caller-identity
-   arguments through `forwardedCallerParams`.
+**`IsAccessControlled(db)` – privileged access control.** Returns true only
+when exact bodies prove a gate to a contract-fixed principal. Names alone never
+prove authorization. Applied modifiers require exact resolved modifier-call
+metadata and are evaluated from their real AST and recursive helper behavior.
+Guarded modifier parameters are bound to persisted call-site argument ASTs, so
+`onlyRole(isOperator[msg.sender])` is recognized while
+`onlyOwner(amount)` plus `require(amount > 0)` is rejected. Internal helpers
+likewise require an exact resolved contract ID and full selector before their
+body is followed. Direct function guards use the same whole-condition proof.
+
+Authorization proof is whole-condition, polarity-aware, and
+enforcement-positive. `require(auth)` and `assert(auth)` require truth, while
+`if (!auth) revert` is the equivalent false-branch form. Observational
+conditions such as `if (auth) emit Seen()` and negative truth requirements such
+as `require(auth == false)` do not gate normal execution. Logical composition
+is conservative: every alternative of a truthy `||` must prove authorization.
+Standard `hasRole(FIXED_ROLE, caller)` predicates require a direct or forwarded
+caller identity and reject freely caller-selected role operands. Parameterized
+modifiers preserve fixed operands separately from authorization booleans, so
+`onlyRole(ADMIN_ROLE)` can bind the modifier's `role` parameter while
+`onlyRole(userRole)` cannot. All three binding sets participate in the
+per-analysis context key. Exact internal recursion propagates caller,
+authorization-boolean, and fixed bindings from the single AST call node whose
+line/byte location matches the recorded call; it does not union every
+same-named call expression.
+
+The `hasRole` name and argument shape are not sufficient. The AST call is
+correlated by exact location to resolved internal `FunctionCall` metadata, and
+the exact callee must have a concrete, unconditional return proving membership
+from an access mapping under the bound fixed-role and caller parameters. A
+bodyless, unresolved, ambiguous, dynamic external, or constant-true decoy
+fails closed. Direct and returned nested mappings flatten every selector key:
+exactly one key must be caller identity and every other key must be fixed rather
+than a function argument. Multiple identity selectors such as
+`roles[msg.sender][tx.origin]` are not privileged membership proof.
+
+Recursive traversal uses a fresh per-analysis recursion stack and memo. Its key
+combines exact body identity with the sorted set of parameters bound to caller
+identity, preventing an earlier plain call from suppressing a later
+`helper(msg.sender)` context while bounding cycles and repeated work.
 
 The authority test is `isOwnerComparison`/`isCallerControlledTarget`: the *other*
 operand must be something the caller **cannot** choose — a state var, a fixed
 getter (`owner()`, `hasRole(ROLE, msg.sender)`), an immutable/constant,
 `address(this)`, or a hardcoded literal address. Comparing against a **function
 argument** is self-authorization, not a privileged gate.
+The access-control and self-scoping walkers use the same exact `_msgSender()`
+identity rule as engine taint, including recorded call metadata, exact MRO
+resolution, local aliases, forwarded arguments, owner comparisons, and getter
+resource checks.
 
-**`ComparesCallerIdentity(db)` — caller self-scoping.** A caller identity compared
+**`ComparesCallerIdentity(databases ...*Database)` – caller self-scoping.** A caller identity compared
 (in a guard) against *any* operand, including item-ownership: `ownerOf(tokenId)
 == msg.sender`. Also interprocedural (same descent + forwarding). This is *not*
 privileged access control — it scopes the caller to their own resource ("you can
 only act on your own behalf/asset"), the ETH/NFT analogue of
-`require(from == msg.sender)`.
+`require(from == msg.sender)`. The optional database preserves the historical
+no-argument SDK call; the first non-nil database enables exact interprocedural
+resolution.
 
 Two precision sub-decisions live here:
 - **`getterIsResourceScoped`** — a getter indexed by a caller-chosen argument
@@ -447,12 +629,12 @@ Two precision sub-decisions live here:
   getter `ownerOf(tokenId)` is **not** mistaken for a cast and collapsed to
   `tokenId`.
 
-**Presets** (`presets.go`) wrap these for templates — each returns *true for the
-vulnerable case* (use in `filter:` without `not:`):
-- `unAuthenticated` = `!IsAccessControlled`
-- `unCheckedSender` = `!IsAccessControlled && !ComparesCallerIdentity` (self-scoping
-  is a valid mitigation — used by `arbitrary-transferfrom` and `arbitrary-send-eth`)
-- `unLocked` = no reentrancy-guard modifier
+**Presets** (`presets.go`) expose property-true checks:
+- `access_controlled` = `IsAccessControlled`
+- `caller_checked` = `IsAccessControlled || ComparesCallerIdentity` (self-scoping
+  is a valid mitigation for `arbitrary-transferfrom` and `arbitrary-send-eth`)
+- `reentrancy_guarded` = a reentrancy-guard modifier is present
+Vulnerability detectors use ordinary `not:` when the property must be absent.
 Unknown preset names are rejected at load (`IsKnownPreset`).
 
 ### 6.7 Location provenance, reachability & related sites
@@ -462,15 +644,38 @@ Unknown preset names are rejected at load (`IsKnownPreset`).
 - **`Location`** — by `LocationSource`: `LocationSourceVerifier` (default;
   contract/function from verifier context, line from matched node) or
   `LocationSourceMatchedNode` (everything from the matched node — SARIF/Slither
-  convention; opt-in via `WGAUDIT_LOCATION_FROM_MATCHED_NODE=1` / `--location-source`).
+  convention; opt-in via `WGAUDIT_LOCATION_FROM_MATCHED_NODE=1` or
+  `Engine.SetLocationSource`; there is no current CLI `--location-source` flag).
 - **`Reachability`** (`enrichFindingFromTrace`) — entry→…→host `ReachStep`s.
 - **`EntryPoint`** — the auditor-actionable fix-here function.
 - **`Finding.Related`** (`enrichContractRelatedLocations`) — for contract-scope
-  combination rules, every contributing site per `match.all` branch, labeled from
+  combination rules, every contributing site per internal `Rule.All` branch, labeled from
   the branch's `label:` (else `condition N`). Sites are found with
   `containedFunctionRules` (all function sub-rules of a branch, so an `any:` of
   several function shapes is faithful), matched against the **shared** synthetic
-  AST (no rebuild).
+  AST (no rebuild). A positive synthetic contract-root branch emits a
+  deterministic contract/file-level site with no borrowed function or precise
+  byte/column span.
+
+Matched-node location mode always takes line, columns, and bytes from
+`Primary`. Host file/contract/function prefer the final trace-chain hop, then
+the enclosing declaration, then verifier fallbacks. Contract-related
+enumeration retains the successful contract-root trace and uses its primary as
+a fallback only when no per-function site can be enumerated.
+
+Contract-scope locations anchor on `Primary` only when it has a real source
+line. In that precise case, the range plus host contract/function and source
+come from the exact enclosing cloned AST node. A location-less primary remains
+at the verified contract/file level and does not borrow a function or line from
+synthetic ancestry. Union identity is therefore one canonical file/span key
+whenever a span is supplied by `PrimaryAST` or `Location`, with kind treated
+as optional provenance: an unknown result is retained provisionally, replaced
+by the first concrete result at that span, and removed from the remembered
+state. Unknown-first and unknown-last orders therefore agree while different
+known kinds remain distinct. For inherited
+entry functions, verification still receives the derived/deployment contract
+for MRO and callee resolution, but reachability files prefer each exact
+`Function.SourceFile` so the final host points to the owning base source.
 
 ---
 
@@ -511,6 +716,11 @@ Formatters:
   `withdrawAll`) and the closing brace via `findBlockEnd` (brace-matching with
   string/comment stripping).
 
+Generator call graphs, state matrices, and workflow closure share one exact
+call resolver. Recorded contract IDs/full selectors are verified first;
+legacy metadata searches exact runtime-MRO objects and succeeds only for one
+distinct selector at the known or unknown arity. Ambiguity is omitted.
+
 Determinism: function lists and "Defined in" groupings are sorted; Mermaid node
 IDs use FNV-64a (32-bit collided ~1% over 10k nodes); contract folders mirror
 source paths and overloaded workflow files use `<fn>__<selector>.md`.
@@ -537,6 +747,10 @@ Subcommands: `build` (parse → `database.json`), `extract` (query a DB: `main`,
 `entry`, `inheritance`, `statevar`, `selector`, `involve`, `workflow`, `bundle`,
 `context`, `source`, `diff`).
 
+Inheritance and bundle extracts never zip display MRO names with compact exact
+IDs. Self maps to the selected contract; other display names receive a kind
+only when exactly one matching object is present in that contract's exact MRO.
+
 **Template precedence** (`pkg/home`): `--template` > `~/.w3goaudit/templates/`
 (downloaded from `th13vn/w3goaudit-templates` on first run) > the embedded
 `official/` pack (`templates/embed.go`). The retained lanes are
@@ -553,7 +767,7 @@ ports), all WQL.
 | **C3 linearization** | `inheritance.go` | The real Solidity/CPython MRO; provably matches solc on diamonds (vs. a heuristic that diverges). |
 | **Bounded taint fixpoint** | `buildFunctionTaintEnv` | Converges chained/loop-carried aliases without unbounded iteration; strong updates keep sender-vs-parameter precision. Cap 8 passes. |
 | **Interprocedural descent with cycle detection + depth caps** | `IsAccessControlled`, taint walker | Follows entry→helper flows (real bugs hide behind internal calls) while staying bounded on recursive/cyclic graphs (depth 12/64). |
-| **Document-order "before"** | `unchecked_var` | Expression/statement nodes lack reliable line numbers; DFS order is robust. |
+| **Local operand-bound proof** | `unchecked_var` | Exact unsigned operands plus effect-free statement and expression topology prove only relations that remain valid at the subtraction; intervening effects and effectful expression siblings end the proof. |
 | **Single-slot synthetic-AST memo** | `contractAST` | Dedup build between match and enrichment without holding every contract's tree (a map would grow unbounded — each contract is visited once). |
 | **Process-wide regex cache** | `compileRegexCached` (`sync.Map`) | A pattern referenced by N nodes compiles once. |
 | **Type-aware call classification** | `classifyMemberAccessCall` | Distinguishes `addr.transfer(x)` (ETH) from `token.transfer(to,x)` (ERC-20) using inferred receiver type, falling back to arity. |
@@ -579,8 +793,15 @@ These are the deliberate calls that separate w3goaudit's output from a naive mat
 4. **Selector vs. bare name.** Callees resolve by the bare name extracted from the
    stored selector (`bareFuncName`); a raw `Name == "_withdraw(address,…)"`
    comparison silently never matched (this was a real dead-path bug).
-5. **`unchecked_var` requires an ordering guard.** `require(a >= b)` bounds
-   `a - b`; `require(a != b)` does not — equality/inequality are excluded.
+5. **`unchecked_var` requires an enforced exact bound.** `require(a >= b)`
+   immediately before `a - b` is safe; `require(a <= b)`, unrelated ordering,
+   a non-terminating `if`, a write or call between an `if` condition and the
+   subtraction, a surviving fallthrough arm with effects, or signed subtraction
+   is not. Only transparent block/unchecked wrappers may precede a subtraction
+   protected by a dominating arm. The subtraction's own statement must also use
+   an allowlisted expression path with structurally effect-free siblings, so
+   `sink((a = 0), a - b)` remains a finding after either an `if` or `require`
+   bound.
 6. **Hex literals.** `0xFF` → `subtype: hex`, so `incorrect-exp` flags `10 ^ 18`
    but not `x ^ 0xFF`.
 7. **`incorrect-exp` shape.** Flags `^` only with simple value operands (id/decimal)
@@ -628,6 +849,20 @@ These are the deliberate calls that separate w3goaudit's output from a naive mat
 17. **Fail-closed WQL lowering.** A mixed context+AST `any:` and a multi-kind
     (list) `select:` are rejected at load rather than silently over-matching /
     never matching — see [wql-syntax.md](wql-syntax.md).
+18. **Sibling negations stay independent.** Repeated `not:` items in one
+    `where` list lower to separate conjunction branches. Merging their children
+    would turn `not A and not B` into `not (A and B)`, producing false positives
+    whenever only one safety property is present.
+19. **Auth helper identity is exact.** `_msgSender()` counts only as a
+    zero-argument internal helper confirmed by metadata and exact MRO resolution
+    when available. Empty or unresolvable database state is not negative proof;
+    usable exact owner/MRO context can disprove the helper. Same-named
+    identifiers/calls and overloads never borrow caller provenance.
+20. **Provenance is transactional and span-first.** Failed sequence candidates
+    restore their primary, matched-node locations always use the primary span,
+    final trace hops own host identity, and union dedup replaces provisional
+    unknown provenance with the first concrete kind while retaining distinct
+    concrete kinds.
 
 ---
 
@@ -635,6 +870,11 @@ These are the deliberate calls that separate w3goaudit's output from a naive mat
 
 - Caps: `MaxRuleRecursionDepth=64`, `MaxInterproceduralTaintDepth=12`,
   `MaxTaintFixpointPasses=8`.
+- The Rule depth cap includes supported nested `Attr` containers; active cycles
+  fail closed without rejecting shared DAG values.
+- Benchmark fallback attribution uses one length- and newline-preserving
+  Solidity lexer for declaration matching and brace counting, masking comments,
+  quoted strings, and escapes so fake declarations/braces cannot shift a site.
 - Regex compiled once and cached; synthetic AST built once per contract.
 - The Database is cacheable (`build` → `--db`), so re-scans skip parsing.
 - Source/cache paths preserve normalized diagnostics and source snapshots;

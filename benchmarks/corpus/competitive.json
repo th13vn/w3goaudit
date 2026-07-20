@@ -46,7 +46,8 @@
       "title": "Delegatecall to user-controlled address",
       "aliases": {
         "w3goaudit": [
-          "SLITHER-CONTROLLED-DELEGATECALL"
+          "SLITHER-CONTROLLED-DELEGATECALL",
+          "DECURITY-DELEGATECALL-TO-ARBITRARY-ADDRESS"
         ],
         "slither": [
           "controlled-delegatecall"
@@ -55,7 +56,8 @@
           "delegatecall"
         ],
         "semgrep": [
-          "controlled-delegatecall"
+          "controlled-delegatecall",
+          "delegatecall-to-arbitrary-address"
         ]
       }
     },
@@ -197,7 +199,8 @@
       "title": "Unprotected selfdestruct",
       "aliases": {
         "w3goaudit": [
-          "SLITHER-SUICIDAL"
+          "SLITHER-SUICIDAL",
+          "DECURITY-ACCESSIBLE-SELFDESTRUCT"
         ],
         "slither": [
           "suicidal"
@@ -208,7 +211,8 @@
         ],
         "semgrep": [
           "selfdestruct",
-          "suicidal"
+          "suicidal",
+          "accessible-selfdestruct"
         ]
       }
     },
@@ -375,17 +379,6 @@
         "semgrep": []
       }
     },
-    "accessible-selfdestruct": {
-      "title": "Accessible Selfdestruct",
-      "aliases": {
-        "w3goaudit": [
-          "DECURITY-ACCESSIBLE-SELFDESTRUCT"
-        ],
-        "semgrep": [
-          "accessible-selfdestruct"
-        ]
-      }
-    },
     "arbitrary-low-level-call": {
       "title": "Arbitrary Low Level Call",
       "aliases": {
@@ -493,17 +486,6 @@
         ],
         "semgrep": [
           "curve-readonly-reentrancy"
-        ]
-      }
-    },
-    "delegatecall-to-arbitrary-address": {
-      "title": "Delegatecall To Arbitrary Address",
-      "aliases": {
-        "w3goaudit": [
-          "DECURITY-DELEGATECALL-TO-ARBITRARY-ADDRESS"
-        ],
-        "semgrep": [
-          "delegatecall-to-arbitrary-address"
         ]
       }
     },
@@ -1153,12 +1135,12 @@
       "requires_compilation": false,
       "expected": [
         {
-          "category": "accessible-selfdestruct",
+          "category": "selfdestruct",
           "contract": "VulnerableAccessibleSelfdestruct",
           "function": "destroy"
         },
         {
-          "category": "accessible-selfdestruct",
+          "category": "selfdestruct",
           "contract": "VulnerableAccessibleSelfdestructHelper",
           "function": "destroy"
         },
@@ -1233,12 +1215,12 @@
           "function": "virtualPrice"
         },
         {
-          "category": "delegatecall-to-arbitrary-address",
+          "category": "controlled-delegatecall",
           "contract": "VulnerableDelegatecallToArbitraryAddress",
           "function": "run"
         },
         {
-          "category": "delegatecall-to-arbitrary-address",
+          "category": "controlled-delegatecall",
           "contract": "VulnerableDelegatecallAlias",
           "function": "run"
         },
@@ -1423,17 +1405,17 @@
           "function": "transferOwnership"
         },
         {
-          "category": "accessible-selfdestruct",
+          "category": "selfdestruct",
           "contract": "VulnerableAccessibleSelfdestructAsm",
           "function": "destroy"
         },
         {
-          "category": "accessible-selfdestruct",
+          "category": "selfdestruct",
           "contract": "VulnerableAccessibleSelfdestructCast",
           "function": "destroy"
         },
         {
-          "category": "delegatecall-to-arbitrary-address",
+          "category": "controlled-delegatecall",
           "contract": "VulnerableDelegatecallStruct",
           "function": "exec"
         },

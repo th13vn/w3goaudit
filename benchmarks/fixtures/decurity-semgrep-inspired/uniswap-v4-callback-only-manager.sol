@@ -51,7 +51,14 @@ library ECDSA {
 contract UpgradeabilityProxy {}
 
 contract SafeUniswapV4CallbackOnlyManager {
+    address public immutable poolManager;
+
+    constructor(address manager) {
+        poolManager = manager;
+    }
+
     modifier onlyPoolManager() {
+        require(msg.sender == poolManager, "not pool manager");
         _;
     }
 

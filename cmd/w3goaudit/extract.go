@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"path/filepath"
 	"sort"
 	"strings"
 
@@ -592,116 +593,136 @@ Example:
 			return fmt.Errorf("error loading db2: %w", err)
 		}
 
-		// Build contract name sets
-		names1 := make(map[string]bool)
-		names2 := make(map[string]bool)
-		for _, c := range db1.Contracts {
-			names1[c.Name] = true
-		}
-		for _, c := range db2.Contracts {
-			names2[c.Name] = true
-		}
-
-		// Added contracts (in db2 not in db1)
-		var addedContracts []string
-		for name := range names2 {
-			if !names1[name] {
-				addedContracts = append(addedContracts, name)
-			}
-		}
-
-		// Removed contracts (in db1 not in db2)
-		var removedContracts []string
-		for name := range names1 {
-			if !names2[name] {
-				removedContracts = append(removedContracts, name)
-			}
-		}
-
-		// Changed contracts (in both, but different functions/state)
-		var changed []ContractDiff
-		for name := range names1 {
-			if !names2[name] {
-				continue
-			}
-			c1 := db1.GetContractByName(name)
-			c2 := db2.GetContractByName(name)
-			if c1 == nil || c2 == nil {
-				continue
-			}
-
-			// Compare functions
-			funcs1 := make(map[string]bool)
-			funcs2 := make(map[string]bool)
-			for _, f := range c1.Functions {
-				funcs1[f.Name] = true
-			}
-			for _, f := range c2.Functions {
-				funcs2[f.Name] = true
-			}
-
-			var addedFuncs, removedFuncs []string
-			for fn := range funcs2 {
-				if !funcs1[fn] {
-					addedFuncs = append(addedFuncs, fn)
-				}
-			}
-			for fn := range funcs1 {
-				if !funcs2[fn] {
-					removedFuncs = append(removedFuncs, fn)
-				}
-			}
-
-			// Compare state variables
-			vars1 := make(map[string]bool)
-			vars2 := make(map[string]bool)
-			for _, v := range c1.StateVariables {
-				vars1[v.Name] = true
-			}
-			for _, v := range c2.StateVariables {
-				vars2[v.Name] = true
-			}
-
-			var addedVars, removedVars []string
-			for v := range vars2 {
-				if !vars1[v] {
-					addedVars = append(addedVars, v)
-				}
-			}
-			for v := range vars1 {
-				if !vars2[v] {
-					removedVars = append(removedVars, v)
-				}
-			}
-
-			if len(addedFuncs) > 0 || len(removedFuncs) > 0 || len(addedVars) > 0 || len(removedVars) > 0 {
-				changed = append(changed, ContractDiff{
-					Contract:         name,
-					AddedFuncs:       addedFuncs,
-					RemovedFuncs:     removedFuncs,
-					AddedStateVars:   addedVars,
-					RemovedStateVars: removedVars,
-				})
-			}
-		}
-
-		output := DiffOutput{
-			SchemaVersion: ExtractSchemaVersion,
-			Db1Path:       db1Path,
-			Db2Path:       db2Path,
-			Added: DiffContractList{
-				Contracts: addedContracts,
-			},
-			Removed: DiffContractList{
-				Contracts: removedContracts,
-			},
-			Changed: changed,
-		}
+		output := diffDatabases(db1Path, db2Path, db1, db2)
 
 		return writeExtract(output,
 			func() string { return renderDiffMarkdown(output) },
 			outPath, resolveExtractFormat(cmd))
 	},
+}
+
+func diffDatabases(db1Path, db2Path string, db1, db2 *types.Database) DiffOutput {
+	contracts1 := normalizedContractIndex(db1)
+	contracts2 := normalizedContractIndex(db2)
+	addedContracts, removedContracts := diffStringSets(contractKeys(contracts1), contractKeys(contracts2))
+
+	shared := make([]string, 0)
+	for key := range contracts1 {
+		if contracts2[key] != nil {
+			shared = append(shared, key)
+		}
+	}
+	sort.Strings(shared)
+	changed := make([]ContractDiff, 0)
+	for _, key := range shared {
+		oldContract := contracts1[key]
+		newContract := contracts2[key]
+		addedFuncs, removedFuncs := diffStringSets(functionIdentitySet(oldContract), functionIdentitySet(newContract))
+		addedVars, removedVars := diffStringSets(stateVariableSet(oldContract), stateVariableSet(newContract))
+		if len(addedFuncs) == 0 && len(removedFuncs) == 0 && len(addedVars) == 0 && len(removedVars) == 0 {
+			continue
+		}
+		changed = append(changed, ContractDiff{
+			Contract:         key,
+			AddedFuncs:       addedFuncs,
+			RemovedFuncs:     removedFuncs,
+			AddedStateVars:   addedVars,
+			RemovedStateVars: removedVars,
+		})
+	}
+
+	return DiffOutput{
+		SchemaVersion: ExtractSchemaVersion,
+		Db1Path:       db1Path,
+		Db2Path:       db2Path,
+		Added:         DiffContractList{Contracts: addedContracts},
+		Removed:       DiffContractList{Contracts: removedContracts},
+		Changed:       changed,
+	}
+}
+
+func normalizedContractIndex(db *types.Database) map[string]*types.Contract {
+	index := make(map[string]*types.Contract)
+	if db == nil {
+		return index
+	}
+	for _, contract := range db.Contracts {
+		if contract == nil {
+			continue
+		}
+		index[normalizedContractKey(db, contract)] = contract
+	}
+	return index
+}
+
+func normalizedContractKey(db *types.Database, contract *types.Contract) string {
+	source := filepath.Clean(contract.SourceFile)
+	if contract.SourceFile == "" {
+		source = ""
+	} else if db != nil && db.ProjectRoot != "" {
+		if rel, err := filepath.Rel(db.ProjectRoot, source); err == nil && rel != ".." &&
+			!strings.HasPrefix(rel, ".."+string(filepath.Separator)) && !filepath.IsAbs(rel) {
+			source = filepath.Clean(rel)
+		}
+	}
+	return filepath.ToSlash(source) + "#" + contract.Name
+}
+
+func contractKeys(contracts map[string]*types.Contract) map[string]bool {
+	keys := make(map[string]bool, len(contracts))
+	for key := range contracts {
+		keys[key] = true
+	}
+	return keys
+}
+
+func functionIdentitySet(contract *types.Contract) map[string]bool {
+	identities := make(map[string]bool)
+	if contract == nil {
+		return identities
+	}
+	for _, fn := range contract.Functions {
+		if fn == nil {
+			continue
+		}
+		identity := fn.Selector
+		if identity == "" {
+			identity = fn.Name
+		}
+		identities[identity] = true
+	}
+	return identities
+}
+
+func stateVariableSet(contract *types.Contract) map[string]bool {
+	names := make(map[string]bool)
+	if contract == nil {
+		return names
+	}
+	for _, state := range contract.StateVariables {
+		if state != nil {
+			names[state.Name] = true
+		}
+	}
+	return names
+}
+
+// diffStringSets returns values present only in right as added and only in
+// left as removed. Both slices are sorted for stable JSON and Markdown.
+func diffStringSets(left, right map[string]bool) (added, removed []string) {
+	for value := range right {
+		if !left[value] {
+			added = append(added, value)
+		}
+	}
+	for value := range left {
+		if !right[value] {
+			removed = append(removed, value)
+		}
+	}
+	sort.Strings(added)
+	sort.Strings(removed)
+	return added, removed
 }
 
 func init() {
