@@ -1,7 +1,7 @@
-# Extension Output — `nav.json` + `explorer.json`
+# Extension Output — `nav.json` + `explorer.json` + `xref.json`
 
 Every scan's result folder (see [Result Folder Layout](./usage.md#result-folder-layout))
-writes two additional files under `data/` alongside `manifest.json`,
+writes three additional files under `data/` alongside `manifest.json`,
 `database.json`, `findings.json`, `overview.json`, and `diagnostics.json`:
 
 - **`data/nav.json`** — a flat, symbol-level navigation index: every
@@ -10,14 +10,18 @@ writes two additional files under `data/` alongside `manifest.json`,
 - **`data/explorer.json`** — a per-deployable-contract model: ordered
   constants/storage variables and entry/getter functions. Built by
   `report.BuildExplorerJSON` (`pkg/report/explorer.go`).
+- **`data/xref.json`** — a precise, type-resolved cross-reference index
+  (`declarations[]` + `references[]`) for regex-free go-to-definition and
+  find-references. Built by `report.BuildXrefJSON` (`pkg/report/xref.go`).
 
-Both are written by `report.WriteBundle` in the same step as `manifest.json`,
-and both are indexed in `manifest.json` under `files.data.nav` /
-`files.data.explorer`. They exist to let a **static consumer** — the
-w3goaudit VSCode extension, an LSP-like navigation panel, or any other
-downstream tool — build jump-to-definition, "who calls this", and a
-per-contract explorer tree **without re-parsing Solidity**. They are read
-directly off disk; nothing here requires the CLI to run a server.
+All three are written by `report.WriteBundle` in the same step as
+`manifest.json`, and are indexed in `manifest.json` under `files.data.nav` /
+`files.data.explorer` / `files.data.xref`. They exist to let a **static
+consumer** — the w3goaudit VSCode extension, an LSP-like navigation panel, or
+any other downstream tool — build jump-to-definition, find-references,
+"who calls this", and a per-contract explorer tree **without re-parsing
+Solidity**. They are read directly off disk; nothing here requires the CLI to
+run a server.
 
 Both documents share a `schemaVersion` field, currently `"2.0.0"`
 (`report.SchemaVersion`), the same version used by `overview.json` /
@@ -245,13 +249,66 @@ construction — no secondary sort needed since `LinearizedBaseIDs` is itself
 a deterministic MRO). `entryFunctions`/`getters` likewise follow the
 deterministic MRO walk order.
 
+## `data/xref.json`
+
+A third data-layer artifact (`report.BuildXrefJSON`, `pkg/report/xref.go`),
+indexed by `manifest.json` under `files.data.xref` and sharing the same
+`schemaVersion`. It gives the extension **precise, type-resolved**
+go-to-definition and find-references without any regex fallback: two flat,
+deterministic tables.
+
+```jsonc
+{
+  "schemaVersion": "2.0.0",
+  "declarations": [
+    { "id": "<canonical decl id>", "kind": "stateVar", "name": "POOL_MANAGER",
+      "range": { "file": "...", "startLine": 72, "startCol": 5, "endLine": 72, "endCol": 48, "startByte": 2201, "endByte": 2244 } }
+  ],
+  "references": [
+    { "file": "...", "range": { "startLine": 359, "startCol": 9, "endLine": 359, "endCol": 21, "startByte": 15975, "endByte": 15987 },
+      "refId": "...#SatoHook.POOL_MANAGER", "refKind": "state_var" }
+  ]
+}
+```
+
+- `declarations[]` (`XrefDecl`) — every jump target, keyed by its canonical
+  `id`, with `kind` ∈ `contract|interface|library|function|modifier|event|error|struct|enum|stateVar|parameter|local`,
+  the `name`, and the name/decl `range` (`SrcRange`). IDs: `file#Contract`
+  (contract), `file#Contract.selector` (function, `types.MakeFunctionID`,
+  selector-or-name fallback), `contractID.member` (stateVar/event/error/struct/
+  enum/modifier), `functionID.paramName` (parameter), and the AST node's own
+  `refId` for a `local`. Deduplicated by `id` (first wins).
+- `references[]` (`XrefRef`) — one entry per resolved occurrence: the `file`,
+  the occurrence `range` (its own `file` omitted — the entry's `file` is
+  authoritative), the `refId` (a declaration id), and `refKind` ∈
+  `state_var|parameter|local_var|error|event|…`.
+
+**Go-to-definition:** find the reference whose `range` covers the cursor →
+`refId` → `declarations[refId].range`. **Find-references:** group `references`
+by `refId`. This subsumes the call-graph "who-calls" and, where a reference is
+present, replaces the regex fallbacks entirely.
+
+**Coverage / precision (v0.4):** every occurrence range points at the exact
+identifier/name token (verified against source). Identifier occurrences
+(state vars, parameters, locals) are emitted when the builder can pin an exact
+position — receivers of member/call expressions, array-index bases, and
+assignment lvalues (see `pkg/builder/INDEX.md`, "Identifier position backfill").
+`revert CustomError(...)` and `emit E(...)` occurrences resolve to their
+error/event declarations. Interior operands whose exact position solast does not
+provide are omitted rather than approximated; a consumer may keep a textual
+last-resort only for those. Both tables are sorted with total-order tiebreakers
+(declarations by `id`→`kind`→`name`→line; references by
+`file`→`startLine`→`startCol`→`startByte`→`refId`) so the artifact is byte-stable
+across runs.
+
 ## Consumption model
 
 Both files are plain, static JSON — no server, no long-lived process, no
 schema negotiation beyond checking `schemaVersion`. A consumer:
 
 1. Reads `data/manifest.json` to discover the relative paths
-   (`files.data.nav`, `files.data.explorer`) alongside every other artifact.
+   (`files.data.nav`, `files.data.explorer`, `files.data.xref`) alongside every
+   other artifact.
 2. Loads `nav.json` once per scan to build a symbol table + reverse-call
    index in memory (ID → `SrcRange`, ID → `[]NavCaller`).
 3. Loads `explorer.json` once per scan to populate an explorer tree keyed

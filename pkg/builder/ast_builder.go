@@ -119,6 +119,7 @@ func buildFunctionASTWithLocator(fndef *ast.FunctionDefinition, fn *types.Functi
 		builder.buildBlock(root, fndef.Body)
 	}
 
+	builder.backfillIdentifierPositions(root)
 	return root
 }
 
@@ -237,7 +238,80 @@ func buildModifierASTWithLocator(moddef *ast.ModifierDefinition, contract *types
 		builder.buildBlock(root, moddef.Body)
 	}
 
+	builder.backfillIdentifierPositions(root)
 	return root
+}
+
+// backfillIdentifierPositions stamps precise source spans onto bare identifier
+// occurrences that solast leaves unlocated. solast v0.1.7 only ranges postfix
+// (member/index/call) expressions and statement nodes — its parsePrimary never
+// calls setLocation — so every plain identifier arrives with no line/col/byte.
+//
+// Each identifier stamped here is structurally anchored to a located parent
+// whose grammar pins the identifier to a known edge of the parent's span, so the
+// derived range is exact, never a text search:
+//   - a member-access / call receiver and an array-index base begin at the
+//     parent's first byte;
+//   - an assignment target (lvalue) begins at the assignment node's first byte.
+//
+// Interior operands (arithmetic operands, plain call arguments) have no such
+// grammatical anchor and are deliberately left unlocated; xref omits those
+// occurrences rather than emit an approximate range. A complete fix would be a
+// solast change ranging primary expressions upstream.
+func (b *ASTBuilder) backfillIdentifierPositions(root *types.ASTNode) {
+	if root == nil || b.locator == nil {
+		return
+	}
+	var walk func(n *types.ASTNode)
+	walk = func(n *types.ASTNode) {
+		if n == nil {
+			return
+		}
+		switch {
+		case n.Kind == types.KindExprMemberAccess, n.Kind == types.KindExprIndexAccess,
+			n.Kind == types.KindStmtAssign:
+			if len(n.Children) > 0 {
+				b.stampLeadingIdentifier(n, n.Children[0])
+			}
+		case strings.HasPrefix(n.Kind, "call."):
+			for _, c := range n.Children {
+				if c != nil && c.GetAttributeBool("call_receiver") {
+					b.stampLeadingIdentifier(n, c)
+					break
+				}
+			}
+		}
+		for _, c := range n.Children {
+			walk(c)
+		}
+	}
+	walk(root)
+}
+
+// stampLeadingIdentifier positions a bare, unlocated identifier that begins at
+// parent.StartByte (on parent.StartLine). A Solidity identifier is a single
+// contiguous ASCII token, so its half-open byte span is [start, start+len(name)]
+// and both columns come from the shared source locator.
+func (b *ASTBuilder) stampLeadingIdentifier(parent, child *types.ASTNode) {
+	if child == nil || child.Kind != types.KindExprIdentifier || child.Name == "" {
+		return
+	}
+	if child.StartLine != 0 || child.StartByte != 0 { // already located
+		return
+	}
+	if parent.StartLine == 0 { // no usable anchor on the parent
+		return
+	}
+	startByte := parent.StartByte
+	endByte := startByte + len(child.Name)
+	child.StartLine, child.EndLine = parent.StartLine, parent.StartLine
+	child.StartByte, child.EndByte = startByte, endByte
+	if col, ok := b.locator.column(parent.StartLine, startByte); ok {
+		child.StartCol = col
+	}
+	if col, ok := b.locator.column(parent.StartLine, endByte); ok {
+		child.EndCol = col
+	}
 }
 
 // buildSymbolTable builds a symbol table for variable lookups.
@@ -1059,11 +1133,51 @@ func (b *ASTBuilder) buildEmit(stmt *ast.EmitStatement) *types.ASTNode {
 	if stmt.EventCall != nil {
 		callNode := b.buildExpression(stmt.EventCall)
 		if callNode != nil {
+			if callNode.Name != "" {
+				if owner := b.scopedDeclOwner(func(c *types.Contract) bool { return contractHasEvent(c, callNode.Name) }); owner != nil {
+					callNode.RefID = owner.ID + "." + callNode.Name
+					callNode.RefKind = "event"
+				}
+			}
 			node.AddChild(callNode)
 		}
 	}
 
 	return node
+}
+
+// scopedDeclOwner returns the first contract along the current contract's C3
+// linearization (itself first, then bases) whose predicate matches — the owner
+// of a name-scoped declaration (error/event/modifier). Deterministic because
+// LinearizedContracts is deterministic. Returns nil without contract/db context.
+func (b *ASTBuilder) scopedDeclOwner(match func(*types.Contract) bool) *types.Contract {
+	if b.db == nil || b.contract == nil {
+		return nil
+	}
+	for _, c := range b.db.LinearizedContracts(b.contract) {
+		if c != nil && match(c) {
+			return c
+		}
+	}
+	return nil
+}
+
+func contractHasError(c *types.Contract, name string) bool {
+	for _, e := range c.Errors {
+		if e != nil && e.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
+func contractHasEvent(c *types.Contract, name string) bool {
+	for _, e := range c.Events {
+		if e != nil && e.Name == name {
+			return true
+		}
+	}
+	return false
 }
 
 // buildRevertStatement builds AST for a revert statement. The pinned parser
@@ -1087,6 +1201,12 @@ func (b *ASTBuilder) buildRevertStatement(stmt *ast.RevertStatement) *types.ASTN
 			node.Name = e.Name
 		case *ast.MemberAccess:
 			node.Name = e.MemberName
+		}
+		if node.Name != "" {
+			if owner := b.scopedDeclOwner(func(c *types.Contract) bool { return contractHasError(c, node.Name) }); owner != nil {
+				node.RefID = owner.ID + "." + node.Name
+				node.RefKind = "error"
+			}
 		}
 		for _, arg := range rc.Arguments {
 			if argNode := b.buildExpression(arg); argNode != nil {

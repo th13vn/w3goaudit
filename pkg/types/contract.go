@@ -52,6 +52,10 @@ type Contract struct {
 	// Events defined in this contract
 	Events []*Event `json:"events,omitempty"`
 
+	// Errors are custom `error` declarations defined in this contract. Captured
+	// so `revert CustomError(...)` occurrences bind to a jump target (xref).
+	Errors []*ErrorDef `json:"errors,omitempty"`
+
 	// Modifiers defined in this contract
 	Modifiers []*Modifier `json:"modifiers,omitempty"`
 
@@ -96,6 +100,20 @@ type StateVariable struct {
 
 // Event represents a Solidity event
 type Event struct {
+	Name       string       `json:"name"`
+	Parameters []*Parameter `json:"parameters,omitempty"`
+
+	// SourceLocation for debugging / click-to-jump
+	StartLine int `json:"startLine,omitempty"`
+	EndLine   int `json:"endLine,omitempty"`
+	StartCol  int `json:"startCol,omitempty"`
+	EndCol    int `json:"endCol,omitempty"`
+	StartByte int `json:"startByte,omitempty"`
+	EndByte   int `json:"endByte,omitempty"`
+}
+
+// ErrorDef represents a Solidity custom error declaration.
+type ErrorDef struct {
 	Name       string       `json:"name"`
 	Parameters []*Parameter `json:"parameters,omitempty"`
 

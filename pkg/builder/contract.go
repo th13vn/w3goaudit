@@ -67,6 +67,10 @@ func (ce *ContractExtractor) visitContract(node *ast.ContractDefinition) {
 			ev := ce.extractEvent(n)
 			contract.Events = append(contract.Events, ev)
 
+		case *ast.ErrorDefinition:
+			er := ce.extractError(n)
+			contract.Errors = append(contract.Errors, er)
+
 		case *ast.ModifierDefinition:
 			mod := ce.extractModifier(n)
 			contract.Modifiers = append(contract.Modifiers, mod)
@@ -212,6 +216,22 @@ func (ce *ContractExtractor) extractEvent(node *ast.EventDefinition) *types.Even
 	ev.StartLine, ev.EndLine, ev.StartCol, ev.EndCol, ev.StartByte, ev.EndByte = span.startLine, span.endLine, span.startCol, span.endCol, span.startByte, span.endByte
 
 	return ev
+}
+
+// extractError extracts a custom error declaration from AST.
+func (ce *ContractExtractor) extractError(node *ast.ErrorDefinition) *types.ErrorDef {
+	er := &types.ErrorDef{
+		Name: node.Name,
+	}
+
+	for _, param := range node.Parameters {
+		er.Parameters = append(er.Parameters, ce.extractParameter(param))
+	}
+
+	span := ce.locator.span(node)
+	er.StartLine, er.EndLine, er.StartCol, er.EndCol, er.StartByte, er.EndByte = span.startLine, span.endLine, span.startCol, span.endCol, span.startByte, span.endByte
+
+	return er
 }
 
 // extractModifier extracts a modifier from AST

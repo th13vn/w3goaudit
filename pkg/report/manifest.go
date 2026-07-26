@@ -56,6 +56,7 @@ type ManifestFiles struct {
 		Database    string `json:"database"`
 		Nav         string `json:"nav,omitempty"`
 		Explorer    string `json:"explorer,omitempty"`
+		Xref        string `json:"xref,omitempty"`
 	} `json:"data"`
 }
 
@@ -141,6 +142,7 @@ func BuildManifestAt(now time.Time, tool ToolMeta, summary *SummaryReport, findi
 	m.Files.Data.Database = "data/database.json"
 	m.Files.Data.Nav = "data/nav.json"
 	m.Files.Data.Explorer = "data/explorer.json"
+	m.Files.Data.Xref = "data/xref.json"
 	if html {
 		m.Files.OverviewHTML = "overview.html"
 		m.Files.FindingsHTML = "findings.html"

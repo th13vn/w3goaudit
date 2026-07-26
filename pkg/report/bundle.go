@@ -154,6 +154,9 @@ func writeBundleData(dir string, db *types.Database, summary *SummaryReport, fin
 	if err := writeJSONFile(filepath.Join(dataDir, "nav.json"), BuildNavJSON(db), "nav"); err != nil {
 		return err
 	}
+	if err := writeJSONFile(filepath.Join(dataDir, "xref.json"), BuildXrefJSON(db), "xref"); err != nil {
+		return err
+	}
 	return writeJSONFile(filepath.Join(dataDir, "explorer.json"), BuildExplorerJSON(db), "explorer")
 }
 

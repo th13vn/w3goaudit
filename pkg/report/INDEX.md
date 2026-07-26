@@ -100,7 +100,7 @@ Writes the **result folder** — the default output of a scan. One call,
 
 ```
 <dir>/README.md, summary.md, overview.md, findings.md, results.sarif
-<dir>/data/{manifest.json, database.json, findings.json, overview.json, diagnostics.json, nav.json, explorer.json}   # canonical DB lives here only
+<dir>/data/{manifest.json, database.json, findings.json, overview.json, diagnostics.json, nav.json, xref.json, explorer.json}   # canonical DB lives here only
 <dir>/contracts/<rel-src-path-no-ext>/<MainContract>/README.md
 <dir>/contracts/<rel-src-path-no-ext>/<MainContract>/state-changes.md
 <dir>/contracts/<rel-src-path-no-ext>/<MainContract>/workflows/<entryFn>.md
@@ -216,6 +216,35 @@ consumed by the VSCode extension:
   Sort keys are **total orders** (symbols tie-break `id`→`kind`→`name`→line;
   `interfaceImpl` tie-breaks `interface`→`method`→`implementation`) so
   multiple implementers of one interface method can't reorder run-to-run.
+
+### xref.go
+
+`BuildXrefJSON(db) *XrefJSON` → `data/xref.json`, the precise, type-resolved
+cross-reference index consumed by the editor extension for go-to-definition and
+find-references without regex. Purely additive to the schema-2.0.0 data layer
+(same `SchemaVersion` constant; no version bump).
+
+- `declarations[]` (`XrefDecl`) — every jump target with its canonical id,
+  `kind`, `name`, and name/decl `range` (`SrcRange`, shared with `nav.go`/
+  `explorer.go`). Kinds emitted in Phase A: `contract`/`interface`/`library`
+  (from `Contract.Kind`; abstract → `contract`), `function`
+  (`types.MakeFunctionID`, selector-or-name fallback like `nav.go`), `parameter`
+  (`functionID.paramName`), `stateVar`/`event`/`struct`/`enum`/`modifier`
+  (`contractID.name`), and `local` (a `decl.variable` AST node's own `RefID`).
+  Declarations are deduplicated by id (first wins over the sorted contract-id
+  iteration).
+- `references[]` (`XrefRef`) — one entry per AST node (across every
+  `Function.AST` and `Modifier.AST`) that carries a non-empty `RefID`: `file`
+  (function's `SourceFile`, else the contract's), occurrence `range`, `refId`,
+  and optional `refKind`. Nodes with `StartLine == 0` (synthetic) are skipped.
+  Occurrence-level `refId`s already exist on `expr.identifier` nodes
+  (`state_var`/`parameter`/`local_var`); Phase B extends resolution to
+  member-access/event/error/modifier/type-name nodes.
+- Both slices are sorted with total-order tiebreakers (declarations by
+  id→kind→name→line; references by file→startLine→startCol→startByte→refId) so
+  `xref.json` is byte-stable across runs, mirroring `nav.go`.
+- Wired in `bundle.go` (written right after `nav.json`) and indexed in
+  `manifest.json` under `files.data.xref`.
 
 ### explorer.go
 
@@ -617,6 +646,7 @@ A scan writes a **result folder** via `WriteBundle` (`bundle.go`):
 │   ├── overview.json      # BuildOverviewJSON
 │   ├── diagnostics.json   # BuildDiagnosticsJSON (always; [] when complete)
 │   ├── nav.json           # BuildNavJSON
+│   ├── xref.json          # BuildXrefJSON (precise xref: declarations + references)
 │   └── explorer.json      # BuildExplorerJSON
 └── contracts/<rel-src-path-no-ext>/<MainContract>/
     ├── README.md          # FormatContractReadme (findings + architecture detail)
