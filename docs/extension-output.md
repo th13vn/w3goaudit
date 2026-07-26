@@ -272,31 +272,40 @@ deterministic tables.
 ```
 
 - `declarations[]` (`XrefDecl`) — every jump target, keyed by its canonical
-  `id`, with `kind` ∈ `contract|interface|library|function|modifier|event|error|struct|enum|stateVar|parameter|local`,
+  `id`, with `kind` ∈ `contract|interface|library|function|modifier|event|error|struct|enum|stateVar|parameter|local|udvt`,
   the `name`, and the name/decl `range` (`SrcRange`). IDs: `file#Contract`
   (contract), `file#Contract.selector` (function, `types.MakeFunctionID`,
   selector-or-name fallback), `contractID.member` (stateVar/event/error/struct/
-  enum/modifier), `functionID.paramName` (parameter), and the AST node's own
-  `refId` for a `local`. Deduplicated by `id` (first wins).
+  enum/modifier), `functionID.paramName` (parameter), `file#TypeName` (a
+  user-defined value type), and the AST node's own `refId` for a `local`.
+  Deduplicated by `id` (first wins).
 - `references[]` (`XrefRef`) — one entry per resolved occurrence: the `file`,
   the occurrence `range` (its own `file` omitted — the entry's `file` is
   authoritative), the `refId` (a declaration id), and `refKind` ∈
-  `state_var|parameter|local_var|error|event|…`.
+  `state_var|parameter|local_var|function|library|event|error|modifier|type|udvt`.
 
 **Go-to-definition:** find the reference whose `range` covers the cursor →
 `refId` → `declarations[refId].range`. **Find-references:** group `references`
 by `refId`. This subsumes the call-graph "who-calls" and, where a reference is
 present, replaces the regex fallbacks entirely.
 
-**Coverage / precision (v0.4):** every occurrence range points at the exact
-identifier/name token (verified against source). Identifier occurrences
-(state vars, parameters, locals) are emitted when the builder can pin an exact
-position — receivers of member/call expressions, array-index bases, and
-assignment lvalues (see `pkg/builder/INDEX.md`, "Identifier position backfill").
-`revert CustomError(...)` and `emit E(...)` occurrences resolve to their
-error/event declarations. Interior operands whose exact position solast does not
-provide are omitted rather than approximated; a consumer may keep a textual
-last-resort only for those. Both tables are sorted with total-order tiebreakers
+**Coverage / precision (v0.4):** occurrence ranges point at the exact
+identifier/name token or the call expression. Resolved reference kinds:
+
+- **identifiers** — state vars, parameters, locals, emitted when the builder can
+  pin an exact position (member/call receivers, array-index bases, assignment
+  lvalues; see `pkg/builder/INDEX.md`, "Identifier position backfill").
+- **calls** — internal/external/self/super and library `using` calls
+  (`x.toUint128()`, `Lib.foo()`) bind to the resolved function via the call graph
+  (`function` / `library`).
+- **UDVT `wrap`/`unwrap`** — bind to the user-defined value type decl (`udvt`).
+- **type casts** — `IToken(x)` binds to the type decl (`type`).
+- **errors / events / modifiers** — `revert X()`, `emit E()`, and applied
+  modifiers bind to their declarations.
+
+Interior operands and struct/enum member positions that solast does not provide
+are omitted rather than approximated; a consumer may keep a textual last resort
+only for those. Both tables are sorted with total-order tiebreakers
 (declarations by `id`→`kind`→`name`→line; references by
 `file`→`startLine`→`startCol`→`startByte`→`refId`) so the artifact is byte-stable
 across runs.

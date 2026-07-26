@@ -111,6 +111,12 @@ type Database struct {
 	// Keys are deployable contract IDs ranked by inheritance weight
 	MainContracts map[string]*MainContractEntry `json:"mainContracts"`
 
+	// UserDefinedValueTypes are all `type X is <T>;` declarations across the
+	// project (file-level and contract-level), keyed by absPath#Name via
+	// UDVTDef.ID(). Captured so `X.wrap(...)`/`X.unwrap(...)` occurrences bind
+	// to a jump target (xref).
+	UserDefinedValueTypes []*UDVTDef `json:"userDefinedValueTypes,omitempty"`
+
 	// CallGraph for the entire project
 	CallGraph *CallGraph `json:"callGraph"`
 
@@ -450,6 +456,26 @@ func (db *Database) GetContractByName(name string) *Contract {
 // caller already has an ID — it's O(1) and unambiguous.
 func (db *Database) GetContractByID(id string) *Contract {
 	return db.Contracts[id]
+}
+
+// UniqueUDVTByName returns the sole user-defined value type with the given name,
+// or nil when there is none or the name is ambiguous (declared in more than one
+// file). Ambiguity yields nil so binding stays precise rather than guessing.
+func (db *Database) UniqueUDVTByName(name string) *UDVTDef {
+	if db == nil || name == "" {
+		return nil
+	}
+	var match *UDVTDef
+	for _, u := range db.UserDefinedValueTypes {
+		if u == nil || u.Name != name {
+			continue
+		}
+		if match != nil && match.ID() != u.ID() {
+			return nil
+		}
+		match = u
+	}
+	return match
 }
 
 // FindContractsByName returns every contract sharing the given unqualified

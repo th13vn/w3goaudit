@@ -13,6 +13,7 @@ type ContractExtractor struct {
 	currentContract *types.Contract
 	functionASTs    map[*types.Function]*ast.FunctionDefinition // Store AST nodes for later processing
 	modifierASTs    map[*types.Modifier]*ast.ModifierDefinition // Store modifier AST nodes for later processing
+	udvts           []*types.UDVTDef                            // Contract-level user-defined value types
 }
 
 // visitContract processes a contract definition
@@ -85,6 +86,9 @@ func (ce *ContractExtractor) visitContract(node *ast.ContractDefinition) {
 			en := ce.extractEnum(n)
 			contract.Enums = append(contract.Enums, en)
 
+		case *ast.UserDefinedValueTypeDefinition:
+			ce.udvts = append(ce.udvts, ce.extractUDVT(n))
+
 		case *ast.UsingForDeclaration:
 			ud := ce.extractUsingDirective(n)
 			contract.UsingDirectives = append(contract.UsingDirectives, ud)
@@ -156,9 +160,27 @@ func (ce *ContractExtractor) extractFunction(node *ast.FunctionDefinition) *type
 
 	// Extract modifiers
 	for _, mod := range node.Modifiers {
-		if mod.Name != "" {
-			fn.Modifiers = append(fn.Modifiers, mod.Name)
+		if mod.Name == "" {
+			continue
 		}
+		fn.Modifiers = append(fn.Modifiers, mod.Name)
+		// The invocation range starts at the modifier-name token; keep just the
+		// name span (not any argument list) as the xref reference range.
+		span := ce.locator.span(mod)
+		usage := &types.ModifierUsage{
+			Name:      mod.Name,
+			StartLine: span.startLine, EndLine: span.startLine,
+			StartByte: span.startByte, EndByte: span.startByte + len(mod.Name),
+		}
+		if span.startLine > 0 {
+			if col, ok := ce.locator.column(span.startLine, usage.StartByte); ok {
+				usage.StartCol = col
+			}
+			if col, ok := ce.locator.column(span.startLine, usage.EndByte); ok {
+				usage.EndCol = col
+			}
+		}
+		fn.ModifierUsages = append(fn.ModifierUsages, usage)
 	}
 
 	// Extract full source location (line + column + byte offset)
@@ -232,6 +254,18 @@ func (ce *ContractExtractor) extractError(node *ast.ErrorDefinition) *types.Erro
 	er.StartLine, er.EndLine, er.StartCol, er.EndCol, er.StartByte, er.EndByte = span.startLine, span.endLine, span.startCol, span.endCol, span.startByte, span.endByte
 
 	return er
+}
+
+// extractUDVT extracts a user-defined value type declaration from AST.
+func (ce *ContractExtractor) extractUDVT(node *ast.UserDefinedValueTypeDefinition) *types.UDVTDef {
+	u := &types.UDVTDef{
+		Name:           node.Name,
+		SourceFile:     ce.sourceFile,
+		UnderlyingType: getTypeName(node.UnderlyingType),
+	}
+	span := ce.locator.span(node)
+	u.StartLine, u.EndLine, u.StartCol, u.EndCol, u.StartByte, u.EndByte = span.startLine, span.endLine, span.startCol, span.endCol, span.startByte, span.endByte
+	return u
 }
 
 // extractModifier extracts a modifier from AST

@@ -1384,6 +1384,7 @@ func (b *ASTBuilder) buildFunctionCall(call *ast.FunctionCall) *types.ASTNode {
 	callType := types.KindCallExternal
 	callName := ""
 	calledSignature := ""
+	userTypeCastName := "" // set for a user-defined-type cast, e.g. IERC20(token)
 	var receiverExpr ast.Node
 	var receiverType types.TypeInfo
 	var resultType types.TypeInfo
@@ -1408,6 +1409,12 @@ func (b *ASTBuilder) buildFunctionCall(call *ast.FunctionCall) *types.ASTNode {
 		default:
 			callType = types.KindCallInternal
 			resultType = b.expressionType(call)
+			// A user-defined-type cast whose callee parses as a bare identifier,
+			// e.g. IToken(owner). Only flagged when the name is a known
+			// contract/interface/library so genuine internal calls are unaffected.
+			if b.isKnownUserType(callName) {
+				userTypeCastName = callName
+			}
 		}
 
 	case *ast.ElementaryTypeName:
@@ -1423,6 +1430,7 @@ func (b *ASTBuilder) buildFunctionCall(call *ast.FunctionCall) *types.ASTNode {
 		callName = expr.NamePath
 		callType = types.KindCallInternal
 		resultType = b.typeInfoFromTypeName(expr.NamePath, "type_cast")
+		userTypeCastName = expr.NamePath
 
 	case *ast.NewExpression:
 		// `new Contract(args)` — deploys and runs code. Classified as call.create
@@ -1535,7 +1543,57 @@ func (b *ASTBuilder) buildFunctionCall(call *ast.FunctionCall) *types.ASTNode {
 		}
 	}
 
+	b.bindUDVTWrapRef(node, callName, receiverExpr)
+	b.bindTypeCastRef(node, userTypeCastName)
 	return node
+}
+
+// bindTypeCastRef binds a user-defined-type conversion (`IERC20(token)`,
+// `PoolId(x)`) to the type's declaration: a contract/interface/library resolves
+// to its contract id, a UDVT to its declaration id. RefKind is "type". Elementary
+// casts (address/uint…) and unresolved/ambiguous names are left unbound.
+func (b *ASTBuilder) bindTypeCastRef(node *types.ASTNode, typeName string) {
+	if b.db == nil || node == nil || node.RefID != "" || typeName == "" {
+		return
+	}
+	base := baseTypeName(types.CleanTypeName(typeName))
+	if b.contract != nil {
+		if resolved, exact := b.db.ResolveContractNameExact(base, b.contract.SourceFile); exact && resolved != nil {
+			node.RefID = resolved.ID
+			node.RefKind = "type"
+			return
+		}
+	}
+	if udvt := b.db.UniqueUDVTByName(base); udvt != nil {
+		node.RefID = udvt.ID()
+		node.RefKind = "type"
+	}
+}
+
+// bindUDVTWrapRef binds a user-defined value type's built-in `T.wrap(x)` /
+// `T.unwrap(x)` conversion to the UDVT declaration. The call graph never
+// resolves these (they are language builtins, not library functions), so the
+// reference is set here from the receiver type name. The receiver must be a
+// bare type identifier — a variable of that name (a library `using` extension
+// like `x.wrap()`) is left for the call graph to resolve as a "library" call.
+func (b *ASTBuilder) bindUDVTWrapRef(node *types.ASTNode, callName string, receiverExpr ast.Node) {
+	if b.db == nil || node == nil || node.RefID != "" {
+		return
+	}
+	if callName != "wrap" && callName != "unwrap" {
+		return
+	}
+	ident, ok := receiverExpr.(*ast.Identifier)
+	if !ok {
+		return
+	}
+	if _, isVar := b.symbolTable[ident.Name]; isVar {
+		return
+	}
+	if udvt := b.db.UniqueUDVTByName(ident.Name); udvt != nil {
+		node.RefID = udvt.ID()
+		node.RefKind = "udvt"
+	}
 }
 
 // classifyMemberAccessCall classifies a member access call using receiver type
@@ -1865,8 +1923,55 @@ func (b *ASTBuilder) buildMemberAccess(ma *ast.MemberAccess) *types.ASTNode {
 		}
 	}
 	b.applyTypeAttributes(node, b.expressionType(ma))
+	b.bindMemberFieldRef(node, ma)
 
 	return node
+}
+
+// bindMemberFieldRef resolves a non-call member read (`x.member`) to its exact
+// declaration using the receiver's already-computed contract type. When the
+// receiver's type resolves to a contract/interface/library, `member` is looked
+// up across that type's C3 linearization: a state variable (which carries a
+// position) or a function is bound as the reference target. Struct-field and
+// enum-value members are intentionally skipped — the model records no per-member
+// position, so there is no exact jump target to point at. Builtins
+// (msg/block/tx/abi) carry no type_contract_id and never match.
+func (b *ASTBuilder) bindMemberFieldRef(node *types.ASTNode, ma *ast.MemberAccess) {
+	if b.db == nil || node.RefID != "" || ma.MemberName == "" {
+		return
+	}
+	recvType := b.expressionType(ma.Expression)
+	if recvType.ContractID == "" || recvType.Kind == types.TypeKindStruct {
+		return
+	}
+	owner := b.db.GetContractByID(recvType.ContractID)
+	if owner == nil {
+		return
+	}
+	for _, c := range b.db.LinearizedContracts(owner) {
+		if c == nil {
+			continue
+		}
+		for _, sv := range c.StateVariables {
+			if sv != nil && sv.Name == ma.MemberName {
+				node.RefID = c.ID + "." + sv.Name
+				node.RefKind = "state_var"
+				return
+			}
+		}
+		for _, fn := range c.Functions {
+			if fn == nil || fn.Name != ma.MemberName {
+				continue
+			}
+			sel := fn.Selector
+			if sel == "" {
+				sel = fn.Name
+			}
+			node.RefID = types.MakeFunctionID(c.SourceFile, c.Name, sel)
+			node.RefKind = "function"
+			return
+		}
+	}
 }
 
 // extractParentName extracts the name of the parent expression for member access

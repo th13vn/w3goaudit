@@ -127,6 +127,9 @@ func (b *Builder) Build(sources []*types.SourceFile) (*types.Database, error) {
 	if err := b.buildCallGraph(); err != nil {
 		return nil, fmt.Errorf("building call graph: %w", err)
 	}
+	// Bind resolved call sites onto their AST nodes as xref references
+	// (reuses the call graph's resolution; must run after Phase 5).
+	b.bindResolvedCallReferences()
 	b.logf("Phase 5 complete")
 
 	// Phase 6: Calculate main contracts and entry functions
@@ -207,6 +210,10 @@ func (b *Builder) parseFile(sf *types.SourceFile) error {
 			if n.Name == "solidity" {
 				sf.PragmaVersion = n.Value
 			}
+		case *ast.UserDefinedValueTypeDefinition:
+			// File-level `type X is <T>;` — captured for xref jump targets so
+			// `X.wrap(...)`/`X.unwrap(...)` occurrences bind to the declaration.
+			extractor.udvts = append(extractor.udvts, extractor.extractUDVT(n))
 		}
 	}
 
@@ -226,6 +233,9 @@ func (b *Builder) parseFile(sf *types.SourceFile) error {
 	for mod, astNode := range extractor.modifierASTs {
 		b.modifierASTs[mod] = astNode
 	}
+
+	// Transfer captured user-defined value types (file-level + contract-level).
+	b.db.UserDefinedValueTypes = append(b.db.UserDefinedValueTypes, extractor.udvts...)
 
 	return nil
 }

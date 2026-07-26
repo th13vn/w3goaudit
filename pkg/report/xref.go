@@ -69,87 +69,120 @@ func BuildXrefJSON(db *types.Database) *XrefJSON {
 		if c == nil {
 			continue
 		}
-		file := c.SourceFile
-		addDecl(c.ID, contractKindLabel(c.Kind), c.Name,
-			declRange(file, c.StartLine, c.StartCol, c.EndLine, c.EndCol, c.StartByte, c.EndByte))
+		collectContractDecls(c, addDecl)
+		collectContractRefs(db, c, addDecl, &out.References)
+	}
 
-		for _, fn := range c.Functions {
-			if fn == nil {
-				continue
-			}
-			fnID := functionDeclID(c, fn)
-			addDecl(fnID, "function", fn.Name,
-				declRange(file, fn.StartLine, fn.StartCol, fn.EndLine, fn.EndCol, fn.StartByte, fn.EndByte))
-			for _, p := range fn.Parameters {
-				if p == nil || p.Name == "" {
-					continue
-				}
-				addDecl(fnID+"."+p.Name, "parameter", p.Name,
-					declRange(file, p.StartLine, p.StartCol, p.EndLine, p.EndCol, p.StartByte, p.EndByte))
-			}
+	// User-defined value types are file/project-scoped (not per-contract).
+	for _, u := range db.UserDefinedValueTypes {
+		if u == nil {
+			continue
 		}
-		for _, sv := range c.StateVariables {
-			if sv == nil {
-				continue
-			}
-			addDecl(c.ID+"."+sv.Name, "stateVar", sv.Name,
-				declRange(file, sv.StartLine, sv.StartCol, sv.EndLine, sv.EndCol, sv.StartByte, sv.EndByte))
-		}
-		for _, ev := range c.Events {
-			if ev == nil {
-				continue
-			}
-			addDecl(c.ID+"."+ev.Name, "event", ev.Name,
-				declRange(file, ev.StartLine, ev.StartCol, ev.EndLine, ev.EndCol, ev.StartByte, ev.EndByte))
-		}
-		for _, er := range c.Errors {
-			if er == nil {
-				continue
-			}
-			addDecl(c.ID+"."+er.Name, "error", er.Name,
-				declRange(file, er.StartLine, er.StartCol, er.EndLine, er.EndCol, er.StartByte, er.EndByte))
-		}
-		for _, st := range c.Structs {
-			if st == nil {
-				continue
-			}
-			addDecl(c.ID+"."+st.Name, "struct", st.Name,
-				declRange(file, st.StartLine, st.StartCol, st.EndLine, st.EndCol, st.StartByte, st.EndByte))
-		}
-		for _, en := range c.Enums {
-			if en == nil {
-				continue
-			}
-			addDecl(c.ID+"."+en.Name, "enum", en.Name,
-				declRange(file, en.StartLine, en.StartCol, en.EndLine, en.EndCol, en.StartByte, en.EndByte))
-		}
-		for _, md := range c.Modifiers {
-			if md == nil {
-				continue
-			}
-			addDecl(c.ID+"."+md.Name, "modifier", md.Name,
-				declRange(file, md.StartLine, md.StartCol, md.EndLine, md.EndCol, md.StartByte, md.EndByte))
-		}
-
-		// References + local-variable declarations, from every function and
-		// modifier AST that hangs off this contract.
-		for _, fn := range c.Functions {
-			if fn == nil || fn.AST == nil {
-				continue
-			}
-			collectXrefFromAST(fn.AST, refFile(file, fn.SourceFile), addDecl, &out.References)
-		}
-		for _, md := range c.Modifiers {
-			if md == nil || md.AST == nil {
-				continue
-			}
-			collectXrefFromAST(md.AST, file, addDecl, &out.References)
-		}
+		addDecl(u.ID(), "udvt", u.Name,
+			declRange(u.SourceFile, u.StartLine, u.StartCol, u.EndLine, u.EndCol, u.StartByte, u.EndByte))
 	}
 
 	sortXrefDecls(out.Declarations)
 	sortXrefRefs(out.References)
 	return out
+}
+
+// collectContractDecls emits every jump-target declaration a contract owns:
+// the contract itself, its functions (+ parameters), state variables, events,
+// errors, structs, enums, and modifiers.
+func collectContractDecls(c *types.Contract, addDecl func(id, kind, name string, r SrcRange)) {
+	file := c.SourceFile
+	addDecl(c.ID, contractKindLabel(c.Kind), c.Name,
+		declRange(file, c.StartLine, c.StartCol, c.EndLine, c.EndCol, c.StartByte, c.EndByte))
+
+	for _, fn := range c.Functions {
+		if fn == nil {
+			continue
+		}
+		fnID := functionDeclID(c, fn)
+		addDecl(fnID, "function", fn.Name,
+			declRange(file, fn.StartLine, fn.StartCol, fn.EndLine, fn.EndCol, fn.StartByte, fn.EndByte))
+		for _, p := range fn.Parameters {
+			if p == nil || p.Name == "" {
+				continue
+			}
+			addDecl(fnID+"."+p.Name, "parameter", p.Name,
+				declRange(file, p.StartLine, p.StartCol, p.EndLine, p.EndCol, p.StartByte, p.EndByte))
+		}
+	}
+	for _, sv := range c.StateVariables {
+		if sv != nil {
+			addDecl(c.ID+"."+sv.Name, "stateVar", sv.Name,
+				declRange(file, sv.StartLine, sv.StartCol, sv.EndLine, sv.EndCol, sv.StartByte, sv.EndByte))
+		}
+	}
+	for _, ev := range c.Events {
+		if ev != nil {
+			addDecl(c.ID+"."+ev.Name, "event", ev.Name,
+				declRange(file, ev.StartLine, ev.StartCol, ev.EndLine, ev.EndCol, ev.StartByte, ev.EndByte))
+		}
+	}
+	for _, er := range c.Errors {
+		if er != nil {
+			addDecl(c.ID+"."+er.Name, "error", er.Name,
+				declRange(file, er.StartLine, er.StartCol, er.EndLine, er.EndCol, er.StartByte, er.EndByte))
+		}
+	}
+	for _, st := range c.Structs {
+		if st != nil {
+			addDecl(c.ID+"."+st.Name, "struct", st.Name,
+				declRange(file, st.StartLine, st.StartCol, st.EndLine, st.EndCol, st.StartByte, st.EndByte))
+		}
+	}
+	for _, en := range c.Enums {
+		if en != nil {
+			addDecl(c.ID+"."+en.Name, "enum", en.Name,
+				declRange(file, en.StartLine, en.StartCol, en.EndLine, en.EndCol, en.StartByte, en.EndByte))
+		}
+	}
+	for _, md := range c.Modifiers {
+		if md != nil {
+			addDecl(c.ID+"."+md.Name, "modifier", md.Name,
+				declRange(file, md.StartLine, md.StartCol, md.EndLine, md.EndCol, md.StartByte, md.EndByte))
+		}
+	}
+}
+
+// collectContractRefs emits references for a contract: occurrences found in its
+// function/modifier ASTs (plus located local-variable declarations) and the
+// applied-modifier usages on each function signature.
+func collectContractRefs(db *types.Database, c *types.Contract, addDecl func(id, kind, name string, r SrcRange), refs *[]*XrefRef) {
+	file := c.SourceFile
+	for _, fn := range c.Functions {
+		if fn != nil && fn.AST != nil {
+			collectXrefFromAST(fn.AST, refFile(file, fn.SourceFile), addDecl, refs)
+		}
+	}
+	for _, md := range c.Modifiers {
+		if md != nil && md.AST != nil {
+			collectXrefFromAST(md.AST, file, addDecl, refs)
+		}
+	}
+	for _, fn := range c.Functions {
+		if fn == nil {
+			continue
+		}
+		for _, mu := range fn.ModifierUsages {
+			if mu == nil || mu.StartLine == 0 {
+				continue
+			}
+			ownerID := modifierOwnerID(db, c, mu.Name)
+			if ownerID == "" {
+				continue
+			}
+			*refs = append(*refs, &XrefRef{
+				File:    refFile(file, fn.SourceFile),
+				Range:   SrcRange{StartLine: mu.StartLine, StartCol: mu.StartCol, EndLine: mu.EndLine, EndCol: mu.EndCol, StartByte: mu.StartByte, EndByte: mu.EndByte},
+				RefID:   ownerID + "." + mu.Name,
+				RefKind: "modifier",
+			})
+		}
+	}
 }
 
 // collectXrefFromAST walks an AST recording every resolved occurrence as a
@@ -176,6 +209,22 @@ func collectXrefFromAST(root *types.ASTNode, file string, addDecl func(id, kind,
 		visit(n)
 		return true
 	})
+}
+
+// modifierOwnerID returns the ID of the first contract along c's C3
+// linearization that declares a modifier named name, or "" when none does.
+func modifierOwnerID(db *types.Database, c *types.Contract, name string) string {
+	for _, base := range db.LinearizedContracts(c) {
+		if base == nil {
+			continue
+		}
+		for _, md := range base.Modifiers {
+			if md != nil && md.Name == name {
+				return base.ID
+			}
+		}
+	}
+	return ""
 }
 
 // functionDeclID mirrors nav.go: key selector-less functions

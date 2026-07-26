@@ -63,6 +63,11 @@ type Function struct {
 	// Modifiers applied to this function
 	Modifiers []string `json:"modifiers,omitempty"`
 
+	// ModifierUsages are the applied-modifier invocation occurrences on this
+	// function's signature, each with the modifier-name token range. Captured so
+	// xref can bind the usage to its modifier declaration (jump/find-refs).
+	ModifierUsages []*ModifierUsage `json:"modifierUsages,omitempty"`
+
 	// IsConstructor indicates if this is a constructor
 	IsConstructor bool `json:"isConstructor,omitempty"`
 
@@ -98,6 +103,18 @@ type Function struct {
 	EndCol    int `json:"endCol,omitempty"`
 	StartByte int `json:"startByte,omitempty"`
 	EndByte   int `json:"endByte,omitempty"`
+}
+
+// ModifierUsage is an applied-modifier occurrence on a function signature. The
+// range spans the modifier-name token only (not its arguments).
+type ModifierUsage struct {
+	Name      string `json:"name"`
+	StartLine int    `json:"startLine,omitempty"`
+	EndLine   int    `json:"endLine,omitempty"`
+	StartCol  int    `json:"startCol,omitempty"`
+	EndCol    int    `json:"endCol,omitempty"`
+	StartByte int    `json:"startByte,omitempty"`
+	EndByte   int    `json:"endByte,omitempty"`
 }
 
 // Parameter represents a function parameter or return value

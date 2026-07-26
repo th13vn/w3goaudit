@@ -1,6 +1,7 @@
 package builder
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/th13vn/w3goaudit/pkg/types"
@@ -36,31 +37,47 @@ func TestXrefBindingsAndPositions(t *testing.T) {
 		t.Fatal("move function or its AST missing")
 	}
 
-	var revertBound, emitBound, positionedIdent bool
-	move.AST.WalkDescendants(func(n *types.ASTNode) bool {
-		switch {
-		case n.Kind == types.KindCheckRevert && n.Name == "Unauthorized":
-			if n.RefID == c.ID+".Unauthorized" && n.RefKind == "error" {
-				revertBound = true
-			}
-		case n.RefKind == "event" && n.Name == "Moved":
-			if n.RefID == c.ID+".Moved" {
-				emitBound = true
-			}
-		case n.Kind == types.KindExprIdentifier && n.RefID != "" && n.StartLine > 0 && n.StartCol > 0:
-			// e.g. `owner` receiver of owner.call, `balances` base, `to` lvalue.
+	// Collect resolved occurrences keyed by "name|refKind" -> refId. Walk the
+	// function body and every modifier body (the revert lives in onlyOwner).
+	bound := map[string]string{}
+	positionedIdent := false
+	visit := func(n *types.ASTNode) bool {
+		if n.RefID != "" {
+			bound[n.Name+"|"+n.RefKind] = n.RefID
+		}
+		if n.Kind == types.KindExprIdentifier && n.RefID != "" && n.StartLine > 0 && n.StartCol > 0 {
 			positionedIdent = true
 		}
 		return true
-	})
-
-	if !revertBound {
-		t.Error("revert Unauthorized() did not bind to the error declaration")
 	}
-	if !emitBound {
-		t.Error("emit Moved() did not bind to the event declaration")
+	move.AST.WalkDescendants(visit)
+	for _, md := range c.Modifiers {
+		if md != nil && md.AST != nil {
+			md.AST.WalkDescendants(visit)
+		}
+	}
+
+	want := []struct{ key, idSuffix, msg string }{
+		{"Unauthorized|error", "#XrefBindings.Unauthorized", "revert -> error decl"},
+		{"Moved|event", "#XrefBindings.Moved", "emit -> event decl"},
+		{"toU128|library", "#SafeCastLib.toU128(uint256)", "library using call -> lib fn"},
+		{"wrap|udvt", "#Amount", "UDVT wrap -> udvt decl"},
+		{"unwrap|udvt", "#Amount", "UDVT unwrap -> udvt decl"},
+		{"balanceOf|function", "#IToken.balanceOf(address)", "external member call -> iface fn"},
+		{"IToken|type", "#IToken", "type cast -> type decl"},
+	}
+	for _, w := range want {
+		if !strings.HasSuffix(bound[w.key], w.idSuffix) {
+			t.Errorf("%s: %q => %q, want suffix %q", w.msg, w.key, bound[w.key], w.idSuffix)
+		}
 	}
 	if !positionedIdent {
 		t.Error("no refId-bearing identifier received a backfilled source position")
+	}
+
+	// Modifier usage is captured with a name-token range for the report layer.
+	if len(move.ModifierUsages) != 1 || move.ModifierUsages[0].Name != "onlyOwner" ||
+		move.ModifierUsages[0].StartLine == 0 {
+		t.Errorf("modifier usage not captured with position: %+v", move.ModifierUsages)
 	}
 }

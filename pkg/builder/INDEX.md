@@ -105,6 +105,11 @@ Contract extraction from raw AST.
 - Custom `error` declarations (`extractError` → `Contract.Errors []*types.ErrorDef`
   with name range) — captured for xref jump targets; `revert X()` occurrences
   bind to them (see ast_builder.go)
+- User-defined value types (`extractUDVT`), both file-level and contract-level,
+  accumulated into `Database.UserDefinedValueTypes` (keyed `absPath#Name`); bound
+  by `T.wrap`/`T.unwrap` occurrences
+- Applied-modifier usages per function (`Function.ModifierUsages`, name-token
+  range) for xref modifier references
 - Base contracts (inheritance)
 
 **Uses:** `solast-go` parser to get raw AST
@@ -259,13 +264,39 @@ and both columns through the shared `sourceLocator`). Interior operands
 left unlocated; `xref.json` omits those occurrences rather than approximate. A
 complete fix would range primary expressions upstream in solast.
 
-**xref reference binding (v0.4):** `revert CustomError(...)` (`check.revert`
-node) and `emit E(...)` (the `stmt.emit` child call node) get `RefID`/`RefKind`
-set to the resolved declaration id via `scopedDeclOwner` — the first contract
-along the current contract's C3 linearization (`db.LinearizedContracts`, itself
-first then bases) that declares the named error/event. Deterministic and
-name-scoped. `pkg/report/xref.go` emits these as `references[]` entries (kind
-`error` / `event`) alongside the identifier occurrences.
+**xref reference binding (v0.4):** occurrence nodes get `RefID`/`RefKind`
+pointing at an exact declaration so `pkg/report/xref.go` emits them as
+`references[]`. All resolution is precision-first: unknown/ambiguous sites are
+left unbound rather than guessed.
+
+- **error / event** — `revert CustomError(...)` (`check.revert`) and `emit E(...)`
+  (the `stmt.emit` child call node) bind via `scopedDeclOwner`, the first
+  contract along the current contract's C3 linearization
+  (`db.LinearizedContracts`) that declares the named error/event.
+- **resolved calls** (`bindResolvedCallReferences`, `xref_refs.go`, Phase-5
+  post-pass) — every AST `call.*` node is matched by start byte to its
+  `Function.Calls`/`Modifier.Calls` entry and, when the call graph resolved it,
+  gets `RefID = ResolvedContractID + "." + ResolvedFunction`, `RefKind`
+  `function` (or `library` for `using` extension calls). This reuses the call
+  graph, so `x.toUint128()`, `Lib.foo()`, internal/external/self/super calls all
+  resolve. A byte with two distinct targets (e.g. multi-leaf `super`) is left
+  unbound.
+- **UDVT wrap/unwrap** (`bindUDVTWrapRef`) — a built-in `T.wrap(x)`/`T.unwrap(x)`
+  binds to the UDVT declaration (`RefKind "udvt"`) via
+  `db.UniqueUDVTByName`. The receiver must be a bare type identifier; a variable
+  named the same (a library extension) is left for the call-graph pass.
+- **type casts** (`bindTypeCastRef`) — a user-defined-type conversion
+  (`IToken(x)`, whether the callee parses as `UserDefinedTypeName` or a known
+  `Identifier`) binds to the contract/interface/library or UDVT decl
+  (`RefKind "type"`). Elementary casts (`address`/`uint…`) never bind.
+- **member field reads** (`bindMemberFieldRef`) — a non-call `expr.member_access`
+  whose receiver type resolves to a contract/interface/library binds `member` to
+  that type's state variable or function across its linearization. Struct/enum
+  members are skipped (the model has no per-member position).
+- **modifier usages** — captured positionally as `Function.ModifierUsages`
+  (`extractFunction`, name-token range); `pkg/report/xref.go` resolves each to
+  its modifier decl along the linearization (`modifierOwnerID`) and emits a
+  `modifier` reference.
 
 **Call Classification:**
 

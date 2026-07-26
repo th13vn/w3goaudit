@@ -112,6 +112,31 @@ type Event struct {
 	EndByte   int `json:"endByte,omitempty"`
 }
 
+// UDVTDef represents a user-defined value type declaration
+// (`type Currency is address;`). UDVTs are usually file-level and global, so
+// they are keyed by `absPath#Name` and stored on the Database, not a contract.
+type UDVTDef struct {
+	Name           string `json:"name"`
+	SourceFile     string `json:"sourceFile"`
+	UnderlyingType string `json:"underlyingType,omitempty"`
+
+	// SourceLocation for debugging / click-to-jump
+	StartLine int `json:"startLine,omitempty"`
+	EndLine   int `json:"endLine,omitempty"`
+	StartCol  int `json:"startCol,omitempty"`
+	EndCol    int `json:"endCol,omitempty"`
+	StartByte int `json:"startByte,omitempty"`
+	EndByte   int `json:"endByte,omitempty"`
+}
+
+// ID returns the canonical UDVT declaration id (absPath#Name).
+func (u *UDVTDef) ID() string {
+	if u == nil {
+		return ""
+	}
+	return u.SourceFile + "#" + u.Name
+}
+
 // ErrorDef represents a Solidity custom error declaration.
 type ErrorDef struct {
 	Name       string       `json:"name"`
