@@ -172,6 +172,31 @@ Import path resolution with remapping support.
   Foundry profile, and deterministically order applicable mappings
 - `findSubRoot(fromFile)` / `subProjectFor(fromFile)` - Locate and cache the owning sub-project
 
+**Fallback heuristics (`fallback.go`):**
+- Run only after remappings and the plain node_modules/lib/root stat fallbacks
+  all fail — i.e. for an import that would otherwise be recorded as
+  `import.unresolved`. They exist for block-explorer-fetched sources
+  (Etherscan standard-JSON / multi-file) whose import prefixes (`@prb/math/`,
+  `@openzeppelin/contracts/`, …) ship without a remappings file, so the prefix
+  cannot be predicted, only reconstructed.
+- `resolveByConvention(root, importPath)` rewrites known prefixes to the
+  directory layouts dependency managers conventionally install them under
+  (`conventionalLayouts`, sorted longest-prefix-first; OZ/OZ-upgradeable,
+  prb-math/prb-test, forge-std, ds-test, solmate/rari-solmate, solady,
+  Uniswap v2/v3). Each prefix lists ordered candidate targets and the first
+  existing regular file wins. prb-* list both the bare and `src/`-suffixed
+  target because those import spellings vary.
+- `resolveBySuffixMatch(root, importPath)` walks `lib/` and `node_modules/`
+  (bounded by `suffixWalkFileLimit`, skipping hidden/VCS dirs) and picks the
+  `.sol` file sharing the longest trailing path-segment suffix with the
+  import. A match must align **at least two** segments (`<dir>/<file>.sol`) and
+  be **unique** at the longest length; otherwise it abstains rather than guess.
+- Both accept only an existing regular file contained within the owning
+  sub-project (`withinRoot`, reusing the sub-project containment rule), so they
+  cannot invent a path or escape the scan tree. On failure resolution still
+  returns the import unchanged and the unresolved-import diagnostic is recorded.
+  Explicit remappings always take precedence — heuristics are last resort.
+
 **Used by:** Reader's `ResolveImports()` to load dependency files on-demand
 
 ### imports.go

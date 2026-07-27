@@ -330,6 +330,19 @@ func (r *Resolver) Resolve(importPath string, fromFile string) (string, error) {
 		return filepath.Abs(rootPath)
 	}
 
+	// Fallback heuristics (last resort). These accept only an existing regular
+	// file contained within the sub-project, so they cannot invent a path or
+	// escape the scan tree; on failure resolution still returns the import
+	// unchanged and the unresolved-import diagnostic is recorded downstream.
+	if candidate, ok := resolveByConvention(sub.Root, importPath); ok {
+		r.logf("  ✓ Resolved via conventional-layout heuristic: %s", candidate)
+		return filepath.Abs(candidate)
+	}
+	if candidate, ok := r.resolveBySuffixMatch(sub.Root, importPath); ok {
+		r.logf("  ✓ Resolved via suffix-match heuristic: %s", candidate)
+		return filepath.Abs(candidate)
+	}
+
 	// Return as-is if nothing found
 	r.logf("  ✗ Import NOT resolved, returning as-is: %s", importPath)
 	return importPath, nil
