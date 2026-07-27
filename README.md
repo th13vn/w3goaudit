@@ -85,13 +85,25 @@ files and a state-change report. See [Result folder layout](#result-folder-layou
   `charOffset`/`charLength`. These are not LSP positions; LSP lines and
   characters are zero-based and commonly use UTF-16 code units.
 - **WQL Templates** - Powerful query language for security pattern matching, with load-time validation (regex, preset names, filter/match placement) so typos fail fast instead of producing silent zero-finding scans. Includes a source-scope `regex` matcher for rare raw-source predicates and contract-scope AST matching for same-contract local/inherited combination rules.
-- **Result Folder** - One opinionated folder per scan: a `README.md` landing page, `summary.md`, `overview.md` (metrics + in-scope contract index), `findings.md`, always-on `results.sarif` + `run.log`, a machine-readable `data/` (`manifest.json`, reusable `database.json`, findings/overview, always-on `diagnostics.json`, plus nav/explorer data for the editor extension), and a `contracts/` tree mirroring source paths. Opt-in **fully offline** HTML mirror with `--html` (graph library embedded — no CDN request).
+- **Result Folder** - One opinionated folder per scan: a `README.md` landing page, `summary.md`, `overview.md` (metrics + in-scope contract index), `findings.md`, always-on `results.sarif` + `run.log`, a machine-readable `data/` (`manifest.json`, reusable `database.json`, findings/overview, always-on `diagnostics.json`, plus nav/explorer/xref data for the editor extension), and a `contracts/` tree mirroring source paths. Opt-in **fully offline** HTML mirror with `--html` (graph library embedded — no CDN request).
 - **Per-Entry Workflow Files** - For every entry function, a self-contained context block (signature, auth / access control, guards & checks, branch conditions, transitive state effects, Mermaid call workflow) — built to be fed to a human or an AI auditor.
 - **State-Change Matrix** - Per contract, each state variable mapped to the functions that write it and the entry points that reach a writer (reverse call-graph walk).
 - **Self-Provisioning Templates** - Downloads the latest [`w3goaudit-templates`](https://github.com/th13vn/w3goaudit-templates) release on first run (nuclei-style, no git clone), refreshable with `--update-templates`; embedded official pack is the always-available offline fallback. Extraction is size/file-count capped and installed with a rollback-safe staged directory swap. The GitHub zipball is TLS-authenticated but not checksum/signature verified.
 - **Reachability-Aware Findings** - Every finding can carry the full call chain from an externally-callable entry down to the function that hosts the dangerous statement: structured `reachability.steps[]` + `entryPoint` (auditor's fix-here pointer) + `primaryAst` in JSON, `relatedLocations` in SARIF, dotted-level trace block in Markdown / HTML, `↳ via …` continuation line on the `--verbose` console. Multi-site findings also carry `related[]`, and Markdown renders all matched sites with full function context.
 - **SARIF 2.1.0** - Always emitted (`results.sarif`) for GitHub Code Scanning, with portable relative URIs + `srcRoot`; fail-closed template loading, `NO_COLOR`-aware console.
+- **Editor Cross-Reference** - `data/xref.json` pairs `declarations[]` jump
+  targets with `references[]` occurrences that carry the declaration `refId`, so
+  an editor gets exact go-to-definition and find-references (state vars,
+  parameters, locals, resolved calls, library `using`, UDVT `wrap`/`unwrap`,
+  type casts, `revert`/`emit` targets, applied modifiers) with no regex
+  fallback. See [Extension Output](./docs/extension-output.md).
 - **Project Detection** - Auto-detect Foundry, Hardhat, Truffle
+- **Import Resolution** - Foundry remappings (profile- and context-aware, per
+  sub-project), then `node_modules/`/`lib/`/root search, then last-resort
+  conventional-layout and unique-suffix heuristics so block-explorer-fetched
+  sources that ship no remappings file still link. Heuristics accept only an
+  existing file inside the scan tree and abstain on ambiguity; anything still
+  unresolved is recorded in `data/diagnostics.json`.
 - **Git Integration** - Auto-detect git repos and generate clickable file links to GitHub/GitLab
 - **Advanced Metrics** - nSLOC, Access Control Analysis, Grouped Entry Points
 - **Source Extraction** - Extract function source, context bundles, and full transitive workflow source
@@ -106,6 +118,7 @@ Comprehensive guides available in [`docs/`](./docs):
 - **[Usage Guide](./docs/usage.md)** - Complete CLI and SDK reference
 - **[SDK Documentation](./docs/sdk.md)** - Comprehensive SDK API reference and integration guide
 - **[WQL Syntax](./docs/wql-syntax.md)** - Template writing reference
+- **[Extension Output](./docs/extension-output.md)** - `data/nav.json` + `data/explorer.json` + `data/xref.json` schemas for editor integrations
 - **[Project Overview](./docs/project-overview.md)** - Architecture and design
 - **[Internals](./docs/internals.md)** - Technical deep-dive: functions, workflows, algorithms (C3, taint, access-control), and precision/edge-case decisions
 
@@ -161,7 +174,8 @@ human or AI auditor:
 │   ├── overview.json
 │   ├── diagnostics.json    # analysis-quality diagnostics; [] when complete
 │   ├── nav.json           # flat symbol/caller/interface-impl index (extension)
-│   └── explorer.json      # per-main-contract model: constants, storage, entry/getter fns
+│   ├── explorer.json      # per-main-contract model: constants, storage, entry/getter fns
+│   └── xref.json          # precise xref: declarations[] + references[] (go-to-def / find-refs)
 └── contracts/             # one sub-tree per main contract, mirroring source paths
     └── <relative-source-path-without-ext>/
         └── <ContractName>/

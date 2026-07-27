@@ -284,7 +284,7 @@ w3goaudit ./contracts/ -v
 
 📂 Results written to: ./contracts-audit
    README.md · summary.md · overview.md · findings.md · results.sarif · run.log
-   data/ (manifest.json, findings.json, overview.json, diagnostics.json, database.json, nav.json, explorer.json)
+   data/ (manifest.json, findings.json, overview.json, diagnostics.json, database.json, nav.json, explorer.json, xref.json)
    contracts/<path>/<Contract>/ (README.md, state-changes.md, workflows/)
 ```
 
@@ -310,7 +310,8 @@ to be fed to a human or an AI auditor:
 │   ├── overview.json
 │   ├── diagnostics.json    # analysis-quality diagnostics; [] when complete
 │   ├── nav.json           # extension navigation index (symbols, callers, interfaceImpl)
-│   └── explorer.json      # extension explorer model (per-contract constants/storage/entries/getters)
+│   ├── explorer.json      # extension explorer model (per-contract constants/storage/entries/getters)
+│   └── xref.json          # extension cross-reference index (declarations[] + references[])
 └── contracts/             # one sub-tree per main contract, mirroring source paths
     └── <relative-source-path-without-ext>/
         └── <ContractName>/
@@ -863,8 +864,9 @@ Machine-readable mirror; each carries `schemaVersion: "2.0.0"`.
 | `data/diagnostics.json` | `{ schemaVersion, generatedAt, analysisComplete, counts, diagnostics[] }`; always emitted |
 | `data/nav.json` | `{ schemaVersion, symbols[], callers[], interfaceImpl[] }` — navigation index for the VSCode extension |
 | `data/explorer.json` | `{ schemaVersion, contracts[] }` — per-deployable-contract constants/storage/entryFunctions/getters, for the extension's explorer tab |
+| `data/xref.json` | `{ schemaVersion, declarations[], references[] }` — precise, type-resolved cross-reference index: jump targets plus every bound occurrence (`refId` + `refKind`), for regex-free go-to-definition and find-references |
 
-See [`docs/extension-output.md`](./extension-output.md) for the full `nav.json` / `explorer.json` schema.
+See [`docs/extension-output.md`](./extension-output.md) for the full `nav.json` / `explorer.json` / `xref.json` schema.
 
 Each finding includes optional `references[]`, `fix`, and `recommendation`.
 Findings can also carry structured context fields:

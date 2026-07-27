@@ -12,15 +12,16 @@ Central database structure.
 **Main Type:**
 ```go
 type Database struct {
-    ProjectRoot   string
-    ScanTarget    string
-    Diagnostics   []Diagnostic
-    SourceFiles   map[string]*SourceFile
-    Contracts     map[string]*Contract
-    MainContracts map[string]*MainContractEntry  // contractID → entry with funcs + linearization
-    CallGraph     *CallGraph
-    DataFlow      *DataFlowGraph
-    Semantics     *SemanticFacts
+    ProjectRoot           string
+    ScanTarget            string
+    Diagnostics           []Diagnostic
+    SourceFiles           map[string]*SourceFile
+    Contracts             map[string]*Contract
+    MainContracts         map[string]*MainContractEntry  // contractID → entry with funcs + linearization
+    UserDefinedValueTypes []*UDVTDef                     // `type X is <T>;`, keyed absPath#Name
+    CallGraph             *CallGraph
+    DataFlow              *DataFlowGraph
+    Semantics             *SemanticFacts
 }
 
 type MainContractEntry struct {
@@ -28,6 +29,19 @@ type MainContractEntry struct {
     LinearizedBases   []string  // compatibility/display names, derived first
     LinearizedBaseIDs []string  // exact file#Contract C3 identities
 }
+
+// A user-defined value type declaration. UDVTs are usually file-level and
+// global, so they live on the Database rather than a contract. Captured so
+// `X.wrap(...)`/`X.unwrap(...)` occurrences bind to a jump target in
+// data/xref.json.
+type UDVTDef struct {
+    Name           string
+    SourceFile     string
+    UnderlyingType string
+    StartLine, EndLine, StartCol, EndCol, StartByte, EndByte int
+}
+
+func (u *UDVTDef) ID() string  // absPath#Name
 ```
 
 **Key Functions:**
@@ -53,6 +67,9 @@ type MainContractEntry struct {
   plus source-scoped name fallback. The lookup is read-only and never appends
   diagnostics while reports/navigation consume the database.
 - `FindContractsByName(name)` - Returns every contract sharing a name (explicit collision handling)
+- `UniqueUDVTByName(name)` - The sole matching user-defined value type, or `nil`
+  when there is none or the name is declared in more than one file. Ambiguity
+  yields `nil` so xref binding stays exact rather than guessing.
 - `UnresolvedBases()` - Sorted base-contract names referenced in inheritance but absent from the DB (unresolved imports); surfaced by the CLI as "⚠ Unresolved references"
 - `CalculateMainContracts()` - Identify deployable contracts
 - `GetStats()` - Database statistics
@@ -130,6 +147,7 @@ and otherwise remain ambiguous; exact resolution never uses directory proximity.
 **ID Formats:**
 - Contract ID: `absPath#ContractName`
 - Function ID: `absPath#ContractName.functionSelector`
+- UDVT ID (`UDVTDef.ID()`): `absPath#TypeName`
 
 ### source.go
 Source extraction helpers added on `*Database`.
@@ -206,17 +224,30 @@ Contract representation.
 type Contract struct {
     ID                string
     Name              string
-    Kind              string  // contract|interface|library|abstract
+    Kind              ContractKind  // contract|interface|library|abstract
     SourceFile        string
     Functions         []*Function
-    StateVars         []*StateVariable
+    StateVariables    []*StateVariable
     Structs           []*Struct
+    Enums             []*Enum
     Events            []*Event
+    Errors            []*ErrorDef   // custom `error` declarations (xref jump targets)
+    Modifiers         []*Modifier
+    UsingDirectives   []*UsingDirective
+    IsAbstract        bool
     BaseContracts     []string
     LinearizedBases   []string  // compatibility/display C3 names
     LinearizedBaseIDs []string  // exact derived-first file#Contract IDs
     InheritanceWeight int
     StartLine, EndLine, StartCol, EndCol, StartByte, EndByte int  // see ast.go note above
+}
+
+// A Solidity custom error declaration. Captured so `revert CustomError(...)`
+// occurrences bind to a jump target in data/xref.json.
+type ErrorDef struct {
+    Name       string
+    Parameters []*Parameter
+    StartLine, EndLine, StartCol, EndCol, StartByte, EndByte int
 }
 ```
 
@@ -246,6 +277,7 @@ type Function struct {
     Visibility      string  // public|external|internal|private
     StateMutability string  // ""(nonpayable)|payable|view|pure
     Modifiers       []string
+    ModifierUsages  []*ModifierUsage  // applied-modifier occurrences (name-token ranges)
     Parameters      []*Parameter
     Returns         []*Parameter
     Selector        string  // canonical signature text, e.g. "transfer(address,uint256)"
@@ -258,6 +290,14 @@ type Function struct {
     EndCol          int  // 1-based Unicode-code-point column of EndLine
     StartByte       int  // 0-based UTF-8 byte offset into the source file
     EndByte         int  // 0-based UTF-8 byte offset into the source file
+}
+
+// An applied-modifier occurrence on a function signature. The range spans the
+// modifier-NAME token only (not its arguments), so data/xref.json can bind the
+// usage to its modifier declaration. `Modifiers` stays the plain name list.
+type ModifierUsage struct {
+    Name string
+    StartLine, EndLine, StartCol, EndCol, StartByte, EndByte int
 }
 ```
 
@@ -329,7 +369,9 @@ type ASTNode struct {
     Children   []*ASTNode
     Parent     *ASTNode
     Attributes map[string]interface{}
-    RefKind    string  // parameter|state_var|local_var (for taint)
+    RefID      string  // exact declaration this node resolves to ("" when unbound)
+    RefKind    string  // parameter|state_var|local_var (taint) plus the xref-only
+                       // function|library|event|error|modifier|type|udvt
     StartLine  int
     EndLine    int
     StartCol   int  // 1-based Unicode-code-point column of StartLine

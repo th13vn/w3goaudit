@@ -4,6 +4,101 @@ All notable changes to w3goaudit are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/). Output changes note the `data/*.json`
 `schemaVersion`.
 
+## v0.4.1 - 2026-07-27
+
+Additive release on top of v0.4.0. Output schema stays `2.0.0`: the new
+`data/xref.json` artifact and the new `Database`/`Contract`/`Function` fields are
+purely additive, and every existing artifact keeps its shape. No template,
+WQL, or CLI-flag changes.
+
+### Precise cross-reference artifact (`data/xref.json`)
+
+A third extension data-layer artifact (`report.BuildXrefJSON`,
+`pkg/report/xref.go`), written by `WriteBundle` and indexed in `manifest.json`
+under `files.data.xref`. It gives an editor exact go-to-definition and
+find-references with **no regex fallback**:
+
+- `declarations[]` — every jump target keyed by its canonical id, with `kind` ∈
+  `contract|interface|library|function|modifier|event|error|struct|enum|stateVar|parameter|local|udvt`
+  and the name-token range (falling back to the declaration span).
+- `references[]` — one entry per bound occurrence: the file, the exact token
+  range, the declaration `refId`, and `refKind` ∈
+  `state_var|parameter|local_var|function|library|event|error|modifier|type|udvt`.
+- Bound occurrence coverage: identifiers (state vars, parameters, locals),
+  resolved internal/external/self/super and library `using` calls, UDVT
+  `wrap`/`unwrap`, type casts, `revert`/`emit` targets, and applied modifiers.
+- Both tables are total-order sorted, so `xref.json` is byte-stable across runs.
+
+Supporting builder/type work, all additive:
+
+- Backfilled identifier source positions from a located parent (member/call
+  receivers, index bases, assignment lvalues), since solast-go ranges postfix
+  expressions but not every interior operand. What stays unlocated is **omitted
+  rather than approximated**.
+- Captured custom error declarations (`Contract.Errors`, new `types.ErrorDef`)
+  and bound `revert X()` / `emit E()` occurrences to them.
+- Captured user-defined value types (`Database.UserDefinedValueTypes`, new
+  `types.UDVTDef` keyed `absPath#Name`, plus `Database.UniqueUDVTByName`) and
+  bound `T.wrap`/`T.unwrap` to the declaration. An ambiguous name binds to
+  nothing.
+- Captured applied-modifier usages with name-token ranges
+  (`Function.ModifierUsages`, new `types.ModifierUsage`); the owner is resolved
+  along the C3 linearization.
+- Bound AST call nodes to their resolved call-graph target by call-site byte,
+  resolved non-call member-field reads through the receiver's type contract id,
+  and bound type-cast callees to their type declaration.
+
+See [`docs/extension-output.md`](./docs/extension-output.md) for the full schema.
+
+### Import resolution — last-resort heuristics
+
+Verified sources fetched from block explorers (Etherscan standard-JSON /
+multi-file) frequently ship prefixes such as `@prb/math/` or
+`@openzeppelin/contracts/` with **no remappings file**, so the prefix cannot be
+predicted, only reconstructed. Two heuristics (`pkg/reader/fallback.go`) now run
+**only** for an import that remappings and the `node_modules/`/`lib/`/root stat
+fallbacks all failed to resolve — i.e. one that would otherwise be recorded as
+`import.unresolved`:
+
+- `resolveByConvention` rewrites well-known prefixes to the layouts dependency
+  managers conventionally install them under (OpenZeppelin + upgradeable,
+  prb-math/prb-test, forge-std, ds-test, solmate/rari-solmate, solady,
+  Uniswap v2/v3), longest-prefix-first, first existing file wins.
+- `resolveBySuffixMatch` picks the `.sol` file under `lib/`/`node_modules/`
+  sharing the longest trailing path-segment suffix with the import, requiring
+  **at least two** aligned segments and **uniqueness** at the longest length.
+
+Both accept only an existing regular file contained within the owning
+sub-project, abstain on ambiguity, and never invent a path; explicit remappings
+always win. An import neither heuristic can resolve still returns unchanged and
+still records its unresolved-import diagnostic, so `--strict-imports` behavior is
+unchanged.
+
+### Documentation
+
+- Documented `data/xref.json` end to end: `README.md` (feature bullet +
+  result-folder tree + docs index), root `INDEX.md` (pipeline, invariants,
+  report notes), `docs/usage.md`, `docs/workflows.md`,
+  `docs/project-overview.md`, `docs/internals.md` (new §5.2.1 on xref reference
+  binding), `docs/sdk.md` (`BuildXrefJSON` + `XrefJSON`/`XrefDecl`/`XrefRef`),
+  and `docs/extension-output.md`.
+- Documented the import-resolution heuristics in `README.md`,
+  root `INDEX.md`, `docs/internals.md`, and `pkg/reader/INDEX.md`.
+- Corrected the stale `Contract` struct in `pkg/types/INDEX.md`
+  (`StateVariables`, not `StateVars`; `Kind` is a `ContractKind`; `Errors`,
+  `Modifiers`, `Enums`, `IsAbstract`, `UsingDirectives` were missing) and
+  documented the new types alongside it.
+- The scan console summary now lists `nav.json`, `explorer.json`, and
+  `xref.json` under `data/`, matching what is actually written (it previously
+  listed only the first five).
+
+### Quality gate
+
+Unchanged from v0.4.0 — the competitive gate still passes at TP 109 / FP 41 /
+FN 0 (precision 72.67%, recall 100%, zero failed cases), stored as
+`benchmarks/2026-07-27-v0.4.1-xref-import-fallback.md`. `go vet ./...` and
+`go test ./...` are clean.
+
 ## v0.4.0 - 2026-07-20
 
 Major release. Precise source locations (**output schema 2.0.0**, breaking), the

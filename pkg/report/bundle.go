@@ -38,7 +38,7 @@ func bundleNow(opts BundleOptions) time.Time {
 //	├── overview.md        # metrics + in-scope contract index
 //	├── findings.md        # full findings
 //	├── results.sarif
-//	├── data/{manifest.json,findings.json,overview.json,diagnostics.json,database.json,nav.json,explorer.json}
+//	├── data/{manifest.json,findings.json,overview.json,diagnostics.json,database.json,nav.json,explorer.json,xref.json}
 //	└── contracts/<relative-source-path-without-ext>/<ContractName>/
 //	    ├── README.md          # per-contract landing (findings + detail)
 //	    ├── state-changes.md

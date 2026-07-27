@@ -23,7 +23,7 @@ any other downstream tool — build jump-to-definition, find-references,
 Solidity**. They are read directly off disk; nothing here requires the CLI to
 run a server.
 
-Both documents share a `schemaVersion` field, currently `"2.0.0"`
+All three documents share a `schemaVersion` field, currently `"2.0.0"`
 (`report.SchemaVersion`), the same version used by `overview.json` /
 `findings.json`. Consumers should refuse to parse on a major-version
 mismatch, per the general JSON versioning policy (see
@@ -31,7 +31,7 @@ mismatch, per the general JSON versioning policy (see
 
 ## Shared: `SrcRange`
 
-Every location in both files uses the same shape:
+Every location in all three files uses the same shape:
 
 ```jsonc
 {
@@ -312,7 +312,7 @@ across runs.
 
 ## Consumption model
 
-Both files are plain, static JSON — no server, no long-lived process, no
+All three files are plain, static JSON — no server, no long-lived process, no
 schema negotiation beyond checking `schemaVersion`. A consumer:
 
 1. Reads `data/manifest.json` to discover the relative paths
@@ -322,10 +322,14 @@ schema negotiation beyond checking `schemaVersion`. A consumer:
    index in memory (ID → `SrcRange`, ID → `[]NavCaller`).
 3. Loads `explorer.json` once per scan to populate an explorer tree keyed
    by main-contract ID.
-4. Uses `SrcRange.file` + 1-based line/col (or the byte offsets, for exact
+4. Loads `xref.json` once per scan to build a declaration table
+   (`refId` → `SrcRange`) plus an occurrence index for go-to-definition and
+   find-references; a cursor position maps to the reference whose `range`
+   covers it.
+5. Uses `SrcRange.file` + 1-based line/col (or the byte offsets, for exact
    substring extraction) to open the source file and jump to or highlight
    the exact span — no re-parsing of Solidity required.
 
-Because both are regenerated on every `WriteBundle` call, re-scanning after
-an edit simply produces a fresh, self-consistent pair of files; there is no
+Because all three are regenerated on every `WriteBundle` call, re-scanning after
+an edit simply produces a fresh, self-consistent set of files; there is no
 incremental-update protocol to implement on the consumer side.

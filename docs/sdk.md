@@ -385,18 +385,19 @@ func FormatFindingsAsHTML(findings []*engine.Finding, db *types.Database) string
 func FormatFindingsAsSARIF(findings []*engine.Finding, tool ToolMeta, projectRoot string) (string, error)
 
 // WriteBundle renders the complete scan result folder (overview.md, findings.md,
-// results.sarif, data/{manifest,database,findings,overview,diagnostics,nav,explorer}.json, and one
+// results.sarif, data/{manifest,database,findings,overview,diagnostics,nav,explorer,xref}.json, and one
 // folder per main contract with state-changes.md + workflows/<entryFn>.md).
 // run.log is written separately by the CLI; HTML mirrors are added when
 // opts.HTML is set.
 func WriteBundle(dir string, db *types.Database, summary *SummaryReport,
     findings []*engine.Finding, tool ToolMeta, opts BundleOptions) error
 
-// BuildNavJSON/BuildExplorerJSON produce the two extension data-layer models
-// (see below); WriteBundle calls both internally to emit data/nav.json and
-// data/explorer.json.
+// BuildNavJSON/BuildExplorerJSON/BuildXrefJSON produce the three extension
+// data-layer models (see below); WriteBundle calls all three internally to emit
+// data/nav.json, data/explorer.json, and data/xref.json.
 func BuildNavJSON(db *types.Database) *NavJSON
 func BuildExplorerJSON(db *types.Database) *ExplorerJSON
+func BuildXrefJSON(db *types.Database) *XrefJSON
 func BuildDiagnosticsJSON(db *types.Database) *DiagnosticsJSON
 
 // Severity helpers — the single source of truth shared by the formatters and
@@ -411,7 +412,7 @@ func IsKnownSeverity(s string) bool
 - Format findings as Markdown/HTML/SARIF/JSON
 - Generate project summaries
 - Write the complete scan result folder (`WriteBundle`)
-- Build the extension data layer (`BuildNavJSON`/`BuildExplorerJSON`)
+- Build the extension data layer (`BuildNavJSON`/`BuildExplorerJSON`/`BuildXrefJSON`)
 - Create call graph visualizations
 - Extract code snippets
 
@@ -423,10 +424,11 @@ when emitted. Finding/content order is deterministic. Real timestamps vary;
 inject the same fixed `Now` into `GeneratorOptions` and `BundleOptions` when a
 byte-stable complete bundle is required.
 
-> **v0.4 — extension data layer:** `BuildNavJSON` and `BuildExplorerJSON`
-> (`pkg/report/nav.go`, `pkg/report/explorer.go`) build the two JSON models
-> the VSCode extension consumes (`data/nav.json` / `data/explorer.json`;
-> `WriteBundle` calls both automatically). Both share `SrcRange`, a compact
+> **v0.4 — extension data layer:** `BuildNavJSON`, `BuildExplorerJSON`, and
+> `BuildXrefJSON` (`pkg/report/nav.go`, `pkg/report/explorer.go`,
+> `pkg/report/xref.go`) build the three JSON models the VSCode extension
+> consumes (`data/nav.json` / `data/explorer.json` / `data/xref.json`;
+> `WriteBundle` calls all three automatically). All share `SrcRange`, a compact
 > one-based Unicode-code-point line/column span with zero-based UTF-8 byte
 > offsets and omitted zero
 > fields:
@@ -483,8 +485,40 @@ byte-stable complete bundle is required.
 > }
 > ```
 >
+> `XrefJSON` is the precise cross-reference index — two flat, total-order
+> sorted tables, so the artifact is byte-stable across runs:
+>
+> ```go
+> type XrefJSON struct {
+>     SchemaVersion string
+>     Declarations  []*XrefDecl   // jump targets, deduplicated by ID (first wins)
+>     References    []*XrefRef    // bound occurrences; omitted when empty
+> }
+>
+> type XrefDecl struct {
+>     ID    string     // canonical decl id (file#Contract, functionID.paramName, …)
+>     Kind  string     // contract|interface|library|function|modifier|event|error|
+>                      // struct|enum|stateVar|parameter|local|udvt
+>     Name  string
+>     Range SrcRange   // name token where available, else the declaration span
+> }
+>
+> type XrefRef struct {
+>     File    string    // authoritative; Range.File is omitted
+>     Range   SrcRange
+>     RefID   string    // an XrefDecl.ID
+>     RefKind string    // state_var|parameter|local_var|function|library|
+>                       // event|error|modifier|type|udvt
+> }
+> ```
+>
+> Go-to-definition: find the reference whose `Range` covers the cursor, then
+> look up `RefID` in `Declarations`. Find-references: group `References` by
+> `RefID`. Occurrences the builder cannot bind to an exact declaration and pin
+> to a real span are omitted rather than approximated.
+>
 > See [`docs/extension-output.md`](./extension-output.md) for the full
-> `nav.json` / `explorer.json` schema and worked examples.
+> `nav.json` / `explorer.json` / `xref.json` schema and worked examples.
 
 `NavJSON.Callers` contains only resolved edges whose fully qualified callee ID
 maps to an existing exact function. Bare, malformed, unresolved, and stale

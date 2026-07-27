@@ -258,7 +258,7 @@ graph TD
     A[Findings + Database + Summary] --> B[WriteBundle]
     B --> C[overview.md / findings.md]
     B --> D[results.sarif]
-    B --> E[data/ database.json, findings.json, overview.json, diagnostics.json, manifest.json, nav.json, explorer.json]
+    B --> E[data/ database.json, findings.json, overview.json, diagnostics.json, manifest.json, nav.json, explorer.json, xref.json]
     B --> F["per-contract: state-changes.md + workflows/&lt;entryFn&gt;.md"]
     B -->|--html| G[overview.html / findings.html]
     H[CLI] --> I[run.log: full verbose detail, always]
@@ -284,8 +284,11 @@ graph TD
   graph, interface→implementation), built by
   [nav.go](../pkg/report/nav.go); `data/explorer.json` — per-main-contract
   model (ordered constants/storage, entry-callable functions, view getters),
-  built by [explorer.go](../pkg/report/explorer.go). Both are manifest-indexed
-  and feed a future VSCode Solidity extension (see
+  built by [explorer.go](../pkg/report/explorer.go); `data/xref.json` —
+  precise cross-reference index (`declarations[]` jump targets plus
+  `references[]` occurrences carrying the declaration `refId`), built by
+  [xref.go](../pkg/report/xref.go). All three are manifest-indexed
+  and feed the VSCode Solidity extension (see
   [docs/extension-output.md](./extension-output.md))
 - `run.log` — full verbose detail, always written by the CLI regardless of `--verbose`
 

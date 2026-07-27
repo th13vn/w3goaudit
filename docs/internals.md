@@ -93,7 +93,15 @@ remappings**:
   `packages/x/src/Foo.sol` resolves against `packages/x/`'s config, not the git root.
 - Remapping precedence: `remappings.txt` → `foundry.toml remappings=[...]` →
   framework defaults (forge-std, `lib/*/src/`, OpenZeppelin) → fallback search
-  (`node_modules/` → `lib/` → project root → as-is).
+  (`node_modules/` → `lib/` → project root) → last-resort heuristics → as-is.
+- Last-resort heuristics (`fallback.go`) run only for imports the above cannot
+  resolve, so explorer-fetched sources whose prefixes ship without a remappings
+  file still link. `resolveByConvention` rewrites well-known prefixes
+  (`@openzeppelin/`, `@prb/`, `forge-std/`, `solmate/`, `solady/`, Uniswap) to
+  their conventional install layouts; `resolveBySuffixMatch` picks the `.sol`
+  file under `lib/`/`node_modules/` sharing the longest ≥2-segment path suffix,
+  abstaining unless that longest match is unique. Both accept only an existing
+  regular file contained within the owning sub-project (`withinRoot`).
 - `ResolveImports` loads transitively with an iterative loop over a growing
   `SourceFiles` slice, dedup-guarded against import cycles.
 - Import directives are lexed with Solidity comment/string rules and decoded
@@ -284,8 +292,11 @@ as proof of identity.
 
 `ASTNode{ Kind, Name, Value, RefID, RefKind, TaintSources, Attributes, Parent,
 Children, StartLine, EndLine, StartCol, EndCol, StartByte, EndByte }`.
-`RefKind` ∈ `parameter`/`state_var`/`local_var`
-drives taint provenance.
+`RefKind` ∈ `parameter`/`state_var`/`local_var` drives taint provenance. The
+xref pass (see §5.2.1) reuses the same `RefID`/`RefKind` pair for
+declaration-bound occurrences, adding
+`function`/`library`/`event`/`error`/`modifier`/`type`/`udvt`; those kinds carry
+no taint meaning and are inert to the evaluator.
 
 **Complete kind list** (from `ast.go`):
 
@@ -304,6 +315,29 @@ drives taint provenance.
   `asm.sstore`, `asm.sload`, `asm.selfdestruct`, `asm.create`, `asm.create2`,
   `asm.log0`–`asm.log4`, `asm.return`, `asm.revert`, `asm.operation` (catch-all
   for any other opcode, e.g. `mload`/`mstore`/`add`).
+
+#### 5.2.1 Xref reference binding
+
+`RefID`/`RefKind` on a located node is what `pkg/report/xref.go` turns into a
+`references[]` entry, so binding happens once in the builder rather than in the
+report layer:
+
+- **identifiers** — state vars, parameters, and locals, once the builder can pin
+  an exact position. solast-go ranges postfix expressions but not every interior
+  operand, so positions are backfilled from a located parent (member/call
+  receivers, index bases, assignment lvalues). What stays unlocated is omitted,
+  never approximated.
+- **resolved calls** — internal/external/self/super and library `using` calls
+  bind to the call-graph target by call-site byte (`function` / `library`).
+- **UDVT `wrap`/`unwrap`** — bind to the `type X is <T>;` declaration
+  (`Database.UserDefinedValueTypes`, keyed `absPath#Name`). An ambiguous name
+  (same UDVT name in more than one file) binds to nothing.
+- **type casts** — `IToken(x)` binds to the type declaration (`type`).
+- **`revert` / `emit` / applied modifiers** — bind to the custom error, event,
+  and modifier declarations; the modifier owner is resolved along the C3
+  linearization, and the usage range spans the name token only.
+
+See [`docs/extension-output.md`](./extension-output.md) for the emitted schema.
 
 ### 5.3 Semantic groups (what each WQL group includes)
 
@@ -691,7 +725,7 @@ for MRO and callee resolution, but reachability files prefer each exact
 ├── findings.md                 # FormatFindingsAsMarkdown
 ├── results.sarif               # FormatFindingsAsSARIF (always)
 ├── run.log                     # CLI tees verbose logs here
-├── data/{manifest.json, database.json, findings.json, overview.json, diagnostics.json, nav.json, explorer.json}
+├── data/{manifest.json, database.json, findings.json, overview.json, diagnostics.json, nav.json, explorer.json, xref.json}
 ├── contracts/<rel-src-path-no-ext>/<MainContract>/
 │   ├── README.md               # FormatContractReadme (findings + detail)
 │   ├── state-changes.md        # reachability/state-write matrix

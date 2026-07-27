@@ -16,14 +16,15 @@ graph LR
     Types --> Engine[pkg/engine]
     Templates[templates/ WQL] --> Engine
     Engine --> Report[pkg/report]
-    Report --> Nav[data/nav.json + data/explorer.json]
+    Report --> Nav[data/nav.json + data/explorer.json + data/xref.json]
 ```
 
 Canonical pipeline: `Reader -> Builder -> Database -> Engine -> Report`. Source
 locations (line/col/byte, from solast-go) are threaded from the builder onto
 AST nodes and declarations all the way through to `Report`, which also derives
-the extension-facing `nav.json`/`explorer.json` navigation artifacts from the
-finished `Database`/`Findings`, independent of the WQL template surface.
+the extension-facing `nav.json`/`explorer.json`/`xref.json` navigation
+artifacts from the finished `Database`/`Findings`, independent of the WQL
+template surface.
 
 ## Package Map
 
@@ -130,7 +131,7 @@ run-output scratch directory.
   builder, engine, database loading, template loading, and report generation.
   Package-global verbose flags/writers remain deprecated compatibility wrappers
   for legacy constructors only; scan-local objects never consult them.
-- A normal scan writes one result folder containing `README.md`, `summary.md`, `overview.md`, `findings.md`, `results.sarif`, `run.log`, `data/` (with `manifest.json` index, plus `nav.json` and `explorer.json`), and a `contracts/` tree (per-main-contract folders mirroring source paths, each with its own `README.md`).
+- A normal scan writes one result folder containing `README.md`, `summary.md`, `overview.md`, `findings.md`, `results.sarif`, `run.log`, `data/` (with `manifest.json` index, plus `nav.json`, `explorer.json`, and `xref.json`), and a `contracts/` tree (per-main-contract folders mirroring source paths, each with its own `README.md`).
 - AST nodes and declarations (`Function`/`Modifier`/`Contract`/`StateVariable`/`Event`/`Struct`/`Enum`/`Parameter`) carry `StartCol`/`EndCol`/`StartByte`/`EndByte` alongside `StartLine`/`EndLine` (one-based Unicode-code-point columns and zero-based UTF-8 byte offsets; both end fields are half-open; zero/omitted for synthetic nodes). `FunctionCall`/`CallEdge` carry point `Col`/`Byte` fields too. The builder derives columns from a once-per-source sparse line/non-ASCII index instead of the parser's byte-oriented column field: O(log non-ASCII runes on the line) per endpoint and O(lines + non-ASCII runes) index memory. Invalid conversions retain lines/bytes, omit columns, and record `location.invalid`. Output schema remains `2.0.0`; this requires solast-go v0.1.7+.
 - A WQL document is meta plus one query: block. The block holds
   `select`/`from`/`where` or a one-level `and:`/`or:` query composition.
@@ -231,6 +232,15 @@ run-output scratch directory.
   rejects malformed escaped paths. Foundry remappings honor the active profile
   and context relative to the importing file's owning sub-project; applicable
   mappings rank by context specificity, then import-prefix specificity.
+- When remappings and the node_modules/lib/root stat fallbacks all fail, two
+  last-resort heuristics run before an import is recorded unresolved (for
+  block-explorer sources whose prefixes ship without a remappings file):
+  conventional dependency-layout rewriting of well-known prefixes
+  (`@openzeppelin/`, `@prb/`, `forge-std/`, `solmate/`, `solady/`, Uniswap, …),
+  then a unique longest-suffix match against the on-disk `lib/`/`node_modules/`
+  tree requiring ≥2 aligned path segments. Both accept only an existing regular
+  file contained within the owning sub-project and abstain on ambiguity;
+  explicit remappings always win.
 - Parsed calls with known arguments never resolve a same-name declaration of
   the wrong arity. They retain no exact target and emit one durable
   `identity.unresolved` diagnostic with the observed arity. Serialized
@@ -267,7 +277,7 @@ Compatibility/exactness repair notes:
 | `docs/project-overview.md` | Architecture and package-level system design |
 | `docs/workflows.md` | Scan/build/report execution workflows |
 | `docs/wql-syntax.md` | WQL template language reference |
-| `docs/extension-output.md` | `data/nav.json` + `data/explorer.json` schema for the future VSCode extension |
+| `docs/extension-output.md` | `data/nav.json` + `data/explorer.json` + `data/xref.json` schema for the VSCode extension |
 | `docs/usage.md` | Full CLI usage, flags, result artifacts |
 | `docs/sdk.md` | Go SDK package/type/function reference |
 
@@ -324,8 +334,20 @@ Compatibility/exactness repair notes:
 - `data/nav.json` is a flat symbol-level navigation index (definitions, caller
   edges, interface→implementation map); `data/explorer.json` is a
   per-main-contract model (ordered constants/storage, entry-callable functions,
-  view getters). Both are built in `pkg/report` (`nav.go`/`explorer.go`),
-  manifest-indexed, and share the same `schemaVersion` as `overview.json`/`findings.json`.
+  view getters); `data/xref.json` is a precise, type-resolved cross-reference
+  index (`declarations[]` jump targets plus `references[]` occurrences carrying
+  the declaration `refId`) that gives regex-free go-to-definition and
+  find-references. All three are built in `pkg/report`
+  (`nav.go`/`explorer.go`/`xref.go`), manifest-indexed, and share the same
+  `schemaVersion` as `overview.json`/`findings.json`.
+- Xref references are only emitted for occurrences the builder can bind to an
+  exact declaration and pin to a real source span: identifiers (state vars,
+  parameters, locals), resolved internal/external/self/super and library
+  `using` calls, UDVT `wrap`/`unwrap`, type casts, `revert`/`emit` targets, and
+  applied modifiers. Interior operands and struct/enum member positions that
+  solast-go does not range are omitted rather than approximated, and an
+  ambiguous UDVT name binds to nothing. Both tables are total-order sorted, so
+  `xref.json` is byte-stable across runs.
 
 ## Change Checklist
 

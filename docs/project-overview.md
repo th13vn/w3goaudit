@@ -19,7 +19,7 @@
 - Per-function effects analysis (state writes, guards, access control)
 - WQL template-based vulnerability detection (`meta` plus one `query:` block)
 - Result-folder output: `overview.md`, `findings.md`, `results.sarif`, `run.log`, a machine-readable `data/`
-  (including extension-facing `nav.json`/`explorer.json`), and per-main-contract workflow files + a
+  (including extension-facing `nav.json`/`explorer.json`/`xref.json`), and per-main-contract workflow files + a
   state-change matrix; opt-in HTML mirror
 - Self-provisioning template home (`~/.w3goaudit`) with release download + embedded fallback
 - Project framework detection (Foundry, Hardhat, Truffle)
@@ -53,8 +53,10 @@
 - `overview.md` is the report index and links to detailed artifacts
 - Per-entry-function workflow files (signature, auth, guards, branch conditions, state effects, call workflow)
 - A per-contract state-change matrix (state var → writers → reaching entry points)
-- An extension-facing data layer — `data/nav.json` (symbol navigation index) and
-  `data/explorer.json` (per-contract explorer model) — for a future VSCode Solidity extension
+- An extension-facing data layer — `data/nav.json` (symbol navigation index),
+  `data/explorer.json` (per-contract explorer model), and `data/xref.json`
+  (precise cross-reference: declarations + bound references) — for the VSCode
+  Solidity extension
 - Console output with color-coded severity and reachability traces
 - Opt-in HTML mirror with interactive visualizations
 
@@ -146,6 +148,7 @@ w3goaudit/
 │   │   ├── manifest.go     # Complete result-folder machine index
 │   │   ├── nav.go          # data/nav.json: symbol navigation index (defs, callers, interface→impl)
 │   │   ├── explorer.go     # data/explorer.json: per-main-contract explorer model
+│   │   ├── xref.go         # data/xref.json: precise xref (declarations[] + references[])
 │   │   ├── state_matrix.go # State-change matrix (writers + reachable entry points)
 │   │   ├── generator.go    # Summary report generation (with git detection)
 │   │   ├── markdown.go     # Markdown formatter (git URL links)
@@ -415,8 +418,9 @@ Precise locations flow end-to-end: solast-go (v0.1.7+) attaches column/byte
 spans to every parsed node, the builder carries them onto `ASTNode`s and
 declarations (interior statements/expressions are now located, not just
 functions), `FunctionCall`/`CallEdge` add `Col`/`Byte`, and `pkg/report`
-surfaces them in findings, SARIF, and the `nav.json`/`explorer.json`
-navigation artifacts. Output schema bumped to `2.0.0` to reflect the added fields.
+surfaces them in findings, SARIF, and the
+`nav.json`/`explorer.json`/`xref.json` navigation artifacts. Output schema
+bumped to `2.0.0` to reflect the added fields.
 SARIF declares `columnKind: unicodeCodePoints`; it does not emit
 `charOffset`/`charLength`, because those are character offsets rather than UTF-8
 byte offsets.
@@ -434,12 +438,15 @@ byte offsets.
 - `results.sarif` — SARIF 2.1.0 (always)
 - `data/{database.json,findings.json,overview.json,diagnostics.json}` — machine-readable; the
   canonical database lives only here (reusable via `--db`)
-- `data/nav.json`, `data/explorer.json` — extension-facing data layer for a
-  future VSCode Solidity extension: a flat symbol navigation index (defs,
-  caller edges, interface→implementation) and a per-main-contract explorer
-  model (ordered constants/storage, entry-callable functions, view getters),
-  built by [pkg/report/nav.go](../pkg/report/nav.go) and
-  [pkg/report/explorer.go](../pkg/report/explorer.go); both manifest-indexed
+- `data/nav.json`, `data/explorer.json`, `data/xref.json` — extension-facing
+  data layer for the VSCode Solidity extension: a flat symbol navigation index
+  (defs, caller edges, interface→implementation), a per-main-contract explorer
+  model (ordered constants/storage, entry-callable functions, view getters), and
+  a precise cross-reference index (`declarations[]` jump targets plus
+  `references[]` occurrences carrying the declaration `refId`), built by
+  [pkg/report/nav.go](../pkg/report/nav.go),
+  [pkg/report/explorer.go](../pkg/report/explorer.go), and
+  [pkg/report/xref.go](../pkg/report/xref.go); all manifest-indexed
   and schema-versioned like the rest of `data/` (see
   [docs/extension-output.md](./extension-output.md))
 - `contracts/<relative-source>/<MainContract>/state-changes.md` — per-contract state-change matrix built by
