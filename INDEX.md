@@ -131,6 +131,11 @@ run-output scratch directory.
   builder, engine, database loading, template loading, and report generation.
   Package-global verbose flags/writers remain deprecated compatibility wrappers
   for legacy constructors only; scan-local objects never consult them.
+- Parse-coverage loss (`parse.recovered`/`parse.skipped`) is always surfaced
+  loudly — on stderr during the build and in the console result — because a
+  missing AST hides declarations from every detector, unlike an unresolved
+  reference which only makes the AST imprecise. `--strict-parse` (root and
+  `build`, plus `scan.strict_parse`) turns it into a pre-report failure.
 - A normal scan writes one result folder containing `README.md`, `summary.md`, `overview.md`, `findings.md`, `results.sarif`, `run.log`, `data/` (with `manifest.json` index, plus `nav.json`, `explorer.json`, and `xref.json`), and a `contracts/` tree (per-main-contract folders mirroring source paths, each with its own `README.md`).
 - AST nodes and declarations (`Function`/`Modifier`/`Contract`/`StateVariable`/`Event`/`Struct`/`Enum`/`Parameter`) carry `StartCol`/`EndCol`/`StartByte`/`EndByte` alongside `StartLine`/`EndLine` (one-based Unicode-code-point columns and zero-based UTF-8 byte offsets; both end fields are half-open; zero/omitted for synthetic nodes). `FunctionCall`/`CallEdge` carry point `Col`/`Byte` fields too. The builder derives columns from a once-per-source sparse line/non-ASCII index instead of the parser's byte-oriented column field: O(log non-ASCII runes on the line) per endpoint and O(lines + non-ASCII runes) index memory. Invalid conversions retain lines/bytes, omit columns, and record `location.invalid`. Output schema remains `2.0.0`; this requires solast-go v0.1.7+.
 - A WQL document is meta plus one query: block. The block holds
@@ -175,6 +180,12 @@ run-output scratch directory.
   canonical.
 - Contract scopes (`main_contract`, `all_contract`, `contract`, `library`, `abstract`) evaluate `match:` against a synthetic `decl.contract` AST containing resolved functions from the linearized inheritance chain.
 - Findings may include `reachability`, `entryPoint`, `primaryAst`, and `related` matched sites. These fields are additive JSON/SARIF/report context.
+- `Finding.Location` describes the dangerous statement by default (matched-node
+  attribution): file, line, columns, bytes, contract, and function all name one
+  place, and the externally-callable entry hop travels in `entryPoint` and
+  `reachability`. Verifier attribution mixed the two — entry `contract`/`function`
+  with matched-node `file`/`line` — and is selectable via `--location-source
+  verifier`, `W3GOAUDIT_LOCATION_FROM_MATCHED_NODE`, or `Engine.SetLocationSource`.
 - `Finding.Location` and `primaryAst` carry the matched node's precise span (`col`/`endLine`/`endCol`/`startByte`/`endByte`) when the location anchors on that node; SARIF declares `columnKind: unicodeCodePoints` and emits `startColumn`/`endColumn`/`endLine`, but never mislabels UTF-8 bytes as `charOffset`/`charLength`. Reachability steps carry a per-hop `file` so cross-contract traces render at the correct file.
 - Matched-node location mode always takes line, columns, and bytes from the
   committed primary node. Host file/contract/function prefer the final
@@ -203,6 +214,24 @@ run-output scratch directory.
   one function expansion; distinct expansions use the event partial order and
   occurrence-specific arm tokens. Callgraph construction records nested
   receiver/option calls exactly once so those helpers can be inlined.
+- One dangerous site yields one finding. Entry-point and function scopes visit
+  each scope item independently, so a statement inside a shared internal helper was
+  reported once per reaching entry function; findings with an exact file+span now
+  collapse to one and the other entry points move into
+  `Context["additionalEntryPoints"]`. `Finding.Location.File` always names the file
+  containing `Finding.Location.Line` — for a match inside an inlined callee both come
+  from the callee, never a mix of the entry file and the callee line.
+- Value provenance for an index or member access comes from the base/receiver chain
+  only, never the key: `from[i]` inherits the caller-supplied base's taint, while
+  `stateMapping[userIndex]` stays state-provenance.
+- `reentrancy_guarded` is proven from an applied modifier's body (check a state
+  variable and write it before `_;`), with name matching only as a fallback for an
+  unresolvable body. `access_controlled` dispatches `virtual` internal calls through
+  the runtime contract's MRO so an abstract auth hook resolves to the deploying
+  contract's override; `super` calls keep their statically resolved base target.
+- Entry-function resolution gives each signature to the most-derived declaration
+  before filtering by entrypoint status, so an inherited interface stub can never
+  substitute for a `view`/`pure` override.
 - Finding output is deterministic: `Engine.ExecuteAll` applies a total-order sort (`SortFindings`) before returning, so `findings.json`/`results.sarif`/`findings.md` are byte-stable across runs despite map-order iteration internally.
 - Generated timestamps are the one intentional source of report-byte variance.
   `GeneratorOptions.Now` and `BundleOptions.Now` let SDK callers inject a fixed
@@ -221,13 +250,28 @@ run-output scratch directory.
   sorted `Database.Diagnostics`, warning summary, and `data/diagnostics.json`.
   Default scans remain tolerant; `--strict-imports` fails before template
   execution/report writing when any persisted unresolved-import diagnostic
-  exists. Legacy name-only MRO caches record one incomplete
+  exists, and `--strict-parse` does the same for any persisted
+  `parse.recovered`/`parse.skipped` diagnostic. Parse loss is additionally
+  always reported loudly — on stderr during the build and in the console result —
+  because a missing AST hides declarations from every detector rather than merely
+  making a reference imprecise. Legacy name-only MRO caches record one incomplete
   `identity.unresolved` diagnostic for every base entry that exact source/import
   resolution cannot materialize.
 - `data/manifest.json` distinguishes `projectRoot` from `scanTarget` (`target`
   is the compatibility alias), exposes `analysisComplete`/`diagnosticCounts`,
   counts contracts/interfaces/libraries/declarations separately, and indexes
   every emitted data/HTML artifact.
+- A template `version:` constraint is intersected with the whole range the
+  file's pragma permits, not compared to its first version triple, so
+  `>=0.7.0 <0.9.0` satisfies `>=0.8.0`. Caret/tilde/comparator chains, `||`
+  alternatives, and partial versions are understood; an unparseable pragma or
+  constraint skips the check instead of excluding the file.
+- Storage-authority recognition for access control uses one closed vocabulary of
+  privileged-principal names (`types.accessControlNameRegex`), covering
+  owner/admin/govern/role/operator/manager/controller/keeper/trusted/signer/
+  validator and similar, and deliberately excluding value-bearing names
+  (balance/deposit/stake/share/nonce) and inverted denylists. Scalar
+  caller-vs-authority comparisons are name-agnostic.
 - Import discovery decodes valid Solidity string escapes before resolution and
   rejects malformed escaped paths. Foundry remappings honor the active profile
   and context relative to the importing file's owning sub-project; applicable
@@ -240,7 +284,9 @@ run-output scratch directory.
   then a unique longest-suffix match against the on-disk `lib/`/`node_modules/`
   tree requiring ≥2 aligned path segments. Both accept only an existing regular
   file contained within the owning sub-project and abstain on ambiguity;
-  explicit remappings always win.
+  explicit remappings always win. The suffix matcher also abstains when its
+  bounded walk is truncated, because uniqueness cannot be established from a
+  partial view of the tree.
 - Parsed calls with known arguments never resolve a same-name declaration of
   the wrong arity. They retain no exact target and emit one durable
   `identity.unresolved` diagnostic with the observed arity. Serialized
@@ -309,7 +355,7 @@ Compatibility/exactness repair notes:
   is available, a missing helper or nonzero overload disproves the identity.
   Same-named identifiers, state/local/parameter
   names, external/self calls, unresolved calls, and nonzero overloads retain
-  their ordinary provenance. All 106 official
+  their ordinary provenance. All 120 official
   + benchmark + feature-test templates use it. `select` is an optional
   scalar; a fully specified sequence supplies its own anchor, and every
   positive-polarity sequence nested under a select-less matcher must guarantee

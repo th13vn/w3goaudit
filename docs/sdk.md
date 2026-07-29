@@ -154,7 +154,7 @@ directory loader and backs the binary's embedded default pack
 (`github.com/th13vn/w3goaudit/templates`.`Official`). `ParseTemplate` is the
 inline equivalent of `LoadTemplate` for SDK consumers that hold YAML in memory.
 
-> **WQL:** A WQL document is meta plus one query: block. All 106
+> **WQL:** A WQL document is meta plus one query: block. All 120
 > official/benchmark/feature-test templates shipped in this repo use that block
 > to hold `select`/`from`/`where` or a query-level `and:`/`or:` composition (see
 > [`docs/wql-syntax.md`](./wql-syntax.md)). `LoadTemplate`, `LoadTemplates`,
@@ -1006,12 +1006,14 @@ Selects how `Finding.Location` is computed.
 
 | Value | Behavior |
 |---|---|
-| `LocationSourceVerifier` *(default)* | `Function`/`Contract` come from the verifier-function context (today's behavior). `Line` from the matched node when available. Backward-compatible. |
-| `LocationSourceMatchedNode` | Every field of `Location` is derived from the matched AST node's enclosing function/modifier — the dangerous statement. Aligns w3goaudit with SARIF / Slither / Semgrep conventions. |
+| `LocationSourceDefault` | The zero value; resolves to `LocationSourceMatchedNode`. Distinct so `SetLocationSource(LocationSourceVerifier)` means "verifier, explicitly" rather than being indistinguishable from an unset field. |
+| `LocationSourceMatchedNode` *(default)* | Every field of `Location` is derived from the matched AST node's enclosing function/modifier — the dangerous statement. Matches SARIF / Slither / Semgrep conventions. |
+| `LocationSourceVerifier` | `Function`/`Contract` come from the verifier-function context while `File`/`Line` come from the matched node. That combination describes two places at once for an interprocedural match, so a finding could name a function the reported line is not inside. Retained for consumers that index findings by entry point. |
 
-The env var `WGAUDIT_LOCATION_FROM_MATCHED_NODE` (`1`/`true`/`matched`)
+The env var `W3GOAUDIT_LOCATION_FROM_MATCHED_NODE` (`matched`/`1`/`true`, or
+`verifier`/`0`/`false`; the older `WGAUDIT_` spelling is a compatibility alias)
 takes precedence over the API call so CI/scripts can flip the mode without
-touching code. There is no current CLI `--location-source` flag. The new
+touching code. The CLI equivalent is `--location-source matched|verifier`. The
 structured fields on `Finding` (`Reachability`,
 `PrimaryAST`, `EntryPoint`, `Related`) are populated **regardless** of this setting —
 only `Location` itself changes.

@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"math"
 	"regexp"
 	"sort"
 	"strconv"
@@ -75,6 +76,13 @@ func (e *Engine) verify(node *types.ASTNode, r Rule) (matched bool) {
 	// Check left/right for member_access, assignment, binary_op
 	if r.Left != nil || r.Right != nil {
 		if !e.matchLeftRight(node, r) {
+			return false
+		}
+	}
+
+	// Receiver: the call's own direct receiver, never a nested call's.
+	if r.Receiver != nil {
+		if !e.matchDirectReceiver(node, *r.Receiver) {
 			return false
 		}
 	}
@@ -803,6 +811,21 @@ func attrInCSV(node *types.ASTNode, attr, csv string) bool {
 
 // matchLeftRight checks left/right matching for binary expression nodes
 // Supports: member_access, assignment, binary_op
+// matchDirectReceiver verifies rule against the node's direct tagged receiver
+// child. A node with no tagged receiver fails closed: there is no receiver to
+// constrain, so the predicate cannot be satisfied.
+func (e *Engine) matchDirectReceiver(node *types.ASTNode, rule Rule) bool {
+	if node == nil {
+		return false
+	}
+	for _, child := range node.Children {
+		if child != nil && child.GetAttributeBool("call_receiver") {
+			return e.verify(child, rule)
+		}
+	}
+	return false
+}
+
 func (e *Engine) matchLeftRight(node *types.ASTNode, r Rule) bool {
 	switch node.Kind {
 	case types.KindExprMemberAccess:
@@ -1205,9 +1228,39 @@ func (e *Engine) collectExpressionTaints(node *types.ASTNode, env map[string][]s
 			out[source] = true
 		}
 	}
+	// An index or member access takes its VALUE provenance from the base/receiver
+	// chain, not from the key or index expression. Choosing a mapping key does not
+	// make you the author of the stored value: `proxyPaths_[userIdx]` is
+	// governance-controlled state even though the caller picked the slot, which is
+	// the standard proxy-dispatch idiom (CrocSwapDex, Curve, OZ UUPS). Unioning the
+	// index's taint in made every such dispatch look attacker-controlled.
+	//
+	// The base is still followed, so the documented `from[i]` behavior holds: when
+	// the base is a caller-supplied array, indexing it does not launder the taint.
+	// This mirrors lvalueStateVarName, which already walks base-only for state-write
+	// matching so `tmp[stateIndex]++` stays local.
+	if children := taintRelevantChildren(node); children != nil {
+		for _, child := range children {
+			e.collectExpressionTaints(child, env, out)
+		}
+		return
+	}
 	for _, child := range node.Children {
 		e.collectExpressionTaints(child, env, out)
 	}
+}
+
+// taintRelevantChildren returns the subset of children that carry a node's value
+// provenance, or nil when every child is relevant. Only access expressions narrow:
+// their first child is the base/receiver and the rest are keys or member selectors.
+func taintRelevantChildren(node *types.ASTNode) []*types.ASTNode {
+	switch node.Kind {
+	case types.KindExprIndexAccess, types.KindExprMemberAccess:
+		if len(node.Children) > 0 {
+			return node.Children[:1]
+		}
+	}
+	return nil
 }
 
 func (e *Engine) directNodeTaints(node *types.ASTNode, env map[string][]string) []string {
@@ -2080,47 +2133,250 @@ func (r *Rule) IsContextOnly() bool {
 	return ruleHasContextFields(*r) && !ruleHasASTFields(*r)
 }
 
-// checkVersion checks if the source file's pragma version matches the constraint
-// Supports operators: >=, <=, >, <, = (e.g., ">=0.8.0", "<0.7.0")
+// checkVersion reports whether a template's `version:` constraint applies to the
+// current source file, by intersecting the constraint with the set of compiler
+// versions the file's pragma actually PERMITS.
+//
+// A Solidity pragma is a range, not a point: `^0.8.20` permits [0.8.20, 0.9.0),
+// `>=0.7.0 <0.9.0` permits [0.7.0, 0.9.0), and `||` unions alternatives. The
+// constraint applies when at least one permitted version satisfies it, so a
+// detector gated on `>=0.8.0` correctly fires for `>=0.7.0 <0.9.0` (which can
+// compile on 0.8.x) — the previous implementation compared only the FIRST version
+// triple in the pragma string and silently skipped such files.
+//
+// Absent context stays tolerant: no source file, no pragma, an unparseable
+// pragma, or an unparseable constraint all skip the gate rather than excluding
+// the file. Only a pragma we can actually reason about can rule a template out.
 func (e *Engine) checkVersion(constraint string) bool {
 	if e.currentSourceFile == nil {
 		return true // No source file context, skip version check
 	}
-
 	pragmaVersion := e.currentSourceFile.PragmaVersion
 	if pragmaVersion == "" {
 		return true // No pragma version, skip check
 	}
 
-	// Parse the constraint
 	op, targetVersion := parseVersionConstraint(constraint)
 	if targetVersion == "" {
 		return true // Invalid constraint, skip check
 	}
-
-	// Extract version from pragma (handle ^0.8.0, >=0.8.0, 0.8.0, etc.)
-	actualVersion := extractVersion(pragmaVersion)
-	if actualVersion == "" {
-		return true // Could not extract version, skip check
+	target, ok := parseVersionTriple(targetVersion)
+	if !ok {
+		return true // Unparseable constraint, skip check
 	}
 
-	// Compare versions
-	cmp := compareVersions(actualVersion, targetVersion)
+	ranges := parsePragmaRanges(pragmaVersion)
+	if len(ranges) == 0 {
+		return true // Could not reason about the pragma, skip check
+	}
+	for _, permitted := range ranges {
+		if permitted.satisfies(op, target) {
+			return true
+		}
+	}
+	return false
+}
 
+// versionRange is a half-open set of compiler versions [low, high). A zero high
+// means unbounded above.
+type versionRange struct {
+	low       [3]int
+	high      [3]int
+	highOpen  bool // true when there is no upper bound
+	lowStrict bool // true when low itself is excluded (`>1.2.3`)
+}
+
+// satisfies reports whether ANY version the range permits satisfies `op target`.
+//
+// The range is [min, high) with high possibly unbounded. Each case asks whether
+// the intersection of the range with the constraint's own half-line is non-empty,
+// which avoids materializing a largest permitted version (patch numbers have no
+// natural upper bound, so `<0.8.0` has no representable maximum).
+func (r versionRange) satisfies(op string, target [3]int) bool {
 	switch op {
 	case ">=":
-		return cmp >= 0
-	case "<=":
-		return cmp <= 0
+		// Non-empty iff some permitted version is at or above target, i.e. the
+		// range extends beyond max(min, target).
+		return r.reaches(target)
 	case ">":
-		return cmp > 0
+		// Strictly greater is `>=` the next patch.
+		return r.reaches([3]int{target[0], target[1], target[2] + 1})
+	case "<=":
+		return compareTriples(r.min(), target) <= 0
 	case "<":
-		return cmp < 0
-	case "=", "==":
-		return cmp == 0
-	default:
-		return cmp == 0 // Default to equality
+		return compareTriples(r.min(), target) < 0
+	default: // "=", "==", or an unrecognized operator
+		return r.contains(target)
 	}
+}
+
+// reaches reports whether the range permits any version at or above target.
+func (r versionRange) reaches(target [3]int) bool {
+	if r.highOpen {
+		return true
+	}
+	// Every permitted version is strictly below high, so a version at or above
+	// target exists only when target itself is below high.
+	return compareTriples(target, r.high) < 0
+}
+
+// min returns the smallest version the range permits. A strict lower bound
+// (`>0.8.0`) excludes the bound itself, so the minimum is the next patch.
+func (r versionRange) min() [3]int {
+	if r.lowStrict {
+		return [3]int{r.low[0], r.low[1], r.low[2] + 1}
+	}
+	return r.low
+}
+
+// contains reports whether target is inside the range.
+func (r versionRange) contains(target [3]int) bool {
+	if compareTriples(target, r.min()) < 0 {
+		return false
+	}
+	if r.highOpen {
+		return true
+	}
+	return compareTriples(target, r.high) < 0
+}
+
+// parsePragmaRanges converts a pragma version expression into the version ranges
+// it permits. `||` separates alternatives; within one alternative, comparators are
+// intersected. Returns nil when nothing usable could be parsed.
+func parsePragmaRanges(pragma string) []versionRange {
+	var ranges []versionRange
+	for _, alternative := range strings.Split(pragma, "||") {
+		if r, ok := parseVersionRange(alternative); ok {
+			ranges = append(ranges, r)
+		}
+	}
+	return ranges
+}
+
+// versionComparatorRegex splits one alternative into `<operator><version>` terms.
+// The operator is optional (a bare version is an exact pin, or a range when the
+// patch/minor is omitted).
+var versionComparatorRegex = regexp.MustCompile(`(>=|<=|\^|~|>|<|=)?\s*(\d+(?:\.\d+){0,2})`)
+
+// parseVersionRange intersects every comparator in one pragma alternative.
+func parseVersionRange(alternative string) (versionRange, bool) {
+	matches := versionComparatorRegex.FindAllStringSubmatch(alternative, -1)
+	if len(matches) == 0 {
+		return versionRange{}, false
+	}
+
+	result := versionRange{highOpen: true}
+	for _, match := range matches {
+		term, ok := versionTermRange(match[1], match[2])
+		if !ok {
+			return versionRange{}, false
+		}
+		result = intersectRanges(result, term)
+	}
+	// An empty intersection cannot permit anything.
+	if !result.highOpen && compareTriples(result.low, result.high) >= 0 {
+		return versionRange{}, false
+	}
+	return result, true
+}
+
+// versionTermRange converts one `<operator><version>` term into a range.
+// A bare or partial version widens to what that spelling permits: `0.8` means
+// [0.8.0, 0.9.0) and `0` means [0.0.0, 1.0.0), matching Solidity's treatment of
+// an incomplete version as a range rather than a pin.
+func versionTermRange(operator, version string) (versionRange, bool) {
+	triple, ok := parseVersionTriple(version)
+	if !ok {
+		return versionRange{}, false
+	}
+	segments := len(strings.Split(version, "."))
+
+	switch operator {
+	case ">=":
+		return versionRange{low: triple, highOpen: true}, true
+	case ">":
+		return versionRange{low: triple, highOpen: true, lowStrict: true}, true
+	case "<=":
+		// Inclusive upper bound: the next patch is the exclusive boundary.
+		return versionRange{high: [3]int{triple[0], triple[1], triple[2] + 1}}, true
+	case "<":
+		return versionRange{high: triple}, true
+	case "^":
+		// ^0.8.20 -> [0.8.20, 0.9.0); ^1.2.3 -> [1.2.3, 2.0.0). For a 0.x major,
+		// the minor is the compatibility boundary, matching npm/solc semantics.
+		if triple[0] == 0 {
+			return versionRange{low: triple, high: [3]int{0, triple[1] + 1, 0}}, true
+		}
+		return versionRange{low: triple, high: [3]int{triple[0] + 1, 0, 0}}, true
+	case "~":
+		// ~0.8.4 -> [0.8.4, 0.9.0).
+		return versionRange{low: triple, high: [3]int{triple[0], triple[1] + 1, 0}}, true
+	default:
+		// No operator. A complete triple pins one version; a partial spelling is
+		// the range that spelling covers.
+		switch segments {
+		case 1:
+			return versionRange{low: triple, high: [3]int{triple[0] + 1, 0, 0}}, true
+		case 2:
+			return versionRange{low: triple, high: [3]int{triple[0], triple[1] + 1, 0}}, true
+		default:
+			return versionRange{low: triple, high: [3]int{triple[0], triple[1], triple[2] + 1}}, true
+		}
+	}
+}
+
+// intersectRanges narrows left by right, keeping the tighter bound on each side.
+func intersectRanges(left, right versionRange) versionRange {
+	result := left
+	if compareTriples(right.low, result.low) > 0 {
+		result.low = right.low
+		result.lowStrict = right.lowStrict
+	} else if compareTriples(right.low, result.low) == 0 && right.lowStrict {
+		result.lowStrict = true
+	}
+	if !right.highOpen {
+		if result.highOpen || compareTriples(right.high, result.high) < 0 {
+			result.high = right.high
+			result.highOpen = false
+		}
+	}
+	return result
+}
+
+// parseVersionTriple parses "1", "1.2", or "1.2.3" into [major, minor, patch],
+// defaulting omitted segments to zero. It rejects anything non-numeric so a
+// malformed pragma fails to parse instead of silently reading as 0.0.0.
+func parseVersionTriple(version string) ([3]int, bool) {
+	version = strings.TrimSpace(version)
+	if version == "" {
+		return [3]int{}, false
+	}
+	segments := strings.Split(version, ".")
+	if len(segments) > 3 {
+		return [3]int{}, false
+	}
+	var triple [3]int
+	for i, segment := range segments {
+		value, err := strconv.Atoi(segment)
+		if err != nil || value < 0 {
+			return [3]int{}, false
+		}
+		triple[i] = value
+	}
+	return triple, true
+}
+
+// compareTriples returns -1, 0, or 1 comparing two [major, minor, patch] values.
+func compareTriples(left, right [3]int) int {
+	for i := 0; i < 3; i++ {
+		if left[i] != right[i] {
+			if left[i] < right[i] {
+				return -1
+			}
+			return 1
+		}
+	}
+	return 0
 }
 
 // parseVersionConstraint parses a version constraint string
@@ -2138,42 +2394,6 @@ func parseVersionConstraint(constraint string) (string, string) {
 
 	// No operator, treat as equality
 	return "=", constraint
-}
-
-// extractVersion extracts the version number from a pragma string
-// Handles: ^0.8.0, >=0.8.0 <0.9.0, 0.8.0, etc.
-func extractVersion(pragma string) string {
-	// Regex to find version numbers (major.minor.patch)
-	re := regexp.MustCompile(`(\d+)\.(\d+)\.(\d+)`)
-	match := re.FindString(pragma)
-	return match
-}
-
-// compareVersions compares two semantic version strings
-// Returns: -1 if v1 < v2, 0 if v1 == v2, 1 if v1 > v2
-func compareVersions(v1, v2 string) int {
-	parts1 := parseVersionParts(v1)
-	parts2 := parseVersionParts(v2)
-
-	for i := 0; i < 3; i++ {
-		if parts1[i] < parts2[i] {
-			return -1
-		}
-		if parts1[i] > parts2[i] {
-			return 1
-		}
-	}
-	return 0
-}
-
-// parseVersionParts parses a version string into [major, minor, patch]
-func parseVersionParts(version string) [3]int {
-	parts := strings.Split(version, ".")
-	var result [3]int
-	for i := 0; i < 3 && i < len(parts); i++ {
-		result[i], _ = strconv.Atoi(parts[i])
-	}
-	return result
 }
 
 // checkPreset checks if a built-in preset condition is satisfied
@@ -2586,6 +2806,21 @@ func expressionParentAllowsBoundProof(parent, pathChild *types.ASTNode) bool {
 			return expressionSiblingsAreEffectFree(parent, idx)
 		}
 	default:
+		// A call ANCESTOR does not invalidate the proof. Solidity evaluates every
+		// argument (and the receiver and call options) before the callee body runs,
+		// so the enclosing call cannot mutate the operands before the subtraction
+		// is computed. Only a SIBLING argument can, because their relative
+		// evaluation order is unspecified — and that is exactly what
+		// expressionSiblingsAreEffectFree still enforces.
+		//
+		// Rejecting call ancestors outright made the canonical guarded subtraction
+		// a finding: `require(a >= b); unchecked { f(..., a - b); }` is OpenZeppelin
+		// ERC20._spendAllowance, ERC20.decreaseAllowance, and
+		// SafeERC20.safeDecreaseAllowance. Nine of 21 unchecked-arithmetic findings
+		// in a real scan were inside OpenZeppelin itself for this reason.
+		if types.IsAnyCall(parent.Kind) {
+			return expressionSiblingsAreEffectFree(parent, idx)
+		}
 		return false
 	}
 }
@@ -2662,6 +2897,17 @@ func isStableBoundExpression(node *types.ASTNode) bool {
 }
 
 func isUnsignedIntegerBoundExpression(node *types.ASTNode) bool {
+	if node == nil {
+		return false
+	}
+	// A non-negative integer literal is trivially an unsigned bound operand. The
+	// builder attaches no `type` attribute to literals, so requiring one made every
+	// `x - 1` inside `unchecked` unprovable and therefore unconditionally reported —
+	// no preceding guard could ever clear `require(n > 0); … n - 1`, which is one of
+	// the most common Solidity idioms.
+	if _, ok := nonNegativeIntegerLiteral(node); ok {
+		return true
+	}
 	typeName := node.GetAttributeString("type")
 	if typeName == "uint" {
 		return true
@@ -2849,22 +3095,86 @@ func conditionProvesSubtractionBound(cond, left, right *types.ASTNode, truth boo
 		return !truth && (conditionProvesSubtractionBound(lhs, left, right, false) ||
 			conditionProvesSubtractionBound(rhs, left, right, false))
 	case ">=":
-		return truth && sameBoundExpression(lhs, left) && sameBoundExpression(rhs, right)
+		if truth && sameBoundExpression(lhs, left) {
+			return sameBoundExpression(rhs, right) || literalBoundProvesSubtraction(rhs, right, false)
+		}
+		return false
 	case "<=":
-		return truth && sameBoundExpression(lhs, right) && sameBoundExpression(rhs, left)
+		if truth && sameBoundExpression(rhs, left) {
+			return sameBoundExpression(lhs, right) || literalBoundProvesSubtraction(lhs, right, false)
+		}
+		return false
 	case ">":
 		if truth {
-			return sameBoundExpression(lhs, left) && sameBoundExpression(rhs, right)
+			if sameBoundExpression(lhs, left) {
+				return sameBoundExpression(rhs, right) || literalBoundProvesSubtraction(rhs, right, true)
+			}
+			return false
 		}
 		return sameBoundExpression(lhs, right) && sameBoundExpression(rhs, left)
 	case "<":
 		if truth {
-			return sameBoundExpression(lhs, right) && sameBoundExpression(rhs, left)
+			if sameBoundExpression(rhs, left) {
+				return sameBoundExpression(lhs, right) || literalBoundProvesSubtraction(lhs, right, true)
+			}
+			return false
 		}
 		return sameBoundExpression(lhs, left) && sameBoundExpression(rhs, right)
 	default:
 		return false
 	}
+}
+
+// literalBoundProvesSubtraction reports whether a guard that bounds the minuend
+// below by the numeric literal `bound` proves that subtracting the numeric literal
+// `right` cannot underflow.
+//
+// `require(n > 0); … n - 1` is one of the most common Solidity idioms — pop an
+// element, step back an index — and the exact-operand rule could not see it, because
+// the guard names `0` while the subtraction names `1`. With `strict` (from `>` rather
+// than `>=`), `n > B` implies `n >= B+1`, so any literal subtrahend up to `B+1` is
+// safe.
+//
+// Both sides must be numeric literals. `require(n > 0); n - userAmount` is still a
+// finding, because nothing bounds `userAmount`.
+func literalBoundProvesSubtraction(bound, right *types.ASTNode, strict bool) bool {
+	boundValue, ok := nonNegativeIntegerLiteral(bound)
+	if !ok {
+		return false
+	}
+	rightValue, ok := nonNegativeIntegerLiteral(right)
+	if !ok {
+		return false
+	}
+	if strict {
+		if boundValue == math.MaxUint64 {
+			return false
+		}
+		boundValue++
+	}
+	return rightValue <= boundValue
+}
+
+// nonNegativeIntegerLiteral parses a decimal or hexadecimal integer literal,
+// ignoring Solidity's underscore digit separators. Anything else — a negative value,
+// a fraction, a unit suffix, or a non-literal node — fails closed.
+func nonNegativeIntegerLiteral(node *types.ASTNode) (uint64, bool) {
+	if node == nil || node.Kind != types.KindExprLiteral {
+		return 0, false
+	}
+	text := strings.ReplaceAll(strings.TrimSpace(node.Value), "_", "")
+	if text == "" {
+		return 0, false
+	}
+	base := 10
+	if lowered := strings.ToLower(text); strings.HasPrefix(lowered, "0x") {
+		text, base = lowered[2:], 16
+	}
+	value, err := strconv.ParseUint(text, base, 64)
+	if err != nil {
+		return 0, false
+	}
+	return value, true
 }
 
 func sameBoundExpression(a, b *types.ASTNode) bool {

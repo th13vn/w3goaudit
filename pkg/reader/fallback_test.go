@@ -141,3 +141,50 @@ func TestResolveRemappingWinsOverHeuristics(t *testing.T) {
 		t.Fatalf("Resolve = %q, want explicit remapping target %q", got, remapped)
 	}
 }
+
+// TestResolveSuffixMatchTruncatedWalkAbstains pins that hitting the walk file cap
+// makes the suffix matcher abstain rather than answer from a partial view.
+//
+// The cap bounds cost on huge dependency trees, but uniqueness is only meaningful
+// over a COMPLETE view: here two equally-good candidates exist, so a full walk
+// correctly sees ambiguity and abstains. A truncated walk sees only the first one,
+// concludes "unique", and binds the import to it — silently picking the wrong
+// dependency. Abstaining instead leaves the import unresolved, which the reader
+// records as a durable `import.unresolved` diagnostic.
+func TestResolveSuffixMatchTruncatedWalkAbstains(t *testing.T) {
+	t.Setenv("FOUNDRY_PROFILE", "")
+	root := t.TempDir()
+
+	// Two candidates aligning the same three trailing segments. Walk order is
+	// lexical, so "aaa" is examined first and "zzz" last.
+	first := filepath.Join(root, "lib", "aaa", "some-dep", "src", "Target.sol")
+	second := filepath.Join(root, "lib", "zzz", "some-dep", "src", "Target.sol")
+	writeResolverTarget(t, first)
+	writeResolverTarget(t, second)
+	// Filler between them so a low cap stops before "zzz" is reached.
+	for _, name := range []string{"mmm1", "mmm2", "mmm3"} {
+		writeResolverTarget(t, filepath.Join(root, "lib", name, "Filler.sol"))
+	}
+
+	// A scoped prefix that no remapping or plain lib/node_modules stat resolves,
+	// so the suffix matcher is genuinely the path under test.
+	importPath := "@scope/some-dep/src/Target.sol"
+	from := filepath.Join(root, "src", "A.sol")
+
+	// Full walk: two equally-good candidates are ambiguous, so it must abstain.
+	if got, err := NewResolver(root).Resolve(importPath, from); err == nil &&
+		(filepath.Clean(got) == filepath.Clean(first) || filepath.Clean(got) == filepath.Clean(second)) {
+		t.Fatalf("baseline: ambiguous candidates must abstain, got %q", got)
+	}
+
+	// Truncated walk: sees only "aaa", so uniqueness looks established. It must
+	// still abstain rather than resolve from the partial view.
+	restore := suffixWalkFileLimit
+	suffixWalkFileLimit = 2
+	t.Cleanup(func() { suffixWalkFileLimit = restore })
+
+	got, err := NewResolver(root).Resolve(importPath, from)
+	if err == nil && filepath.Clean(got) == filepath.Clean(first) {
+		t.Fatal("a truncated walk must abstain, not resolve from a partial view")
+	}
+}

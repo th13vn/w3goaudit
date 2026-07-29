@@ -69,7 +69,7 @@ func TestRepositoryBasicArithmeticUnderflowUsesRangeGuards(t *testing.T) {
 	findings := New(db).Execute(tmpl)
 	counts := make(map[string]int)
 	for _, finding := range findings {
-		counts[finding.Location.Contract+"."+finding.Location.Function]++
+		counts[findingEntryLabel(finding)]++
 	}
 
 	if got := counts["VulnerableBasicArithmeticUnderflow.withdraw"]; got != 2 {

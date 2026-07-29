@@ -1,0 +1,31 @@
+meta:
+  id: HIGH-ERC20-PUBLIC-BURN
+  title: "Public burn Destroys Another Account's Tokens"
+  severity: HIGH
+  confidence: MEDIUM
+  description: >
+    An externally callable `burn` forwards a caller-supplied account into the
+    internal `_burn`, with no access control and no allowance check. Anyone can
+    destroy anyone else's balance. Beyond the direct theft-by-destruction, this
+    breaks every invariant built on `totalSupply`: an attacker can burn tokens
+    held by a pool or vault to inflate the value of their own shares, which is
+    how several "public burn" incidents were actually monetized.
+  recommendation: >
+    Burn only from the caller (`_burn(msg.sender, amount)`), or require an
+    allowance via `burnFrom` semantics (`_spendAllowance(account, msg.sender,
+    amount)` before `_burn`). If a privileged burn is genuinely needed, gate it
+    behind a role and document why.
+  references:
+    - https://docs.openzeppelin.com/contracts/5.x/api/token/erc20#ERC20Burnable
+    - https://github.com/crytic/slither/wiki/Detector-Documentation#missing-access-control
+
+query:
+  from: entry_function
+  select: internal_call
+
+  where:
+    - func_name: '^burn$'
+    - not: { preset: access_controlled }
+    - name: '^_burn$'
+    # The burned-from account is chosen by the caller.
+    - arg.0: { tainted: parameter }

@@ -25,6 +25,11 @@ meta:
 
 query:
   from: function
+  # Anchor on the ARITHMETIC, not the enclosing block. A gas-optimized
+  # whole-function `unchecked { … }` wrapper (CrocSwap, Solady) otherwise produced
+  # one unactionable finding for an entire body — the auditor could not see which
+  # operation was at risk.
+  select: binary
 
   where:
     - version: ">=0.8.0"
@@ -39,15 +44,37 @@ query:
     - and:
         - mutability: "payable,nonpayable"
 
-    - has:
+    # The operation must sit inside an explicit `unchecked` block; ordinary checked
+    # arithmetic reverts on overflow and is not a finding.
+    - in:
         block: unchecked
-        has:
-          block: binary
-          operator: "[+\\-*/]"
-          # Only flag arithmetic whose operands were NOT bounded by a preceding
-          # guard. A range check that references every operand — e.g.
-          # `require(oldAllowance >= value); … oldAllowance - value;` (OpenZeppelin
-          # SafeERC20.safeDecreaseAllowance) or `require(b <= a); … a - b;`
-          # (SafeMath.sub) — makes the unchecked op deliberate and safe, so it is
-          # excluded. Arithmetic with no such preceding guard is still reported.
-          unchecked_var: true
+
+    # Only operations that are actually an exploit primitive. Division cannot
+    # overflow, so `/` is excluded entirely.
+    - any:
+        # Multiplication and subtraction overflow/underflow even against a constant
+        # operand, so both shapes stay in scope.
+        - operator: "[*]"
+        - operator: "[-]"
+        # Addition only when an operand is CALLER-CONTROLLED. Wrapping
+        # `balances[user] + amount` is a real primitive when `amount` is an
+        # unbounded parameter — the attacker picks `2^256 - balance` — but a counter
+        # or nonce incremented from storage (`nonceLookup[k] + 1`,
+        # `numElements + 1`) can never be driven to the type maximum, and those made
+        # up the bulk of the noise on real code (EVC, `Set.insert`).
+        - and:
+            - operator: "[+]"
+            # An OPERAND must be caller-controlled — `left:`/`right:`, not `has:`,
+            # which would descend into a mapping KEY and make `nonceLookup[key] + 1`
+            # look attacker-influenced because the caller picked the slot.
+            - any:
+                - left: { tainted: user_controlled }
+                - right: { tainted: user_controlled }
+
+    # Only flag arithmetic whose operands were NOT bounded by a preceding
+    # guard. A range check that references every operand — e.g.
+    # `require(oldAllowance >= value); … oldAllowance - value;` (OpenZeppelin
+    # SafeERC20.safeDecreaseAllowance) or `require(b <= a); … a - b;`
+    # (SafeMath.sub) — makes the unchecked op deliberate and safe, so it is
+    # excluded. Arithmetic with no such preceding guard is still reported.
+    - unchecked_var: true

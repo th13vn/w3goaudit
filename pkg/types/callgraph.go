@@ -168,8 +168,15 @@ func (cg *CallGraph) GetExternalCalls(funcID string) []*CallEdge {
 	return result
 }
 
-// HasCycle checks if there's a cycle involving the given function
+// HasCycle checks if there's a cycle involving the given function.
+//
+// EnsureIndex is required here for the same reason as in GetCallees: the
+// adjacency maps are unexported and do not survive JSON, so a graph loaded from a
+// `--db` cache has an empty index. Without the rebuild, hasCycleUtil walked no
+// edges and this returned false for every input — a silent "acyclic" answer
+// rather than an error.
 func (cg *CallGraph) HasCycle(funcName string) bool {
+	cg.EnsureIndex()
 	visited := make(map[string]bool)
 	recStack := make(map[string]bool)
 	return cg.hasCycleUtil(funcName, visited, recStack)

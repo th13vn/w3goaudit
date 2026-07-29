@@ -1,0 +1,33 @@
+meta:
+  id: HIGH-ORACLE-PRICE-UPDATE-UNRESTRICTED
+  title: "Oracle / Price State Writable by Anyone"
+  severity: HIGH
+  confidence: MEDIUM
+  description: >
+    An externally callable function whose name identifies it as an oracle or
+    price setter writes that state directly from a caller-supplied parameter,
+    with no access control. Anyone can set the protocol's reference price to any
+    value, then borrow against worthless collateral, liquidate healthy positions,
+    or redeem shares at a fabricated rate. This is a total loss of the pricing
+    invariant, not a manipulation window.
+  recommendation: >
+    Restrict the setter to a trusted role (`onlyOwner`, `onlyRole(ORACLE_ROLE)`,
+    a governance timelock). Prefer pulling from a signed or on-chain oracle over
+    a push setter; if a push is required, bound the change per update and add a
+    staleness/deviation check so a compromised updater cannot move the price
+    arbitrarily in one step.
+  references:
+    - https://github.com/crytic/slither/wiki/Detector-Documentation#missing-access-control
+    - https://docs.chain.link/data-feeds
+
+query:
+  from: entry_function
+  select: state_write
+
+  where:
+    - func_name: '(?i)^(setOracleData|setAssetPrice|.*(oracle|price).*)$'
+    - not: { preset: access_controlled }
+    # The written value must come from the caller — a write of a computed or
+    # constant value is not an attacker-chosen price.
+    - right:
+        tainted: parameter

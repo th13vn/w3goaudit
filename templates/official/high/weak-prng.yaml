@@ -31,3 +31,11 @@ query:
     - has:
         block: member
         name: (?i)^block\.(timestamp|number|difficulty|prevrandao|coinbase)$|^blockhash$
+    # A modulo by a power of two is TRUNCATION, not a random draw:
+    # `uint32(block.timestamp % 2**32)` is Uniswap V2's `_update` fitting a timestamp
+    # into a packed slot. A weak PRNG takes the modulo by a participant count or
+    # similar bound so the result selects a winner.
+    - not:
+        right:
+          block: binary
+          operator: '\*\*'

@@ -2,8 +2,8 @@
 
 Complete reference for writing security templates using the W3GoAudit Query
 Language (WQL). A WQL document is meta plus one query: block. The block contains
-`select`/`from`/`where` or a query-level composition. All 106
-repository templates (25 official, 5 feature-test, and 76 benchmark) use this
+`select`/`from`/`where` or a query-level composition. All 120
+repository templates (39 official, 5 feature-test, and 76 benchmark) use this
 syntax.
 
 This reference is accurate to the **implementation** —
@@ -322,7 +322,8 @@ a finding, such as access control or an initializer modifier.
 | `modifier: <regex>` | Function has a modifier whose name matches. |
 | `base: <regex>` | Contract-scope: the contract (or an ancestor in its inheritance chain) matches. |
 | `func_name: <regex>` | Function name matches (function-level precondition, independent of the AST node's own `name:`). |
-| `version: <constraint>` | Solidity pragma version constraint, e.g. `">=0.8.0"`. |
+| `receiver: {rule}` | Matches the sub-rule against the call's **direct** receiver only (`token` in `token.call(data)`). Use this instead of `has: {receiver: true, …}`, which searches every descendant and is satisfied by the receiver of a nested call in the arguments. The scalar `receiver: true` remains the attribute marker on a receiver node. |
+| `version: <constraint>` | Solidity pragma version constraint, e.g. `">=0.8.0"`. Evaluated against the whole **range** the file's pragma permits, not against one version: `>=0.7.0 <0.9.0` satisfies `>=0.8.0` because it can compile on 0.8.x. Caret, tilde, comparator chains, `||` alternatives, and partial versions (`^0.8`, `0.8`) are all understood; a pragma or constraint that cannot be parsed skips the check rather than excluding the file. |
 | `has_param: <name>` | Function has a parameter with this name. |
 
 `guarded_by` evaluates real evidence. For an applied modifier, the engine

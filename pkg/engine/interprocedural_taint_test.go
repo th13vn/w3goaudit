@@ -33,7 +33,7 @@ func TestInterproceduralTaintForInternalTransferFrom(t *testing.T) {
 	findings := New(db).Execute(tmpl)
 	got := make([]string, 0, len(findings))
 	for _, finding := range findings {
-		got = append(got, finding.Location.Contract+"."+finding.Location.Function)
+		got = append(got, findingEntryLabel(finding))
 	}
 	sort.Strings(got)
 
@@ -156,7 +156,7 @@ func TestInterproceduralSequenceFindsCallsInsideInternalHelpers(t *testing.T) {
 	findings := New(db).Execute(tmpl)
 	got := make([]string, 0, len(findings))
 	for _, finding := range findings {
-		got = append(got, finding.Location.Contract+"."+finding.Location.Function)
+		got = append(got, findingEntryLabel(finding))
 	}
 	sort.Strings(got)
 
@@ -302,7 +302,7 @@ query:
 	findings := New(db).Execute(tmpl)
 	got := make([]string, 0, len(findings))
 	for _, finding := range findings {
-		got = append(got, finding.Location.Function)
+		got = append(got, findingEntryFunction(finding))
 	}
 	sort.Strings(got)
 	want := []string{"vulnerable"}
@@ -330,7 +330,7 @@ func TestUncheckedArithmeticTemplateSeesUncheckedBlocks(t *testing.T) {
 	findings := New(db).Execute(tmpl)
 	got := make([]string, 0, len(findings))
 	for _, finding := range findings {
-		got = append(got, finding.Location.Contract+"."+finding.Location.Function)
+		got = append(got, findingEntryLabel(finding))
 	}
 	sort.Strings(got)
 
@@ -700,7 +700,7 @@ contract NestedOverloadTraversal {
 	findings := New(db).Execute(tmpl)
 	var finding *Finding
 	for _, candidate := range findings {
-		if candidate.Location.Function == "entry" {
+		if findingEntryFunction(candidate) == "entry" {
 			finding = candidate
 			break
 		}
@@ -785,7 +785,7 @@ contract MemberLeaf is MemberMid {
 	findings := New(db).Execute(tmpl)
 	seen := make(map[string]*Finding)
 	for _, finding := range findings {
-		seen[finding.Location.Function] = finding
+		seen[findingEntryFunction(finding)] = finding
 	}
 	for name, depth := range wantDepth {
 		finding := seen[name]
@@ -1022,4 +1022,27 @@ func skipWithoutBenchmarkHarness(t *testing.T, root string) {
 	if !benchmarkHarnessAvailable(root) {
 		t.Skip("scripts/benchmark harness not present (dev-only, git-ignored); skipping benchmark-dependent test")
 	}
+}
+
+// findingEntryLabel names the externally-callable ENTRY hop of a finding.
+//
+// Findings anchor on the dangerous statement by default, so `Location` names the
+// callee that hosts it — `_internalDeposit`, not the `depositFrom` that reaches it.
+// Tests whose subject is interprocedural reachability want the entry, which
+// `Finding.EntryPoint` carries. Falls back to `Location` for a match found directly
+// in the entry function, where the two are the same place.
+func findingEntryLabel(finding *Finding) string {
+	if finding.EntryPoint != nil && finding.EntryPoint.Function != "" {
+		return finding.EntryPoint.Contract + "." + finding.EntryPoint.Function
+	}
+	return finding.Location.Contract + "." + finding.Location.Function
+}
+
+// findingEntryFunction is findingEntryLabel without the contract prefix, for tests
+// that index by bare entry-function name.
+func findingEntryFunction(finding *Finding) string {
+	if finding.EntryPoint != nil && finding.EntryPoint.Function != "" {
+		return finding.EntryPoint.Function
+	}
+	return finding.Location.Function
 }

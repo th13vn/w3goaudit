@@ -32,7 +32,18 @@ query:
     - any:
         - has: { block: member, name: ^balance$ }
         - has: { block: external_call, name: ^balanceOf$ }
-        # Also catch raw `block.number == X` (snapshot-locking abuse) and
-        # `block.timestamp == X` (rare but a real anti-pattern in vesting
-        # contracts).
-        - has: { block: member, name: ^(timestamp|number)$ }
+        # Raw `block.number == X` (snapshot-locking abuse) and
+        # `block.timestamp == X` (a real anti-pattern in vesting contracts) — but
+        # only when the other side is CALLER-influenced.
+        #
+        # `storedTimestamp == block.timestamp` is the same-block cache
+        # short-circuit (`if (reserve.lastUpdateTimestamp == block.timestamp)
+        # return cachedIndex;`, Aave's shape). The stored value is written by the
+        # contract itself, so the comparison detects sameness rather than handing
+        # anyone a lever, and all three real occurrences carried an explicit
+        # `// slither-disable-next-line incorrect-equality`.
+        - and:
+            - has: { block: member, name: ^(timestamp|number)$ }
+            - any:
+                - left: { tainted: user_controlled }
+                - right: { tainted: user_controlled }

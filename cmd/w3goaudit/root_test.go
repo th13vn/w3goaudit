@@ -273,3 +273,164 @@ func TestBuildVerboseFlagAcceptsNoValue(t *testing.T) {
 		t.Fatalf("build --verbose NoOptDefVal = %q, want true", flag.NoOptDefVal)
 	}
 }
+
+// unparsableSource contains a construct the parser cannot represent. It exists so
+// coverage-loss tests do not depend on any specific parser gap being open: what
+// matters is that parse.* diagnostics are surfaced loudly, not which syntax
+// produced them.
+const unparsableSource = "pragma solidity ^0.8.0;\ncontract Broken {\n" +
+	"    function ok() public pure returns (uint256) { return 1; }\n" +
+	"    function bad() public pure { this is not solidity ]]] }\n" +
+	"    uint256 public afterBad;\n}\n"
+
+// TestStrictParseRejectsSourceAndCacheWithStderrParity mirrors the strict-imports
+// contract for parse coverage loss: --strict-parse must fail before template
+// execution or report writing, identically for a source build and a --db scan,
+// and the warning must go to stderr while stdout stays machine-clean.
+func TestStrictParseRejectsSourceAndCacheWithStderrParity(t *testing.T) {
+	dir := t.TempDir()
+	source := filepath.Join(dir, "Broken.sol")
+	if err := os.WriteFile(source, []byte(unparsableSource), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	db, err := buildDatabaseWithOptions(databaseLoadOptions{
+		InputPath: source,
+		Stdout:    io.Discard,
+		Stderr:    io.Discard,
+	})
+	if err != nil {
+		t.Fatalf("build strict-parse fixture: %v", err)
+	}
+	if !hasParseLoss(db) {
+		t.Fatal("fixture produced no parse diagnostics; pick a different construct")
+	}
+	data, err := json.Marshal(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cache := filepath.Join(dir, "database.json")
+	if err := os.WriteFile(cache, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	stderrByMode := make(map[string]string)
+	for _, mode := range []string{"source", "cache"} {
+		t.Run(mode, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			opts := scanOptions{
+				InputPath:   source,
+				StrictParse: true,
+				StdoutOnly:  true,
+				Stdout:      &stdout,
+				Stderr:      &stderr,
+			}
+			if mode == "cache" {
+				opts.InputPath = ""
+				opts.DBPath = cache
+			}
+			err := executeScan(opts)
+			if err == nil || !strings.Contains(err.Error(), "strict parse:") {
+				t.Fatalf("executeScan error = %v, want a strict parse failure", err)
+			}
+			if !strings.Contains(stderr.String(), "Broken.sol") {
+				t.Fatalf("stderr = %q, want the affected file named", stderr.String())
+			}
+			// stdout legitimately echoes the input path in the progress line;
+			// what must not leak there is the warning itself.
+			if strings.Contains(stdout.String(), "could not be parsed") {
+				t.Fatalf("stdout was polluted by the warning: %q", stdout.String())
+			}
+			stderrByMode[mode] = stderr.String()
+		})
+	}
+	if stderrByMode["source"] != stderrByMode["cache"] {
+		t.Fatalf("source/cache stderr differs:\nsource: %q\n cache: %q", stderrByMode["source"], stderrByMode["cache"])
+	}
+}
+
+// TestParseLossIsLoudByDefault is the core of F-1b: a default (tolerant) scan
+// must still say out loud that source was dropped. Before this, the only signal
+// was analysisComplete:false buried in data/manifest.json, so a confident-looking
+// finding count could hide an entirely unanalyzed file.
+func TestParseLossIsLoudByDefault(t *testing.T) {
+	dir := t.TempDir()
+	source := filepath.Join(dir, "Broken.sol")
+	if err := os.WriteFile(source, []byte(unparsableSource), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	opts := scanOptions{
+		InputPath:    source,
+		TemplatePath: "../../templates/official",
+		StdoutOnly:   true,
+		NoColor:      true,
+		Stdout:       &stdout,
+		Stderr:       &stderr,
+	}
+	if err := executeScan(opts); err != nil {
+		t.Fatalf("default scan must stay tolerant, got: %v", err)
+	}
+
+	out := stdout.String()
+	if !strings.Contains(out, "Incomplete parse") {
+		t.Errorf("stdout missing the parse-loss warning:\n%s", out)
+	}
+	if !strings.Contains(out, "Broken.sol") {
+		t.Errorf("stdout does not name the affected file:\n%s", out)
+	}
+	if !strings.Contains(out, "--strict-parse") {
+		t.Errorf("stdout does not point at --strict-parse:\n%s", out)
+	}
+}
+
+// TestNoParseLossWarningWhenClean pins that a healthy scan stays quiet, so the
+// warning keeps its signal value.
+func TestNoParseLossWarningWhenClean(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	opts := scanOptions{
+		InputPath:    "../../test-data/core/build-database/01-basic-contracts.sol",
+		TemplatePath: "../../templates/official",
+		StdoutOnly:   true,
+		NoColor:      true,
+		Stdout:       &stdout,
+		Stderr:       &stderr,
+	}
+	if err := executeScan(opts); err != nil {
+		t.Fatalf("executeScan: %v", err)
+	}
+	if strings.Contains(stdout.String(), "Incomplete parse") {
+		t.Errorf("clean scan emitted a parse-loss warning:\n%s", stdout.String())
+	}
+}
+
+// TestStrictParseConfigRespectsExplicitCLIFlag mirrors the strict-imports config
+// precedence rule: config supplies the default, an explicit flag always wins.
+func TestStrictParseConfigRespectsExplicitCLIFlag(t *testing.T) {
+	cfg := &home.Config{}
+	cfg.Scan.StrictParse = true
+
+	defaultCmd := &cobra.Command{}
+	defaultCmd.Flags().Bool("strict-parse", false, "")
+	defaultOpts := scanOptions{}
+	applyConfigDefaults(defaultCmd, cfg, &defaultOpts)
+	if !defaultOpts.StrictParse {
+		t.Fatal("config strict_parse was not applied when the CLI flag was absent")
+	}
+
+	explicitCmd := &cobra.Command{}
+	explicitCmd.Flags().Bool("strict-parse", false, "")
+	if err := explicitCmd.Flags().Set("strict-parse", "false"); err != nil {
+		t.Fatal(err)
+	}
+	explicitOpts := scanOptions{}
+	applyConfigDefaults(explicitCmd, cfg, &explicitOpts)
+	if explicitOpts.StrictParse {
+		t.Fatal("explicit --strict-parse=false did not override config")
+	}
+
+	if rootCmd.Flags().Lookup("strict-parse") == nil || buildCmd.Flags().Lookup("strict-parse") == nil {
+		t.Fatal("root and build commands must both expose --strict-parse")
+	}
+}

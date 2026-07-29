@@ -1,0 +1,27 @@
+meta:
+  id: MEDIUM-ORACLE-CURVE-SPOT-PRICE
+  title: "Curve get_p Spot Price Returned Directly"
+  severity: MEDIUM
+  confidence: MEDIUM
+  description: >
+    A Curve pool's `get_p()` is read and returned without smoothing. `get_p` is
+    the pool's instantaneous spot price, not an oracle: it moves with any swap in
+    the same transaction, so a flash-loaned imbalance sets whatever price the
+    caller wants. Curve exposes `price_oracle()` — an exponential moving average
+    with a configurable half-life — for exactly this use.
+  recommendation: >
+    Read `price_oracle()` instead of `get_p()`, and cross-check it against an
+    independent feed with a deviation bound. If `get_p` is needed for internal
+    math, never let its value escape as a price the protocol trusts.
+  references:
+    - https://docs.curve.fi/stableswap-exchange/stableswap-ng/pools/oracles/
+    - https://chainsecurity.com/curve-lp-oracle-manipulation-post-mortem/
+
+query:
+  from: function
+
+  where:
+    - sequence:
+        - block: external_call
+          name: '^get_p$'
+        - block: return

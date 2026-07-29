@@ -191,6 +191,13 @@ Import path resolution with remapping support.
   `.sol` file sharing the longest trailing path-segment suffix with the
   import. A match must align **at least two** segments (`<dir>/<file>.sol`) and
   be **unique** at the longest length; otherwise it abstains rather than guess.
+  **Hitting the file cap also abstains**, and logs why: uniqueness is only
+  meaningful over a complete view of the tree, so a match that looks unique among
+  the files walked so far may be ambiguous in the ones that were skipped.
+  Answering from a partial view would bind the import to the wrong dependency;
+  abstaining leaves it unresolved, which is already recorded as a durable
+  `import.unresolved` diagnostic. `suffixWalkFileLimit` is a `var` only so tests
+  can exercise that path without creating 20k files.
 - Both accept only an existing regular file contained within the owning
   sub-project (`withinRoot`, reusing the sub-project containment rule), so they
   cannot invent a path or escape the scan tree. On failure resolution still

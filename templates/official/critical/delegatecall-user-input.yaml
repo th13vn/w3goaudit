@@ -21,6 +21,11 @@ query:
   select: delegatecall
   where:
     - not: { preset: access_controlled }
-    - has:
-        receiver: true
+    # The DELEGATECALL's own target must be caller-controlled. `has:` would search
+    # every descendant, so the receiver of a nested call in the encoded arguments
+    # satisfied it — CrocSwapDex's
+    # `proxyPaths_[CONST].delegatecall(abi.encodeWithSignature(…, curve.pullPriceTick(), …))`
+    # was reported CRITICAL because `curve` is caller-derived, even though the
+    # target is a constant-index read of governance-controlled storage.
+    - receiver:
         tainted: user_controlled

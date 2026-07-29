@@ -1,0 +1,43 @@
+meta:
+  id: MEDIUM-ORACLE-LP-SPOT-PRICE
+  title: "Price Derived From AMM Reserves / Spot Supply Ratio"
+  severity: MEDIUM
+  confidence: MEDIUM
+  description: >
+    A price getter computes its value by dividing pool reserves (or the
+    underlying balance) by `totalSupply`. That ratio is the pool's instantaneous
+    state, which anyone can move within a single transaction using a flash loan.
+    An attacker skews the reserves, calls the protocol function that reads this
+    price, and unwinds — the classic flash-loan price manipulation that has
+    caused a long series of lending-protocol losses.
+  recommendation: >
+    Price from a manipulation-resistant source: a Chainlink feed, a
+    sufficiently long TWAP (Uniswap V3 `observe`), or a fair-value LP formula
+    that combines external asset prices with invariant math rather than spot
+    reserves. If a spot read is unavoidable, bound the deviation against an
+    independent feed.
+  references:
+    - https://cmichel.io/pricing-lp-tokens/
+    - https://docs.uniswap.org/concepts/protocol/oracle
+
+query:
+  from: function
+
+  where:
+    - func_name: '(?i)get.*price'
+    - has:
+        any:
+          # reserve / underlying divided by supply.
+          - block: binary
+            operator: '/'
+            left:
+              name: '^(reserve0|reserve1|reserve|underlying|underlyingUnit|pair)$'
+            right:
+              name: 'totalSupply'
+          # The same division expressed through a math library.
+          - block: external_call
+            name: '^div$'
+            has:
+              name: '^(reserve0|reserve1|reserve|underlying|underlyingUnit|pair)$'
+            arg.0:
+              name: 'totalSupply'

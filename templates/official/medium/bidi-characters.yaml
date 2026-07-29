@@ -1,0 +1,29 @@
+meta:
+  id: MEDIUM-BIDI-CHARACTERS
+  title: "Unicode Bidirectional Control Characters in Source (Trojan Source)"
+  severity: MEDIUM
+  confidence: HIGH
+  description: >
+    The source contains Unicode bidirectional control characters (RLO, LRO, RLE,
+    LRE, PDF, or the isolate family). These reorder how text is DISPLAYED without
+    changing how it is compiled, so a reviewer on GitHub or in an editor can read
+    logic that is the opposite of what the compiler sees — a comment that appears
+    to end where it does not, or operands that appear swapped. Known as Trojan
+    Source, this is an attack on code review itself, which makes it especially
+    dangerous in a contract that will be audited and then verified on a block
+    explorer.
+  recommendation: >
+    Remove the control characters. Reject them in CI (a lint rule or a pre-commit
+    grep over the code-point set), and be suspicious of any legitimate need for
+    them in Solidity source — string literals that genuinely require RTL text
+    should use explicit escapes.
+  references:
+    - https://trojansource.codes/
+    - https://nvd.nist.gov/vuln/detail/CVE-2021-42574
+
+query:
+  from: source
+
+  where:
+    # LRE, RLE, LRO, RLO, LRI, RLI, FSI, PDF, PDI.
+    - regex: '[\x{202A}\x{202B}\x{202D}\x{202E}\x{2066}\x{2067}\x{2068}\x{202C}\x{2069}]'

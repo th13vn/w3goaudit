@@ -30,14 +30,23 @@ query:
     # "some descendant matches (branch 1 OR branch 2)".
     - has:
         any:
-          # 1. Boolean constant as a DIRECT operand of a comparison or logical
-          #    operator: `x == true`, `y != false`, `a && true`, `b || false`.
+          # 1. Boolean constant as a DIRECT operand of a LOGICAL operator:
+          #    `a && false`, `b || true`. These fold to a constant, so a branch is
+          #    dead — a real logic error.
+          #
+          #    `==`/`!=` against a boolean literal is deliberately NOT matched.
+          #    `x == false` is a verbose `!x`: a style preference, not a defect, and
+          #    it is how CrocSwap writes its mutex checks
+          #    (`require(msgValSpent_ == false, "DS")`). Reporting it at MEDIUM
+          #    contradicts this pack's curation policy, which excludes style and
+          #    informational rules because they bury real findings.
+          #
           #    left/right match the operand nodes themselves (not descendants), so
           #    `sink(true) && sink(false)` — where the literals are call args, not
           #    operands — is not flagged. Assignments use operator "=" on
           #    stmt.assign, so `x = true` / `return true` never match here.
           - block: binary
-            operator: '^(==|!=|&&|\|\|)$'
+            operator: '^(&&|\|\|)$'
             any:
               - left:
                   block: literal

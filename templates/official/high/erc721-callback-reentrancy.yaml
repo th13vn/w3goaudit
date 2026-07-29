@@ -1,0 +1,29 @@
+meta:
+  id: HIGH-ERC721-CALLBACK-REENTRANCY
+  title: "ERC721 Receiver Callback Reentrancy (safeMint / safeTransferFrom)"
+  severity: HIGH
+  confidence: MEDIUM
+  description: >
+    An unguarded entry point reaches `_checkOnERC721Received`, which calls
+    `onERC721Received` on a caller-controlled recipient. That hand-off transfers
+    control to arbitrary code at a point where the token has already been
+    credited but the surrounding bookkeeping — mint counters, per-wallet caps,
+    allowlist consumption, sale accounting — has usually not been updated yet.
+    Reentering the same entry point from the hook is the standard way NFT mint
+    caps and allowlists are bypassed.
+  recommendation: >
+    Add a `nonReentrant` modifier, and independently follow checks-effects-
+    interactions: update every counter, cap, and allowlist entry BEFORE calling
+    `_safeMint` / `safeTransferFrom`. Use `_mint` instead of `_safeMint` when the
+    recipient does not need the callback.
+  references:
+    - https://github.com/crytic/slither/wiki/Detector-Documentation#reentrancy-vulnerabilities
+    - https://docs.openzeppelin.com/contracts/5.x/api/token/erc721#IERC721Receiver
+
+query:
+  from: entry_function
+  select: internal_call
+
+  where:
+    - not: { preset: reentrancy_guarded }
+    - name: '^_checkOnERC721Received$'

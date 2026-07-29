@@ -161,6 +161,8 @@ Every flag has a long and short form.
 | `--no-color`                 |       | bool   | Disable ANSI color in console output; `NO_COLOR` env always wins                                                                                                 |
 | `--ignore-invalid-templates` |       | bool   | Skip invalid templates in a directory instead of failing the scan                                                                                                |
 | `--strict-imports`           |       | bool   | Fail when any Solidity import is unresolved; applies identically to source builds and persisted `--db` diagnostics                                               |
+| `--strict-parse`             |       | bool   | Fail when any Solidity source could not be fully parsed (`parse.recovered`/`parse.skipped`); same source/`--db` parity                                            |
+| `--location-source`          |       | string | Where a finding points: `matched` (default — the dangerous statement) or `verifier` (the entry function)                                                           |
 | `--update-templates`         | `-T`  | bool   | Refresh `~/.w3goaudit/templates` from the latest published release and exit                                                                                      |
 | `--update`                   | `-u`  | bool   | Update w3goaudit itself via `go install …@latest` and exit                                                                                                       |
 
@@ -184,14 +186,30 @@ Every flag has a long and short form.
   persisted as a database diagnostic and warned on stderr. `--strict-imports`
   converts that same diagnostic into an error for both source scans and
   `--db` cache scans, so cache reuse cannot silently weaken the policy.
+- Parse coverage is tolerant by default too, but it is never silent. Any
+  `parse.recovered`/`parse.skipped` diagnostic is summarized on stderr during the
+  build and again in the console result, naming the affected files. This is a
+  stronger failure than an unresolved import: an unresolved reference leaves the
+  AST intact and only imprecise, whereas parse loss means the affected
+  declarations do not exist for **any** detector, so a confident-looking finding
+  count can hide a file the analyzer never read. `--strict-parse` converts it to
+  an error, with the same source/`--db` parity as `--strict-imports`.
 - `NO_COLOR` (https://no-color.org) is honored everywhere — the summary header,
   per-section emoji, and severity icons all suppress.
-- Location attribution defaults to verifier context with the matched node's
-  precise line, columns, and bytes. Set
-  `WGAUDIT_LOCATION_FROM_MATCHED_NODE=1` for matched-node attribution, or use
-  `Engine.SetLocationSource` from the SDK. There is no current CLI
-  `--location-source` flag. Primary-node, reachability, and fix-here context
-  remains available in either mode.
+- **Location attribution points at the dangerous statement by default.** Every
+  `Location` field — file, line, columns, bytes, contract, function — describes the
+  matched node. The entry point is not lost: it is carried by `entryPoint` (the
+  auditor-actionable "fix here" hop) and `reachability`.
+  Verifier attribution took `file`/`line` from the matched node but
+  `contract`/`function` from the entry function, so an interprocedural finding
+  described two different places at once — it read `LongPath.userCmd` while pointing
+  at `ProxyCaller.sol:163`, a line inside a different contract, and jumping to it
+  landed where the named function does not exist. Select it with
+  `--location-source verifier` if you index findings by entry point.
+  `W3GOAUDIT_LOCATION_FROM_MATCHED_NODE` (`matched`/`1`/`true`, or
+  `verifier`/`0`/`false`) overrides both, and `Engine.SetLocationSource` is the SDK
+  equivalent. Primary-node, reachability, and fix-here context is populated in every
+  mode.
 - Columns are one-based, half-open Unicode code points. Bytes are zero-based,
   half-open UTF-8 offsets. These fields are not LSP positions.
 
@@ -249,6 +267,9 @@ w3goaudit -d ./contracts/data/database.json
 ```bash
 w3goaudit ./contracts/ --strict-imports
 w3goaudit -d ./contracts/data/database.json --strict-imports
+
+# Fail when any source could not be fully parsed.
+w3goaudit ./contracts/ --strict-parse
 ```
 
 **List the active template set (no path required):**
@@ -382,6 +403,7 @@ w3goaudit build <path> -o <output.json> [flags]
 | `--db <file>`         | string | No       | Load existing database instead of rebuilding |
 | `--verbose[=<file>]`  | string | No       | Enable verbose logging; omit the value for stdout or provide a log-file path |
 | `--strict-imports`    | bool   | No       | Fail before writing JSON when an import diagnostic is unresolved |
+| `--strict-parse`      | bool   | No       | Fail before writing JSON when any source could not be fully parsed |
 
 #### Examples
 
@@ -390,6 +412,7 @@ w3goaudit build ./contracts/ -o database.json
 w3goaudit build ./contracts/ -o database.json --verbose
 w3goaudit build ./contracts/ -o database.json --verbose=/tmp/build.log
 w3goaudit build ./contracts/ -o database.json --strict-imports
+w3goaudit build ./contracts/ -o database.json --strict-parse
 ```
 
 The resulting `database.json` can later be re-scanned with
@@ -950,6 +973,7 @@ output:
 scan:
   min_severity: ""                 # default --min-severity threshold
   strict_imports: false            # fail when any source/cache import is unresolved
+  strict_parse: false              # fail when any source could not be fully parsed
   exclude_paths:                   # reserved: paths skipped during discovery
     - node_modules
     - lib
@@ -963,7 +987,8 @@ color: auto                        # auto | never
 ```
 
 The keys consumed today are `templates.dir`, `templates.repo`, `output.base_dir`,
-`output.html`, `scan.min_severity`, `scan.strict_imports`, and `color`. `scan.exclude_paths`,
+`output.html`, `scan.min_severity`, `scan.strict_imports`, `scan.strict_parse`, and
+`color`. `scan.exclude_paths`,
 `scan.workers`, and `report.repo_base` are reserved for future use.
 
 ### Project Detection

@@ -23,6 +23,9 @@ func applyConfigDefaults(cmd *cobra.Command, cfg *home.Config, opts *scanOptions
 	if !cmd.Flags().Changed("strict-imports") {
 		opts.StrictImports = cfg.Scan.StrictImports
 	}
+	if !cmd.Flags().Changed("strict-parse") {
+		opts.StrictParse = cfg.Scan.StrictParse
+	}
 	if !cmd.Flags().Changed("no-color") && strings.EqualFold(cfg.Color, "never") {
 		opts.NoColor = true
 	}

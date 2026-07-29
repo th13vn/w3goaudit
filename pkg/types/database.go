@@ -914,24 +914,37 @@ func (db *Database) buildEntryFunctionsForContract(contract *Contract) []string 
 	// Map signature -> function ID
 	resolvedBySignature := make(map[string]string)
 
-	// LinearizedBases is derived-first: [MostDerived, ..., MostBase]
-	// Iterate forward - first signature encountered is the most derived (overridden) version
+	// LinearizedBases is derived-first: [MostDerived, ..., MostBase], so the first
+	// declaration of a signature is the most derived one.
+	//
+	// The signature slot is claimed by that most-derived declaration REGARDLESS of
+	// whether it is an entry point, and only then filtered. Checking IsEntrypoint
+	// first was a real defect: a derived override that is `view`/`pure` never
+	// occupied its slot, so an inherited declaration for the same selector — often a
+	// nonpayable INTERFACE stub, which does look like an entry point — was admitted
+	// in its place. Detectors then reported bodyless interface declarations, where
+	// there is nothing to fix (7 false positives on Uniswap v4 IHooks in one real
+	// scan). An override shadows its base even when it is not externally callable;
+	// in that case the selector simply has no entry function.
+	claimed := make(map[string]bool)
 	for _, baseContract := range db.LinearizedContracts(contract) {
 		for _, fn := range baseContract.Functions {
-			if fn.IsEntrypoint() {
-				signature := fn.GetSignature(nil)
-				if signature != "" {
-					// Only add if not already seen - first occurrence is most derived
-					if _, exists := resolvedBySignature[signature]; !exists {
-						selector := fn.Selector
-						if selector == "" {
-							selector = fn.Name
-						}
-						funcID := MakeFunctionID(baseContract.SourceFile, baseContract.Name, selector)
-						resolvedBySignature[signature] = funcID
-					}
-				}
+			signature := fn.GetSignature(nil)
+			if signature == "" {
+				continue
 			}
+			if claimed[signature] {
+				continue
+			}
+			claimed[signature] = true
+			if !fn.IsEntrypoint() {
+				continue
+			}
+			selector := fn.Selector
+			if selector == "" {
+				selector = fn.Name
+			}
+			resolvedBySignature[signature] = MakeFunctionID(baseContract.SourceFile, baseContract.Name, selector)
 		}
 	}
 

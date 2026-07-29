@@ -720,3 +720,80 @@ func TestGoldenRule(t *testing.T) {
 		t.Error("Expected golden rule to NOT match function with access control")
 	}
 }
+
+// TestCheckVersionEvaluatesPragmaRanges pins that `version:` intersects the
+// constraint with the pragma's whole permitted RANGE rather than comparing it to
+// the first version triple in the string.
+//
+// The old point-comparison model was wrong in both directions:
+//   - `>=0.7.0 <0.9.0` (Uniswap-V3-era style) yielded 0.7.0, so a `>=0.8.0`
+//     detector was silently skipped for code that compiles on 0.8.x — a false
+//     negative on very common source.
+//   - `^0.8` has no patch, so extractVersion returned "" and the gate failed
+//     OPEN, which happened to be right for `>=0.8.0` and wrong for `<0.8.0`.
+func TestCheckVersionEvaluatesPragmaRanges(t *testing.T) {
+	cases := []struct {
+		pragma     string
+		constraint string
+		want       bool
+		why        string
+	}{
+		// Caret: ^0.8.20 permits [0.8.20, 0.9.0).
+		{"^0.8.20", ">=0.8.0", true, "0.8.20 is at or above 0.8.0"},
+		{"^0.8.20", "<0.8.0", false, "nothing in ^0.8.20 is below 0.8.0"},
+		{"^0.7.6", ">=0.8.0", false, "^0.7.6 stops before 0.8.0"},
+		{"^0.7.6", "<0.8.0", true, "^0.7.6 is entirely below 0.8.0"},
+
+		// Compound range: the regression. >=0.7.0 <0.9.0 permits 0.8.x, so a
+		// >=0.8.0 detector MUST apply.
+		{">=0.7.0 <0.9.0", ">=0.8.0", true, "the range permits 0.8.x"},
+		{">=0.7.0 <0.9.0", "<0.8.0", true, "the range also permits 0.7.x"},
+		{">=0.8.0 <0.9.0", "<0.8.0", false, "the range starts at 0.8.0"},
+
+		// Patchless pragma: must be reasoned about, not skipped.
+		{"^0.8", ">=0.8.0", true, "^0.8 permits 0.8.x"},
+		{"^0.8", "<0.8.0", false, "^0.8 has no version below 0.8.0"},
+		{"0.8", ">=0.8.0", true, "bare 0.8 means 0.8.0"},
+
+		// Exact pin.
+		{"0.8.20", ">=0.8.0", true, "0.8.20 satisfies >=0.8.0"},
+		{"0.8.20", "<0.8.0", false, "0.8.20 does not satisfy <0.8.0"},
+		{"0.8.20", "=0.8.20", true, "exact match"},
+		{"0.8.20", "=0.8.19", false, "exact mismatch"},
+
+		// Tilde: ~0.8.4 permits [0.8.4, 0.9.0).
+		{"~0.8.4", ">=0.8.0", true, "0.8.4 is at or above 0.8.0"},
+		{"~0.8.4", "<0.8.0", false, "nothing in ~0.8.4 is below 0.8.0"},
+
+		// Open lower bound.
+		{">=0.6.0", ">=0.8.0", true, "an open upper bound permits 0.8.x"},
+
+		// Disjunction: either alternative satisfying is enough.
+		{"^0.7.0 || ^0.8.0", ">=0.8.0", true, "the ^0.8.0 alternative permits it"},
+	}
+
+	for _, c := range cases {
+		e := &Engine{currentSourceFile: &types.SourceFile{PragmaVersion: c.pragma}}
+		if got := e.checkVersion(c.constraint); got != c.want {
+			t.Errorf("pragma %q, constraint %q = %v, want %v (%s)",
+				c.pragma, c.constraint, got, c.want, c.why)
+		}
+	}
+}
+
+// TestCheckVersionUnknownContextSkips keeps the documented tolerant behavior for
+// genuinely absent context: no source file and no pragma both skip the gate.
+// An UNPARSEABLE pragma must also skip rather than silently exclude every file.
+func TestCheckVersionUnknownContextSkips(t *testing.T) {
+	if got := (&Engine{}).checkVersion(">=0.8.0"); !got {
+		t.Error("no source-file context should skip the version gate")
+	}
+	e := &Engine{currentSourceFile: &types.SourceFile{}}
+	if !e.checkVersion(">=0.8.0") {
+		t.Error("an empty pragma should skip the version gate")
+	}
+	e.currentSourceFile = &types.SourceFile{PragmaVersion: "not a version at all"}
+	if !e.checkVersion(">=0.8.0") {
+		t.Error("an unparseable pragma should skip the version gate, not exclude the file")
+	}
+}

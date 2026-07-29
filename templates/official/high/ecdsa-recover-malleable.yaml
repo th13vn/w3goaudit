@@ -26,8 +26,13 @@ query:
           has:
             receiver: true
             name: '^ECDSA$'
+        # The replay guard must be keyed by the SIGNATURE. That is what makes
+        # malleability exploitable: a malleated (r, s') pair is a different map key
+        # for the same authorization. A guard keyed by a request id
+        # (`claimed[battleId] = true`) is the CORRECT pattern and was previously
+        # reported, because any caller-derived index satisfied the old rule.
         - block: state_write
           left:
             block: index
             has:
-              tainted: parameter
+              name: (?i)(signature|^sig$|sigHash|_sig)

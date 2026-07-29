@@ -15,10 +15,10 @@ func TestRepositoryTemplatePackIsValidWQL(t *testing.T) {
 		path string
 		want int
 	}{
-		{path: "templates/official", want: 25},
+		{path: "templates/official", want: 39},
 		{path: "templates/test", want: 5},
 	}
-	wantTotal := 30
+	wantTotal := 44
 	// The benchmark template lane lives under the dev-only, git-ignored
 	// scripts/benchmark/ harness; only assert it when the harness is present.
 	if benchmarkHarnessAvailable(root) {
@@ -26,7 +26,7 @@ func TestRepositoryTemplatePackIsValidWQL(t *testing.T) {
 			path string
 			want int
 		}{path: "scripts/benchmark/templates", want: 76})
-		wantTotal = 106
+		wantTotal = 120
 	}
 
 	total := 0

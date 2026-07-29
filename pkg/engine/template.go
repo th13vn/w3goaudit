@@ -217,6 +217,18 @@ type Rule struct {
 	Left  *Rule `json:"left,omitempty"`
 	Right *Rule `json:"right,omitempty"`
 
+	// Receiver matches the sub-rule against the call's DIRECT tagged receiver
+	// child (`token` in `token.call(data)`), and nothing else.
+	//
+	// This exists because `has: {receiver: true, …}` searches every descendant, so
+	// the receiver of a NESTED call inside the arguments satisfied it: CrocSwapDex's
+	// `proxyPaths_[CONST].delegatecall(abi.encodeWithSignature(…, curve.pullPriceTick(), …))`
+	// was reported as an attacker-controlled delegatecall because `curve` is
+	// caller-derived. `receiver:` gives the guarantee `receiver_name` already
+	// provides for names. Authored as `receiver: {…}`; the scalar `receiver: true`
+	// remains the attribute marker on a receiver node itself.
+	Receiver *Rule `json:"receiver,omitempty"`
+
 	// ========== FILTER-SPECIFIC ==========
 	HasParam string `json:"has_param,omitempty"` // check function has param named X
 }
@@ -492,6 +504,9 @@ func (state *ruleCloneState) clone(rule *Rule, depth int, path string) (Rule, er
 	if cloned.Right, err = state.clonePointer(rule.Right, depth+1, path+".right"); err != nil {
 		return Rule{}, err
 	}
+	if cloned.Receiver, err = state.clonePointer(rule.Receiver, depth+1, path+".receiver"); err != nil {
+		return Rule{}, err
+	}
 	return cloned, nil
 }
 
@@ -713,6 +728,7 @@ func normalizeRule(r *Rule) {
 	normalizeRule(r.Contains)
 	normalizeRule(r.Inside)
 	normalizeRule(r.Left)
+	normalizeRule(r.Receiver)
 	normalizeRule(r.Right)
 	normalizeRule(r.HasGuard)
 	normalizeRule(r.StatementContains)
@@ -792,6 +808,7 @@ func presentRuleFields(r *Rule) []ruleField {
 	add(r.TaintedFrom != "", "tainted_from", classAST)
 	add(r.Left != nil, "left", classAST)
 	add(r.Right != nil, "right", classAST)
+	add(r.Receiver != nil, "receiver", classAST)
 	add(len(r.Attr) > 0, "attr", classAST)
 	add(r.Operator != "", "operator", classAST)
 	add(r.IsStateVar != nil, "is_state_var", classAST)
@@ -856,6 +873,9 @@ func checkRule(r *Rule, where string, inMatch bool) error {
 		return err
 	}
 	if err := checkRule(r.Inside, where, inMatch); err != nil {
+		return err
+	}
+	if err := checkRule(r.Receiver, where, inMatch); err != nil {
 		return err
 	}
 	if err := checkRule(r.Left, where, inMatch); err != nil {
@@ -1038,7 +1058,7 @@ func (r *Rule) IsEmpty() bool {
 		r.Regex == "" && r.SourceRegex == "" && r.ArgAny == nil &&
 		r.Extends == "" && r.Modifier == "" && len(r.Args) == 0 &&
 		r.TaintedFrom == "" && r.Version == "" && r.Preset == "" &&
-		r.Left == nil && r.Right == nil && r.HasParam == "" &&
+		r.Left == nil && r.Right == nil && r.Receiver == nil && r.HasParam == "" &&
 		r.FuncName == "" &&
 		r.HasGuard == nil && r.IsStateVar == nil &&
 		r.Operator == "" && r.Visibility == "" && r.Mutability == "" &&
@@ -1132,6 +1152,9 @@ func walkRules(r *Rule, visit func(*Rule) error) error {
 		return err
 	}
 	if err := walkRules(r.Inside, visit); err != nil {
+		return err
+	}
+	if err := walkRules(r.Receiver, visit); err != nil {
 		return err
 	}
 	if err := walkRules(r.Left, visit); err != nil {

@@ -1031,9 +1031,18 @@ func TestVersionChecking(t *testing.T) {
 		{"0.8.0", "0.8", 0}, // missing patch treated as 0
 	}
 	for _, c := range cmpCases {
-		if got := compareVersions(c.a, c.b); got != c.want {
-			t.Errorf("compareVersions(%q,%q) = %d, want %d", c.a, c.b, got, c.want)
+		left, okLeft := parseVersionTriple(c.a)
+		right, okRight := parseVersionTriple(c.b)
+		if !okLeft || !okRight {
+			t.Fatalf("parseVersionTriple(%q,%q) failed", c.a, c.b)
 		}
+		if got := compareTriples(left, right); got != c.want {
+			t.Errorf("compareTriples(%q,%q) = %d, want %d", c.a, c.b, got, c.want)
+		}
+	}
+	// A malformed segment must fail to parse rather than silently read as zero.
+	if _, ok := parseVersionTriple("0.8.x"); ok {
+		t.Error("parseVersionTriple(0.8.x) should fail, not default to zero")
 	}
 
 	// parseVersionConstraint splits operator from version.

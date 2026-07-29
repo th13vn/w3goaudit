@@ -1,0 +1,31 @@
+meta:
+  id: HIGH-UNISWAP-V4-HOOK-UNPROTECTED
+  title: "Uniswap V4 Hook Callable by Anyone"
+  severity: HIGH
+  confidence: MEDIUM
+  description: >
+    A Uniswap V4 hook entry point (`beforeSwap`, `afterSwap`, `beforeAddLiquidity`,
+    …) is externally callable without restricting the caller to the PoolManager.
+    Hooks run inside the PoolManager's lock and are trusted to read and mutate
+    pool-related accounting. Called directly, an attacker drives the hook's state
+    machine outside any real pool operation — skewing the hook's accounting,
+    minting hook-held claims, or arranging for a later legitimate swap to settle
+    at a manipulated value.
+  recommendation: >
+    Gate every hook callback on the PoolManager, for example by inheriting
+    `BaseHook` (which applies `onlyPoolManager`) or by adding
+    `require(msg.sender == address(poolManager))` to each hook entry point.
+  references:
+    - https://docs.uniswap.org/contracts/v4/concepts/hooks
+    - https://github.com/Uniswap/v4-periphery/blob/main/src/utils/BaseHook.sol
+
+query:
+  from: entry_function
+
+  where:
+    - func_name: '^(beforeInitialize|afterInitialize|beforeAddLiquidity|afterAddLiquidity|beforeRemoveLiquidity|afterRemoveLiquidity|beforeSwap|afterSwap|beforeDonate|afterDonate)$'
+    - visibility: external
+    - not: { preset: access_controlled }
+    - not:
+        modifier: '(?i)onlyPoolManager'
+    - block: function

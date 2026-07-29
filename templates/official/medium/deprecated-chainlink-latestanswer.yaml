@@ -1,0 +1,26 @@
+meta:
+  id: MEDIUM-DEPRECATED-CHAINLINK-LATESTANSWER
+  title: "Deprecated Chainlink latestAnswer / latestRound API"
+  severity: MEDIUM
+  confidence: HIGH
+  description: >
+    The contract reads a price through Chainlink's deprecated `latestAnswer()`
+    (or the equally deprecated `latestRound`/`latestTimestamp` family). These
+    functions cannot report round completeness or staleness, and Chainlink
+    documents that they may return `0` rather than reverting on a feed with no
+    answer — a zero price silently propagated into collateral math values the
+    position at nothing.
+  recommendation: >
+    Migrate to `latestRoundData()` and validate the full tuple: a positive
+    `answer`, a non-zero `updatedAt`, and `answeredInRound >= roundId`. Reject
+    rounds older than the feed's documented heartbeat.
+  references:
+    - https://docs.chain.link/data-feeds/api-reference#latestanswer
+    - https://docs.chain.link/data-feeds/api-reference#latestrounddata
+
+query:
+  from: function
+  select: external_call
+
+  where:
+    - name: ^latestAnswer$

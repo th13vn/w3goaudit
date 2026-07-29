@@ -1,0 +1,32 @@
+meta:
+  id: MEDIUM-STALE-ORACLE-DATA
+  title: "Chainlink latestRoundData Used Without Freshness Check"
+  severity: MEDIUM
+  confidence: MEDIUM
+  description: >
+    `latestRoundData()` is consumed without any guard on the returned values.
+    The call yields `updatedAt` and `answer` precisely so callers can reject stale
+    or invalid rounds: a feed can stop updating (sequencer outage, deprecated
+    feed, or a heartbeat longer than the protocol assumes) while still returning
+    its last answer forever. Pricing against a frozen answer lets positions be
+    opened or liquidated at a price the market left behind.
+  recommendation: >
+    Validate every returned field before use — `require(answer > 0)` and
+    `require(block.timestamp - updatedAt <= maxStaleness)`, with `maxStaleness`
+    set per feed from its documented heartbeat and deviation threshold. On L2s,
+    also check the sequencer-uptime feed before trusting any price.
+  references:
+    - https://docs.chain.link/data-feeds/historical-data
+    - https://docs.chain.link/data-feeds/l2-sequencer-feeds
+
+query:
+  from: function
+
+  where:
+    - has:
+        block: external_call
+        name: ^latestRoundData$
+    # No guard anywhere in the function means nothing was validated.
+    - not:
+        has:
+          block: guard

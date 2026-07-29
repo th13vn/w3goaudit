@@ -11,7 +11,7 @@ import (
 
 // Version information
 var (
-	Version   = "0.4.1"
+	Version   = "0.4.2"
 	BuildTime = "dev"
 )
 
@@ -56,6 +56,8 @@ var (
 	excludeTemplates       string
 	listTemplates          bool
 	strictImports          bool
+	strictParse            bool
+	locationSource         string
 	updateTemplates        bool
 	updateTool             bool
 )
@@ -75,6 +77,8 @@ func init() {
 	rootCmd.Flags().StringVarP(&excludeTemplates, "exclude", "e", "", "Comma-separated template-ID glob(s); matching findings are suppressed")
 	rootCmd.Flags().BoolVarP(&listTemplates, "list-templates", "l", false, "List the templates that would run (id, severity, confidence, title) and exit")
 	rootCmd.Flags().BoolVar(&strictImports, "strict-imports", false, "Fail when any Solidity import cannot be resolved")
+	rootCmd.Flags().BoolVar(&strictParse, "strict-parse", false, "Fail when any Solidity source could not be fully parsed")
+	rootCmd.Flags().StringVar(&locationSource, "location-source", "", "Where a finding points: matched (default, the dangerous statement) or verifier (the entry function)")
 	rootCmd.Flags().BoolVarP(&updateTemplates, "update-templates", "T", false, "Update the template home (~/.w3goaudit/templates) from the latest published release and exit")
 	rootCmd.Flags().BoolVarP(&updateTool, "update", "u", false, "Update w3goaudit itself via `go install …@latest` and exit")
 
@@ -132,6 +136,8 @@ func runScan(cmd *cobra.Command, args []string) error {
 		IgnoreInvalidTemplates: ignoreInvalidTemplates,
 		ListTemplates:          listTemplates,
 		StrictImports:          strictImports,
+		StrictParse:            strictParse,
+		LocationSource:         locationSource,
 		Stdout:                 os.Stdout,
 		Stderr:                 os.Stderr,
 	}

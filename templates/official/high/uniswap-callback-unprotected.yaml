@@ -1,0 +1,35 @@
+meta:
+  id: HIGH-UNISWAP-CALLBACK-UNPROTECTED
+  title: "Uniswap Callback Callable by Anyone"
+  severity: HIGH
+  confidence: MEDIUM
+  description: >
+    A Uniswap V2/V3 callback (`uniswapV2Call`, `uniswapV3SwapCallback`,
+    `uniswapV3FlashCallback`, `uniswapV3MintCallback`) is externally callable
+    without verifying that the caller is the expected pool. Uniswap invokes these
+    on the borrower mid-swap, and the borrower is expected to pay what it owes
+    inside them — so the body typically transfers tokens or mints shares while
+    trusting its arguments. An attacker who calls the callback directly supplies
+    those arguments themselves, making the contract pay out or credit them with
+    no real swap having happened.
+  recommendation: >
+    Assert the caller is the pool: recompute the expected pool address with
+    `PoolAddress.computeAddress(factory, key)` (V3) or the V2 pair
+    `create2` address and `require(msg.sender == expectedPool)`. Additionally
+    verify that your own contract initiated the swap — a transient flag set
+    before the call and cleared after.
+  references:
+    - https://docs.uniswap.org/contracts/v3/reference/periphery/interfaces/callback/IUniswapV3SwapCallback
+    - https://github.com/Uniswap/v3-periphery/blob/main/contracts/libraries/CallbackValidation.sol
+
+query:
+  from: entry_function
+
+  where:
+    - func_name: '^(uniswapV2Call|uniswapV3SwapCallback|uniswapV3FlashCallback|uniswapV3MintCallback)$'
+    - not: { preset: access_controlled }
+    # Recognize the canonical validation helpers by name; they encode the
+    # computeAddress + require pair that makes the callback safe.
+    - not:
+        regex: '(\.verifyCallback\s*\(|\b_?verifyCallback\s*\(|\bisCallback\b)'
+    - block: function

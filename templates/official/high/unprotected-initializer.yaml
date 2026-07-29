@@ -33,15 +33,18 @@ query:
     # initializer/reinitializer modifiers.
     - not:
         preset: access_controlled
+    # A one-time-init guard proven from the body: an enforcing check on a state flag
+    # that the function also sets. This covers OpenZeppelin's `initializer` modifier
+    # (whose body is exactly that mutex) plus every other spelling —
+    # `if (initialized) revert;` (Euler) and
+    # `if (_isInitialized()) revert; _initialize();` (Axelar), both of which were
+    # previously reported because only the OZ modifier name and a guard literally
+    # naming `_initializersDisabled` were recognized.
+    - not:
+        preset: initializer_guarded
     - not:
         modifier: "(?i)(initializer|reinitializer)"
     # Require at least one state write — otherwise it's a pure helper named
     # `init()` and not an actual initializer (= no privilege to steal).
     - has:
         block: state_write
-    - not:
-        has:
-          block: guard
-          has:
-            block: identifier
-            name: ^_initializersDisabled$

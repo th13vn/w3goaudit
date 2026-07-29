@@ -193,7 +193,37 @@ func loadOrBuildDatabaseWithOptions(opts databaseLoadOptions) (*types.Database, 
 		}
 	}
 	emitImportDiagnostics(opts.Stderr, db)
+	emitParseDiagnostics(opts.Stderr, db)
 	return db, nil
+}
+
+// emitParseDiagnostics warns on stderr when source text never became an AST.
+//
+// The sibling of emitImportDiagnostics, and deliberately worded more strongly: an
+// unresolved import leaves the AST intact and only imprecise, whereas parse loss
+// makes the affected declarations invisible to every detector. Both source builds
+// and --db loads go through loadOrBuildDatabaseWithOptions, and the diagnostics
+// are persisted, so the two modes emit identical text.
+func emitParseDiagnostics(w io.Writer, db *types.Database) {
+	if w == nil || db == nil {
+		return
+	}
+	files, total := types.ParseLossFiles(db.Diagnostics)
+	if total == 0 {
+		return
+	}
+	fmt.Fprintf(w, "Warning: %d construct(s) in %d file(s) could not be parsed — those declarations were NOT analyzed:\n",
+		total, len(files))
+	limit := len(files)
+	if limit > 10 {
+		limit = 10
+	}
+	for _, file := range files[:limit] {
+		fmt.Fprintf(w, "  - %s\n", filepath.Base(file))
+	}
+	if len(files) > limit {
+		fmt.Fprintf(w, "  … and %d more\n", len(files)-limit)
+	}
 }
 
 func emitImportDiagnostics(w io.Writer, db *types.Database) {

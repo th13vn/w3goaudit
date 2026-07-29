@@ -25,10 +25,11 @@ type scanOptions struct {
 	OutputPath      string
 	OutputBaseDir   string
 
-	Severity    string
-	MinSeverity string
-	Include     string
-	Exclude     string
+	Severity       string
+	MinSeverity    string
+	LocationSource string
+	Include        string
+	Exclude        string
 
 	Verbose                bool
 	HTML                   bool
@@ -37,6 +38,7 @@ type scanOptions struct {
 	IgnoreInvalidTemplates bool
 	ListTemplates          bool
 	StrictImports          bool
+	StrictParse            bool
 
 	Stdout io.Writer
 	Stderr io.Writer
@@ -76,6 +78,11 @@ func validateScanOptions(opts scanOptions) error {
 	if opts.MinSeverity != "" && !report.IsKnownSeverity(opts.MinSeverity) {
 		return fmt.Errorf("--min-severity must be one of: critical, high, medium, low, info")
 	}
+	switch opts.LocationSource {
+	case "", "matched", "verifier":
+	default:
+		return fmt.Errorf("--location-source %q: must be \"matched\" (default) or \"verifier\"", opts.LocationSource)
+	}
 	for _, severity := range splitGlobs(opts.Severity) {
 		if !report.IsKnownSeverity(severity) {
 			return fmt.Errorf("--severity %q: must be one of: critical, high, medium, low, info", severity)
@@ -109,6 +116,40 @@ func enforceStrictImports(db *types.Database, strict bool) error {
 		}
 	}
 	return nil
+}
+
+// hasParseLoss reports whether any source text failed to become an AST.
+func hasParseLoss(db *types.Database) bool {
+	if db == nil {
+		return false
+	}
+	for _, diagnostic := range db.Diagnostics {
+		if types.IsParseLoss(diagnostic.Code) {
+			return true
+		}
+	}
+	return false
+}
+
+// enforceStrictParse is the parse-coverage sibling of enforceStrictImports.
+// Unresolved imports mean a reference could not be bound; parse loss means the
+// declarations themselves are invisible to every detector, so a clean-looking
+// finding count can hide an entirely unanalyzed file. Default scans stay
+// tolerant; this is the opt-in fail-closed policy, and it runs before template
+// execution and report writing for both source builds and --db scans.
+func enforceStrictParse(db *types.Database, strict bool) error {
+	if !strict || db == nil {
+		return nil
+	}
+	files, total := types.ParseLossFiles(db.Diagnostics)
+	if total == 0 {
+		return nil
+	}
+	if len(files) == 0 {
+		return fmt.Errorf("strict parse: %d unparsed construct(s); see data/diagnostics.json", total)
+	}
+	return fmt.Errorf("strict parse: %d unparsed construct(s) across %d file(s), first: %s",
+		total, len(files), files[0])
 }
 
 // executeScan runs one scan using only the supplied options and scan-local
@@ -170,6 +211,9 @@ func executeScan(raw scanOptions) error {
 	if err := enforceStrictImports(db, opts.StrictImports); err != nil {
 		return err
 	}
+	if err := enforceStrictParse(db, opts.StrictParse); err != nil {
+		return err
+	}
 
 	stats := db.GetStats()
 	progressTo(opts.Stdout, "Building database", fmt.Sprintf("%d files, %d contracts, %d functions",
@@ -189,6 +233,9 @@ func executeScan(raw scanOptions) error {
 	progressTo(opts.Stdout, "Scanning", fmt.Sprintf("%d templates (%s)", len(templates), templateSource), "")
 
 	e := engine.NewWithOptions(db, engine.Options{Logger: logger})
+	if opts.LocationSource == "verifier" {
+		e.SetLocationSource(engine.LocationSourceVerifier)
+	}
 	findings, err := filterFindingsWithOptions(e.ExecuteAll(templates), findingFilterOptions{
 		Severity:    opts.Severity,
 		MinSeverity: opts.MinSeverity,
@@ -209,6 +256,7 @@ func executeScan(raw scanOptions) error {
 		report.PrintConsoleSummaryHeader(opts.Stdout, findings, len(db.MainContracts), elapsed, colorMode)
 		fmt.Fprintln(opts.Stdout)
 		printCombinedConsoleTo(opts.Stdout, stats, summary, findings, plain, opts.Verbose)
+		printParseLossTo(opts.Stdout, db, plain)
 		printUnresolvedTo(opts.Stdout, db, plain)
 		return nil
 	}
@@ -223,6 +271,7 @@ func executeScan(raw scanOptions) error {
 	report.PrintConsoleSummaryHeader(opts.Stdout, findings, len(db.MainContracts), elapsed, colorMode)
 	fmt.Fprintln(opts.Stdout)
 	printFindingsTo(opts.Stdout, findings, plain, opts.Verbose)
+	printParseLossTo(opts.Stdout, db, plain)
 	printUnresolvedTo(opts.Stdout, db, plain)
 	printResultLocationTo(opts.Stdout, outDir, opts.HTML, plain)
 	return nil

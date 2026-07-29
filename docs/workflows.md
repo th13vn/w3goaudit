@@ -56,7 +56,8 @@ graph LR
 6. **Resolve imports recursively** and persist each unresolved import as a
    structured database diagnostic. Warnings are rendered on stderr from that
    diagnostic after either a source build or `--db` load, keeping both paths
-   equivalent. The default remains tolerant; `--strict-imports` fails closed.
+   equivalent. The default remains tolerant; `--strict-imports` and
+   `--strict-parse` fail closed.
 7. **Preserve every import occurrence** in `SourceFile.ImportBindings`, with the
    authored path and canonical resolved file. Phase 1 attaches unit/named
    aliases without deduplicating repeated directives.
@@ -236,12 +237,13 @@ graph TD
 - **Related matched sites**: Multi-condition contract findings can carry
   `Finding.Related`, which reports every contributing source site and not only
   the primary location
-- **Location source**: verifier attribution is the default, with the matched
-  node supplying the precise line, columns, and bytes. SDK callers can select
-  `LocationSourceMatchedNode`, and CLI scans can opt in through
-  `WGAUDIT_LOCATION_FROM_MATCHED_NODE=1`; there is no current CLI
-  `--location-source` flag. Structured primary-node,
-  reachability, and entry-point context is populated in both modes.
+- **Location source**: matched-node attribution is the default, so every
+  `Location` field describes the dangerous statement and the entry hop travels in
+  `entryPoint`/`reachability`. Verifier attribution — `contract`/`function` from the
+  entry function, `file`/`line` from the matched node — is available through
+  `--location-source verifier`, `W3GOAUDIT_LOCATION_FROM_MATCHED_NODE=verifier`, or
+  `Engine.SetLocationSource`. Structured primary-node, reachability, and entry-point
+  context is populated in every mode.
 - **Location units**: columns are one-based, half-open Unicode code points;
   bytes are zero-based, half-open UTF-8 offsets. They are not LSP positions.
 
@@ -431,9 +433,9 @@ captured in `<output>/run.log`.
 
 > **Removed in v0.3:** `--fail-on`,
 > `--format`/`--json`/`--md`/`--html`-as-format (the folder always
-> carries Markdown + SARIF + JSON), and `--log`. Location-source behavior
-> remains available through the SDK and
-> `WGAUDIT_LOCATION_FROM_MATCHED_NODE`.
+> carries Markdown + SARIF + JSON), and `--log`. Location-source behavior is
+> selectable through `--location-source`, the SDK, and
+> `W3GOAUDIT_LOCATION_FROM_MATCHED_NODE`.
 
 ### Flow Diagram
 

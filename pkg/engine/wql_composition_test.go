@@ -1262,7 +1262,20 @@ query:
 	}
 }
 
-func TestOrCompositionIdentityPreservesIntraBranchDuplicates(t *testing.T) {
+// TestOrCompositionCollapsesRepeatedSiteWithinABranch pins the deduplication
+// contract for one dangerous site reached more than once inside a single branch.
+//
+// This test previously asserted the opposite — that intra-branch duplicates were
+// retained — which described the `or:` union implementation rather than a behavior
+// anyone wanted. Reporting one source defect once per reaching entry point was the
+// single largest source of perceived false-positive noise in real scans (22% of
+// findings on a 470-file project), so dedupeReachedSites now collapses repeat
+// reports of an identical precise site and records the other entry points in
+// `Context["additionalEntryPoints"]` instead of dropping them.
+//
+// The duplicated entry-function ID below stands in for the real-world shape: many
+// externally-callable wrappers over one shared internal helper.
+func TestOrCompositionCollapsesRepeatedSiteWithinABranch(t *testing.T) {
 	tmpl, err := ParseTemplate(`
 meta: {id: or-intra-branch-duplicates, severity: HIGH}
 query:
@@ -1286,12 +1299,10 @@ query:
 	want := mustASTNode(t, fn.AST, types.KindCallLowlevelDelegate)
 
 	findings := New(db).Execute(tmpl)
-	if len(findings) != 2 {
-		t.Fatalf("intra-branch duplicate findings = %d, want both retained: %+v", len(findings), findings)
+	if len(findings) != 1 {
+		t.Fatalf("repeated site findings = %d, want one collapsed finding: %+v", len(findings), findings)
 	}
-	for _, f := range findings {
-		assertFindingMatchesNode(t, f, want)
-	}
+	assertFindingMatchesNode(t, findings[0], want)
 }
 
 const functionScopeProvenanceFixture = `// SPDX-License-Identifier: MIT

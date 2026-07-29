@@ -275,16 +275,29 @@ type EntryRef struct {
 type LocationSource int
 
 const (
-	// LocationSourceVerifier (default) preserves today's behavior:
-	// Function/Contract come from the verifier-function context while Line
-	// comes from the matched AST node. Maintained for backward compatibility.
-	LocationSourceVerifier LocationSource = iota
+	// LocationSourceDefault is the zero value and resolves to
+	// LocationSourceMatchedNode. Having a distinct zero value lets
+	// SetLocationSource(LocationSourceVerifier) mean "verifier, explicitly"
+	// rather than being indistinguishable from an unset field.
+	LocationSourceDefault LocationSource = iota
 
-	// LocationSourceMatchedNode takes the precise range from the matched AST
-	// node and host identity from the final trace hop or enclosing declaration.
-	// Aligns w3goaudit with SARIF / Slither / Semgrep conventions. Selected via the env var
-	// WGAUDIT_LOCATION_FROM_MATCHED_NODE=1 or the --location-source matched
-	// CLI flag. Will become the default in a future major version.
+	// LocationSourceVerifier reports Function/Contract from the verifier-function
+	// context (the entry point that started the match) while File/Line come from
+	// the matched AST node.
+	//
+	// That combination describes two different places at once: an interprocedural
+	// finding read `LongPath.userCmd` while pointing at `ProxyCaller.sol:163`, a
+	// line inside a different contract, so jumping to the location landed where the
+	// named function does not exist. Retained for consumers that index findings by
+	// entry point; select with --location-source verifier.
+	LocationSourceVerifier
+
+	// LocationSourceMatchedNode is the DEFAULT. Every Location field describes the
+	// dangerous statement: the precise range from the matched AST node, and host
+	// identity from the final trace hop or enclosing declaration. The entry point is
+	// not lost — it is carried by Finding.EntryPoint (the auditor-actionable "fix
+	// here" hop) and Finding.Reachability. Matches SARIF / Slither / Semgrep
+	// conventions.
 	LocationSourceMatchedNode
 )
 
@@ -296,19 +309,22 @@ func (e *Engine) locationSource() LocationSource {
 	if envVal == "" {
 		envVal = os.Getenv("WGAUDIT_LOCATION_FROM_MATCHED_NODE")
 	}
-	if envVal == "1" || strings.EqualFold(envVal, "true") || strings.EqualFold(envVal, "matched") {
+	switch {
+	case envVal == "1", strings.EqualFold(envVal, "true"), strings.EqualFold(envVal, "matched"):
 		return LocationSourceMatchedNode
+	case envVal == "0", strings.EqualFold(envVal, "false"), strings.EqualFold(envVal, "verifier"):
+		return LocationSourceVerifier
 	}
-	if e.locationOverride == LocationSourceMatchedNode {
-		return LocationSourceMatchedNode
+	if e.locationOverride != LocationSourceDefault {
+		return e.locationOverride
 	}
-	return LocationSourceVerifier
+	return LocationSourceMatchedNode
 }
 
-// SetLocationSource overrides the location provenance for this Engine
-// instance. The CLI uses this when --location-source is passed; tests use it
-// directly. The env var still takes precedence so it can be set in CI without
-// touching code.
+// SetLocationSource overrides the location provenance for this Engine instance.
+// The CLI uses this when --location-source is passed; tests use it directly.
+// LocationSourceDefault restores the default (matched-node). The env var still
+// takes precedence so it can be set in CI without touching code.
 func (e *Engine) SetLocationSource(src LocationSource) { e.locationOverride = src }
 
 // newFinding constructs a Finding with metadata propagated from tmpl.Meta.
@@ -526,8 +542,75 @@ func (e *Engine) executeQuery(tmpl *Template) []*Finding {
 		findings = e.executeOnEntryFunctions(tmpl)
 	}
 
+	findings = dedupeReachedSites(findings)
 	e.logf("Template %s completed: Found %d findings", tmpl.Meta.ID, len(findings))
 	return findings
+}
+
+// dedupeReachedSites collapses repeat reports of one dangerous source site.
+//
+// Entry-point and function scopes visit every scope item independently, so a
+// dangerous statement inside a shared internal helper was reported once per entry
+// function that reaches it. A router with six `removeLiquidity*` variants over one
+// helper produced six findings for one line; across a real 470-file scan this was
+// 20 of 92 findings (22%), all of them re-reports of a site already listed.
+//
+// The defect is one defect, so it is reported once, anchored at the site. The other
+// reaching entry points are not discarded — they move into
+// `Context["additionalEntryPoints"]`, which is what an auditor actually needs
+// ("this one line is reachable from these six externally-callable functions").
+//
+// Only findings with a precise identity (exact file plus span) are collapsed;
+// location-less findings are all retained, matching the union-dedup rule in
+// Execute. SortFindings runs first so the surviving finding is chosen by the total
+// order rather than by map-iteration order, keeping output byte-stable.
+func dedupeReachedSites(findings []*Finding) []*Finding {
+	if len(findings) < 2 {
+		return findings
+	}
+	SortFindings(findings)
+
+	kept := make([]*Finding, 0, len(findings))
+	winnerIndex := make(map[matchedSiteIdentity]int)
+	for _, finding := range findings {
+		identity, precise := findingMatchedSiteIdentity(finding)
+		if !precise {
+			kept = append(kept, finding)
+			continue
+		}
+		index, seen := winnerIndex[identity]
+		if !seen {
+			winnerIndex[identity] = len(kept)
+			kept = append(kept, finding)
+			continue
+		}
+		recordAdditionalEntryPoint(kept[index], finding)
+	}
+	return kept
+}
+
+// recordAdditionalEntryPoint folds a duplicate's entry point into the surviving
+// finding so no reachability information is lost to deduplication. Entries are
+// appended in the sorted order they were seen and deduplicated by name.
+func recordAdditionalEntryPoint(winner, duplicate *Finding) {
+	if winner == nil || duplicate == nil || duplicate.EntryPoint == nil {
+		return
+	}
+	label := duplicate.EntryPoint.Contract + "." + duplicate.EntryPoint.Function
+	if winner.EntryPoint != nil &&
+		label == winner.EntryPoint.Contract+"."+winner.EntryPoint.Function {
+		return
+	}
+	if winner.Context == nil {
+		winner.Context = make(map[string]interface{})
+	}
+	existing, _ := winner.Context["additionalEntryPoints"].([]string)
+	for _, seen := range existing {
+		if seen == label {
+			return
+		}
+	}
+	winner.Context["additionalEntryPoints"] = append(existing, label)
 }
 
 // executeOnSourceFiles runs raw source-text templates. This is deliberately
@@ -1137,7 +1220,8 @@ func (e *Engine) buildLocation(trace *matchTrace, verifierFn *types.Function, ve
 		applyNodeSpan(&loc, trace.Primary)
 		return loc
 	}
-	// Default (today's behavior): verifier function/contract; matched-node line if available.
+	// Default (today's behavior): verifier function/contract; matched-node line if
+	// available.
 	loc := Location{File: fallbackFile}
 	if verifierFn != nil {
 		loc.Line = verifierFn.StartLine
@@ -1147,8 +1231,41 @@ func (e *Engine) buildLocation(trace *matchTrace, verifierFn *types.Function, ve
 	if trace != nil && trace.Primary != nil && trace.Primary.StartLine > 0 {
 		loc.Line = trace.Primary.StartLine
 		applyNodeSpan(&loc, trace.Primary)
+		// The file must follow the line. For a match inside an inlined callee the
+		// primary node lives in the callee's file, and reporting it against the
+		// ENTRY function's file produced a location that does not exist: real scans
+		// pointed at line 185 of a 112-line OpenZeppelin UUPSUpgradeable.sol because
+		// the delegatecall is really in AddressUpgradeable.sol. Function and Contract
+		// stay verifier-derived, which is the documented LocationSourceVerifier
+		// contract; only the file is corrected so the pair is coherent and the
+		// finding can be opened. buildContractLocation already did this.
+		if primaryFile := e.primaryNodeFile(trace); primaryFile != "" {
+			loc.File = primaryFile
+		}
 	}
 	return loc
+}
+
+// primaryNodeFile resolves the source file that actually contains the trace's
+// primary node: the final interprocedural hop when one was recorded, otherwise the
+// enclosing declaration the node was cloned from. Returns "" when neither is
+// available, leaving the caller's fallback in place.
+func (e *Engine) primaryNodeFile(trace *matchTrace) string {
+	if trace == nil || trace.Primary == nil {
+		return ""
+	}
+	if idx := len(trace.Chain) - 1; idx >= 0 {
+		if fn := trace.Chain[idx]; fn != nil && fn.SourceFile != "" {
+			return fn.SourceFile
+		}
+		if idx < len(trace.ChainContracts) && trace.ChainContracts[idx] != nil {
+			if file := trace.ChainContracts[idx].SourceFile; file != "" {
+				return file
+			}
+		}
+	}
+	_, _, declFile, _ := e.hostFunctionFor(trace.Primary)
+	return declFile
 }
 
 func (e *Engine) buildContractLocation(trace *matchTrace, contract *types.Contract) Location {

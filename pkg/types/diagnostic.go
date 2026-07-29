@@ -35,6 +35,37 @@ type Diagnostic struct {
 	Incomplete bool               `json:"incomplete,omitempty"`
 }
 
+// IsParseLoss reports whether a diagnostic code means source text could not be
+// turned into an AST. These are the codes that make a finding count untrustworthy
+// rather than merely imprecise: the affected declarations are invisible to every
+// detector, so a clean-looking scan can hide an entirely unanalyzed file.
+//
+// Kept separate from resolution codes (`import.unresolved`,
+// `identity.unresolved`, `inheritance.base_unresolved`), which mean the AST
+// exists but some reference could not be bound.
+func IsParseLoss(code string) bool {
+	return code == DiagnosticParseRecovered || code == DiagnosticParseSkipped
+}
+
+// ParseLossFiles returns the sorted, deduplicated set of files carrying parse
+// diagnostics, along with the total diagnostic count. Callers use the file set
+// for a bounded human warning and the count to describe the scale.
+func ParseLossFiles(diagnostics []Diagnostic) (files []string, total int) {
+	seen := make(map[string]bool)
+	for _, diagnostic := range diagnostics {
+		if !IsParseLoss(diagnostic.Code) {
+			continue
+		}
+		total++
+		if diagnostic.File != "" && !seen[diagnostic.File] {
+			seen[diagnostic.File] = true
+			files = append(files, diagnostic.File)
+		}
+	}
+	sort.Strings(files)
+	return files, total
+}
+
 // SortDiagnostics applies the serialized diagnostic total order. The primary
 // public key is severity, code, file, line, import path, symbol, and message;
 // phase and incomplete are deterministic tie-breakers for otherwise distinct

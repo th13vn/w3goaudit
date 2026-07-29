@@ -31,6 +31,7 @@ var (
 	buildVerbose       string
 	buildDbPath        string
 	buildStrictImports bool
+	buildStrictParse   bool
 )
 
 func init() {
@@ -42,6 +43,7 @@ func init() {
 	buildCmd.Flags().Lookup("verbose").NoOptDefVal = "true"
 	buildCmd.Flags().StringVar(&buildDbPath, "db", "", "Load existing database instead of rebuilding")
 	buildCmd.Flags().BoolVar(&buildStrictImports, "strict-imports", false, "Fail when any Solidity import cannot be resolved")
+	buildCmd.Flags().BoolVar(&buildStrictParse, "strict-parse", false, "Fail when any Solidity source could not be fully parsed")
 	buildCmd.MarkFlagRequired("output")
 }
 
@@ -54,12 +56,18 @@ func runBuild(cmd *cobra.Command, args []string) error {
 	defer func() { _ = closeLog() }()
 
 	strict := buildStrictImports
-	if !cmd.Flags().Changed("strict-imports") {
+	strictParseMode := buildStrictParse
+	if !cmd.Flags().Changed("strict-imports") || !cmd.Flags().Changed("strict-parse") {
 		cfg, cfgErr := home.Load()
 		if cfgErr != nil {
 			fmt.Fprintf(os.Stderr, "warning: %v\n", cfgErr)
 		} else if cfg != nil {
-			strict = cfg.Scan.StrictImports
+			if !cmd.Flags().Changed("strict-imports") {
+				strict = cfg.Scan.StrictImports
+			}
+			if !cmd.Flags().Changed("strict-parse") {
+				strictParseMode = cfg.Scan.StrictParse
+			}
 		}
 	}
 
@@ -93,8 +101,12 @@ func runBuild(cmd *cobra.Command, args []string) error {
 			return err
 		}
 		emitImportDiagnostics(os.Stderr, db)
+		emitParseDiagnostics(os.Stderr, db)
 	}
 	if err := enforceStrictImports(db, strict); err != nil {
+		return err
+	}
+	if err := enforceStrictParse(db, strictParseMode); err != nil {
 		return err
 	}
 

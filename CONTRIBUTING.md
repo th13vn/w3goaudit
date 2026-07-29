@@ -68,7 +68,7 @@ A WQL document is meta plus one query: block. Example: flag
 1. **Write the template** — `templates/official/medium/timestamp-guard.yaml`
    (official templates live under a `critical/`, `high/`, or `medium/` severity
    subdirectory), in
-   **WQL** (`query:` containing `select`/`from`/`where` — the syntax used by all 106
+   **WQL** (`query:` containing `select`/`from`/`where` — the syntax used by all 120
    official/benchmark/feature-test templates):
 
    ```yaml

@@ -4,6 +4,336 @@ All notable changes to w3goaudit are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/). Output changes note the `data/*.json`
 `schemaVersion`.
 
+## v0.4.2 - 2026-07-29
+
+Correctness and coverage release. Output schema stays `2.0.0`. One new CLI flag
+(`--strict-parse`) and one new config key (`scan.strict_parse`); every other
+change is a fix or an addition to the shipped detector pack.
+
+### Fixed: whole source files were silently dropped (solast-go v0.1.7 → v0.1.10)
+
+Three parser gaps, each with the same failure mode: an unhandled token, `expect()`
+not advancing in tolerant mode, and the **remainder of the file shredded** — not
+just the offending construct.
+
+- `assembly ("memory-safe") { … }` — the optional `assemblyFlags` group, standard
+  since Solidity 0.8.13 and pervasive in OpenZeppelin v5, Solady, and Solmate.
+- Dotted Yul paths (`sig.offset`, `x.slot`). In operand position the `.`
+  desynchronized the block; in assignment-target position it silently produced a
+  truncated name with no error reported at all.
+- `hex"1900"` and `unicode"…"` literal prefixes. The token types existed and the
+  parser already branched on them, but the lexer never produced either.
+
+Measured on a real OpenZeppelin v5 Foundry project: **488 `parse.recovered`
+diagnostics → 0**, and functions analyzed **247 → 352 (+43%)**. `Math.sol`,
+`Strings.sol`, `ECDSA.sol`, `EIP712.sol`, `MessageHashUtils.sol`, `SafeERC20.sol`,
+`Bytes.sol`, `ShortStrings.sol`, and `StorageSlot.sol` previously yielded no usable
+AST, so every detector was blind inside them.
+
+### Added: parse-coverage loss is loud, and `--strict-parse`
+
+The only prior signal for the above was `analysisComplete: false` inside
+`data/manifest.json`, so a confident-looking finding count could hide a file the
+analyzer never read. Parse loss is a different class from an unresolved reference:
+an unresolved import leaves the AST intact and merely imprecise, whereas a missing
+AST hides declarations from **every** detector.
+
+- `parse.recovered`/`parse.skipped` are now summarized on stderr during the build
+  (`emitParseDiagnostics`) and in the console result (`printParseLossTo`), naming
+  the affected files and pointing at the new flag.
+- `--strict-parse` (root command and `build`, plus `scan.strict_parse` in
+  `~/.w3goaudit/config.yml`) fails before template execution and report writing,
+  with the same source/`--db` parity and explicit-flag-wins precedence as
+  `--strict-imports`.
+
+### Fixed: `version:` compared a pragma range to a single version
+
+`extractVersion` took the **first** `major.minor.patch` in the pragma and compared
+it as a point, which was wrong in both directions:
+
+- `pragma solidity >=0.7.0 <0.9.0;` yielded `0.7.0`, so a `version: ">=0.8.0"`
+  detector was silently skipped for code that compiles on 0.8.x — a false negative
+  on a very common spelling (Uniswap V3 era, much of the library ecosystem).
+- `^0.8` has no patch, so extraction returned `""` and the gate failed **open**.
+
+`checkVersion` now intersects the constraint with the whole range the pragma
+permits, understanding caret, tilde, comparator chains, `||` alternatives, and
+partial versions. An unparseable pragma or constraint still skips the check rather
+than excluding the file. The dead `extractVersion`/`compareVersions`/
+`parseVersionParts` helpers were removed in favor of `parseVersionTriple`/
+`compareTriples`.
+
+### Fixed: access-control precision depended on variable naming
+
+The storage-authority vocabulary that decides whether
+`require(<mapping>[msg.sender])` proves authorization listed only eleven terms, so
+identical code produced a false positive or not depending on the author's naming:
+`operators` and `whitelist` were recognized while `keepers`, `managers`,
+`controllers`, `governors`, and `trustedCallers` were not. It is now one
+documented, closed set of privileged-principal nouns, still deliberately excluding
+value-bearing names (balance, deposit, stake, share, nonce) and inverted denylists
+(blacklist), because treating those as authorization would suppress real findings.
+Competitive benchmark unchanged (TP 109 / FP 41 / FN 0), so the widening cost no
+recall.
+
+### Fixed: `CallGraph.HasCycle` always returned false on a `--db` cache
+
+`HasCycle` read the unexported adjacency map directly instead of going through
+`EnsureIndex`. Those maps do not survive JSON, so on a loaded database it walked no
+edges and reported "no cycle" for every input — a silent wrong answer.
+
+### Fixed: a truncated import walk could bind the wrong dependency
+
+`resolveBySuffixMatch` bounds its `lib/`/`node_modules/` walk, but uniqueness is
+only meaningful over a complete view: a match that looks unique among the files
+seen so far may be ambiguous in the ones skipped. Hitting the cap now abstains and
+logs why, leaving the import unresolved (already a durable `import.unresolved`
+diagnostic) instead of resolving from a partial view.
+
+### Added: 14 detectors promoted into the shipped `official/` pack (25 → 39)
+
+Generic, benchmark-validated detectors that previously existed only in the
+dev-only, git-ignored benchmark lane, so a released binary never ran them. Each
+ships with vulnerable **and** safe fixtures under `test-data/security/` and a
+`pkg/engine/promoted_templates_test.go` assertion that doubles as a
+false-positive gate.
+
+- Read-only reentrancy: `HIGH-READONLY-REENTRANCY-CURVE`,
+  `HIGH-READONLY-REENTRANCY-BALANCER`.
+- AMM integration: `HIGH-NO-SLIPPAGE-CHECK`,
+  `HIGH-UNISWAP-CALLBACK-UNPROTECTED`, `HIGH-UNISWAP-V4-HOOK-UNPROTECTED`.
+- Access control: `HIGH-ORACLE-PRICE-UPDATE-UNRESTRICTED`,
+  `HIGH-ERC20-PUBLIC-BURN`.
+- Callback reentrancy: `HIGH-ERC721-CALLBACK-REENTRANCY`,
+  `HIGH-ERC777-CALLBACK-REENTRANCY`.
+- Oracles: `MEDIUM-STALE-ORACLE-DATA`,
+  `MEDIUM-DEPRECATED-CHAINLINK-LATESTANSWER`, `MEDIUM-ORACLE-LP-SPOT-PRICE`,
+  `MEDIUM-ORACLE-CURVE-SPOT-PRICE`.
+- Source integrity: `MEDIUM-BIDI-CHARACTERS` (Trojan Source).
+
+A fifteenth candidate — a generic "external call then state write" reentrancy rule
+— was evaluated and **rejected**: it fired on 36 sites across the repository
+fixtures, 17 of them deliberate safe controls, because pull-then-credit is the
+correct ERC20 deposit shape. The precise signal it reached for is already covered
+by the two callback-reentrancy detectors above, so it stays in the benchmark lane.
+`templates/INDEX.md` records this as the worked example of the precision bar.
+
+### Changed: benchmark reports state their own methodology
+
+Every generated `benchmark.md` now names the template directory each case ran with
+and carries a "How to read these numbers" section explaining that the corpus and
+answer key are first-party and that cases run lane-specific templates rather than
+the shipped `official/` pack — so the detection rate is a regression signal, not
+evidence of coverage on unseen code. `benchmarks/README.md` says the same. No
+metric or threshold changed (precision >= 0.65, recall >= 0.95, zero failed cases).
+
+### Changed: findings point at the dangerous statement (new default)
+
+`Finding.Location` now uses matched-node attribution: file, line, columns, bytes,
+contract, and function all describe the statement the detector matched. The
+externally-callable entry point is not lost — it travels in `entryPoint` (the
+auditor-actionable "fix here" hop) and `reachability`.
+
+Verifier attribution, the previous default, took `file`/`line` from the matched node
+but `contract`/`function` from the entry function, so an interprocedural finding
+described **two different places at once**. On a real 470-file scan 8 of 52 findings
+disagreed with themselves that way: one read `CrocSwapDex.userCmdRelayer` while its
+line pointed into `ProxyCaller.sol`, and an editor jumping to the location opened a
+`using` statement in an unrelated file. It also produced impossible coordinates —
+line 185 of a 112-line `UUPSUpgradeable.sol`, because the delegatecall is really in
+`AddressUpgradeable.sol`.
+
+After the change, on that same project: 0 findings whose line falls outside its own
+file, 0 whose reported contract does not enclose the reported line.
+
+- New `--location-source matched|verifier` CLI flag. The docs previously stated no
+  such flag existed.
+- `W3GOAUDIT_LOCATION_FROM_MATCHED_NODE` now accepts `verifier`/`0`/`false` as well
+  as `matched`/`1`/`true`, and still takes precedence over the API.
+- New `LocationSourceDefault` zero value, so
+  `SetLocationSource(LocationSourceVerifier)` means "verifier, explicitly" rather
+  than being indistinguishable from an unset field.
+- **Consumers that index findings by entry function should read `EntryPoint`**, or
+  pass `--location-source verifier`. Seven repository tests were updated to assert on
+  the entry hop rather than on `Location`; the matching behavior is unchanged, only
+  the label moved.
+
+### Fixed: seven false-positive classes found by scanning 470 real contracts
+
+Scanning a corpus of verified block-explorer sources (Kyber, Euler, CrocSwap,
+OpenZeppelin, Uniswap v4) produced 103 findings, of which 39 were false or
+duplicated. Each class below was reproduced from the real source, fixed, and pinned
+by a regression test in `pkg/engine/false_positive_regression_test.go` or
+`pkg/types/function_test.go`. Net effect on that corpus: **103 → 63 findings (39%
+fewer)** with no true positive lost; the competitive benchmark improved slightly
+(FP 41 → 40, precision 72.67% → 73.15%, recall still 100%).
+
+1. **A key does not taint the value it selects.** Expression taint unioned every
+   child, so `proxyPaths_[callpath].delegatecall(...)` looked attacker-controlled
+   because the caller chose the *index* — even though only governance can populate
+   the mapping. Value provenance now comes from the base/receiver chain only, which
+   is the rule `lvalueStateVarName` already used. `from[i]` still inherits its
+   caller-supplied base's taint. Fixed CRITICAL reports on the standard
+   proxy-dispatch idiom (CrocSwapDex, Curve, OZ UUPS).
+2. **A call ancestor does not invalidate a bound proof.** `require(a >= b);
+   unchecked { f(..., a - b); }` was reported, because the subtraction's expression
+   path has a call ancestor. Solidity evaluates arguments before the callee runs, so
+   the enclosing call cannot mutate the operands; only effectful SIBLING arguments
+   can, and that check is unchanged. Nine of 21 unchecked-arithmetic findings were
+   inside OpenZeppelin's own `ERC20._spendAllowance`, `ERC20.decreaseAllowance`, and
+   `SafeERC20.safeDecreaseAllowance`. The repository fixture that was meant to cover
+   this used a plain assignment, which is why the real shape was never caught.
+3. **Reentrancy guards are proven from bodies, not names.** `checkReentrancyGuarded`
+   matched a name regex, so `reEntrantLock` was recognized while its siblings
+   `reEntrantAgent` and `reEntrantApproved` — identical mutexes in the same
+   contract — were not. `types.Function.HasReentrancyGuard` now requires the
+   modifier to check a state variable and write it before `_;`. Names remain a
+   fallback only for an unresolvable body.
+4. **One dangerous site is one finding.** Each entry function was reported
+   separately for the same statement in a shared helper: six `removeLiquidity*`
+   wrappers gave six findings for one line, and 20 of 92 findings were such repeats.
+   `dedupeReachedSites` collapses them and moves the other entry points into
+   `Context["additionalEntryPoints"]`, so reachability information is kept rather
+   than dropped.
+5. **A finding's file now contains its line.** In the default location mode the
+   line came from the matched node but the file from the entry function, so an
+   interprocedural match produced a location that does not exist — line 185 of a
+   112-line `UUPSUpgradeable.sol`, because the `delegatecall` is in
+   `AddressUpgradeable.sol`. Such a finding reads as a false positive even when
+   sound, since nothing is there to inspect. Function/Contract stay
+   verifier-derived, so JSON/SARIF consumers are unaffected.
+6. **An override shadows its base even when it is not an entry point.**
+   Entry-function resolution checked `IsEntrypoint()` before the override dedup, so
+   a `view`/`pure` override never claimed its selector and an inherited nonpayable
+   INTERFACE stub was admitted instead. Every access-control detector then fired on
+   a bodyless declaration (7 false positives on Uniswap v4 `IHooks`).
+7. **An abstract auth hook resolves to its override.** `access_controlled` analyzed
+   `UUPSUpgradeable._authorizeUpgrade`'s bodyless `internal virtual;` declaration
+   instead of the deploying contract's `internal override onlyOwner {}`, reporting
+   the ecosystem's most standard upgrade guard as an unprotected upgrade. The new
+   `IsAccessControlledIn(db, runtime)` dispatches `virtual` internal calls through
+   the runtime MRO. `super.f()` is excluded, because redirecting it to the
+   most-derived declaration points it back at the caller (Euler's
+   `EVault.transferFrom` is `return super.transferFrom(...)`).
+
+A second pass over the same corpus, auditing every surviving finding against the
+real source, found seven more classes. Combined with the first pass: **103 → 52
+findings (50% fewer)**, benchmark recall still 100% and precision still 73.15%.
+
+8. **A pinned selector is not an arbitrary call.** `arbitrary-low-level-call`
+   required only that the calldata be tainted, so
+   `token.call(abi.encodeWithSelector(IERC20.transferFrom.selector, from, to, value))`
+   — Uniswap's `TransferHelper` — was reported in four separate projects. The caller
+   chooses the arguments but not the FUNCTION, which is what a confused deputy needs.
+   The rule now requires either a raw caller-supplied calldata blob or an
+   attacker-chosen selector.
+9. **`has: {receiver: true}` matched a nested call's receiver.** It searches every
+   descendant, so CrocSwapDex's
+   `proxyPaths_[CONST].delegatecall(abi.encodeWithSignature(…, curve.pullPriceTick(), …))`
+   was CRITICAL because `curve` is caller-derived — not because the target was.
+   New `receiver:` nested-rule matcher constrains the call's **direct** receiver
+   (`matchDirectReceiver`); `receiver: true` keeps its attribute meaning.
+10. **ECDSA malleability needs a signature-keyed replay guard.** Any caller-derived
+    index after a `recover` matched, so `battles[battleId] = …` — an id-keyed claim
+    flag, i.e. the correct pattern — was reported. The index must now reference the
+    signature.
+11. **`getRate` is too generic to identify Balancer.** The promoted
+    `readonly-reentrancy-balancer` detector matched any `getRate()`, firing three
+    times on Shell/Curve `Assimilators.getRate`. Narrowed to the Vault-specific
+    `getPoolTokens` shape; the rate-provider variant stays in the benchmark lane,
+    where the corpus pins the receiver.
+12. **A custom role system read through assembly.** Axelar's
+    `if (!_hasRole(_getRoles(msg.sender), role)) revert` reads the role bitmap with
+    `assembly { accountRoles := sload(key) }`, which the body analysis cannot follow.
+    `authorityCallProvesAuthorization` accepts it, but only with four signals at
+    once — authority name, forwarded caller, all other operands fixed, and the
+    caller-carrying argument resolving to an assembly storage read. The last signal
+    is what keeps a `return true` decoy rejected.
+13. **An unresolvable applied modifier is undetermined, not absent.** Axelar's
+    role-gated `burn` was reported as a public burn purely because
+    `@axelar-network/…` imports did not resolve, leaving `RolesBase` out of the exact
+    MRO. A recorded modifier application the analyzer cannot see is now undetermined;
+    unresolved imports are already durable diagnostics rather than a reason to
+    manufacture a finding. A bare name in `Function.Modifiers` still proves nothing,
+    and `IsAccessControlled(nil)` is still false.
+
+14. **Binary operations had no source location at all** (solast-go v0.1.10). Every
+    level of the precedence ladder built a `BinaryOperation` without calling
+    `setLocation` — invisible because `setLocation` already had a case for that node
+    type, so nothing reached it. Findings anchored on an operation therefore reported
+    the enclosing FUNCTION's line: `divide-before-multiply`, `boolean-cst`,
+    `incorrect-exp`, and `unchecked-arithmetic` were all affected.
+15. **`unchecked-arithmetic` rebuilt around what is actually exploitable.** It now
+    anchors on the operation rather than the `unchecked` block (a gas-optimized
+    whole-function wrapper produced one unactionable finding for an entire body), and
+    covers `*`, `-`, and `+` only when an operand is caller-controlled. `/` cannot
+    overflow; counter and nonce increments cannot be driven to the type maximum. Two
+    bound-proof gaps were fixed alongside: a non-negative integer literal now
+    qualifies as an unsigned bound operand (so `require(n > 0); … n - 1` is provable
+    at all — previously EVERY `x - 1` in an `unchecked` block was unconditionally
+    reported), and a guard bounding the minuend below by a literal proves a literal
+    subtrahend.
+
+A fourth pass took the remaining findings class by class. Cumulative on the same
+corpus: **103 → 44 findings (57% fewer)**, benchmark still TP 109 / FP 40 / recall
+100% / precision 73.15%.
+
+16. **One-time-init guards are now proven, not name-matched.** The detector knew only
+    the OpenZeppelin `initializer` modifier and a guard literally naming
+    `_initializersDisabled`, so Euler's `if (initialized) revert; initialized = true;`
+    and Axelar's split `if (_isInitialized()) revert; _initialize();` were both
+    reported as unprotected initializers. New `initializer_guarded` preset
+    (`HasOneTimeInitGuardIn`) proves the same mutex shape the reentrancy work already
+    proves: an enforcing check reads a state flag that the function, a resolved
+    internal helper, or a sibling such as the constructor sets. The name-specific
+    carve-out is gone.
+17. **`boolean-cst` narrowed to constant folding.** `a && false` and `if (true)` leave
+    a dead branch — a real logic error. `x == false` is a verbose `!x`, which is a
+    style preference and how CrocSwap spells its mutex checks
+    (`require(msgValSpent_ == false, "DS")`); reporting it at MEDIUM contradicted the
+    pack's own policy of excluding style rules.
+18. **`weak-prng` ignores power-of-two truncation.** `uint32(block.timestamp % 2**32)`
+    is Uniswap V2's `_update` fitting a timestamp into a packed slot, not a random
+    draw. A weak PRNG takes the modulo by a participant count.
+19. **`dangerous-strict-equality` allows the same-block cache check.**
+    `if (reserve.lastUpdateTimestamp == block.timestamp) return cachedIndex;` is
+    Aave's "already updated this block" short-circuit against a contract-written
+    value; all three real occurrences carried an explicit
+    `// slither-disable-next-line incorrect-equality`. Block-clock comparisons are now
+    reported only when the other operand is caller-controlled.
+
+### Fixed: benchmark scoring follows the new attribution
+
+The harness matched corpus expectations against `Location.contract`/`function` only.
+With matched-node attribution an interprocedural detection is located at the callee
+that hosts the statement, so `VulnerableBadTransferFromInherited.deposit` was scored
+as a miss even though the finding existed with exactly that `entryPoint`. The
+w3goaudit adapter now scores by entry point, falling back to the location.
+
+Emitting BOTH identities also restores recall but inflates false positives, because
+the identity that does not match the key is counted as extra noise — one row per
+finding, keyed on the entry point, is the correct shape. For a non-interprocedural
+finding the two identities are the same function anyway.
+
+Known limitation, deliberately not "fixed": CrocSwapDex's sidecar `userCmd` entry
+points are reachable only via `delegatecall` from the parent contract, which holds the
+reentrancy lock in shared storage. Proving that needs cross-contract storage-layout
+modeling; Slither reports these too.
+
+One behavior change is deliberate and worth calling out: intra-branch duplicate
+findings for an identical precise site are now collapsed rather than retained.
+`TestOrCompositionIdentityPreservesIntraBranchDuplicates` pinned the old behavior
+and has been retargeted; it described the `or:`-union implementation rather than
+anything a user wanted.
+
+### Test coverage
+
+- `pkg/types` 56.9% → 69.3%, concentrated on the false-positive-sensitive
+  access-control vocabulary, the call-graph API and its JSON round-trip, the
+  diagnostic helpers, and the database identity surface.
+- New `FuzzParseTemplate` over the WQL loader — the project's only untrusted input
+  surface besides Solidity source. 433k executions, no crashes.
+
 ## v0.4.1 - 2026-07-27
 
 Additive release on top of v0.4.0. Output schema stays `2.0.0`: the new

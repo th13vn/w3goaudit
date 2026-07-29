@@ -282,7 +282,7 @@ interface/contract methods with the same names.
 
 **Capabilities:**
 - Load YAML templates as **WQL** (`meta` plus `query:` — `select`/`from`/
-  `where` or a query-level `and:`/`or:` composition; all 106 official,
+  `where` or a query-level `and:`/`or:` composition; all 120 official,
   benchmark, and feature-test templates use it). Unknown keys at any level
   are rejected by the strict parser. `TemplateDoc.lower()`
   (`pkg/engine/wql.go`) compiles the document into evaluator `Rule` IR

@@ -27,5 +27,29 @@ cp benchmarks/results/latest/benchmark.md "benchmarks/$(date +%F)-<commit-slug>.
 ```
 
 The quality gate requires precision >= 0.65, recall >= 0.95, and zero failed
-cases. Docker Compose (`scripts/benchmark/compose.yaml`) is needed only for the
+cases.
+
+## What these numbers do and do not show
+
+**This is a regression suite, not an independent benchmark**, and every generated
+`benchmark.md` now says so in its own "How to read these numbers" section. Two
+properties make the detection rate close to structural rather than evidential:
+
+1. The corpus and its answer key are **first-party** — authored here, with lanes
+   named after the tools whose detectors inspired them.
+2. Each case runs W3GoAudit with its **own lane-specific template directory**
+   (`scripts/benchmark/templates/<lane>/`), not the shipped
+   `templates/official/` pack. The measurement is "do the templates written for
+   these cases still find these cases".
+
+That is exactly what a release regression gate should measure, and it is what the
+recall threshold protects. It is **not** evidence of coverage on unseen code. The
+informative figure is precision, and even that is optimistic: hand-written corpus
+files lack the density of legitimate safe patterns that generate false positives in
+real projects.
+
+For a claim about real-world capability, a second suite over third-party projects
+with ground truth taken from published audit reports — not from our own detectors —
+would be needed. Recall there would be far below 100%, and that is the number worth
+tracking over time. Docker Compose (`scripts/benchmark/compose.yaml`) is needed only for the
 multi-tool comparison against Slither/Semgrep/4naly3er.

@@ -59,7 +59,7 @@ from GitHub Releases — never `git clone`).
 ```yaml
 templates: {dir, repo}
 output:    {base_dir, html}
-scan:      {min_severity, strict_imports, exclude_paths, workers}   # exclude_paths/workers reserved
+scan:      {min_severity, strict_imports, strict_parse, exclude_paths, workers}   # exclude_paths/workers reserved
 report:    {repo_base}                              # reserved
 color:     auto | never
 ```

@@ -191,7 +191,7 @@ func executeRepositoryTemplate(t *testing.T, root string, db *types.Database, re
 	}
 	got := make(map[string]bool)
 	for _, finding := range New(db).Execute(tmpl) {
-		got[finding.Location.Contract+"."+finding.Location.Function] = true
+		got[findingEntryLabel(finding)] = true
 	}
 	return got
 }

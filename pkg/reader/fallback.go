@@ -83,7 +83,10 @@ func init() {
 
 // suffixWalkFileLimit bounds how many .sol files the suffix matcher inspects so
 // that a large node_modules tree cannot make a last-resort lookup pathological.
-const suffixWalkFileLimit = 20000
+// Reaching it makes the matcher abstain (see resolveBySuffixMatch), because a
+// partial view cannot establish uniqueness. A variable, not a constant, only so
+// tests can exercise the truncation path without creating 20k files.
+var suffixWalkFileLimit = 20000
 
 // resolveByConvention rewrites importPath using the conventional dependency
 // layouts and returns the first candidate that is an existing regular file
@@ -108,6 +111,13 @@ func resolveByConvention(root, importPath string) (string, bool) {
 // whose path shares the longest trailing path-segment suffix with importPath.
 // A match must align at least two segments (<dir>/<file>.sol) and be unique at
 // the longest length; otherwise the matcher abstains rather than guess.
+//
+// Uniqueness is only meaningful over a COMPLETE view of the tree, so exceeding
+// suffixWalkFileLimit abstains too: in a truncated walk a match that looks unique
+// among the files seen so far may be ambiguous in the files that were skipped, and
+// binding an import to the wrong dependency is worse than not resolving it.
+// Abstaining leaves the import unresolved, which the reader already records as a
+// durable `import.unresolved` diagnostic.
 func (r *Resolver) resolveBySuffixMatch(root, importPath string) (string, bool) {
 	wantSegs := pathSegments(importPath)
 	if len(wantSegs) == 0 || !strings.HasSuffix(wantSegs[len(wantSegs)-1], ".sol") {
@@ -118,6 +128,7 @@ func (r *Resolver) resolveBySuffixMatch(root, importPath string) (string, bool) 
 	bestScore := 0
 	ambiguous := false
 	examined := 0
+	truncated := false
 
 	for _, depDir := range []string{"lib", "node_modules"} {
 		base := filepath.Join(root, depDir)
@@ -141,6 +152,7 @@ func (r *Resolver) resolveBySuffixMatch(root, importPath string) (string, bool) 
 			}
 			examined++
 			if examined > suffixWalkFileLimit {
+				truncated = true
 				return fs.SkipAll
 			}
 			score := commonSuffixSegments(wantSegs, pathSegments(filepath.ToSlash(path)))
@@ -157,6 +169,11 @@ func (r *Resolver) resolveBySuffixMatch(root, importPath string) (string, bool) 
 		})
 	}
 
+	if truncated {
+		r.logf("Import suffix match for %q abstained: dependency walk exceeded %d files, so uniqueness could not be established",
+			importPath, suffixWalkFileLimit)
+		return "", false
+	}
 	if bestScore < 2 || ambiguous || !withinRoot(root, bestPath) {
 		return "", false
 	}

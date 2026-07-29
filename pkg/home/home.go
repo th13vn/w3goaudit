@@ -36,6 +36,7 @@ type Config struct {
 	Scan struct {
 		MinSeverity   string   `yaml:"min_severity"`   // default --min-severity
 		StrictImports bool     `yaml:"strict_imports"` // fail when any import is unresolved
+		StrictParse   bool     `yaml:"strict_parse"`   // fail when any source cannot be fully parsed
 		ExcludePaths  []string `yaml:"exclude_paths"`  // reserved: paths to skip
 		Workers       int      `yaml:"workers"`        // reserved: 0 = auto
 	} `yaml:"scan"`

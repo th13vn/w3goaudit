@@ -11,7 +11,7 @@ self-contained detector. The `official/` pack is embedded in the binary
 **A WQL document is meta plus one query: block.** All templates under
 `official/` and `test/` (this directory), plus every
 benchmark template under `../scripts/benchmark/templates/` (slither-inspired,
-decurity-semgrep-inspired, 4naly3er-inspired) — 106 templates total — are
+decurity-semgrep-inspired, 4naly3er-inspired) — 120 templates total — are
 written in WQL (`query:` containing `select`/`from`/`where` or composition). See
 [`../docs/wql-syntax.md`](../docs/wql-syntax.md) for the full language
 reference.
@@ -41,11 +41,22 @@ noise that drowns out genuine findings. Templates that cannot be made
 precise (e.g. detectors with no way to distinguish a true positive from a
 legitimate pattern) are also out.
 
+**Worked example of the precision bar.** A generic "external call then state
+write" reentrancy rule (the benchmark lane's `SLITHER-REENTRANCY-NO-ETH`) was
+evaluated for promotion and **rejected**: it fired on 36 sites across
+`../test-data/security/`, 17 of them deliberate safe controls, because
+pull-then-credit *is* the correct ERC20 deposit shape. Narrowing it to a
+user-controlled call target silenced it entirely, including its own vulnerable
+fixture. The precise signal it was reaching for is already covered by
+`HIGH-ERC777-CALLBACK-REENTRANCY` and `HIGH-ERC721-CALLBACK-REENTRANCY`, so it
+stays in the benchmark lane. Prefer a narrow detector plus a benchmark-lane
+sibling over a broad one in `official/`.
+
 ## Directory Structure
 
 ```
 templates/
-├── official/   # Curated official detector pack (25) — embedded; run THIS to audit
+├── official/   # Curated official detector pack (39) — embedded; run THIS to audit
 └── test/       # WQL feature-test templates (5; NOT production detectors)
 ```
 
@@ -101,8 +112,8 @@ template/category rather than by name prefix alone.
 | `HIGH-REENTRANCY-PATTERN` | HIGH | `high/reentrancy-pattern.yaml` | CEI violation — ETH-bearing call / raw low-level `.call` / `delegatecall` followed by a state write, on a function lacking a reentrancy guard |
 | `HIGH-REENTRANCY-BALANCE` | HIGH | `high/reentrancy-balance.yaml` | `balanceOf` → external-call → balance-read pattern without a reentrancy guard (delta-snapshot exploit) |
 | `HIGH-DELEGATECALL-IN-LOOP` | HIGH | `high/delegatecall-in-loop.yaml` | `delegatecall` inside a `for`/`while` body (payable-multicall ETH reuse) |
-| `HIGH-UNPROTECTED-INITIALIZER` | HIGH | `high/unprotected-initializer.yaml` | `initialize/init/setup` entrypoint that writes state with no access control or `initializer` guard |
-| `HIGH-WEAK-PRNG` | HIGH | `high/weak-prng.yaml` | Modulo over `block.timestamp` / `block.number` / `block.prevrandao` / `blockhash` |
+| `HIGH-UNPROTECTED-INITIALIZER` | HIGH | `high/unprotected-initializer.yaml` | `initialize/init/setup` entrypoint that writes state with no access control and no **proven** one-time guard (`preset: initializer_guarded` — an enforcing check on a state flag that the function, a helper, or a sibling such as the constructor sets). Covers OpenZeppelin's `initializer` modifier, Euler's `if (initialized) revert; initialized = true;`, Axelar's split `if (_isInitialized()) revert; _initialize();`, and the `_disableInitializers()` pattern |
+| `HIGH-WEAK-PRNG` | HIGH | `high/weak-prng.yaml` | Modulo over `block.timestamp` / `block.number` / `block.prevrandao` / `blockhash`, excluding a modulo by a power of two — `uint32(block.timestamp % 2**32)` is Uniswap V2's slot-packing truncation, not a random draw |
 | `HIGH-MSG-VALUE-IN-LOOP` | HIGH | `high/msg-value-in-loop.yaml` | `msg.value` referenced inside a loop body in a `payable` entrypoint (multicall ETH reuse) |
 | `HIGH-INCORRECT-EXP` | HIGH | `high/incorrect-exp.yaml` | `^` (bitwise XOR) used where `**` was meant. Flags `base ^ exp`, `2 ^ 8`, `10 ^ 18` — both operands simple (identifier/decimal) and no other bitwise operator in the same statement (`statement_has`). Excludes genuine XOR in OpenZeppelin-style math and hex masks |
 | `HIGH-ENCODE-PACKED-COLLISION` | HIGH | `high/encode-packed-collision.yaml` | `keccak256(abi.encodePacked(...))` over ≥2 user-controlled dynamic args (ambiguous packing → collision) |
@@ -112,12 +123,26 @@ template/category rather than by name prefix alone.
 | `HIGH-UNRESTRICTED-TRANSFEROWNERSHIP` | HIGH | `high/unrestricted-transferownership.yaml` | `transferOwnership` entrypoint writes owner-like state from a parameter with no access control |
 | `MEDIUM-UNCHECKED-SEND` | MEDIUM | `medium/unchecked-send.yaml` | `addr.send(amt)` whose bool return is discarded |
 | `MEDIUM-UNCHECKED-LOWLEVEL-CALL` | MEDIUM | `medium/unchecked-lowlevel-call.yaml` | Low-level `.call(data)` / `.call{value:}(data)` whose `(bool, bytes)` return is discarded |
-| `MEDIUM-DANGEROUS-STRICT-EQUALITY` | MEDIUM | `medium/dangerous-strict-equality.yaml` | `==` / `!=` against `address(this).balance`, `balanceOf(...)`, `block.timestamp`, `block.number` |
+| `MEDIUM-DANGEROUS-STRICT-EQUALITY` | MEDIUM | `medium/dangerous-strict-equality.yaml` | `==` / `!=` against `address(this).balance` or `balanceOf(...)`; also `block.timestamp`/`block.number` but only when the other operand is caller-controlled, so Aave's same-block cache short-circuit (`if (reserve.lastUpdateTimestamp == block.timestamp) return cachedIndex;`) is not reported |
 | `MEDIUM-DIVIDE-BEFORE-MULTIPLY` | MEDIUM | `medium/divide-before-multiply.yaml` | `(a / b) * c` shape — divide is the left operand of a multiply (precision-loss bug) |
 | `MEDIUM-VIEW-PURE-MODIFIES-STATE` | MEDIUM | `medium/view-pure-modifies-state.yaml` | `view` / `pure` function that writes state (including inline-assembly `sstore` bypass) |
 | `MEDIUM-TX-ORIGIN-AUTH` | MEDIUM | `medium/tx-origin-auth.yaml` | `tx.origin` used inside any guard (`require` / `assert` / `if` / ternary) |
-| `MEDIUM-UNCHECKED-ARITHMETIC` | MEDIUM | `medium/unchecked-arithmetic.yaml` | Arithmetic inside `unchecked { ... }` on Solidity `>=0.8.0`, **scoped to state-mutating functions** (`mutability: payable,nonpayable`) and **only when operands are not range-checked first** (`unchecked_var: true`). Excludes `pure`/`view` library math (SafeMath/Math/Strings) and guarded subtraction like `require(a>=b); … a-b` (OpenZeppelin `SafeERC20.safeDecreaseAllowance`) |
-| `MEDIUM-BOOLEAN-CST` | MEDIUM | `medium/boolean-cst.yaml` | Boolean literal misused as a comparison/logical operand (`x == true`, `a && false`) or directly as an `if`/ternary condition (`if (true)`). Plain `return true` / `flag = false` / `while (true)` are not flagged |
+| `MEDIUM-UNCHECKED-ARITHMETIC` | MEDIUM | `medium/unchecked-arithmetic.yaml` | Arithmetic inside `unchecked { ... }` on Solidity `>=0.8.0`, **anchored on the operation** (not the block, so a whole-function `unchecked` wrapper still names the exact expression), **scoped to state-mutating functions** (`mutability: payable,nonpayable`), and **only when operands are not range-checked first** (`unchecked_var: true`). Limited to operations that are an exploit primitive: `*`, `-`, and `+` only when an operand is caller-controlled. `/` cannot overflow and is excluded; counter/nonce increments (`nonce + 1`, `numElements + 1`) are excluded because the value can never be driven to the type maximum. Also excludes `pure`/`view` library math and guarded subtraction like `require(a>=b); … a-b` (OpenZeppelin `SafeERC20.safeDecreaseAllowance`) |
+| `HIGH-READONLY-REENTRANCY-CURVE` | HIGH | `high/readonly-reentrancy-curve.yaml` | Curve `get_virtual_price()` read without first poking a reentrancy-locked pool entry point (`remove_liquidity` / `claim_admin_fees`). Read-only reentrancy: your own `nonReentrant` does not help because the attacker never re-enters you |
+| `HIGH-READONLY-REENTRANCY-BALANCER` | HIGH | `high/readonly-reentrancy-balancer.yaml` | Balancer Vault `getPoolTokens` or rate-provider `getRate` read without `VaultReentrancyLib.ensureNotInVaultContext` / `manageUserBalance`. `or:`-composed over the two read shapes |
+| `HIGH-NO-SLIPPAGE-CHECK` | HIGH | `high/no-slippage-check.yaml` | Uniswap-style router swap with `amountOutMin` hardcoded to `0` (arg 0 for ETH-in, arg 1 for token-in), or set to max uint — fully sandwichable |
+| `HIGH-UNISWAP-CALLBACK-UNPROTECTED` | HIGH | `high/uniswap-callback-unprotected.yaml` | `uniswapV2Call` / `uniswapV3SwapCallback` / `uniswapV3FlashCallback` / `uniswapV3MintCallback` callable without asserting the caller is the pool (no `access_controlled`, no `verifyCallback`-style helper) |
+| `HIGH-UNISWAP-V4-HOOK-UNPROTECTED` | HIGH | `high/uniswap-v4-hook-unprotected.yaml` | Uniswap V4 hook entry point (`beforeSwap`, `afterAddLiquidity`, …) that is `external` without `onlyPoolManager` or an equivalent caller assertion |
+| `HIGH-ORACLE-PRICE-UPDATE-UNRESTRICTED` | HIGH | `high/oracle-price-update-unrestricted.yaml` | Oracle/price-named entrypoint writes state from a caller parameter with no access control — anyone sets the protocol's reference price |
+| `HIGH-ERC20-PUBLIC-BURN` | HIGH | `high/erc20-public-burn.yaml` | Public `burn` forwards a caller-supplied account into `_burn` with no access control and no allowance spend — destroys anyone's balance and moves `totalSupply` |
+| `HIGH-ERC721-CALLBACK-REENTRANCY` | HIGH | `high/erc721-callback-reentrancy.yaml` | Unguarded entrypoint reaching `_checkOnERC721Received`, so `onERC721Received` on a caller-chosen recipient runs before mint caps / allowlists are consumed |
+| `HIGH-ERC777-CALLBACK-REENTRANCY` | HIGH | `high/erc777-callback-reentrancy.yaml` | Unguarded entrypoint invoking an ERC777 `tokensReceived` hook — an apparently inert token transfer that executes recipient code (imBTC class) |
+| `MEDIUM-STALE-ORACLE-DATA` | MEDIUM | `medium/stale-oracle-data.yaml` | `latestRoundData()` consumed with no guard anywhere in the function, so neither the answer nor its age is validated |
+| `MEDIUM-DEPRECATED-CHAINLINK-LATESTANSWER` | MEDIUM | `medium/deprecated-chainlink-latestanswer.yaml` | Deprecated Chainlink `latestAnswer()`, which cannot report round completeness or staleness and may return `0` instead of reverting |
+| `MEDIUM-ORACLE-LP-SPOT-PRICE` | MEDIUM | `medium/oracle-lp-spot-price.yaml` | Price getter dividing pool reserves / underlying by `totalSupply` (directly or via a `div` library) — flash-loan manipulable spot ratio |
+| `MEDIUM-ORACLE-CURVE-SPOT-PRICE` | MEDIUM | `medium/oracle-curve-spot-price.yaml` | Curve `get_p()` (instantaneous spot price) read and returned, instead of the smoothed `price_oracle()` |
+| `MEDIUM-BIDI-CHARACTERS` | MEDIUM | `medium/bidi-characters.yaml` | Unicode bidirectional control characters in source (Trojan Source): rendered text disagrees with compiled code, defeating review. `scope: source`, so it reports once per occurrence |
+| `MEDIUM-BOOLEAN-CST` | MEDIUM | `medium/boolean-cst.yaml` | Boolean literal that makes an expression constant: a logical operand (`a && false`, `b \|\| true`) or an `if`/ternary condition (`if (true)`) — both leave a dead branch. `x == false` / `x == true` are NOT flagged: they are a verbose `!x`/`x`, a style preference and the idiomatic mutex spelling (`require(msgValSpent_ == false)`), which this pack's policy excludes. Plain `return true` / `flag = false` / `while (true)` are not flagged either |
 
 `references` is **optional** — present only where a canonical smart-contract
 reference exists (SWC registry, Slither wiki, Solidity docs, EIPs). The engine
@@ -250,6 +275,15 @@ and `reentrancy_guarded`. Vulnerability detectors normally negate the property,
 for example `not: { preset: access_controlled }`. Unknown preset names fail at
 template load.
 
+All three are proven from **bodies**, not names. `reentrancy_guarded` requires an
+applied modifier that checks a state variable and writes it before `_;` — a real
+mutex — so guards named `reEntrantAgent` or `singleEntry` are recognized while a
+modifier merely named `lock` that enforces nothing is not.
+`access_controlled` dispatches `virtual` internal calls through the runtime
+contract's MRO, so an abstract auth hook such as
+`UUPSUpgradeable._authorizeUpgrade` resolves to the deploying contract's
+`onlyOwner` override rather than the bodyless base declaration.
+
 ### Taint Analysis
 
 ```yaml
@@ -294,6 +328,15 @@ query:
   where:
     - version: ">=0.8.0"  # or <0.8.0, >0.7.0, etc.
 ```
+
+The constraint is intersected with the **range** the file's pragma permits, not
+compared to a single version. `pragma solidity >=0.7.0 <0.9.0;` therefore
+satisfies `version: ">=0.8.0"`, because such a file can compile on 0.8.x —
+previously only the first version triple in the pragma was read, so this common
+spelling was silently skipped. Caret (`^0.8.20`), tilde (`~0.8.4`), comparator
+chains, `||` alternatives, and partial versions (`^0.8`, `0.8`) are all
+understood. A pragma or constraint that cannot be parsed skips the check rather
+than excluding the file.
 
 ### Left/Right Matching
 

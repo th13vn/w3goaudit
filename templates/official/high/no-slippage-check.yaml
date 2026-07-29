@@ -1,0 +1,46 @@
+meta:
+  id: HIGH-NO-SLIPPAGE-CHECK
+  title: "AMM Swap With No Slippage Bound (amountOutMin = 0)"
+  severity: HIGH
+  confidence: MEDIUM
+  description: >
+    A Uniswap-style router swap is executed with its minimum-output argument set
+    to `0` (or to the maximum uint for an exact-output swap), which disables
+    slippage protection entirely. Any MEV searcher can sandwich the transaction:
+    buy ahead of it to move the price, let the unbounded swap execute at the
+    worsened rate, then sell back. The victim receives whatever is left. This is
+    one of the most reliably exploited bug classes in DeFi because it needs no
+    special conditions — only a public mempool.
+  recommendation: >
+    Pass a real `amountOutMin` derived from an off-chain quote or a TWAP, with an
+    explicit tolerance (for example 0.5%). Accept the bound as a caller argument
+    so the caller can choose it, and never hardcode `0`. Add a `deadline` as well;
+    an unbounded swap with no deadline can be held and executed later.
+  references:
+    - https://docs.uniswap.org/contracts/v2/guides/smart-contract-integration/trading-from-a-smart-contract
+    - https://dacian.me/defi-slippage-attacks
+
+query:
+  from: entry_function
+
+  where:
+    - any:
+        # ETH-in swaps take amountOutMin as argument 0.
+        - has:
+            block: external_call
+            name: '^(swapExactETHForTokens|swapExactETHForTokensSupportingFeeOnTransferTokens)$'
+            arg.0:
+              any:
+                - block: literal
+                  name: '^0$'
+                - name: '^(type|uint256|max)$'
+
+        # Token-in swaps take it as argument 1.
+        - has:
+            block: external_call
+            name: '^(swapExactTokensForTokens|swapExactTokensForTokensSupportingFeeOnTransferTokens|swapExactTokensForETH|swapExactTokensForETHSupportingFeeOnTransferTokens|swapTokensForExactTokens|swapTokensForExactETH|swap)$'
+            arg.1:
+              any:
+                - block: literal
+                  name: '^0$'
+                - name: '^(type|uint256|max)$'

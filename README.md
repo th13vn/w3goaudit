@@ -227,9 +227,11 @@ The root command **is** the scan (there is no `scan` subcommand). Every scan
 flag has a long and short form: `-o/--output`, `-t/--template`, `-d/--db`,
 `-v/--verbose`, `-s/--severity` (exact set), `-m/--min-severity` (threshold),
 `-i/--include`, `-e/--exclude`, `-l/--list-templates`, `-H/--html`,
-`-q/--stdout`, `--strict-imports`, `-T/--update-templates`, `-u/--update`.
+`-q/--stdout`, `--strict-imports`, `--strict-parse`, `--location-source`,
+`-T/--update-templates`, `-u/--update`.
 `--severity` and `--min-severity` are mutually exclusive. Import resolution is
-tolerant by default; use `--strict-imports` when unresolved imports must fail
+tolerant by default; use `--strict-imports` when unresolved imports must fail,
+and `--strict-parse` when unparsed source must fail
 the source scan or an equivalent `--db` cache scan. Import warnings are always
 written to stderr.
 
@@ -274,6 +276,11 @@ w3goaudit -d ./contracts/data/database.json
 # Fail closed when any persisted/source import is unresolved
 w3goaudit ./contracts/ --strict-imports
 w3goaudit -d ./contracts/data/database.json --strict-imports
+
+# Fail when any source could not be fully parsed. Unlike an unresolved import
+# (which leaves the AST intact and only imprecise), parse loss makes the
+# affected declarations invisible to every detector.
+w3goaudit ./contracts/ --strict-parse
 
 # Refresh templates from the latest release; update the tool itself
 w3goaudit --update-templates
@@ -372,7 +379,7 @@ query:
 
 This is **WQL** (W3GoAudit Query Language). A WQL document is meta plus one query: block.
 That block contains `select`/`from`/`where`, or a query-level
-`and:`/`or:` composition. All 106 repository templates (25 official, 5
+`and:`/`or:` composition. All 120 repository templates (39 official, 5
 feature-test, and 76 benchmark) use it; see the
 [WQL Syntax Guide](./docs/wql-syntax.md) for the full language reference.
 

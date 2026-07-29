@@ -9,7 +9,7 @@ Executes WQL templates against the contract database to find security vulnerabil
 **A WQL document is meta plus one query: block.** The block holds
 `select`/`from`/`where` or a one-level `and:`/`or:` query
 composition; see [`docs/wql-syntax.md`](../../docs/wql-syntax.md) for the
-full language reference. All 106 official/benchmark/feature-test templates in
+full language reference. All 120 official/benchmark/feature-test templates in
 this repo use it.
 
 - `wql.go` — parses a WQL document (`TemplateDoc`) and **lowers** it to
@@ -76,6 +76,17 @@ Main query execution engine.
 - `ExecuteAll(templates)` - Run multiple templates, then `SortFindings` for a
   deterministic total order (findings are otherwise collected in map-iteration
   order, which shuffled `findings.json`/`results.sarif` across runs)
+- **One site, one finding** (`dedupeReachedSites`, applied at the end of
+  `executeQuery`): entry-point and function scopes visit each scope item
+  independently, so a dangerous statement inside a shared internal helper was
+  reported once per entry function that reaches it — six `removeLiquidity*`
+  wrappers over one helper produced six findings for one line, and 22% of findings
+  on a real 470-file scan were such repeats. Findings with a precise identity
+  (exact file plus span) now collapse to one, and the other reaching entry points
+  move into `Context["additionalEntryPoints"]` so no reachability information is
+  lost. `SortFindings` runs first, so the survivor is chosen by the total order
+  rather than by map-iteration order and output stays byte-stable. Location-less
+  findings are all retained, matching the union rule in `Execute`.
 - `SortFindings(findings)` - Total-order sort (file, line, col, primaryAst
   start, template, contract, function, …) making output byte-stable
 - `Finding` struct - Vulnerability finding result (now carries optional
@@ -174,11 +185,19 @@ location-source mode:
 
 The engine supports two location-derivation modes via `LocationSource`:
 
-- `LocationSourceVerifier` *(default)* — preserves today's behavior:
-  `Location.Function` / `Location.Contract` come from the verifier-function
-  context (typically the entrypoint that started the match), `Location.Line`
-  comes from the matched node when available. Backward-compatible for every
-  existing JSON / SARIF / report consumer.
+- `LocationSourceVerifier` *(default)* — `Location.Function` /
+  `Location.Contract` come from the verifier-function context (typically the
+  entrypoint that started the match), while `Location.Line` **and
+  `Location.File`** come from the matched node when available. The file follows the
+  line by necessity: for a match inside an inlined callee the primary node lives in
+  the callee's file, and pairing it with the entry function's file produced a
+  location that does not exist — real scans pointed at line 185 of a 112-line
+  `UUPSUpgradeable.sol` because the delegatecall is in `AddressUpgradeable.sol`. A
+  finding whose line is outside its own file reads as a false positive even when
+  the match is sound, because there is nothing there to inspect
+  (`primaryNodeFile`; `buildContractLocation` already behaved this way).
+  Function/Contract remain verifier-derived, so existing JSON / SARIF / report
+  consumers are unaffected.
 - `LocationSourceMatchedNode` — every field of `Location` comes from the
   matched AST node's enclosing function/modifier. Aligns w3goaudit's
   attribution with SARIF / Slither / Semgrep conventions (report at the
@@ -495,7 +514,13 @@ query:
 - **Atomic:** `kind`, `name`, `attr` (+ inline `is_state_var`, `operator`, `visibility`, `mutability`)
 - **`unchecked_var`:** for unsigned `left - right` / `left -= right`, matches
   unless exact stable operand expressions are locally proven as
-  `left >= right`. Accepted proofs are an immediately preceding
+  `left >= right`. A non-negative integer LITERAL qualifies as an unsigned bound
+  operand: the builder attaches no `type` attribute to literals, so requiring one
+  made every `x - 1` inside `unchecked` unprovable and therefore unconditionally
+  reported — no guard could clear `require(n > 0); … n - 1`. A guard bounding the
+  minuend below by a literal also proves a literal subtrahend
+  (`literalBoundProvesSubtraction`): `n > 0` implies `n >= 1`, so `n - 1` is safe,
+  while `require(n > 0); n - userAmount` remains a finding. Accepted proofs are an immediately preceding
   `require`/`assert`, a dominating safe `if` arm whose subtraction is the first
   executable operation through `stmt.block`/`stmt.unchecked` wrappers, or
   fallthrough after the unsafe arm unconditionally exits with an absent or
@@ -513,7 +538,15 @@ query:
   expression/topology helpers in verify.go.
 - **`statement_contains`:** sub-rule matched against the node's nearest enclosing statement (closest `stmt.*`/`check.*`/`decl.variable` ancestor). Statement-scoped sibling search — narrower than `inside`, wider than `contains`. Generic: the match vocabulary lives in the sub-rule, not the engine. Pair with `not:` for "no such node in this statement" (e.g. incorrect-exp excludes a `^` whose statement holds another bitwise op). Placement validation recurses through its body at the current AST layer, so context-only predicates cannot hide inside it. Implemented by `statementContains` in verify.go; wired through `normalizeRule`/`walkRules`.
 - **Source:** `regex` as a scope-aware raw-text predicate
-- **Traversal:** `contains`, `inside`
+- **Traversal:** `contains`, `inside`, `receiver`
+  - `receiver:` with a nested rule matches the call's **direct** tagged receiver
+    child and nothing else. `has: {receiver: true, …}` searches every descendant, so
+    the receiver of a NESTED call in the arguments satisfied it — CrocSwapDex's
+    `proxyPaths_[CONST].delegatecall(abi.encodeWithSignature(…, curve.pullPriceTick(), …))`
+    was reported CRITICAL because `curve` is caller-derived. The scalar
+    `receiver: true` remains the attribute marker on a receiver node itself;
+    lowering dispatches on the YAML node kind. Implemented by
+    `matchDirectReceiver` in verify.go.
 - **Filter (function-level preconditions):**
   - `modifier` — regex match on function modifiers
   - `extends` — regex match on inherited contracts
@@ -682,8 +715,15 @@ WQL rule verification logic (THE CORE).
   available). Same-named identifiers, state/local/parameter names,
   external/self calls, unresolved calls, and nonzero overloads retain ordinary provenance. A
   member-access identity must have the direct identifier receiver `msg` or
-  `tx`; chained values such as `account.msg.sender` do not qualify. Indexed
-  arguments like `from[i]` inherit the base expression's taint.
+  `tx`; chained values such as `account.msg.sender` do not qualify.
+  An index or member access takes its value provenance from the **base/receiver
+  chain only**, never from the key or index expression (`taintRelevantChildren`).
+  Indexed arguments like `from[i]` therefore still inherit the base expression's
+  taint, while `proxyPaths_[userIdx]` stays governance-controlled **state** even
+  though the caller picked the slot. Unioning the index's taint in made the standard
+  proxy-dispatch idiom (CrocSwapDex, Curve, OZ UUPS) look like an attacker-chosen
+  `delegatecall` target. This mirrors `lvalueStateVarName`, which already walks
+  base-only so `tmp[stateIndex]++` stays local.
 - Interprocedural taint follows entrypoint → internal helper calls. For
   example, `_deposit(from, amount)` maps the callee's `from` parameter to
   `parameter`, while `_deposit(msg.sender, amount)` maps it to sender identity
@@ -793,8 +833,13 @@ Built-in preset checks for common patterns.
   Function.ComparesCallerIdentity(db)`. True when the function is privileged
   or self-scopes the caller, including item-ownership checks such as
   `ownerOf(tokenId) == msg.sender` and forwarded equivalents.
-- `reentrancy_guarded` — true when the function has a recognized
-  reentrancy-guard modifier.
+- `reentrancy_guarded` — true when an applied modifier's BODY proves a mutex.
+- `initializer_guarded` — `Function.HasOneTimeInitGuardIn(db, contract)`. True when
+  an enforcing check reads a state flag that the function, a resolved internal
+  helper, or a sibling in the same contract (a constructor, a
+  `_disableInitializers()`) sets. Replaces the previous name-specific carve-outs,
+  which knew only the OpenZeppelin `initializer` modifier and a guard literally
+  naming `_initializersDisabled`.
 
 Every preset returns true when its named safety property is present. Express
 the vulnerable absence with normal negation:
@@ -812,7 +857,25 @@ known presets, and the runtime fallback returns `false`.
 **Available Presets:**
 
 #### access_controlled
-Returns true when privileged access control is present. Checks in order:
+Returns true when privileged access control is present. Body-based: modifier and
+helper NAMES are descriptive only, and must resolve to a body that actually
+proves caller authorization.
+
+One name vocabulary is used, and only for the **storage authority** operand:
+`types.accessControlNameRegex` decides whether a caller-membership read such as
+`require(operators[msg.sender])` counts as authorization. That check is
+load-bearing — without it `require(balances[msg.sender] > 0)` would read as a
+privilege gate — so the vocabulary is a closed set of authority nouns (owner,
+admin, govern/gov, auth, role, permission, access, allow/whitelist/safelist,
+operator, manager, controller, guardian, keeper, moderator, maintainer,
+strategist, executor, relayer, sequencer, minter, burner, pauser, upgrader,
+distributor, trust, sign, validator, attestor, oracle) and deliberately excludes
+value-bearing names (balance, deposit, stake, share, reward, nonce) and inverted
+denylists (blacklist). Scalar comparisons (`msg.sender == governance`) are
+name-agnostic and need no vocabulary entry. Extend the one regex rather than
+adding a second list; `pkg/types/access_control_name_test.go` pins both halves.
+
+Checks in order:
 1. Auth modifier regex: `(?i)(onlyOwner|onlyAdmin|onlyOperator|onlyRole|onlyGuardian|onlyGovernor|onlyGovernance|onlyGov|onlyManager|onlyController|auth|authorized|requiresAuth|onlyMinter|onlyPauser)`
 2. Internal auth call heuristic: calls matching `(?i)(_?check|_?require|_?verify|_?validate|_?enforce).(Owner|Auth|Admin|Role|Sender|Access|Permission)`
 3. AST check: `msg.sender`/`tx.origin`/`_msgSender()` compared against owner/admin patterns
@@ -861,7 +924,7 @@ selector.
   acceptance, unknown-key rejection through both loader and public SDK
   boundaries, evaluator-IR JSON compatibility, value/regex/version validation,
   embedded-FS loading, canonical active-vocabulary checks, and the exact
-  25-official + 5-test + 76-benchmark = 106 repository inventory.
+  39-official + 5-test + 76-benchmark = 120 repository inventory.
 - `wql_test.go`, `wql_lower_test.go`, `wql_catalog_test.go`,
   `wql_execute_test.go` — strict scalar decoding, catalog mappings, lowering
   into evaluator IR, select-absent root matching, sequence-anchor conflict

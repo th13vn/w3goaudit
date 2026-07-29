@@ -55,6 +55,60 @@ func printUnresolvedTo(w io.Writer, db *types.Database, plain bool) {
 	fmt.Fprintln(w)
 }
 
+// maxParseLossFilesShown bounds the file list so one badly-broken dependency
+// tree cannot bury the findings it is hiding.
+const maxParseLossFilesShown = 10
+
+// printParseLossTo warns, loudly, that source text never became an AST.
+//
+// This is a different failure class from printUnresolvedTo: an unresolved
+// reference leaves the AST intact and merely imprecise, whereas parse loss makes
+// the affected declarations invisible to EVERY detector. Without this warning the
+// only signal was `analysisComplete: false` inside data/manifest.json, so a
+// confident-looking "3 findings" could be reported over a file the analyzer never
+// actually read.
+func printParseLossTo(w io.Writer, db *types.Database, plain bool) {
+	if db == nil {
+		return
+	}
+	files, total := types.ParseLossFiles(db.Diagnostics)
+	if total == 0 {
+		return
+	}
+	icon := emojiOr("⚠", plain)
+	if icon != "" {
+		icon += " "
+	}
+	fmt.Fprintf(w, "%sIncomplete parse (%d construct(s) in %d file(s)) — those declarations were NOT analyzed:\n",
+		icon, total, len(files))
+	shown := files
+	if len(shown) > maxParseLossFilesShown {
+		shown = shown[:maxParseLossFilesShown]
+	}
+	for _, file := range shown {
+		fmt.Fprintf(w, "   - %s\n", relativeToCWD(file))
+	}
+	if len(files) > len(shown) {
+		fmt.Fprintf(w, "   … and %d more\n", len(files)-len(shown))
+	}
+	fmt.Fprintln(w, "   Findings may be incomplete. Use --strict-parse to fail instead, or see data/diagnostics.json.")
+	fmt.Fprintln(w)
+}
+
+// relativeToCWD shortens an absolute path for console output, falling back to the
+// original when no shorter relative form exists.
+func relativeToCWD(path string) string {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return path
+	}
+	rel, err := filepath.Rel(cwd, path)
+	if err != nil || strings.HasPrefix(rel, "..") {
+		return path
+	}
+	return rel
+}
+
 func printCombinedConsoleTo(w io.Writer, stats *types.DatabaseStats, summary *report.SummaryReport, findings []*engine.Finding, plain, verbose bool) {
 	fmt.Fprintln(w, "╔══════════════════════════════════════════════════════════════╗")
 	fmt.Fprintln(w, "║                    W3GoAudit Scan Results                    ║")

@@ -851,6 +851,13 @@ func lowerKeyValue(key string, val yaml.Node) (*Rule, *Rule, error) {
 		return lowerWrappedAttributes(val)
 	case "left", "right", "statement_has", "has", "in", "guarded_by":
 		return lowerNestedRuleMatcher(key, val)
+	case "receiver":
+		// `receiver: {…}` constrains the call's DIRECT receiver; `receiver: true`
+		// remains the attribute marker carried by a receiver node itself.
+		if val.Kind == yaml.MappingNode {
+			return lowerNestedRuleMatcher(key, val)
+		}
+		return lowerDynamicMatcher(key, val)
 	case "unchecked_var":
 		return lowerUncheckedVar(val)
 	case "sequence", "any", "and":
@@ -948,6 +955,8 @@ func lowerNestedRuleMatcher(key string, val yaml.Node) (*Rule, *Rule, error) {
 		return &Rule{Left: sub}, nil, nil
 	case "right":
 		return &Rule{Right: sub}, nil, nil
+	case "receiver":
+		return &Rule{Receiver: sub}, nil, nil
 	case "statement_has":
 		return &Rule{StatementContains: sub}, nil, nil
 	case "has":
@@ -1356,6 +1365,9 @@ func mergeRuleInto(dst, src *Rule) error {
 		return err
 	}
 	if err := mergePtr(&dst.Left, src.Left); err != nil {
+		return err
+	}
+	if err := mergePtr(&dst.Receiver, src.Receiver); err != nil {
 		return err
 	}
 	if err := mergePtr(&dst.Right, src.Right); err != nil {

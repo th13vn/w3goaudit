@@ -19,7 +19,25 @@ query:
   select: lowlevel_call
   where:
     - not: { preset: access_controlled }
-    - has:
-        receiver: true
+
+    # The CALL's own target must be caller-controlled — not the receiver of some
+    # nested call inside the calldata expression.
+    - receiver:
         tainted: user_controlled
-    - arg.0: { tainted: user_controlled }
+
+    # The caller must control which FUNCTION is invoked, which is what makes this a
+    # confused deputy. Contract-built calldata with a pinned selector
+    # (`abi.encodeWithSelector(IERC20.transferFrom.selector, …)` — Uniswap's
+    # TransferHelper) lets the caller choose only the arguments, so it is an ordinary
+    # token transfer and was previously reported in four separate projects.
+    - arg.0:
+        any:
+          # The caller supplies the whole calldata blob.
+          - tainted: user_controlled
+            not:
+              block: external_call
+              name: ^(encodeWithSelector|encodeWithSignature|encodeCall|encodePacked)$
+          # The contract builds the calldata, but the caller picks the selector.
+          - block: external_call
+            name: ^(encodeWithSelector|encodeWithSignature|encodeCall|encodePacked)$
+            arg.0: { tainted: user_controlled }

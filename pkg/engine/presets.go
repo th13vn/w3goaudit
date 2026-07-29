@@ -11,9 +11,10 @@ type PresetFunc func(fn *types.Function, contract *types.Contract, e *Engine) bo
 
 // BuiltinPresets contains all built-in preset checks
 var BuiltinPresets = map[string]PresetFunc{
-	"access_controlled":  checkAccessControlled,
-	"caller_checked":     checkCallerChecked,
-	"reentrancy_guarded": checkReentrancyGuarded,
+	"access_controlled":   checkAccessControlled,
+	"caller_checked":      checkCallerChecked,
+	"reentrancy_guarded":  checkReentrancyGuarded,
+	"initializer_guarded": checkInitializerGuarded,
 }
 
 // checkBuiltinPreset checks if a built-in preset condition is satisfied.
@@ -50,23 +51,32 @@ func KnownPresetNames() []string {
 }
 
 // checkAccessControlled reports whether privileged access control is present.
-func checkAccessControlled(fn *types.Function, _ *types.Contract, e *Engine) bool {
-	return fn.IsAccessControlled(e.db)
+//
+// The scope contract is passed as the RUNTIME contract so a bodyless `virtual`
+// auth hook resolves to the override that the analyzed contract actually deploys
+// (see types.Function.IsAccessControlledIn).
+func checkAccessControlled(fn *types.Function, contract *types.Contract, e *Engine) bool {
+	return fn.IsAccessControlledIn(e.db, contract)
 }
 
 // checkCallerChecked reports whether the caller is privileged or constrained
 // to act on its own behalf.
-func checkCallerChecked(fn *types.Function, _ *types.Contract, e *Engine) bool {
-	return fn.IsAccessControlled(e.db) || fn.ComparesCallerIdentity(e.db)
+func checkCallerChecked(fn *types.Function, contract *types.Contract, e *Engine) bool {
+	return fn.IsAccessControlledIn(e.db, contract) || fn.ComparesCallerIdentity(e.db)
 }
 
-// checkReentrancyGuarded reports whether a reentrancy-guard modifier is present.
-func checkReentrancyGuarded(fn *types.Function, _ *types.Contract, _ *Engine) bool {
-	const pattern = `(?i)(nonReentrant|noReentrancy|lock|locked|guard|mutex|reentrancyGuard)`
-	for _, mod := range fn.Modifiers {
-		if MatchesRegex(pattern, mod) {
-			return true
-		}
-	}
-	return false
+// checkReentrancyGuarded reports whether a reentrancy guard is present, proven
+// from the applied modifier's body rather than its name. See
+// types.Function.HasReentrancyGuard for the proven shape and for when the name
+// vocabulary is still used as a fallback.
+func checkReentrancyGuarded(fn *types.Function, _ *types.Contract, e *Engine) bool {
+	return fn.HasReentrancyGuard(e.db)
+}
+
+// checkInitializerGuarded reports whether the function can only run once, proven
+// from an enforced state flag that it also sets. See
+// types.Function.HasOneTimeInitGuard; the OpenZeppelin `initializer` modifier is
+// covered because its body is that same mutex.
+func checkInitializerGuarded(fn *types.Function, contract *types.Contract, e *Engine) bool {
+	return fn.HasOneTimeInitGuardIn(e.db, contract)
 }

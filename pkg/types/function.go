@@ -13,7 +13,43 @@ import (
 	"golang.org/x/crypto/sha3"
 )
 
-var accessControlNameRegex = regexp.MustCompile(`(?i)(owner|admin|auth|authori[sz]ed|operator|role|permission|allow|whitelist|guardian|minter|pauser)`)
+// accessControlNameRegex is the single vocabulary of names that denote a
+// privileged principal. It gates the storage-authority paths — a caller
+// membership read such as `require(operators[msg.sender])` counts as access
+// control only when the mapping/variable name says it holds authority.
+//
+// The name check is load-bearing, not decoration: without it every mapping read
+// on the caller would prove authorization, and `require(balances[msg.sender] > 0)`
+// is a balance check that anyone can satisfy, not a gate on WHO may call. So the
+// list must stay a closed set of authority nouns and must NOT grow to include
+// value-bearing names (balance, deposit, stake, share, reward, nonce) or
+// exclusion lists (blacklist/denylist, whose check is inverted).
+//
+// Substring semantics are intentional: `gov` covers governor/governance, `trust`
+// covers isTrusted/trustedCallers, `sign` covers signer/signers. Keep the terms
+// singular where a plural is just a suffix.
+//
+// This vocabulary is deliberately WIDER than it once was. It previously listed
+// only owner/admin/auth/operator/role/permission/allow/whitelist/guardian/
+// minter/pauser, so identical code produced a false positive or not depending on
+// whether the author wrote `operators` or `keepers` — the detector's precision
+// tracked naming taste rather than behavior. Every term below is a conventional
+// name for a privileged principal in production Solidity.
+var accessControlNameRegex = regexp.MustCompile(`(?i)(` + strings.Join([]string{
+	// Ownership and administration.
+	"owner", "admin", "govern", "gov", "council", "steward",
+	// Explicit authorization vocabulary.
+	"auth", "authori[sz]ed", "permission", "role", "access",
+	// Allowlists (note: NOT blacklist/denylist — that check is inverted).
+	"allow", "whitelist", "safelist",
+	// Named privileged operator roles.
+	"operator", "manager", "controller", "guardian", "keeper", "moderator",
+	"maintainer", "strategist", "executor", "relayer", "sequencer",
+	// Capability-specific roles.
+	"minter", "burner", "pauser", "upgrader", "distributor",
+	// Trust and attestation.
+	"trust", "sign", "validator", "attestor", "oracle",
+}, "|") + `)`)
 
 // Visibility represents function visibility
 type Visibility string
@@ -429,9 +465,12 @@ func functionIdentityKey(f *Function) string {
 }
 
 type accessControlAnalysis struct {
-	db    *Database
-	stack map[string]bool
-	memo  map[string]bool
+	db *Database
+	// runtime is the contract being analyzed, used to dispatch bodyless `virtual`
+	// callees through its MRO. Nil retains declaring-contract-only resolution.
+	runtime *Contract
+	stack   map[string]bool
+	memo    map[string]bool
 }
 
 // IsAccessControlled reports whether exact bodies prove privileged caller
@@ -439,13 +478,30 @@ type accessControlAnalysis struct {
 // modifiers and internal calls must resolve through db, then their actual body
 // or recursively resolved behavior must contain a privileged caller check.
 func (f *Function) IsAccessControlled(db *Database) bool {
+	return f.IsAccessControlledIn(db, nil)
+}
+
+// IsAccessControlledIn is IsAccessControlled with an explicit RUNTIME contract,
+// used to dispatch `virtual` internal calls the way Solidity does.
+//
+// A `virtual` hook may be declared with no body and implemented by a deriving
+// contract — `UUPSUpgradeable._authorizeUpgrade` is `internal virtual;` and the
+// concrete `onlyOwner` version lives in the contract being deployed. Resolving such
+// a call to the declaring contract finds an empty body and proves nothing, which
+// reported the ecosystem's most standard upgrade guard as an unprotected upgrade.
+// Passing the contract under analysis lets the override be found through its MRO.
+//
+// A nil runtime contract keeps the historical declaring-contract-only behavior, so
+// existing SDK callers are unaffected.
+func (f *Function) IsAccessControlledIn(db *Database, runtime *Contract) bool {
 	if f == nil {
 		return false
 	}
 	analysis := &accessControlAnalysis{
-		db:    db,
-		stack: make(map[string]bool),
-		memo:  make(map[string]bool),
+		db:      db,
+		runtime: runtime,
+		stack:   make(map[string]bool),
+		memo:    make(map[string]bool),
 	}
 	return analysis.functionControlled(f, nil)
 }
@@ -501,6 +557,25 @@ func (a *accessControlAnalysis) bodyControlledWithParams(identity string, f *Fun
 			continue
 		}
 		contract, mod := resolveExactAppliedModifier(a.db, call)
+		if mod == nil && a.db != nil && len(a.db.Contracts) > 0 {
+			// A modifier IS applied here but its declaration is not reachable — the
+			// declaring base is missing from the exact MRO, usually because an import
+			// did not resolve. The analyzer has no information about this gate, so it
+			// must not conclude "unprotected": Axelar's
+			// `burn(...) external onlyRole(uint8(Roles.MINTER))` was reported as a
+			// public burn purely because `@axelar-network/…` imports were unresolved.
+			//
+			// The unresolved imports are already surfaced as durable diagnostics (and
+			// `--strict-imports` fails on them), so incompleteness is reported as
+			// incompleteness rather than manufactured into a security finding.
+			//
+			// This is narrower than trusting names in two ways: a modifier that appears
+			// only in Function.Modifiers, with no recorded application, still proves
+			// nothing; and an absent or empty database is "no context at all" rather
+			// than "incomplete context", so IsAccessControlled(nil) still proves
+			// nothing either.
+			return true
+		}
 		if a.modifierControlled(contract, mod, call, f) {
 			return true
 		}
@@ -518,6 +593,7 @@ func (a *accessControlAnalysis) bodyControlledWithParams(identity string, f *Fun
 		if callee == nil {
 			continue
 		}
+		callee = a.dispatchVirtualCallee(call, callee)
 		forwardedCaller, forwardedAuth, forwardedFixed := a.exactCallBindings(f, call, callee, callerParams, authParams, fixedParams)
 		if a.bodyControlledWithParams("function:"+functionIdentityKey(callee), callee, forwardedCaller, forwardedAuth, forwardedFixed) {
 			return true
@@ -614,6 +690,265 @@ func sortedBindingNames(bindings map[string]bool) string {
 	return strings.Join(params, ",")
 }
 
+// HasReentrancyGuard reports whether an applied modifier proves a reentrancy
+// mutex from its actual BODY, rather than from its name.
+//
+// The proven shape is the one every real guard uses, including OpenZeppelin's
+// nonReentrant: before yielding to the function body (`_;`), the modifier both
+//
+//  1. CHECKS a state variable, and
+//  2. WRITES that same state variable.
+//
+// Re-entering therefore cannot pass step 1, because the first entry already
+// changed the value step 1 tests. Both halves are required: a modifier that only
+// reads the flag proves nothing (it is observational), and one that only writes it
+// never blocks anything.
+//
+// This is name-independent by design. A purely name-based check recognized
+// `reEntrantLock` while missing its siblings `reEntrantAgent` and
+// `reEntrantApproved` in the same contract — identical mutexes, differing only in
+// spelling. Names remain a documented FALLBACK, used only when the modifier body
+// cannot be resolved (an interface, an abstract declaration, or a legacy cache
+// without modifier objects), so unavailable context stays tolerant rather than
+// silently reporting a guarded function.
+func (f *Function) HasReentrancyGuard(db *Database) bool {
+	if f == nil {
+		return false
+	}
+	for _, call := range f.Calls {
+		if call == nil || call.CallType != CallTypeModifier {
+			continue
+		}
+		_, mod := resolveExactAppliedModifier(db, call)
+		if mod == nil || mod.AST == nil {
+			// Body unavailable: fall back to the name for this modifier only.
+			if call.ResolvedFunction != "" && reentrancyGuardNameRegex.MatchString(call.ResolvedFunction) {
+				return true
+			}
+			continue
+		}
+		if modifierBodyProvesMutex(mod.AST) {
+			return true
+		}
+	}
+	// Modifiers with no recorded call metadata at all (legacy caches, synthetic
+	// functions) retain the historical name-only behavior.
+	for _, name := range f.Modifiers {
+		if reentrancyGuardNameRegex.MatchString(name) {
+			return true
+		}
+	}
+	return false
+}
+
+// HasOneTimeInitGuard reports whether a function proves it can only ever run once,
+// by enforcing a state flag that it then sets.
+//
+// This is the same mutex shape HasReentrancyGuard proves, minus the `_;` boundary:
+// an enforcing check (require/assert/if-revert) must READ a state variable, and the
+// function must WRITE that same variable. Re-entering the initializer cannot pass the
+// check, because the first call already flipped the value it tests.
+//
+// Both halves are required, which keeps an observational read
+// (`emit Seen(initialized)`) from counting. Reads and writes are followed one level
+// into resolved internal callees, because the idiom is routinely split that way:
+// Axelar's `if (_isInitialized()) revert AlreadyInitialized(); _initialize();` keeps
+// the read in one helper and the write in another.
+//
+// Name-based recognition is deliberately absent here. The detector previously knew
+// only the OpenZeppelin `initializer` modifier and a guard literally naming
+// `_initializersDisabled`, so every other spelling of "already initialized" was
+// reported as unprotected.
+func (f *Function) HasOneTimeInitGuard(db *Database) bool {
+	return f.HasOneTimeInitGuardIn(db, nil)
+}
+
+// HasOneTimeInitGuardIn is HasOneTimeInitGuard with the enclosing contract, which
+// also accepts a flag set by SOMEWHERE ELSE in that contract rather than by the
+// initializer itself.
+//
+// OpenZeppelin's disable pattern works that way: the constructor runs
+// `_disableInitializers()` and `initialize` only READS the flag
+// (`require(!_initializersDisabled)`). The self-setting proof cannot see that, and
+// requiring it would report the canonical OZ implementation-contract guard.
+//
+// A nil contract keeps the stricter self-setting-only proof.
+func (f *Function) HasOneTimeInitGuardIn(db *Database, contract *Contract) bool {
+	if f == nil || f.AST == nil {
+		return false
+	}
+	checked := make(map[string]bool)
+	written := make(map[string]bool)
+	collectGuardedStateReads(f.AST, checked)
+	collectStateWriteTargets(f.AST, written)
+
+	// One level into resolved internal callees, for the split-helper idiom.
+	for _, call := range f.Calls {
+		if call == nil || !isInternalCall(call.CallType) {
+			continue
+		}
+		callee := resolveExactAccessControlCallee(db, call)
+		if callee == nil || callee.AST == nil {
+			continue
+		}
+		if calleeGuardsInitialization(f, call, callee, checked) {
+			collectStateReads(callee.AST, checked)
+		}
+		collectStateWriteTargets(callee.AST, written)
+	}
+
+	// A flag the initializer sets itself is the strongest proof.
+	for name := range checked {
+		if written[name] {
+			return true
+		}
+	}
+	// Otherwise the flag may be set elsewhere in the contract — a constructor, or a
+	// `_disableInitializers()`-style function. An ENFORCED read of such a flag is
+	// still a one-time-init gate.
+	if contract != nil {
+		for _, sibling := range contract.Functions {
+			if sibling == nil || sibling == f || sibling.AST == nil {
+				continue
+			}
+			siblingWrites := make(map[string]bool)
+			collectStateWriteTargets(sibling.AST, siblingWrites)
+			for name := range checked {
+				if siblingWrites[name] {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+// calleeGuardsInitialization reports whether the call to callee appears inside an
+// enforcing check of f, so that a state read in the callee's body is an enforced
+// read rather than an incidental one.
+func calleeGuardsInitialization(f *Function, metadata *FunctionCall, callee *Function, _ map[string]bool) bool {
+	node := exactASTCallForMetadata(f, metadata)
+	if node == nil {
+		return false
+	}
+	for current := node; current != nil; current = current.Parent {
+		if IsCheck(current.Kind) {
+			return true
+		}
+		if current.Kind == KindStmtIf {
+			return true
+		}
+		if current.Kind == KindDeclFunction {
+			return false
+		}
+	}
+	return false
+}
+
+// reentrancyGuardNameRegex is the FALLBACK vocabulary, used only when a modifier
+// body is unavailable. Prefer modifierBodyProvesMutex; do not grow this list to
+// paper over a body the analyzer failed to resolve.
+var reentrancyGuardNameRegex = regexp.MustCompile(`(?i)(nonReentrant|noReentrancy|lock|locked|guard|mutex|reentrancyGuard)`)
+
+// modifierBodyProvesMutex reports whether the statements executed BEFORE the `_`
+// placeholder both test and assign one common state variable.
+func modifierBodyProvesMutex(body *ASTNode) bool {
+	if body == nil {
+		return false
+	}
+	checked := make(map[string]bool)
+	written := make(map[string]bool)
+	for _, stmt := range body.Children {
+		if isModifierPlaceholder(stmt) {
+			break // Only statements before `_;` can block re-entry.
+		}
+		collectGuardedStateReads(stmt, checked)
+		collectStateWriteTargets(stmt, written)
+	}
+	for name := range checked {
+		if written[name] {
+			return true
+		}
+	}
+	return false
+}
+
+// isModifierPlaceholder reports whether a node is the `_;` placeholder that marks
+// where the guarded function body runs.
+func isModifierPlaceholder(node *ASTNode) bool {
+	return node != nil && node.Kind == KindExprIdentifier && node.Name == "_"
+}
+
+// collectGuardedStateReads records state variables whose value is tested by an
+// enforcing check — require/assert/revert, or an `if` condition (a guard written
+// as `if (locked) revert()`). A read anywhere else in the modifier, such as inside
+// an `emit`, is observational and does not constrain re-entry.
+func collectGuardedStateReads(node *ASTNode, out map[string]bool) {
+	if node == nil {
+		return
+	}
+	if IsCheck(node.Kind) {
+		for _, child := range node.Children {
+			collectStateReads(child, out)
+		}
+		return
+	}
+	if node.Kind == KindStmtIf && len(node.Children) > 0 {
+		collectStateReads(node.Children[0], out)
+	}
+	for _, child := range node.Children {
+		collectGuardedStateReads(child, out)
+	}
+}
+
+func collectStateReads(node *ASTNode, out map[string]bool) {
+	if node == nil {
+		return
+	}
+	if node.Kind == KindExprIdentifier && node.RefKind == "state_var" && node.Name != "" {
+		out[node.Name] = true
+	}
+	for _, child := range node.Children {
+		collectStateReads(child, out)
+	}
+}
+
+// collectStateWriteTargets records the state variables assigned by node. Targets
+// follow the lvalue base chain only, so `map[key] = v` records `map` and never the
+// variables used to compute `key`.
+func collectStateWriteTargets(node *ASTNode, out map[string]bool) {
+	if node == nil {
+		return
+	}
+	if node.Kind == KindStmtAssign && len(node.Children) > 0 {
+		if name := lvalueStateRootName(node.Children[0]); name != "" {
+			out[name] = true
+		}
+	}
+	for _, child := range node.Children {
+		collectStateWriteTargets(child, out)
+	}
+}
+
+// lvalueStateRootName returns the state variable at the root of an assignment
+// target, following only the base of index/member accesses.
+func lvalueStateRootName(node *ASTNode) string {
+	if node == nil {
+		return ""
+	}
+	switch node.Kind {
+	case KindExprIdentifier:
+		if node.RefKind == "state_var" {
+			return node.Name
+		}
+	case KindExprIndexAccess, KindExprMemberAccess:
+		if len(node.Children) > 0 {
+			return lvalueStateRootName(node.Children[0])
+		}
+	}
+	return ""
+}
+
 func resolveExactAppliedModifier(db *Database, call *FunctionCall) (*Contract, *Modifier) {
 	if db == nil || call == nil || !call.Resolved || call.ResolvedContractID == "" || call.ResolvedFunction == "" {
 		return nil, nil
@@ -628,6 +963,49 @@ func resolveExactAppliedModifier(db *Database, call *FunctionCall) (*Contract, *
 		}
 	}
 	return nil, nil
+}
+
+// dispatchVirtualCallee resolves an internal call to the implementation the RUNTIME
+// contract actually executes: the most-derived declaration of that selector in its
+// MRO.
+//
+// This is plain Solidity dispatch for `virtual` internal calls. The builder records
+// the call against the contract that DECLARES it, which for a hook is the abstract
+// base — `UUPSUpgradeable._authorizeUpgrade` is `internal virtual;` and the concrete
+// version is supplied by the deploying contract. Analyzing the base declaration
+// found no authorization and reported the ecosystem's most standard upgrade guard as
+// an unprotected upgrade.
+//
+// Selecting by MRO position rather than by "has a body" is deliberate: the real
+// OpenZeppelin override is `function _authorizeUpgrade(address) internal override
+// onlyOwner {}` — an EMPTY body whose authorization lives entirely in the modifier.
+// Both declarations therefore have zero body statements, so body presence cannot
+// distinguish them. For a non-virtual call the resolved callee already is the
+// most-derived declaration and this returns it unchanged.
+func (a *accessControlAnalysis) dispatchVirtualCallee(call *FunctionCall, callee *Function) *Function {
+	if callee == nil || call == nil || a.db == nil || a.runtime == nil || callee.Selector == "" {
+		return callee
+	}
+	// `super.f()` deliberately targets the NEXT contract after the caller in the
+	// MRO, not the most-derived override. Redirecting it to the most-derived
+	// declaration points it back at the caller — Euler's
+	// `EVault.transferFrom` is `return super.transferFrom(...)`, so the allowance
+	// check in the base module became invisible and the call resolved to itself.
+	// Leave super calls with the statically resolved target.
+	if call.CallType == CallTypeSuper {
+		return callee
+	}
+	for _, contract := range a.db.LinearizedContracts(a.runtime) {
+		if contract == nil {
+			continue
+		}
+		for _, candidate := range contract.Functions {
+			if candidate != nil && candidate.Selector == callee.Selector {
+				return candidate
+			}
+		}
+	}
+	return callee
 }
 
 func resolveExactAccessControlCallee(db *Database, call *FunctionCall) *Function {
@@ -755,6 +1133,9 @@ func expressionRequiresAuthorization(expr *ASTNode, wantTrue bool, fn *Function,
 	if roleCallProvesAuthorization(expr, fn, analysis, callerParams, fixedParams) || accessMappingProvesAuthorization(expr, fn, db, callerParams, fixedParams) {
 		return wantTrue
 	}
+	if authorityCallProvesAuthorization(expr, fn, db, callerParams, fixedParams) {
+		return wantTrue
+	}
 	if expr.Kind == KindExprUnaryOp && expr.GetAttributeString("operator") == "!" && len(expr.Children) > 0 {
 		return expressionRequiresAuthorization(expr.Children[0], !wantTrue, fn, analysis, callerParams, authParams, fixedParams)
 	}
@@ -821,6 +1202,125 @@ func privilegedCallerComparison(caller, authority *ASTNode, fn *Function, db *Da
 	return expressionIsCallerIdentity(caller, fn, db, callerParams) &&
 		!expressionIsCallerIdentity(authority, fn, db, callerParams) &&
 		!isCallerControlledTarget(authority, fn, db)
+}
+
+// authorityCallProvesAuthorization recognizes a custom role system whose storage
+// read the analyzer cannot follow, by requiring three independent signals at once:
+//
+//  1. the expression is a CALL whose name matches the authority vocabulary
+//     (`accessControlNameRegex` — hasRole, getRoles, isOperator, checkOwner, …),
+//  2. a caller identity is forwarded into it, directly or through a nested call, and
+//  3. the caller has placed it in an ENFORCING position (the caller of this
+//     function only invokes it from require/assert/if-revert conditions).
+//
+// Axelar's `RolesBase` is the motivating case: `if (!_hasRole(_getRoles(msg.sender),
+// role)) revert MissingRole(...)`, where `_getRoles` reads the role bitmap with
+// `assembly { accountRoles := sload(key) }` on a key derived from the account. There
+// is no mapping access to recognize and no authorizing body to descend into, so the
+// body-based analysis could not prove anything and reported a role-gated `burn` as a
+// public burn.
+//
+// All of these are required because any one alone over-accepts:
+// `require(balances[msg.sender] > 0)` forwards a caller identity and is enforcing,
+// but `balance` is not an authority name — the vocabulary deliberately excludes
+// value-bearing and denylist names for exactly this reason.
+//
+// Every argument that does NOT carry the caller identity must additionally be a
+// FIXED operand, which preserves the existing rule that a caller-selected authority
+// proves nothing: `require(hasRole(role, msg.sender))` with a `bytes32 role`
+// parameter lets the attacker name a role they already hold. Axelar passes
+// `role` from the modifier invocation (`onlyRole(uint8(Roles.MINTER))`), so it is
+// contract-fixed there.
+func authorityCallProvesAuthorization(expr *ASTNode, fn *Function, db *Database, callerParams, fixedParams map[string]bool) bool {
+	if expr == nil || !IsAnyCall(expr.Kind) || !isAccessControlName(expr.Name) {
+		return false
+	}
+	forwarded := false
+	for _, arg := range solidityArgNodes(expr) {
+		// The argument carrying the caller must itself read the authority out of
+		// storage through inline assembly. That is the ONLY situation this fallback
+		// is for: `_getRoles(account)` is `assembly { accountRoles := sload(key) }`,
+		// which the body analysis cannot follow. Requiring it keeps a decoy like
+		// `function hasRole(bytes32, address) internal pure returns (bool) { return
+		// true; }` rejected — that body IS analyzable, and it proves nothing.
+		if subtreeForwardsCallerIdentity(arg, fn, db, callerParams, 0) {
+			if !callReadsStorageViaAssembly(arg, fn, db) {
+				return false
+			}
+			forwarded = true
+			continue
+		}
+		if !expressionIsFixedOperand(arg, fn, db, callerParams, fixedParams) {
+			return false
+		}
+	}
+	return forwarded
+}
+
+// callReadsStorageViaAssembly reports whether expr is (or contains) a resolved
+// internal call whose body reads storage with an assembly `sload`. Such a body is
+// opaque to the AST-level authorization analysis, which is what makes the
+// name-plus-fixed-operand fallback necessary rather than lazy.
+func callReadsStorageViaAssembly(expr *ASTNode, fn *Function, db *Database) bool {
+	if expr == nil || db == nil || fn == nil {
+		return false
+	}
+	if IsAnyCall(expr.Kind) {
+		for _, call := range fn.Calls {
+			if call == nil || !isInternalCall(call.CallType) || call.Target != expr.Name {
+				continue
+			}
+			if callee := resolveExactAccessControlCallee(db, call); callee != nil &&
+				astReadsStorageViaAssembly(callee.AST, 0) {
+				return true
+			}
+		}
+	}
+	for _, child := range expr.Children {
+		if callReadsStorageViaAssembly(child, fn, db) {
+			return true
+		}
+	}
+	return false
+}
+
+// astReadsStorageViaAssembly reports whether a body contains an assembly storage
+// read, bounded so a pathological tree cannot walk unboundedly.
+func astReadsStorageViaAssembly(node *ASTNode, depth int) bool {
+	if node == nil || depth > 64 {
+		return false
+	}
+	if node.Kind == KindAsmSload {
+		return true
+	}
+	for _, child := range node.Children {
+		if astReadsStorageViaAssembly(child, depth+1) {
+			return true
+		}
+	}
+	return false
+}
+
+// maxAuthorityForwardDepth bounds the search for a forwarded caller identity inside
+// an authority call's arguments. Real shapes nest one or two calls deep
+// (`_hasRole(_getRoles(msg.sender), role)`).
+const maxAuthorityForwardDepth = 4
+
+// subtreeForwardsCallerIdentity reports whether a caller identity appears anywhere
+// in the expression subtree, following nested calls up to a bounded depth.
+func subtreeForwardsCallerIdentity(node *ASTNode, fn *Function, db *Database, callerParams map[string]bool, depth int) bool {
+	if node == nil || depth > maxAuthorityForwardDepth {
+		return false
+	}
+	if expressionIsCallerIdentity(node, fn, db, callerParams) {
+		return true
+	}
+	for _, child := range node.Children {
+		if subtreeForwardsCallerIdentity(child, fn, db, callerParams, depth+1) {
+			return true
+		}
+	}
+	return false
 }
 
 func roleCallProvesAuthorization(call *ASTNode, fn *Function, analysis *accessControlAnalysis, callerParams, fixedParams map[string]bool) bool {

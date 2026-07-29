@@ -70,7 +70,7 @@ func assertTemplateFindsOnly(t *testing.T, fixture, templatePath, vulnerable, sa
 
 	got := map[string]bool{}
 	for _, finding := range New(db).Execute(tmpl) {
-		got[finding.Location.Contract+"."+finding.Location.Function] = true
+		got[findingEntryLabel(finding)] = true
 	}
 	if !got[vulnerable] {
 		t.Errorf("missing %s; got=%v", vulnerable, got)
@@ -103,7 +103,7 @@ func TestDuplicateContractNamesKeepExactEngineReachability(t *testing.T) {
 		if finding.Location.File == aFile {
 			t.Fatalf("a.Token has no selfdestruct but produced a finding: %#v", finding)
 		}
-		if finding.Location.File == zFile && finding.Location.Function == "run" {
+		if finding.Location.File == zFile && findingEntryFunction(finding) == "run" {
 			zFinding = finding
 		}
 	}

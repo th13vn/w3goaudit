@@ -71,7 +71,15 @@ func (u *UDVTDef) ID() string  // absPath#Name
   when there is none or the name is declared in more than one file. Ambiguity
   yields `nil` so xref binding stays exact rather than guessing.
 - `UnresolvedBases()` - Sorted base-contract names referenced in inheritance but absent from the DB (unresolved imports); surfaced by the CLI as "⚠ Unresolved references"
-- `CalculateMainContracts()` - Identify deployable contracts
+- `CalculateMainContracts()` - Identify deployable contracts. Entry-function
+  resolution claims each signature slot for the **most-derived** declaration
+  regardless of whether it is an entry point, then filters. Checking
+  `IsEntrypoint()` first was a defect: a derived override that is `view`/`pure`
+  never occupied its slot, so an inherited nonpayable INTERFACE stub was admitted in
+  its place and every access-control detector fired on a bodyless declaration where
+  there is nothing to fix (7 false positives on Uniswap v4 `IHooks`). An override
+  shadows its base even when not externally callable; the selector then simply has
+  no entry function.
 - `GetStats()` - Database statistics
 - `LoadFromJSON(path)` - Load pre-built database from JSON file (for caching) and restore serialized AST parent pointers
 - `LoadFromJSONWithOptions(path, LoadOptions{Logger})` - Load a cache with scan-local logging retained for later database lookups
@@ -92,7 +100,15 @@ semantic coverage the analyzer could not establish.
 
 Stable codes include `import.unresolved`, `parse.skipped`, `parse.recovered`,
 `inheritance.base_unresolved`, `location.invalid`, `identity.unresolved`, and
-`analysis.semantic_unsupported`. The semantic code records an exact AST shape
+`analysis.semantic_unsupported`.
+
+`IsParseLoss(code)` and `ParseLossFiles(diagnostics)` separate the **parse**
+codes from the resolution ones. The distinction is not cosmetic: an unresolved
+reference leaves the AST intact and only imprecise, whereas parse loss means the
+affected declarations do not exist for any detector. `ParseLossFiles` returns the
+sorted, deduplicated affected files plus the total diagnostic count (counting an
+unattributed record, so the total never understates the loss), which the CLI uses
+for its stderr/console warning and for `--strict-parse`. The semantic code records an exact AST shape
 that the internal lowering layer could not model and marks analysis incomplete.
 `SortDiagnostics` orders records by severity, code, file, line, import path,
 symbol, message, then deterministic tie-breakers. `Database.NormalizeDiagnostics`
@@ -325,6 +341,50 @@ type ModifierUsage struct {
 - `IsEntrypoint()` - true for public/external functions that are not view/pure and not the constructor
 - `GetSelector(structDefs)` - Calculate canonical signature text (with struct→tuple resolution)
 - `GetSignature(structDefs)` - Generate the 4-byte hash
+- `HasReentrancyGuard(db)` - Detect a reentrancy mutex from an applied
+  modifier's **body**: before yielding to the function (`_;`) the modifier must
+  both CHECK a state variable and WRITE that same variable, so re-entry cannot pass
+  the check. Both halves are required — a modifier that only reads the flag is
+  observational, and one that only writes it blocks nothing. Name matching remains a
+  documented fallback, used only when the modifier body cannot be resolved
+  (interface, abstract declaration, legacy cache). A purely name-based check
+  recognized `reEntrantLock` while missing its siblings `reEntrantAgent` and
+  `reEntrantApproved` in the same contract: identical mutexes, differing only in
+  spelling.
+- `IsAccessControlledIn(db, runtime)` - `IsAccessControlled` with an explicit
+  runtime contract, so a `virtual` internal call dispatches the way Solidity does —
+  to the most-derived declaration of that selector in the runtime MRO
+  (`dispatchVirtualCallee`). `UUPSUpgradeable._authorizeUpgrade` is
+  `internal virtual;` and the concrete version is
+  `internal override onlyOwner {}` in the deploying contract: an EMPTY body whose
+  authorization lives entirely in the modifier, so body presence cannot distinguish
+  the two and MRO position must. `super.f()` is deliberately excluded — it targets
+  the next contract after the caller, and redirecting it to the most-derived
+  declaration points it back at the caller (Euler's `EVault.transferFrom` is
+  `return super.transferFrom(...)`). A nil runtime keeps the historical
+  declaring-contract-only behavior, so existing SDK callers are unaffected.
+- **Undetermined vs. absent.** A modifier that IS applied (a recorded
+  `CallTypeModifier` call) but whose declaration cannot be resolved leaves the
+  analyzer with no information about that gate, so `IsAccessControlled` returns true
+  rather than concluding "unprotected". Axelar's
+  `burn(...) external onlyRole(uint8(Roles.MINTER))` was reported as a public burn
+  purely because `@axelar-network/…` imports were unresolved, leaving `RolesBase`
+  out of the exact MRO. Unresolved imports are already durable diagnostics (and
+  `--strict-imports` fails on them), so incompleteness is reported as
+  incompleteness instead of being manufactured into a finding. This is narrower
+  than trusting names in two ways: a modifier appearing only in
+  `Function.Modifiers` with no recorded application still proves nothing, and an
+  absent or empty database is "no context at all" — `IsAccessControlled(nil)`
+  remains false.
+- `authorityCallProvesAuthorization` is a fallback for a custom role system whose
+  storage read is opaque to AST analysis. It requires FOUR signals together: an
+  authority-named call, a forwarded caller identity, every other argument being a
+  fixed operand, and the caller-carrying argument resolving to a body that reads
+  storage via `asm.sload`. Axelar's
+  `if (!_hasRole(_getRoles(msg.sender), role)) revert` is the motivating shape.
+  The last signal is what keeps a decoy like
+  `function hasRole(bytes32, address) internal pure returns (bool) { return true; }`
+  rejected — that body is analyzable, so it is judged on its merits.
 - `IsAccessControlled(db)` - Detect **privileged** access control from exact
   bodies and call-site bindings. Modifier and helper names are descriptive only:
   applied modifiers require a resolved `CallTypeModifier` target, internal
@@ -553,7 +613,11 @@ type CallGraph struct {
 
 > `outgoing`/`incoming` are unexported and not serialized; after loading a
 > database from JSON, call `CallGraph.EnsureIndex()` before using
-> `GetCallees`/`GetCallers`.
+> `GetCallees`/`GetCallers`. Every accessor now calls it itself —
+> `GetCallees`, `GetCallers`, `GetExternalCalls`, `GetCallChain`, and
+> `HasCycle`. `HasCycle` previously read the adjacency map directly, so on a
+> `--db` cache it walked no edges and reported "no cycle" for every input: a
+> silent wrong answer rather than an error.
 
 `ResolvedContract` remains the short display/compatibility name.
 `ResolvedContractID` is additive JSON (`resolvedContractId`) and is populated
