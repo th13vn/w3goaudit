@@ -1108,6 +1108,57 @@ contract HelperFlag {
     }
 }
 
+// Axelar InterchainToken verbatim: the flag is an explicit storage slot, so both
+// halves of the mutex are inline assembly — sload under the check, sstore for the
+// write. Matching only stmt.assign saw the read and missed the write.
+contract AsmSlotFlag {
+    bytes32 internal constant INITIALIZED_SLOT = 0xc778385ecb3e8cecb82223fa1f343ec6865b2d64c65b0c15c7e8aef225d9e214;
+    string public name;
+    error AlreadyInitialized();
+
+    function _isInitialized() internal view returns (bool initialized) {
+        assembly {
+            initialized := sload(INITIALIZED_SLOT)
+        }
+    }
+
+    function _initialize() internal {
+        assembly {
+            sstore(INITIALIZED_SLOT, true)
+        }
+    }
+
+    // SAFE: one-time-init proven through an assembly storage slot.
+    function init(string calldata tokenName) external {
+        if (_isInitialized()) revert AlreadyInitialized();
+        _initialize();
+        name = tokenName;
+    }
+}
+
+contract AsmSlotMismatch {
+    bytes32 internal constant INITIALIZED_SLOT = 0xc778385ecb3e8cecb82223fa1f343ec6865b2d64c65b0c15c7e8aef225d9e214;
+    bytes32 internal constant OTHER_SLOT = 0xa1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90;
+    address public owner;
+    error AlreadyInitialized();
+
+    function _isInitialized() internal view returns (bool initialized) {
+        assembly {
+            initialized := sload(INITIALIZED_SLOT)
+        }
+    }
+
+    // VULNERABLE: the write lands on a DIFFERENT slot, so the flag it tests is
+    // never set and the check can be passed forever.
+    function init(address newOwner) external {
+        if (_isInitialized()) revert AlreadyInitialized();
+        assembly {
+            sstore(OTHER_SLOT, true)
+        }
+        owner = newOwner;
+    }
+}
+
 contract Unguarded {
     address public owner;
 
@@ -1137,6 +1188,7 @@ contract ObservationalOnly {
 		}
 	}
 	want := []string{
+		"HIGH-UNPROTECTED-INITIALIZER|AsmSlotMismatch.init",
 		"HIGH-UNPROTECTED-INITIALIZER|ObservationalOnly.initialize",
 		"HIGH-UNPROTECTED-INITIALIZER|Unguarded.initialize",
 	}
@@ -1297,5 +1349,61 @@ contract Pool {
 	}
 	if strings.Join(eq, "\n") != strings.Join(want, "\n") {
 		t.Errorf("strict-equality findings mismatch\n got: %v\nwant: %v", eq, want)
+	}
+}
+
+// TestDelegatecallIsNotReentrancy covers the delegatecall false positives the
+// real-corpus scan produced: 3 of 7 HIGH-REENTRANCY-PATTERN findings were
+// delegatecall-only sites (CrocSwap `ProxyCaller.callSwap`/`callCrossFlag` into
+// an admin-set sidecar, Eesee `MulticallPayable.multicall` into
+// `address(this)`).
+//
+// Delegatecall runs the callee's code in THIS contract's context — same
+// storage, same guard slot — so re-entry through it is the contract calling
+// its own code, not attacker-injected reentry. An attacker-influenced
+// delegatecall target is arbitrary code execution and belongs to
+// CRITICAL-DELEGATECALL-USER-INPUT, not to the CEI detector.
+func TestDelegatecallIsNotReentrancy(t *testing.T) {
+	source := `// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.20;
+contract Sidecars {
+    mapping(uint256 => address) internal proxyPaths_;
+    mapping(address => uint256) public shares;
+    uint256 public total;
+
+    // SAFE: delegatecall into a governance-set sidecar, then a state write.
+    // Not reentrancy — the sidecar executes in this contract's own context.
+    function callSwap(bytes calldata payload) external {
+        (bool ok, bytes memory out) = proxyPaths_[1].delegatecall(payload);
+        require(ok);
+        total = out.length;
+    }
+
+    // SAFE: self-delegatecall multicall, then a state write.
+    function multicall(bytes[] calldata data) external {
+        for (uint256 i; i < data.length; ++i) {
+            (bool ok, ) = address(this).delegatecall(data[i]);
+            require(ok);
+        }
+        total = data.length;
+    }
+
+    // VULNERABLE control: a real external call before the state write.
+    function withdraw(uint256 amount) external {
+        (bool ok, ) = msg.sender.call{value: amount}("");
+        require(ok);
+        shares[msg.sender] -= amount;
+    }
+}`
+	got := scanSourceWithPack(t, source)
+	var reentrancy []string
+	for _, finding := range got {
+		if strings.HasPrefix(finding, "HIGH-REENTRANCY-PATTERN|") {
+			reentrancy = append(reentrancy, finding)
+		}
+	}
+	want := []string{"HIGH-REENTRANCY-PATTERN|Sidecars.withdraw"}
+	if strings.Join(reentrancy, "\n") != strings.Join(want, "\n") {
+		t.Errorf("reentrancy findings mismatch\n got: %v\nwant: %v", reentrancy, want)
 	}
 }

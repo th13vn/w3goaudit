@@ -667,9 +667,20 @@ Two precision sub-decisions live here:
 - `access_controlled` = `IsAccessControlled`
 - `caller_checked` = `IsAccessControlled || ComparesCallerIdentity` (self-scoping
   is a valid mitigation for `arbitrary-transferfrom` and `arbitrary-send-eth`)
-- `reentrancy_guarded` = a reentrancy-guard modifier is present
+- `reentrancy_guarded` = `HasReentrancyGuard` — an applied modifier's **body**
+  proves a mutex (checks and writes one common state variable before `_;`)
+- `initializer_guarded` = `HasOneTimeInitGuardIn` — the same mutex minus the `_;`
+  boundary: an enforcing check READS a flag that the function, a resolved internal
+  callee, or a sibling in the contract WRITES
 Vulnerability detectors use ordinary `not:` when the property must be absent.
 Unknown preset names are rejected at load (`IsKnownPreset`).
+
+Both mutex proofs share `collectStateWriteTargets`, which counts an inline-assembly
+`sstore(SLOT, …)` as a write to `SLOT` — non-OZ proxies keep the flag in an explicit
+storage slot, so Axelar's `sload(INITIALIZED_SLOT)` / `sstore(INITIALIZED_SLOT, true)`
+split across `_isInitialized()` / `_initialize()` proves one-time init. Recognizing
+only `stmt.assign` collected the read and never the write, reporting
+`InterchainToken.init()` as an unprotected initializer.
 
 ### 6.7 Location provenance, reachability & related sites
 

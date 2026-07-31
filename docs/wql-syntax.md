@@ -621,16 +621,20 @@ query:
   where:
     - not: { preset: reentrancy_guarded }
     - sequence:
-        - any:
-            - block: eth_transfer
-            - block: delegatecall
+        - block: eth_transfer
         - block: state_write
 ```
 
-Requires the function to lack a reentrancy guard and an ETH-bearing/low-level
-call or `delegatecall` to occur before a state write on the same execution path
-(CEI violation). Every sequence step supplies its own block kind, so no
-top-level `select` is needed.
+Requires the function to lack a reentrancy guard and an ETH-bearing or raw
+low-level call (`.transfer` / `.send` / `.call{value:}` / `.call(...)`) to occur
+before a state write on the same execution path (CEI violation). Every sequence
+step supplies its own block kind, so no top-level `select` is needed.
+
+`delegatecall` is deliberately **not** part of this rule: it runs the callee's
+code in the caller's own context (same storage, same guard slot), so re-entry
+through it is not attacker-injected reentry. An attacker-influenced delegatecall
+target is arbitrary code execution and is reported by
+`CRITICAL-DELEGATECALL-USER-INPUT` instead.
 
 ### C. Unprotected initializer
 

@@ -916,13 +916,25 @@ func collectStateReads(node *ASTNode, out map[string]bool) {
 // collectStateWriteTargets records the state variables assigned by node. Targets
 // follow the lvalue base chain only, so `map[key] = v` records `map` and never the
 // variables used to compute `key`.
+//
+// An inline-assembly `sstore(SLOT, value)` counts as a write to SLOT. Explicit
+// storage slots are how non-OZ proxies keep their one-time-init and reentrancy
+// flags — Axelar's InterchainToken reads `sload(INITIALIZED_SLOT)` in
+// `_isInitialized()` and writes `sstore(INITIALIZED_SLOT, true)` in
+// `_initialize()`. Matching only `stmt.assign` saw the read but never the write,
+// so the mutex was unprovable and `init()` was reported as unprotected. This
+// mirrors the engine's `state_write` block, which already treats `asm.sstore` as
+// a state write.
 func collectStateWriteTargets(node *ASTNode, out map[string]bool) {
 	if node == nil {
 		return
 	}
-	if node.Kind == KindStmtAssign && len(node.Children) > 0 {
-		if name := lvalueStateRootName(node.Children[0]); name != "" {
-			out[name] = true
+	switch node.Kind {
+	case KindStmtAssign, KindAsmSstore:
+		if len(node.Children) > 0 {
+			if name := lvalueStateRootName(node.Children[0]); name != "" {
+				out[name] = true
+			}
 		}
 	}
 	for _, child := range node.Children {

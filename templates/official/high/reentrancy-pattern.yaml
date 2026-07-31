@@ -16,25 +16,35 @@ meta:
 # `not: {preset: reentrancy_guarded}` returns true when the function lacks a
 # reentrancy guard — i.e. exactly the case we want to scan.
 #
-# Reentrancy requires the external call to be able to re-enter. Match the
-# genuinely reentrancy-prone call kinds — ETH-bearing transfers, raw
-# low-level calls, and delegatecall — but NOT routine typed ERC20 method
-# invocations (token.transfer/transferFrom/approve), which only re-enter
-# via non-standard ERC777-style hooks. This eliminates the dominant FP
-# class on vault-style `token.transferFrom(...); balances[...] += ...`
-# while preserving all TP detections (verified against test-data/security/reentrancy.sol,
-# whose vulnerable fixtures all use call{value:}/transfer/send/raw .call).
+# Reentrancy requires control flow to actually leave this contract and land in
+# code the caller can steer back in. Match the genuinely reentrancy-prone call
+# kinds — ETH-bearing transfers and raw low-level `.call` — but NOT:
+#
+#   * routine typed ERC20 method invocations (token.transfer/transferFrom/
+#     approve), which only re-enter via non-standard ERC777-style hooks. This
+#     eliminates the dominant FP class on vault-style
+#     `token.transferFrom(...); balances[...] += ...`.
+#   * `delegatecall`. Delegatecall executes the callee's bytecode in *this*
+#     contract's context — the same storage, the same guard slot — so a
+#     re-entry through it is this contract calling itself, which is a control
+#     flow the developer already wrote, not attacker-injected reentry. In real
+#     code the target is a trusted, admin-set implementation/sidecar
+#     (`proxyPaths_[CONST].delegatecall(...)`) or literally `address(this)`
+#     (multicall), which produced pure noise on the 470-contract corpus:
+#     CrocSwap ProxyCaller.callSwap/callCrossFlag and Eesee
+#     MulticallPayable.multicall. When the delegatecall target IS
+#     attacker-influenced the bug is arbitrary code execution, strictly worse
+#     than reentrancy and already reported by CRITICAL-DELEGATECALL-USER-INPUT.
+#
+# Verified against test-data/security/reentrancy.sol, whose vulnerable fixtures
+# all use call{value:}/transfer/send/raw .call.
 query:
   from: entry_function
   where:
     - not: { preset: reentrancy_guarded }
     - sequence:
-        - any:
-            # eth_transfer matches .transfer/.send/.call{value:} AND raw .call(...)
-            # (call.builtin.transfer, call.builtin.send, call.lowlevel.call, asm.call)
-            # — i.e. every ETH-bearing or raw-call shape used in classical reentrancy.
-            - block: eth_transfer
-            # delegatecall variants (call.lowlevel.delegatecall, asm.delegatecall)
-            # can reenter via arbitrary code execution in the current context.
-            - block: delegatecall
+        # eth_transfer matches .transfer/.send/.call{value:} AND raw .call(...)
+        # (call.builtin.transfer, call.builtin.send, call.lowlevel.call, asm.call)
+        # — i.e. every ETH-bearing or raw-call shape used in classical reentrancy.
+        - block: eth_transfer
         - block: state_write

@@ -839,7 +839,11 @@ Built-in preset checks for common patterns.
   helper, or a sibling in the same contract (a constructor, a
   `_disableInitializers()`) sets. Replaces the previous name-specific carve-outs,
   which knew only the OpenZeppelin `initializer` modifier and a guard literally
-  naming `_initializersDisabled`.
+  naming `_initializersDisabled`. The flag may live in an explicit storage slot
+  written by inline assembly — `collectStateWriteTargets` counts `asm.sstore(SLOT, …)`
+  as a write to `SLOT`, so Axelar's `sload(INITIALIZED_SLOT)` /
+  `sstore(INITIALIZED_SLOT, true)` split across `_isInitialized()` / `_initialize()`
+  proves the mutex. Matching only `stmt.assign` saw the read and missed the write.
 
 Every preset returns true when its named safety property is present. Express
 the vulnerable absence with normal negation:

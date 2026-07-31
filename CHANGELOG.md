@@ -4,6 +4,59 @@ All notable changes to w3goaudit are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/). Output changes note the `data/*.json`
 `schemaVersion`.
 
+## v0.4.3 - 2026-07-31
+
+Precision release, cut from real-corpus review of the v0.4.2 output. No CLI, SDK,
+or output-schema change — schema stays `2.0.0`. Two false-positive classes are
+removed; on the 470-contract corpus the scan goes **44 → 41 findings** with no
+true positive lost. Ships with template pack **v2.1.1**.
+
+One fix lives in the pack (`reentrancy-pattern.yaml`) and one in the engine
+(`collectStateWriteTargets`), so `--update-templates` alone delivers only half of
+this release — upgrade the binary too.
+
+### Fixed: `delegatecall` no longer counts as reentrancy (`HIGH-REENTRANCY-PATTERN`)
+
+The CEI detector matched `delegatecall` alongside ETH-bearing and raw low-level
+calls. Delegatecall executes the callee's bytecode in **this** contract's context
+— same storage, same guard slot — so re-entry through it is the contract running
+its own code, not attacker-injected reentry. Real targets are trusted, admin-set
+sidecars or literally `address(this)`.
+
+On the 470-contract corpus this was **3 of 7** `HIGH-REENTRANCY-PATTERN` findings,
+all noise: CrocSwap `ProxyCaller.callSwap`/`callCrossFlag`
+(`proxyPaths_[CONST].delegatecall(...)`) and Eesee `MulticallPayable.multicall`
+(`address(this).delegatecall(...)`). No true positive is lost — an
+attacker-influenced delegatecall target is arbitrary code execution and is
+already reported, at higher severity, by `CRITICAL-DELEGATECALL-USER-INPUT`.
+
+Removing the branch also unshadowed one raw-`.call` site that the delegatecall
+match had been winning over on the same entry point (CrocSwap
+`TransferHelper.safeTransferFrom`, `token.call(abi.encodeWithSelector(...))` from
+`HotProxy.userCmd`). Corpus total: 44 → 42 findings.
+
+Regression: `TestDelegatecallIsNotReentrancy` in
+`pkg/engine/false_positive_regression_test.go`.
+
+### Fixed: an assembly storage-slot init flag now proves a one-time-init guard
+
+`HIGH-UNPROTECTED-INITIALIZER` reported Axelar's `InterchainToken.init()`, which
+opens with `if (_isInitialized()) revert AlreadyInitialized();`. The
+`initializer_guarded` preset needs the same flag to be read under a check and
+written; the flag here is an explicit storage slot touched only from inline
+assembly (`sload(INITIALIZED_SLOT)` in `_isInitialized()`,
+`sstore(INITIALIZED_SLOT, true)` in `_initialize()`). `collectStateWriteTargets`
+matched only `stmt.assign`, so the read was collected and the write never was, and
+the mutex could not be proven.
+
+`asm.sstore(SLOT, …)` now counts as a write to `SLOT`, matching the engine's
+`state_write` block, which already treated it that way. This also lets
+assembly-slot reentrancy mutexes (Solady-style) prove `reentrancy_guarded`, since
+`modifierBodyProvesMutex` shares the collector. Corpus total: 42 → 41 findings.
+
+Regression: `AsmSlotFlag` (safe) and `AsmSlotMismatch` (the write lands on a
+different slot, still reported) in `TestOneTimeInitGuardIsRecognized`.
+
 ## v0.4.2 - 2026-07-29
 
 Correctness and coverage release. Output schema stays `2.0.0`. One new CLI flag

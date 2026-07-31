@@ -351,6 +351,15 @@ type ModifierUsage struct {
   recognized `reEntrantLock` while missing its siblings `reEntrantAgent` and
   `reEntrantApproved` in the same contract: identical mutexes, differing only in
   spelling.
+- `HasOneTimeInitGuardIn(db, contract)` - the same mutex proof minus the `_;`
+  boundary: an enforcing check (`require`/`assert`/if-revert) must READ a state flag
+  that the function, a resolved internal callee, or a sibling in `contract` WRITES.
+  The write half accepts inline assembly — `collectStateWriteTargets` treats
+  `asm.sstore(SLOT, …)` as a write to `SLOT`, because non-OZ proxies keep the flag in
+  an explicit storage slot. Axelar's InterchainToken splits it across
+  `_isInitialized()` (`sload(INITIALIZED_SLOT)`) and `_initialize()`
+  (`sstore(INITIALIZED_SLOT, true)`); recognizing only `stmt.assign` collected the
+  read but never the write, so `init()` was reported as an unprotected initializer.
 - `IsAccessControlledIn(db, runtime)` - `IsAccessControlled` with an explicit
   runtime contract, so a `virtual` internal call dispatches the way Solidity does —
   to the most-derived declaration of that selector in the runtime MRO
