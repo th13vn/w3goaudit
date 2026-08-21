@@ -30,15 +30,15 @@ template surface.
 
 | Path | Responsibility | Local Index |
 |---|---|---|
-| `cmd/w3goaudit/` | Cobra CLI: root scan, build, extract, update, completion, result-folder orchestration | `cmd/w3goaudit/INDEX.md` |
-| `pkg/reader/` | Discover/load `.sol` files, resolve imports/remappings, detect project/git info | `pkg/reader/INDEX.md` |
-| `pkg/logging/` | Immutable scan-local verbose logger with serialized writes | `pkg/logging/INDEX.md` |
-| `pkg/builder/` | Parse source into database, build simplified ASTs, C3 inheritance, call graph, selectors, effects | `pkg/builder/INDEX.md` |
-| `pkg/types/` | Core serialized data structures: database, contracts, functions, AST, call graph, semantic facts | `pkg/types/INDEX.md` |
-| `pkg/engine/` | WQL template loading, validation, execution, taint/reachability, finding construction | `pkg/engine/INDEX.md` |
-| `pkg/report/` | Markdown/HTML/SARIF/JSON output, result folder, state matrix, workflow files, source excerpts | `pkg/report/INDEX.md` |
-| `pkg/home/` | `~/.w3goaudit` config/template-home management and release download | `pkg/home/INDEX.md` |
-| `templates/` | Official embedded WQL detector pack plus benchmark and feature-test templates | `templates/INDEX.md` |
+| `cmd/w3goaudit/` | Cobra CLI: root scan, build, extract, update, completion, result-folder orchestration | `cmd/w3goaudit/AI.md` |
+| `pkg/reader/` | Discover/load `.sol` files, resolve imports/remappings, detect project/git info | `pkg/reader/AI.md` |
+| `pkg/logging/` | Immutable scan-local verbose logger with serialized writes | `pkg/logging/AI.md` |
+| `pkg/builder/` | Parse source into database, build simplified ASTs, C3 inheritance, call graph, selectors, effects | `pkg/builder/AI.md` |
+| `pkg/types/` | Core serialized data structures: database, contracts, functions, AST, call graph, semantic facts | `pkg/types/AI.md` |
+| `pkg/engine/` | WQL template loading, validation, execution, taint/reachability, finding construction | `pkg/engine/AI.md` |
+| `pkg/report/` | Markdown/HTML/SARIF/JSON output, result folder, state matrix, workflow files, source excerpts | `pkg/report/AI.md` |
+| `pkg/home/` | `~/.w3goaudit` config/template-home management and release download | `pkg/home/AI.md` |
+| `templates/` | Official embedded WQL detector pack plus benchmark and feature-test templates | `templates/AI.md` |
 | `scripts/benchmark/` | **Dev-only, git-ignored** (not in a fresh clone): competitive analyzer benchmark harness, corpora, fixtures, adapters, and quality threshold gate. Benchmark-dependent Go tests skip when it is absent. | `scripts/benchmark/README.md` |
 | `benchmarks/` | Stored benchmark results: tracked dated reports (`yyyy-mm-dd-<commit-slug>.md`) plus the Git-ignored `results/` run-output scratch directory | `benchmarks/README.md` |
 | `test-data/` | Canonical Solidity fixtures: security matrices plus core builder/engine/extract/identity cases | `test-data/README.md` |
@@ -399,12 +399,12 @@ Compatibility/exactness repair notes:
 
 Before changing code:
 
-- Read this file and the `INDEX.md` of every touched package.
+- Read this file and the `AI.md` of every touched package.
 - Read relevant docs in `docs/` for WQL, workflow, SDK, or CLI changes.
 
 After changing code:
 
-- Update the touched package `INDEX.md` files.
+- Update the touched package `AI.md` files.
 - Update user docs (`README.md`, `docs/*.md`) for behavior/API/output changes.
 - Add or update tests for the behavior, including safe/vulnerable cases for new security templates.
 - Run focused tests at minimum; for broad changes prefer `go test ./...`.

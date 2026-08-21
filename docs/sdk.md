@@ -327,8 +327,8 @@ type FunctionCall struct {
 > nodes with no source counterpart. `FunctionCall` and `CallEdge` (the
 > call-graph edge type) gained a matching `Col`/`Byte` pair for the call site.
 > Output `schemaVersion` bumped `1.0.0` → `2.0.0` for this change. See
-> [`pkg/types/INDEX.md`](../pkg/types/INDEX.md) and
-> [`pkg/builder/INDEX.md`](../pkg/builder/INDEX.md#locationgo) for the full
+> [`pkg/types/AI.md`](../pkg/types/AI.md) and
+> [`pkg/builder/AI.md`](../pkg/builder/AI.md#locationgo) for the full
 > field/helper reference.
 > SARIF declares `columnKind: unicodeCodePoints` and intentionally omits
 > `charOffset`/`charLength`; UTF-8 byte offsets are not SARIF character offsets.

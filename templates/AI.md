@@ -381,7 +381,7 @@ to substring matching.
 3. Test against fixtures in [`../test-data/security/`](../test-data/security/):
    add a `Vulnerable_*` / `Safe_*` pair named after the detector.
 4. Verify the `Vulnerable_*` cases trigger and the `Safe_*` cases do not.
-5. Add the template to the table in this INDEX.md.
+5. Add the template to the table in this AI.md.
 
 ## Competitive quality gate
 

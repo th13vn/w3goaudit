@@ -7,7 +7,7 @@ and the specific cases / edge-case decisions that shape behavior.
 This is the *engineering* companion to the higher-level [`project-overview.md`](project-overview.md).
 For the WQL template language see [`wql-syntax.md`](wql-syntax.md); for CLI/SDK
 see [`usage.md`](usage.md) / [`sdk.md`](sdk.md). Each package also has a focused
-`pkg/*/INDEX.md` with `file:line` change-checklists — those are the source of
+`pkg/*/AI.md` with `file:line` change-checklists — those are the source of
 truth when editing; this document explains how the pieces fit together.
 
 > **Accuracy note:** functions are referenced by name + file; exact line numbers
@@ -933,20 +933,20 @@ These are the deliberate calls that separate w3goaudit's output from a naive mat
 
 ## 12. Extending the Codebase
 
-See the skill (`w3goaudit-dev`) and the per-package `INDEX.md` change-checklists.
+See the skill (`w3goaudit-dev`) and the per-package `AI.md` change-checklists.
 Quick map:
 
 - **New AST kind** → `pkg/types/ast.go` (constant + semantic-group membership) →
   `pkg/builder/ast_builder.go` (emit it) → `pkg/engine` `matchKind` if special →
-  `docs/wql-syntax.md` + `pkg/types/INDEX.md`.
+  `docs/wql-syntax.md` + `pkg/types/AI.md`.
 - **New WQL operator** → `Rule` field + `presentRuleFields` class in
   `pkg/engine/template.go` → verify logic in `pkg/engine/verify.go` (wire into
   `normalizeRule`/`walkRules` if it holds a sub-rule) → test + `docs/wql-syntax.md`
-  + `pkg/engine/INDEX.md`.
+  + `pkg/engine/AI.md`.
 - **New semantic fact** → `pkg/types/semantic.go` + `pkg/builder/semantic.go`,
   mirror onto AST attrs only when useful to WQL.
 - **New detector** → `templates/official/*.yaml` + `test-data/security/` fixtures
-  (Vulnerable* + Safe*) + `templates/INDEX.md`.
+  (Vulnerable* + Safe*) + `templates/AI.md`.
 
 ---
 
@@ -956,4 +956,4 @@ Quick map:
 - [`wql-syntax.md`](wql-syntax.md) — the WQL template language reference
 - [`workflows.md`](workflows.md) — scan/build/report pipelines
 - [`usage.md`](usage.md) / [`sdk.md`](sdk.md) — CLI & Go SDK
-- `pkg/*/INDEX.md` — per-package responsibilities, key types/functions, change checklists
+- `pkg/*/AI.md` — per-package responsibilities, key types/functions, change checklists

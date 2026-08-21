@@ -169,7 +169,7 @@ A fifteenth candidate — a generic "external call then state write" reentrancy 
 fixtures, 17 of them deliberate safe controls, because pull-then-credit is the
 correct ERC20 deposit shape. The precise signal it reached for is already covered
 by the two callback-reentrancy detectors above, so it stays in the benchmark lane.
-`templates/INDEX.md` records this as the worked example of the precision bar.
+`templates/AI.md` records this as the worked example of the precision bar.
 
 ### Changed: benchmark reports state their own methodology
 
@@ -460,14 +460,14 @@ unchanged.
 ### Documentation
 
 - Documented `data/xref.json` end to end: `README.md` (feature bullet +
-  result-folder tree + docs index), root `INDEX.md` (pipeline, invariants,
+  result-folder tree + docs index), root `AI.md` (pipeline, invariants,
   report notes), `docs/usage.md`, `docs/workflows.md`,
   `docs/project-overview.md`, `docs/internals.md` (new §5.2.1 on xref reference
   binding), `docs/sdk.md` (`BuildXrefJSON` + `XrefJSON`/`XrefDecl`/`XrefRef`),
   and `docs/extension-output.md`.
 - Documented the import-resolution heuristics in `README.md`,
-  root `INDEX.md`, `docs/internals.md`, and `pkg/reader/INDEX.md`.
-- Corrected the stale `Contract` struct in `pkg/types/INDEX.md`
+  root `AI.md`, `docs/internals.md`, and `pkg/reader/AI.md`.
+- Corrected the stale `Contract` struct in `pkg/types/AI.md`
   (`StateVariables`, not `StateVars`; `Kind` is a `ContractKind`; `Errors`,
   `Modifiers`, `Enums`, `IsAbstract`, `UsingDirectives` were missing) and
   documented the new types alongside it.

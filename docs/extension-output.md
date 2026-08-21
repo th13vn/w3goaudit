@@ -294,7 +294,7 @@ identifier/name token or the call expression. Resolved reference kinds:
 
 - **identifiers** — state vars, parameters, locals, emitted when the builder can
   pin an exact position (member/call receivers, array-index bases, assignment
-  lvalues; see `pkg/builder/INDEX.md`, "Identifier position backfill").
+  lvalues; see `pkg/builder/AI.md`, "Identifier position backfill").
 - **calls** — internal/external/self/super and library `using` calls
   (`x.toUint128()`, `Lib.foo()`) bind to the resolved function via the call graph
   (`function` / `library`).

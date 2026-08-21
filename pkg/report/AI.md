@@ -11,7 +11,7 @@ overview/findings representation is useful.
 ## Reachability-aware findings — quick map
 
 Every `engine.Finding` can carry optional structured fields populated
-by the engine (see `pkg/engine/INDEX.md`, "Matched-node attribution &
+by the engine (see `pkg/engine/AI.md`, "Matched-node attribution &
 Reachability"):
 
 - `Reachability` — call chain from an externally-callable entry function
@@ -381,7 +381,7 @@ summary carries the same fixed timestamp and completeness metadata.
 **Constants:**
 - `SchemaVersion` (currently `"2.0.0"`, bumped from `"1.0.0"` in v0.4 for the
   precise-location fields on `types.ASTNode`/declarations/`FunctionCall`/
-  `CallEdge` — see [`pkg/types/INDEX.md`](../types/INDEX.md#astgo)) — bumped
+  `CallEdge` — see [`pkg/types/AI.md`](../types/AI.md#astgo)) — bumped
   on any breaking change to the JSON shape; consumers should refuse to parse
   on a major-version mismatch.
 
@@ -528,7 +528,7 @@ Markdown and HTML findings rendering plus shared helpers.
 
 Each per-occurrence block now embeds a rich call-chain trace produced from
 `Finding.Reachability` + `Finding.EntryPoint` (populated by the engine — see
-`pkg/engine/INDEX.md`, Matched-node attribution & Reachability).
+`pkg/engine/AI.md`, Matched-node attribution & Reachability).
 
 - `renderFindingTraceMarkdown(*engine.Finding) string` — Markdown fragment.
   Lays out the file path, the fix-here entry, then a dotted-level list

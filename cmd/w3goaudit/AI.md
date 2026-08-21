@@ -46,4 +46,4 @@ contract's exact MRO; unresolved or ambiguous entries stay `unknown`.
 
 - New flag/command → update `docs/usage.md` and `README.md`.
 - Behavior change to output artifacts → update `docs/workflows.md` / `docs/extension-output.md` as applicable.
-- Keep the root INDEX.md package map in sync.
+- Keep the root AI.md package map in sync.

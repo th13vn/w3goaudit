@@ -140,7 +140,7 @@ Source-location helpers shared by `ast_builder.go` (v0.4).
 Depends on `github.com/th13vn/solast-go` **v0.1.7**, which added `Loc`/`Range`
 accessors to call/member/index postfix expressions — the source of call-site
 `Col`/`Byte` on `types.FunctionCall`/`types.CallEdge` (see
-[`pkg/types/INDEX.md`](../types/INDEX.md#callgraphgo)).
+[`pkg/types/AI.md`](../types/AI.md#callgraphgo)).
 
 ### ast_builder.go
 Builds simplified AST trees for function bodies.

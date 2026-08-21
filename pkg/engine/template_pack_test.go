@@ -159,7 +159,7 @@ func TestAuthoritativeWQLDocsUseCanonicalVocabulary(t *testing.T) {
 		"scripts/benchmark/fixtures/decurity-semgrep-inspired/unrestricted-transfer-ownership-fake-modifier.sol": {
 			"unAuthenticated",
 		},
-		"templates/INDEX.md": {
+		"templates/AI.md": {
 			"written in WQL**",
 			"FOURNALY3ER_LOCK_SHA256",
 			"reviewed hash is still an external blocker",
@@ -229,10 +229,10 @@ func TestAuthoritativeWQLDocsUseCanonicalVocabulary(t *testing.T) {
 		"test-data/core/engine-features/02-inside.sol": {
 			"contains + inside",
 		},
-		"INDEX.md": {
+		"AI.md": {
 			"`match.all`",
 		},
-		"pkg/types/INDEX.md": {
+		"pkg/types/AI.md": {
 			"`token_call`",
 			"`kind: guard`",
 			"`kind: selfdestruct`",
@@ -254,9 +254,9 @@ func TestAuthoritativeWQLDocsUseCanonicalVocabulary(t *testing.T) {
 		}
 	}
 
-	templateIndex := readRepositoryText(t, root, "templates/INDEX.md")
+	templateIndex := readRepositoryText(t, root, "templates/AI.md")
 	if !strings.Contains(templateIndex, "delegatecall` whose target flows from a parameter or caller identity") {
-		t.Errorf("templates/INDEX.md does not describe the widened delegatecall taint source")
+		t.Errorf("templates/AI.md does not describe the widened delegatecall taint source")
 	}
 }
 

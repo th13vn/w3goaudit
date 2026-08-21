@@ -329,7 +329,7 @@ type ModifierUsage struct {
 > `Enum`, and `Parameter` (declared in `contract.go`/`function.go`) — not
 > repeated verbatim below. They are populated by the builder via
 > `pkg/builder/location.go`'s cached `sourceLocator`; see
-> [`pkg/builder/INDEX.md`](../builder/INDEX.md#locationgo).
+> [`pkg/builder/AI.md`](../builder/AI.md#locationgo).
 
 > **Naming caveat:** these field names are inverted relative to common industry
 > usage, where "selector" means the 4-byte hash and "signature" the text form.
@@ -456,7 +456,7 @@ type ASTNode struct {
 > wrappers (`buildStatement`, `buildExpression`, `buildAssemblyOperation`,
 > `buildAssemblyCall`, `buildInlineAssembly`) carries a real span sourced from
 > solast-go's `Loc`/`Range`. Zero on synthetic nodes (no source counterpart).
-> See [`pkg/builder/INDEX.md`](../builder/INDEX.md#locationgo) for the
+> See [`pkg/builder/AI.md`](../builder/AI.md#locationgo) for the
 > chokepoint mechanism.
 
 **AST Kinds — Dot-Notation:**
@@ -506,7 +506,7 @@ type ASTNode struct {
 
 **Closed sets exposed for engine validation:**
 - `KnownSemanticGroups` (`map[string]bool`) — every semantic-group name accepted by `matchKind`
-- `IsKnownKind(kind string) bool` — used by `engine.validateKinds` to reject `kind:` typos at template-load time. See [`pkg/engine/INDEX.md`](../engine/INDEX.md#templatego) for the load pipeline.
+- `IsKnownKind(kind string) bool` — used by `engine.validateKinds` to reject `kind:` typos at template-load time. See [`pkg/engine/AI.md`](../engine/AI.md#templatego) for the load pipeline.
 
 
 **Traversal Methods:**

@@ -9,8 +9,8 @@ with a YAML-based detection language (WQL). The most valuable contributions are
 - Discuss non-trivial changes in an issue first.
 - Every code change must keep `go build ./...`, `go test ./...`, `go vet ./...`,
   and `gofmt -l ./cmd ./pkg ./templates` (empty output) green.
-- Update the relevant `INDEX.md` and `docs/` when you change behavior — each
-  `pkg/*` and top-level folder with an `INDEX.md` documents its own change
+- Update the relevant `AI.md` and `docs/` when you change behavior — each
+  `pkg/*` and top-level folder with an `AI.md` documents its own change
   checklist; see `docs/project-overview.md` for the overall architecture.
 - New detectors **and** engine changes need tests (vulnerable + safe fixtures).
 
@@ -112,13 +112,13 @@ A WQL document is meta plus one query: block. Example: flag
    at load with an actionable message (unknown block kind/preset/attribute,
    `select` omitted with no AST-level matcher in `where`, invalid regex, etc.).
 
-4. **Document** — add the detector to `templates/INDEX.md`.
+4. **Document** — add the detector to `templates/AI.md`.
 
 5. **Open a PR** with the template, fixtures, and INDEX entry.
 
 ## Engine / Go changes
 
-Read the package `INDEX.md` for whatever you touch first (every `pkg/*` has
+Read the package `AI.md` for whatever you touch first (every `pkg/*` has
 one). Common entry points:
 
 - AST kinds / parsing — `pkg/builder/ast_builder.go`, `pkg/types/ast.go`
