@@ -1024,7 +1024,7 @@ Template → validateRulePlacement() → normalizeQueryBlock() → Engine → Sc
 
 AI-enabled templates use WQL only as the deterministic candidate generator.
 `Engine.Options.AIReviewer` receives the policy, finding, exact matched source,
-and enclosing declaration context. A candidate is retained only when the
+and bounded enclosing function and contract source. A candidate is retained only when the
 reviewer confirms the bug and trigger conditions above the configured
 confidence threshold. Missing/erroring reviewers fail closed for that template
 and are visible through `AIReviewRecords`; templates without `ai` are unchanged.

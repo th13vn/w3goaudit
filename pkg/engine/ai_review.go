@@ -3,6 +3,8 @@ package engine
 import (
 	"context"
 	"fmt"
+
+	"github.com/th13vn/w3goaudit/pkg/types"
 )
 
 // AIReviewer validates a broad WQL candidate against explicit security conditions.
@@ -17,6 +19,8 @@ type AIReviewRequest struct {
 	MatchedSource     string           `json:"matchedSource"`
 	EnclosingFunction string           `json:"enclosingFunction,omitempty"`
 	EnclosingContract string           `json:"enclosingContract,omitempty"`
+	FunctionSource    string           `json:"functionSource,omitempty"`
+	ContractSource    string           `json:"contractSource,omitempty"`
 }
 
 type AIReviewVerdict struct {
@@ -105,5 +109,18 @@ func (e *Engine) aiReviewRequest(tmpl *Template, finding *Finding) AIReviewReque
 		request.EnclosingFunction = fmt.Sprintf("%s.%s", finding.Location.Contract, finding.Location.Function)
 	}
 	request.EnclosingContract = finding.Location.Contract
+	contract := e.db.GetContractByID(types.MakeContractID(finding.Location.File, finding.Location.Contract))
+	if contract == nil {
+		contract, _ = e.db.ResolveContractNameExact(finding.Location.Contract, finding.Location.File)
+	}
+	if contract != nil {
+		request.ContractSource = e.contractSource(contract)
+		for _, fn := range contract.Functions {
+			if fn != nil && (fn.Name == finding.Location.Function || fn.Selector == finding.Location.Function) {
+				request.FunctionSource = e.functionSource(fn, contract)
+				break
+			}
+		}
+	}
 	return request
 }

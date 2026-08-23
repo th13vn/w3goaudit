@@ -121,6 +121,10 @@ func TestAIReviewFiltersCandidatesFailClosed(t *testing.T) {
 			if len(reviewer.calls) != 1 || !strings.Contains(reviewer.calls[0].MatchedSource, "sendValue") {
 				t.Fatalf("review requests = %#v", reviewer.calls)
 			}
+			if !strings.Contains(reviewer.calls[0].FunctionSource, "function withdraw") ||
+				!strings.Contains(reviewer.calls[0].ContractSource, "contract Vault") {
+				t.Fatalf("review request lacks enclosing source context: %#v", reviewer.calls[0])
+			}
 			if tc.wantCount == 1 && findings[0].AITriage == nil {
 				t.Fatal("accepted finding has no aiTriage verdict")
 			}

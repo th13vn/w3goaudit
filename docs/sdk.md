@@ -40,7 +40,8 @@ Templates may carry an optional `ai` policy. WQL still produces the candidate;
 the engine then invokes an injected `engine.AIReviewer` and keeps only verdicts
 that confirm the bug, confirm all trigger conditions, and meet the template's
 confidence threshold. The generic engine does not start a container or select a
-provider.
+provider. Review requests include the exact match plus enclosing function and
+contract source so the reviewer can validate guards and safe counterconditions.
 
 ```go
 type reviewer struct{}
