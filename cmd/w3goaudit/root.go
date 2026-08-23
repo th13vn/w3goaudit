@@ -115,6 +115,10 @@ func runScan(cmd *cobra.Command, args []string) error {
 	if updateTemplates {
 		return runUpdateTemplates(cfg)
 	}
+	triage, err := resolveAITriageConfig(cfg)
+	if err != nil {
+		return err
+	}
 
 	inputPath := ""
 	if len(args) > 0 {
@@ -140,6 +144,9 @@ func runScan(cmd *cobra.Command, args []string) error {
 		LocationSource:         locationSource,
 		Stdout:                 os.Stdout,
 		Stderr:                 os.Stderr,
+		AITriageURL:            triage.URL,
+		AITriageKeyFile:        triage.APIKeyFile,
+		AITriageTimeout:        triage.Timeout,
 	}
 	applyConfigDefaults(cmd, cfg, &opts)
 	if os.Getenv("NO_COLOR") != "" {

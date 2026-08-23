@@ -61,8 +61,14 @@ templates: {dir, repo}
 output:    {base_dir, html}
 scan:      {min_severity, strict_imports, strict_parse, exclude_paths, workers}   # exclude_paths/workers reserved
 report:    {repo_base}                              # reserved
+ai_triage: {url, api_key_file, timeout}             # isolated candidate reviewer
 color:     auto | never
 ```
+
+`api_key_file` points to a credential file rather than embedding a secret in
+YAML. The CLI also accepts `W3GOAUDIT_AI_TRIAGE_URL`,
+`W3GOAUDIT_AI_TRIAGE_KEY_FILE`, and `W3GOAUDIT_AI_TRIAGE_TIMEOUT`; environment
+values override config.
 
 ## Consumers
 

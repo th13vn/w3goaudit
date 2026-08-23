@@ -21,6 +21,9 @@ type BundleOptions struct {
 	// Now supplies the one UTC timestamp shared by every generated artifact in
 	// this bundle. Nil uses time.Now.
 	Now func() time.Time
+	// AIReviews emits data/ai-triage.json when at least one candidate was
+	// reviewed. Credentials and HTTP request metadata are never included.
+	AIReviews []engine.AIReviewRecord
 }
 
 func bundleNow(opts BundleOptions) time.Time {
@@ -65,7 +68,7 @@ func WriteBundle(dir string, db *types.Database, summary *SummaryReport, finding
 		return err
 	}
 	contractRefs := buildContractRefs(summary, findings)
-	if err := writeBundleData(dir, db, summary, findings, contractRefs, diagnostics, tool, now, opts.HTML); err != nil {
+	if err := writeBundleData(dir, db, summary, findings, contractRefs, diagnostics, tool, now, opts); err != nil {
 		return err
 	}
 	if err := writeBundleHTML(dir, db, summary, findings, opts.HTML); err != nil {
@@ -127,12 +130,17 @@ func buildContractRefs(summary *SummaryReport, findings []*engine.Finding) []Con
 	return refs
 }
 
-func writeBundleData(dir string, db *types.Database, summary *SummaryReport, findings []*engine.Finding, refs []ContractRef, diagnostics []types.Diagnostic, tool ToolMeta, now time.Time, html bool) error {
+func writeBundleData(dir string, db *types.Database, summary *SummaryReport, findings []*engine.Finding, refs []ContractRef, diagnostics []types.Diagnostic, tool ToolMeta, now time.Time, opts BundleOptions) error {
 	// Remove the pre-v0.4 location so re-scans migrate to the canonical data/ tree.
 	_ = os.RemoveAll(filepath.Join(dir, "corpus"))
 	dataDir := filepath.Join(dir, "data")
 	if err := os.MkdirAll(dataDir, 0755); err != nil {
 		return fmt.Errorf("creating data folder: %w", err)
+	}
+	if len(opts.AIReviews) == 0 {
+		if err := os.Remove(filepath.Join(dataDir, "ai-triage.json")); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("removing stale AI triage artifact: %w", err)
+		}
 	}
 	databaseForOutput := *db
 	databaseForOutput.Diagnostics = diagnostics
@@ -148,7 +156,16 @@ func writeBundleData(dir string, db *types.Database, summary *SummaryReport, fin
 	if err := writeJSONFile(filepath.Join(dataDir, "diagnostics.json"), BuildDiagnosticsJSONAt(now, db), "diagnostics"); err != nil {
 		return err
 	}
-	if err := writeJSONFile(filepath.Join(dataDir, "manifest.json"), BuildManifestAt(now, tool, summary, findings, refs, db, html), "manifest"); err != nil {
+	if len(opts.AIReviews) > 0 {
+		if err := writeJSONFile(filepath.Join(dataDir, "ai-triage.json"), BuildAITriageJSONAt(now, tool, opts.AIReviews), "AI triage"); err != nil {
+			return err
+		}
+	}
+	manifest := BuildManifestAt(now, tool, summary, findings, refs, db, opts.HTML)
+	if len(opts.AIReviews) > 0 {
+		manifest.Files.Data.AITriage = "data/ai-triage.json"
+	}
+	if err := writeJSONFile(filepath.Join(dataDir, "manifest.json"), manifest, "manifest"); err != nil {
 		return err
 	}
 	if err := writeJSONFile(filepath.Join(dataDir, "nav.json"), BuildNavJSON(db), "nav"); err != nil {

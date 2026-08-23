@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/th13vn/w3goaudit/pkg/aitriage"
 	"github.com/th13vn/w3goaudit/pkg/engine"
 	"github.com/th13vn/w3goaudit/pkg/logging"
 	"github.com/th13vn/w3goaudit/pkg/report"
@@ -43,6 +44,11 @@ type scanOptions struct {
 	Stdout io.Writer
 	Stderr io.Writer
 	Now    func() time.Time
+
+	AIReviewer      engine.AIReviewer
+	AITriageURL     string
+	AITriageKeyFile string
+	AITriageTimeout time.Duration
 }
 
 // databaseLoadOptions carries one logger and output channels through source
@@ -230,9 +236,21 @@ func executeScan(raw scanOptions) error {
 	if err != nil {
 		return err
 	}
+	reviewer := opts.AIReviewer
+	if templatesRequireAIReview(templates) && reviewer == nil {
+		if strings.TrimSpace(opts.AITriageURL) == "" || strings.TrimSpace(opts.AITriageKeyFile) == "" {
+			return fmt.Errorf("AI triage is required by the loaded templates; configure ai_triage.url and ai_triage.api_key_file or W3GOAUDIT_AI_TRIAGE_URL and W3GOAUDIT_AI_TRIAGE_KEY_FILE")
+		}
+		reviewer, err = aitriage.NewHTTPReviewer(aitriage.HTTPOptions{
+			URL: opts.AITriageURL, APIKeyFile: opts.AITriageKeyFile, Timeout: opts.AITriageTimeout,
+		})
+		if err != nil {
+			return fmt.Errorf("configuring AI triage: %w", err)
+		}
+	}
 	progressTo(opts.Stdout, "Scanning", fmt.Sprintf("%d templates (%s)", len(templates), templateSource), "")
 
-	e := engine.NewWithOptions(db, engine.Options{Logger: logger})
+	e := engine.NewWithOptions(db, engine.Options{Logger: logger, AIReviewer: reviewer})
 	if opts.LocationSource == "verifier" {
 		e.SetLocationSource(engine.LocationSourceVerifier)
 	}
@@ -263,7 +281,7 @@ func executeScan(raw scanOptions) error {
 
 	progressTo(opts.Stdout, "Writing report", outDir, "")
 	tool := report.ToolMeta{Name: "w3goaudit", Version: Version}
-	if err := report.WriteBundle(outDir, db, summary, findings, tool, report.BundleOptions{HTML: opts.HTML, Now: fixedNow}); err != nil {
+	if err := report.WriteBundle(outDir, db, summary, findings, tool, report.BundleOptions{HTML: opts.HTML, Now: fixedNow, AIReviews: e.AIReviewRecords()}); err != nil {
 		return err
 	}
 
@@ -275,4 +293,13 @@ func executeScan(raw scanOptions) error {
 	printUnresolvedTo(opts.Stdout, db, plain)
 	printResultLocationTo(opts.Stdout, outDir, opts.HTML, plain)
 	return nil
+}
+
+func templatesRequireAIReview(templates []*engine.Template) bool {
+	for _, tmpl := range templates {
+		if tmpl != nil && tmpl.AI != nil && tmpl.AI.Enabled {
+			return true
+		}
+	}
+	return false
 }

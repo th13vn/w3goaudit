@@ -96,7 +96,7 @@ from the durable database metadata.
 ### bundle.go
 
 Writes the **result folder** — the default output of a scan. One call,
-`WriteBundle(dir, db, summary, findings, tool, BundleOptions{HTML, Now})`, produces:
+`WriteBundle(dir, db, summary, findings, tool, BundleOptions{HTML, Now, AIReviews})`, produces:
 
 ```
 <dir>/README.md, summary.md, overview.md, findings.md, results.sarif
@@ -139,6 +139,10 @@ Writes the **result folder** — the default output of a scan. One call,
   complete machine-readable bundle byte-stable.
 - `data/diagnostics.json` is always emitted, including the complete-analysis
   case where `diagnostics` is `[]`.
+- `data/ai-triage.json` is emitted only when `AIReviews` contains attempts. It
+  records accepted/rejected/error counts and every sanitized engine review
+  record. `files.data.aiTriage` indexes it in the manifest. Credentials and
+  HTTP metadata are never part of the record.
 - Internally, `WriteBundle` is a thin phase orchestrator: summary snapshot,
   human/SARIF reports, contract refs, machine JSON, optional HTML, and contract
   folders are handled by private helpers in the same output order. Exported APIs

@@ -43,6 +43,7 @@ low-confidence, missing, or errored verdict.
 | `pkg/builder/` | Parse source into database, build simplified ASTs, C3 inheritance, call graph, selectors, effects | `pkg/builder/AI.md` |
 | `pkg/types/` | Core serialized data structures: database, contracts, functions, AST, call graph, semantic facts | `pkg/types/AI.md` |
 | `pkg/engine/` | WQL template loading, validation, execution, taint/reachability, finding construction | `pkg/engine/AI.md` |
+| `pkg/aitriage/` | Authenticated HTTP implementation of the injected AI candidate reviewer | `pkg/aitriage/AI.md` |
 | `pkg/report/` | Markdown/HTML/SARIF/JSON output, result folder, state matrix, workflow files, source excerpts | `pkg/report/AI.md` |
 | `pkg/home/` | `~/.w3goaudit` config/template-home management and release download | `pkg/home/AI.md` |
 | `templates/` | Official embedded WQL detector pack plus benchmark and feature-test templates | `templates/AI.md` |
@@ -143,7 +144,7 @@ run-output scratch directory.
   missing AST hides declarations from every detector, unlike an unresolved
   reference which only makes the AST imprecise. `--strict-parse` (root and
   `build`, plus `scan.strict_parse`) turns it into a pre-report failure.
-- A normal scan writes one result folder containing `README.md`, `summary.md`, `overview.md`, `findings.md`, `results.sarif`, `run.log`, `data/` (with `manifest.json` index, plus `nav.json`, `explorer.json`, and `xref.json`), and a `contracts/` tree (per-main-contract folders mirroring source paths, each with its own `README.md`).
+- A normal scan writes one result folder containing `README.md`, `summary.md`, `overview.md`, `findings.md`, `results.sarif`, `run.log`, `data/` (with `manifest.json` index, plus `nav.json`, `explorer.json`, `xref.json`, and optional `ai-triage.json`), and a `contracts/` tree (per-main-contract folders mirroring source paths, each with its own `README.md`).
 - AST nodes and declarations (`Function`/`Modifier`/`Contract`/`StateVariable`/`Event`/`Struct`/`Enum`/`Parameter`) carry `StartCol`/`EndCol`/`StartByte`/`EndByte` alongside `StartLine`/`EndLine` (one-based Unicode-code-point columns and zero-based UTF-8 byte offsets; both end fields are half-open; zero/omitted for synthetic nodes). `FunctionCall`/`CallEdge` carry point `Col`/`Byte` fields too. The builder derives columns from a once-per-source sparse line/non-ASCII index instead of the parser's byte-oriented column field: O(log non-ASCII runes on the line) per endpoint and O(lines + non-ASCII runes) index memory. Invalid conversions retain lines/bytes, omit columns, and record `location.invalid`. Output schema remains `2.0.0`; this requires solast-go v0.1.7+.
 - A WQL document is meta plus one query: block. The block holds
   `select`/`from`/`where` or a one-level `and:`/`or:` query composition.

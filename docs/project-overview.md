@@ -132,6 +132,9 @@ w3goaudit/
 │   ├── home/               # ~/.w3goaudit config + template home
 │   │   └── home.go         # config.yml load/init, release download (zipball), --update-templates
 │   │
+│   ├── aitriage/           # authenticated HTTP implementation of engine.AIReviewer
+│   │   └── http.go         # key-file auth, timeout, strict verdict decoding
+│   │
 │   ├── types/              # Core data structures
 │   │   ├── database.go     # Contract database + MainContractEntry
 │   │   ├── diagnostic.go   # Durable analysis-quality diagnostics
@@ -444,6 +447,8 @@ byte offsets.
 - `results.sarif` — SARIF 2.1.0 (always)
 - `data/{database.json,findings.json,overview.json,diagnostics.json}` — machine-readable; the
   canonical database lives only here (reusable via `--db`)
+- optional `data/ai-triage.json` — accepted/rejected/error records for AI-gated
+  candidates, indexed as `files.data.aiTriage` without changing schema `2.0.0`
 - `data/nav.json`, `data/explorer.json`, `data/xref.json` — extension-facing
   data layer for the VSCode Solidity extension: a flat symbol navigation index
   (defs, caller edges, interface→implementation), a per-main-contract explorer

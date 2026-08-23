@@ -57,6 +57,7 @@ type ManifestFiles struct {
 		Nav         string `json:"nav,omitempty"`
 		Explorer    string `json:"explorer,omitempty"`
 		Xref        string `json:"xref,omitempty"`
+		AITriage    string `json:"aiTriage,omitempty"`
 	} `json:"data"`
 }
 

@@ -25,6 +25,7 @@ The W3GoAudit SDK provides programmatic access to the Solidity contract analysis
 
 ```
 pkg/
+├── aitriage/    # Authenticated HTTP implementation of engine.AIReviewer
 ├── logging/     # Immutable scan-local logger
 ├── reader/      # File discovery and loading
 ├── builder/     # Database construction
@@ -61,6 +62,14 @@ Accepted findings carry `aiTriage`. `AIReviewRecords` also includes suppressed
 and errored candidates so callers can distinguish a clean deterministic miss
 from a candidate rejected or unavailable at the review layer. Templates without
 `ai` never call the reviewer.
+
+CLI-equivalent integrations can construct
+`aitriage.NewHTTPReviewer(aitriage.HTTPOptions{URL, APIKeyFile, Timeout})`. The
+credential is loaded from a file, requests use bearer authentication, and the
+client applies a hard per-candidate timeout. SDK callers may instead implement
+`engine.AIReviewer` directly. Pass the returned records to
+`report.BundleOptions{AIReviews: reviews}` to emit and manifest-index
+`data/ai-triage.json`.
 
 ---
 

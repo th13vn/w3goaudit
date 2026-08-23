@@ -220,6 +220,11 @@ graph TD
    callees; distinct pre-effect siblings are unordered. Exact callgraph edges
    include nested receiver/option helper calls once.
 6. **Perform taint analysis** for source tracking, including caller argument bindings when entrypoints invoke internal helpers — the call chain traversed becomes the finding's `Reachability` (entry → … → host of `PrimaryAST`)
+7. **Review AI-gated candidates** when the template has `ai.enabled: true`.
+   WQL remains the broad candidate generator; the injected reviewer confirms the
+   bug, its necessary trigger conditions, and the confidence threshold.
+   Negative, low-confidence, timeout, malformed-response, and reviewer-error
+   outcomes fail closed and remain available as review records.
 
 **Advanced features:**
 - **Recursive internal call tracing**: Engine follows entrypoint → helper call chains and maps caller argument taint onto callee parameters; the chain itself is preserved on the finding
@@ -277,6 +282,8 @@ graph TD
 - `results.sarif` — SARIF 2.1.0 (always)
 - `data/{database.json,findings.json,overview.json,diagnostics.json}` — machine-readable mirror;
   the canonical database lives only here and is reusable via `--db`
+- `data/ai-triage.json` — optional accepted/rejected/error audit trail for every
+  candidate reviewed by an `ai` template
 - `data/manifest.json` — the complete machine index. `projectRoot` is the
   detected project root; `scanTarget` is the original selected file/directory;
   `target` is its compatibility alias. Counts distinguish contracts,

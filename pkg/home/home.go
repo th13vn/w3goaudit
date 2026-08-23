@@ -43,6 +43,11 @@ type Config struct {
 	Report struct {
 		RepoBase string `yaml:"repo_base"` // "" = relative paths; else source-link base
 	} `yaml:"report"`
+	AITriage struct {
+		URL        string `yaml:"url"`
+		APIKeyFile string `yaml:"api_key_file"`
+		Timeout    string `yaml:"timeout"`
+	} `yaml:"ai_triage"`
 	Color string `yaml:"color"` // auto | never
 }
 
@@ -81,6 +86,7 @@ func defaultConfig() *Config {
 	c.Output.HTML = false
 	c.Scan.ExcludePaths = []string{"node_modules", "lib", "out", "**/test/**", "**/mocks/**"}
 	c.Scan.Workers = 0
+	c.AITriage.Timeout = "10m"
 	c.Color = "auto"
 	return c
 }
@@ -154,6 +160,10 @@ scan:
   workers: 0                       # reserved: 0 = auto
 report:
   repo_base: ""                    # "" = relative source links; else a repo base URL
+ai_triage:
+  url: ""                          # isolated reviewer endpoint; required by templates with ai:
+  api_key_file: ""                 # file containing the bearer credential, preferably mode 0600
+  timeout: 10m                       # per-candidate agent deadline
 color: auto                        # auto | never
 `
 	content := fmt.Sprintf(tmpl, DefaultTemplatesRepo)

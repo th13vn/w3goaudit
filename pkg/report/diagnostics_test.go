@@ -189,6 +189,61 @@ func TestWriteBundleFixedClockIsByteStable(t *testing.T) {
 	}
 }
 
+func TestWriteBundleEmitsAITriageArtifactOnlyWhenReviewsExist(t *testing.T) {
+	db := navFixtureDB()
+	summary := NewGeneratorWithOptions(db, GeneratorOptions{Now: func() time.Time { return time.Unix(0, 0) }}).GenerateSummary()
+	base := t.TempDir()
+	withoutReviews := filepath.Join(base, "without")
+	if err := WriteBundle(withoutReviews, db, summary, nil, ToolMeta{Name: "w3goaudit"}, BundleOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(withoutReviews, "data", "ai-triage.json")); !os.IsNotExist(err) {
+		t.Fatalf("ai-triage.json should be absent, stat error = %v", err)
+	}
+
+	withReviews := filepath.Join(base, "with")
+	reviews := []engine.AIReviewRecord{
+		{TemplateID: "accepted", Status: engine.AIReviewAccepted, Verdict: &engine.AIReviewVerdict{ValidBug: true, TriggerConditionsMet: true, Confidence: 0.91}},
+		{TemplateID: "rejected", Status: engine.AIReviewRejected},
+		{TemplateID: "errored", Status: engine.AIReviewError, Error: "timeout"},
+	}
+	if err := WriteBundle(withReviews, db, summary, nil, ToolMeta{Name: "w3goaudit", Version: "test"}, BundleOptions{
+		Now:       func() time.Time { return time.Unix(0, 0) },
+		AIReviews: reviews,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(filepath.Join(withReviews, "data", "ai-triage.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc struct {
+		SchemaVersion string                  `json:"schemaVersion"`
+		Counts        map[string]int          `json:"counts"`
+		Reviews       []engine.AIReviewRecord `json:"reviews"`
+	}
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		t.Fatal(err)
+	}
+	if doc.SchemaVersion != SchemaVersion || doc.Counts["accepted"] != 1 || doc.Counts["rejected"] != 1 || doc.Counts["error"] != 1 || len(doc.Reviews) != 3 {
+		t.Fatalf("ai triage document = %#v", doc)
+	}
+	manifestRaw, err := os.ReadFile(filepath.Join(withReviews, "data", "manifest.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(manifestRaw, []byte(`"aiTriage": "data/ai-triage.json"`)) {
+		t.Fatalf("manifest did not index AI triage artifact: %s", manifestRaw)
+	}
+
+	if err := WriteBundle(withReviews, db, summary, nil, ToolMeta{Name: "w3goaudit"}, BundleOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(withReviews, "data", "ai-triage.json")); !os.IsNotExist(err) {
+		t.Fatalf("stale ai-triage.json survived a scan with no reviews, stat error = %v", err)
+	}
+}
+
 func TestLegacyFixedClockBundleDoesNotMutateDatabase(t *testing.T) {
 	legacy := types.NewDatabase()
 	legacy.ProjectRoot = "/repo"

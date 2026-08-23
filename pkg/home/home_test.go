@@ -41,6 +41,26 @@ func TestLoadStrictImportsConfig(t *testing.T) {
 	}
 }
 
+func TestLoadAITriageConfig(t *testing.T) {
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+	configDir := filepath.Join(homeDir, ".w3goaudit")
+	if err := os.MkdirAll(configDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	content := "ai_triage:\n  url: http://triage.internal/review\n  api_key_file: /run/secrets/w3_triage\n  timeout: 12m\n"
+	if err := os.WriteFile(filepath.Join(configDir, "config.yml"), []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.AITriage.URL != "http://triage.internal/review" || cfg.AITriage.APIKeyFile != "/run/secrets/w3_triage" || cfg.AITriage.Timeout != "12m" {
+		t.Fatalf("ai_triage = %#v", cfg.AITriage)
+	}
+}
+
 func TestArchiveRelativePathStripsTopLevel(t *testing.T) {
 	cases := map[string]string{
 		"th13vn-w3goaudit-templates-abc123/official/reentrancy.yaml": "official/reentrancy.yaml",
