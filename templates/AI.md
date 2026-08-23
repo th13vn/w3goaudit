@@ -8,7 +8,8 @@ self-contained detector. The `official/` pack is embedded in the binary
 
 ## Template Language: WQL
 
-**A WQL document is meta plus one query: block.** All templates under
+**A WQL document is `meta` plus one `query` block, with an optional top-level
+`ai` review policy.** All templates under
 `official/` and `test/` (this directory), plus every
 benchmark template under `../scripts/benchmark/templates/` (slither-inspired,
 decurity-semgrep-inspired, 4naly3er-inspired) — 120 templates total — are
@@ -32,6 +33,12 @@ A scan resolves templates in this order (see `cmd/w3goaudit/scan_filters.go`):
 
 This `templates/official/` directory in the repo is both the embedded pack and
 the seed content published to the `w3goaudit-templates` release.
+
+> **Release status:** the optional `ai` contract currently belongs to the local
+> W3GoAudit development build and the local ETL canary pipeline. No AI-enabled
+> detector has been promoted into this embedded official pack or the separately
+> released `w3goaudit-templates` pack yet. Do not describe it as an official
+> released template capability until both release channels are updated.
 
 ## Curation Policy
 
@@ -178,7 +185,64 @@ query:
     - not: { preset: access_controlled }
     - has:
         block: eth_transfer
+
+# Optional. Use only when WQL intentionally emits a broad structural candidate
+# whose real vulnerability depends on contextual security proof.
+ai:
+  enabled: true
+  min_confidence: 0.85
+  invariant: >
+    Protocol-controlled assets must not leave custody without caller
+    authorization and valid accounting.
+  trigger_conditions:
+    - An untrusted caller can reach the matched transfer path.
+    - The transfer can reduce protocol-controlled assets.
+    - No authorization or equivalent invariant prevents the transfer.
+  reject_if:
+    - The caller, destination, and amount are constrained by protocol state.
 ```
+
+### Optional AI triage contract
+
+An AI-enabled template separates candidate discovery from vulnerability
+confirmation:
+
+1. `query` remains the deterministic WQL layer. It should match the general
+   structural family without encoding incident-specific names, storage layout,
+   constants, or one exact call path.
+2. The configured `AIReviewer` receives the policy, ordinary WQL finding, exact
+   matched source, and bounded enclosing function and contract source.
+3. The candidate becomes a finding only when the reviewer returns
+   `valid_bug=true`, `trigger_conditions_met=true`, and confidence at or above
+   `min_confidence`. Accepted findings carry `aiTriage`.
+4. Negative, low-confidence, malformed, unavailable, or erroring reviews fail
+   closed. They never promote an unreviewed candidate into a confirmed finding.
+
+`enabled` must be `true`. `invariant` and every item in
+`trigger_conditions` must be non-empty, and at least one trigger condition is
+required. `min_confidence` defaults to `0.85` and must be between `0.5` and
+`1`. `reject_if` is optional and records sufficient safe counterconditions that
+the reviewer should use to dismiss a broad candidate. Unknown fields are
+rejected during template loading. Templates without `ai` keep the existing
+fully deterministic behavior and require no reviewer.
+
+The `ai` policy is not a substitute for WQL coverage. WQL must still surface
+every intended inheritance, modifier, library, helper, loop, and private-call
+variant before AI can validate it. A hidden positive that never becomes a WQL
+candidate is a false negative, not an AI rejection. Author public fixtures in
+four semantic families when developing an AI-enabled template:
+
+- `vulnerable` – broad candidate that AI must confirm.
+- `ai_rejected` – broad candidate that reaches AI but fails a necessary
+  condition or satisfies `reject_if`.
+- `safe` – structurally safe code that should not become a candidate.
+- `fixed` – repaired form of the vulnerable behavior that must remain quiet.
+
+Repeated validation passes must reuse the same schema-validated verdict for the
+same prompt contract and exact review request. This preserves deterministic
+scan output while still requiring a real semantic audit for each distinct
+candidate. Every attempted review is available through `AIReviewRecords`;
+report bundles with review attempts include `data/ai-triage.json`.
 
 `query:` may instead hold a one-level `and:` (multi-site join on a shared
 `from:` scope, branch `label:`s surfacing in `Finding.Related`) or `or:`
@@ -376,12 +440,17 @@ to substring matching.
    - `test/` — low-confidence feature-exercise templates for WQL operators
      (paired with `../test-data/core/engine-features/`), NOT production detectors.
 2. Write it in **WQL** (`meta` plus one `query:` block containing `select`/`from`/`where`, or a
-   query-level `and:`/`or:` composition) — see
+   query-level `and:`/`or:` composition). Add top-level `ai` only when the query is deliberately
+   broad and contextual proof is necessary. See
    [../docs/wql-syntax.md](../docs/wql-syntax.md).
-3. Test against fixtures in [`../test-data/security/`](../test-data/security/):
+3. For an AI-enabled template, prove all four public families: `vulnerable`, `ai_rejected`,
+   `safe`, and `fixed`. WQL must reach the first two; AI must confirm only `vulnerable`.
+4. Test against fixtures in [`../test-data/security/`](../test-data/security/):
    add a `Vulnerable_*` / `Safe_*` pair named after the detector.
-4. Verify the `Vulnerable_*` cases trigger and the `Safe_*` cases do not.
-5. Add the template to the table in this AI.md.
+5. Verify the vulnerable cases trigger and all safe, fixed, and AI-rejected controls remain quiet.
+6. Add the template to the table in this AI.md.
+7. Do not promote an AI-enabled detector into `official/` until its hidden holdout,
+   deterministic, parse-loss, regression, and precision gates all pass.
 
 ## Competitive quality gate
 
