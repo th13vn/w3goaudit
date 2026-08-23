@@ -6,7 +6,8 @@ Executes WQL templates against the contract database to find security vulnerabil
 
 ## WQL (template surface)
 
-**A WQL document is meta plus one query: block.** The block holds
+**A WQL document is meta plus one query: block, with an optional `ai` review
+contract.** The block holds
 `select`/`from`/`where` or a one-level `and:`/`or:` query
 composition; see [`docs/wql-syntax.md`](../../docs/wql-syntax.md) for the
 full language reference. All 120 official/benchmark/feature-test templates in
@@ -1020,3 +1021,10 @@ Template → validateRulePlacement() → normalizeQueryBlock() → Engine → Sc
 - **Normalization** happens at template load time and once at each direct SDK
   evaluator boundary; recursive evaluation reuses the prepared copy
 - **Silent failures fixed** — invalid templates now emit warnings under `--verbose`
+
+AI-enabled templates use WQL only as the deterministic candidate generator.
+`Engine.Options.AIReviewer` receives the policy, finding, exact matched source,
+and enclosing declaration context. A candidate is retained only when the
+reviewer confirms the bug and trigger conditions above the configured
+confidence threshold. Missing/erroring reviewers fail closed for that template
+and are visible through `AIReviewRecords`; templates without `ai` are unchanged.

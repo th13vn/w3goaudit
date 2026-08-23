@@ -280,6 +280,12 @@ interface/contract methods with the same names.
 
 **Responsibility:** Execute WQL templates to find vulnerabilities.
 
+Templates may optionally attach an `ai` review contract. In that mode the WQL
+query remains a deterministic candidate filter, and an SDK-injected reviewer
+must confirm the bug and all necessary trigger conditions before the candidate
+is returned as a finding. The engine records suppressed and errored reviews
+separately and never selects a model, provider, or isolation mechanism itself.
+
 **Capabilities:**
 - Load YAML templates as **WQL** (`meta` plus `query:` — `select`/`from`/
   `where` or a query-level `and:`/`or:` composition; all 120 official,

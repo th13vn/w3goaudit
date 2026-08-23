@@ -15,7 +15,8 @@ import (
 
 // Options configures one Engine instance.
 type Options struct {
-	Logger *logging.Logger
+	Logger     *logging.Logger
+	AIReviewer AIReviewer
 }
 
 // MaxRuleRecursionDepth caps how deep Verify is allowed to recurse into a
@@ -80,6 +81,8 @@ type Engine struct {
 	// A new contract evicts the previous map; Execute resets both slots.
 	modifierDeclContract *types.Contract
 	modifierDeclByName   map[string]*types.ASTNode
+	aiReviewer           AIReviewer
+	aiReviewRecords      []AIReviewRecord
 }
 
 // matchTrace accumulates the metadata needed to build a Finding with
@@ -118,6 +121,14 @@ func New(db *types.Database) *Engine {
 	return &Engine{db: db, legacy: true}
 }
 
+// SetAIReviewer installs the optional candidate reviewer on a legacy Engine.
+// New code should prefer NewWithOptions so configuration is immutable.
+func (e *Engine) SetAIReviewer(reviewer AIReviewer) {
+	if e != nil {
+		e.aiReviewer = reviewer
+	}
+}
+
 // NewWithOptions creates an Engine with scan-local configuration. A nil logger
 // is treated as disabled and never falls back to package globals.
 func NewWithOptions(db *types.Database, opts Options) *Engine {
@@ -125,7 +136,7 @@ func NewWithOptions(db *types.Database, opts Options) *Engine {
 	if logger == nil {
 		logger = logging.Disabled()
 	}
-	return &Engine{db: db, logger: logger}
+	return &Engine{db: db, logger: logger, aiReviewer: opts.AIReviewer}
 }
 
 func (e *Engine) logf(format string, args ...any) {
@@ -167,8 +178,9 @@ type Finding struct {
 	EntryPoint *EntryRef `json:"entryPoint,omitempty"`
 
 	// Optional metadata propagated from TemplateMeta.
-	References []string `json:"references,omitempty"`
-	Fix        string   `json:"fix,omitempty"`
+	References []string         `json:"references,omitempty"`
+	Fix        string           `json:"fix,omitempty"`
+	AITriage   *AIReviewVerdict `json:"aiTriage,omitempty"`
 }
 
 // Location identifies where a finding was detected.
@@ -357,7 +369,7 @@ func (e *Engine) Execute(tmpl *Template) []*Finding {
 	}
 	tmpl = normalized
 	if len(tmpl.Queries) <= 1 {
-		return e.executeQuery(tmpl)
+		return e.reviewAICandidates(tmpl, e.executeQuery(tmpl))
 	}
 
 	var findings []*Finding
@@ -395,7 +407,7 @@ func (e *Engine) Execute(tmpl *Template) []*Finding {
 			rememberMatchedSite(seenEarlier, occurrence.Identity, occurrence.FindingIndex)
 		}
 	}
-	return findings
+	return e.reviewAICandidates(tmpl, findings)
 }
 
 type matchedSiteSpan struct {
@@ -866,6 +878,7 @@ func stripLineComment(line string) string {
 // ExecuteAll runs all templates
 func (e *Engine) ExecuteAll(templates []*Template) []*Finding {
 	e.logf("Executing %d templates", len(templates))
+	e.aiReviewRecords = nil
 	var findings []*Finding
 	for _, tmpl := range templates {
 		findings = append(findings, e.Execute(tmpl)...)

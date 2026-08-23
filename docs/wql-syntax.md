@@ -32,7 +32,8 @@ design spec. Where the two ever disagree, the code wins.
 
 ## 1. Template Shape
 
-A WQL source document has exactly two top-level keys: `meta` and `query`.
+A WQL source document has `meta` and `query`, plus an optional top-level
+`ai` review contract.
 `query` holds either one `select`/`from`/`where` query, or a one-level
 `and:`/`or:` composition of branch queries (see
 [Query Composition](#query-composition-and--or)). Unknown keys are rejected
@@ -63,6 +64,37 @@ query:
     - arg.0: { tainted: user_controlled }
     - not: { preset: access_controlled }
 ```
+
+### Optional AI triage
+
+Use `ai` when WQL is intentionally a broad, deterministic candidate filter and
+the vulnerability still depends on conditions that require contextual audit
+reasoning. The engine runs the query first, then reports a candidate only when
+the configured AI reviewer confirms both the bug and every necessary trigger
+condition at or above `min_confidence`.
+
+```yaml
+ai:
+  enabled: true
+  min_confidence: 0.85
+  invariant: >
+    Protocol-controlled assets must not leave custody without caller
+    authorization and valid accounting.
+  trigger_conditions:
+    - An untrusted caller can reach the matched transfer path.
+    - The transfer can reduce protocol-controlled assets.
+    - No authorization or equivalent invariant prevents the transfer.
+  reject_if:
+    - The caller, destination, and amount are all constrained by protocol state.
+```
+
+`enabled` must be `true`. `invariant` and every trigger condition must be
+non-empty, and at least one trigger condition is required. `min_confidence`
+defaults to `0.85` and must be between `0.5` and `1`. Unknown fields are
+rejected. Templates without `ai` retain fully deterministic behavior and do
+not require a reviewer. An AI-enabled template fails closed when review is not
+configured or cannot complete; it never promotes an unreviewed candidate into
+a confirmed finding.
 
 `meta.id` and `meta.severity` are required at load time;
 `severity` must be one of `CRITICAL`/`HIGH`/`MEDIUM`/`LOW`/`INFO`.

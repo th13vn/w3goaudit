@@ -26,6 +26,13 @@ the extension-facing `nav.json`/`explorer.json`/`xref.json` navigation
 artifacts from the finished `Database`/`Findings`, independent of the WQL
 template surface.
 
+An optional second-stage path exists for AI-enabled templates:
+`WQL candidate -> injected AIReviewer -> confirmed finding or review record`.
+WQL remains the deterministic candidate generator. The generic engine neither
+chooses a provider nor starts a container, and templates without `ai` never
+invoke the reviewer. AI-enabled candidates fail closed on a negative,
+low-confidence, missing, or errored verdict.
+
 ## Package Map
 
 | Path | Responsibility | Local Index |
@@ -233,6 +240,12 @@ run-output scratch directory.
   before filtering by entrypoint status, so an inherited interface stub can never
   substitute for a `view`/`pure` override.
 - Finding output is deterministic: `Engine.ExecuteAll` applies a total-order sort (`SortFindings`) before returning, so `findings.json`/`results.sarif`/`findings.md` are byte-stable across runs despite map-order iteration internally.
+- A top-level WQL `ai` contract may declare an invariant, necessary trigger
+  conditions, safe rejection conditions, and a confidence floor. It changes no
+  matcher semantics. `Engine.Options.AIReviewer` reviews the ordinary WQL
+  candidates and only confirmed verdicts become findings; accepted findings
+  carry `aiTriage`, while every attempted verdict is available through
+  `AIReviewRecords`.
 - Generated timestamps are the one intentional source of report-byte variance.
   `GeneratorOptions.Now` and `BundleOptions.Now` let SDK callers inject a fixed
   clock; a complete fixed-clock bundle is byte-stable.

@@ -33,6 +33,35 @@ pkg/
 └── report/      # Report generation
 ```
 
+### AI-triaged template candidates
+
+Templates may carry an optional `ai` policy. WQL still produces the candidate;
+the engine then invokes an injected `engine.AIReviewer` and keeps only verdicts
+that confirm the bug, confirm all trigger conditions, and meet the template's
+confidence threshold. The generic engine does not start a container or select a
+provider.
+
+```go
+type reviewer struct{}
+
+func (reviewer) Review(ctx context.Context, request engine.AIReviewRequest)
+    (engine.AIReviewVerdict, error) {
+    // Send request to a locally controlled review service.
+}
+
+e := engine.NewWithOptions(db, engine.Options{
+    Logger:     log,
+    AIReviewer: reviewer{},
+})
+findings := e.ExecuteAll(templates)
+reviews := e.AIReviewRecords()
+```
+
+Accepted findings carry `aiTriage`. `AIReviewRecords` also includes suppressed
+and errored candidates so callers can distinguish a clean deterministic miss
+from a candidate rejected or unavailable at the review layer. Templates without
+`ai` never call the reviewer.
+
 ---
 
 ## Installation
