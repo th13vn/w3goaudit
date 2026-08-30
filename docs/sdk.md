@@ -25,7 +25,6 @@ The W3GoAudit SDK provides programmatic access to the Solidity contract analysis
 
 ```
 pkg/
-├── aitriage/    # Authenticated HTTP implementation of engine.AIReviewer
 ├── logging/     # Immutable scan-local logger
 ├── reader/      # File discovery and loading
 ├── builder/     # Database construction
@@ -34,43 +33,14 @@ pkg/
 └── report/      # Report generation
 ```
 
-### AI-triaged template candidates
+### Deterministic engine boundary
 
-Templates may carry an optional `ai` policy. WQL still produces the candidate;
-the engine then invokes an injected `engine.AIReviewer` and keeps only verdicts
-that confirm the bug, confirm all trigger conditions, and meet the template's
-confidence threshold. The generic engine does not start a container or select a
-provider. Review requests include the exact match plus enclosing function and
-contract source so the reviewer can validate guards and safe counterconditions.
-
-```go
-type reviewer struct{}
-
-func (reviewer) Review(ctx context.Context, request engine.AIReviewRequest)
-    (engine.AIReviewVerdict, error) {
-    // Send request to a locally controlled review service.
-}
-
-e := engine.NewWithOptions(db, engine.Options{
-    Logger:     log,
-    AIReviewer: reviewer{},
-})
-findings := e.ExecuteAll(templates)
-reviews := e.AIReviewRecords()
-```
-
-Accepted findings carry `aiTriage`. `AIReviewRecords` also includes suppressed
-and errored candidates so callers can distinguish a clean deterministic miss
-from a candidate rejected or unavailable at the review layer. Templates without
-`ai` never call the reviewer.
-
-CLI-equivalent integrations can construct
-`aitriage.NewHTTPReviewer(aitriage.HTTPOptions{URL, APIKeyFile, Timeout})`. The
-credential is loaded from a file, requests use bearer authentication, and the
-client applies a hard per-candidate timeout. SDK callers may instead implement
-`engine.AIReviewer` directly. Pass the returned records to
-`report.BundleOptions{AIReviews: reviews}` to emit and manifest-index
-`data/ai-triage.json`.
+The SDK has no model transport or reviewer callback. A WQL document contains
+exactly `meta` plus one `query`, and `engine.Execute` returns the deterministic
+finding set for the database and template. Findings retain exact locations,
+`primaryAst`, `related`, `entryPoint`, and reachability data. External AI
+Assistant workflows can consume those artifacts or extraction bundles, but do
+not mutate the engine's official findings.
 
 ---
 

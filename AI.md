@@ -243,12 +243,9 @@ run-output scratch directory.
   before filtering by entrypoint status, so an inherited interface stub can never
   substitute for a `view`/`pure` override.
 - Finding output is deterministic: `Engine.ExecuteAll` applies a total-order sort (`SortFindings`) before returning, so `findings.json`/`results.sarif`/`findings.md` are byte-stable across runs despite map-order iteration internally.
-- A top-level WQL `ai` contract may declare an invariant, necessary trigger
-  conditions, safe rejection conditions, and a confidence floor. It changes no
-  matcher semantics. `Engine.Options.AIReviewer` reviews the ordinary WQL
-  candidates and only confirmed verdicts become findings; accepted findings
-  carry `aiTriage`, while every attempted verdict is available through
-  `AIReviewRecords`.
+- A WQL document contains exactly `meta` plus one `query`. Unknown top-level
+  keys, including the removed `ai` key, fail strict decoding. Engine findings
+  are produced only by deterministic template execution.
 - Generated timestamps are the one intentional source of report-byte variance.
   `GeneratorOptions.Now` and `BundleOptions.Now` let SDK callers inject a fixed
   clock; a complete fixed-clock bundle is byte-stable.

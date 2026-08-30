@@ -405,7 +405,7 @@ func TestNoParseLossWarningWhenClean(t *testing.T) {
 	}
 }
 
-func TestExecuteScanRejectsInCoreAITemplateReview(t *testing.T) {
+func TestExecuteScanRejectsRemovedAIKey(t *testing.T) {
 	dir := t.TempDir()
 	source := filepath.Join(dir, "C.sol")
 	if err := os.WriteFile(source, []byte("pragma solidity ^0.8.0; contract C { function run() external {} }"), 0o644); err != nil {
@@ -434,7 +434,7 @@ query:
 		InputPath: source, TemplatePath: template, StdoutOnly: true,
 		Stdout: io.Discard, Stderr: io.Discard,
 	})
-	if err == nil || !strings.Contains(err.Error(), "external Assistant") {
+	if err == nil || !strings.Contains(err.Error(), "field ai not found") {
 		t.Fatalf("executeScan error = %v", err)
 	}
 }

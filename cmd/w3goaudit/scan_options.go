@@ -233,9 +233,6 @@ func executeScan(raw scanOptions) error {
 	if err != nil {
 		return err
 	}
-	if templatesRequireAIReview(templates) {
-		return fmt.Errorf("template ai: review is no longer supported by the scanner; move AI triage to an external Assistant workflow")
-	}
 	progressTo(opts.Stdout, "Scanning", fmt.Sprintf("%d templates (%s)", len(templates), templateSource), "")
 
 	e := engine.NewWithOptions(db, engine.Options{Logger: logger})
@@ -281,13 +278,4 @@ func executeScan(raw scanOptions) error {
 	printUnresolvedTo(opts.Stdout, db, plain)
 	printResultLocationTo(opts.Stdout, outDir, opts.HTML, plain)
 	return nil
-}
-
-func templatesRequireAIReview(templates []*engine.Template) bool {
-	for _, tmpl := range templates {
-		if tmpl != nil && tmpl.AI != nil && tmpl.AI.Enabled {
-			return true
-		}
-	}
-	return false
 }

@@ -1021,10 +1021,8 @@ Template → validateRulePlacement() → normalizeQueryBlock() → Engine → Sc
 - **Normalization** happens at template load time and once at each direct SDK
   evaluator boundary; recursive evaluation reuses the prepared copy
 - **Silent failures fixed** — invalid templates now emit warnings under `--verbose`
-
-AI-enabled templates use WQL only as the deterministic candidate generator.
-`Engine.Options.AIReviewer` receives the policy, finding, exact matched source,
-and bounded enclosing function and contract source. A candidate is retained only when the
-reviewer confirms the bug and trigger conditions above the configured
-confidence threshold. Missing/erroring reviewers fail closed for that template
-and are visible through `AIReviewRecords`; templates without `ai` are unchanged.
+- **Deterministic boundary** – a WQL document is exactly `meta` plus one
+  `query`; strict decoding rejects the removed top-level `ai` key. The engine
+  has no model reviewer state, and `Execute` returns deterministic WQL findings
+  directly while preserving primary, related-site, entry-point, and
+  reachability evidence.

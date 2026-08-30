@@ -44,67 +44,14 @@ const (
 // Public WQL documents are lowered into this structure before validation
 // and execution. It is intentionally not a YAML decoding target.
 type Template struct {
-	Meta  TemplateMeta      `json:"meta"`
-	AI    *AITemplatePolicy `json:"ai,omitempty"`
-	Query QueryBlock        `json:"query"`
+	Meta  TemplateMeta `json:"meta"`
+	Query QueryBlock   `json:"query"`
 
 	// Queries carries every executable block when the template composes
 	// multiple queries with a query-level or: (Queries[0] == Query). The
 	// engine executes each block and unions the findings under this
 	// template's meta. Empty for single-query templates.
 	Queries []QueryBlock `json:"queries,omitempty"`
-}
-
-// AITemplatePolicy asks a separately configured audit agent to validate each
-// deterministic WQL candidate before it becomes a confirmed finding.
-type AITemplatePolicy struct {
-	Enabled           bool     `yaml:"enabled" json:"enabled"`
-	MinConfidence     float64  `yaml:"min_confidence,omitempty" json:"minConfidence"`
-	Invariant         string   `yaml:"invariant" json:"invariant"`
-	TriggerConditions []string `yaml:"trigger_conditions" json:"triggerConditions"`
-	RejectIf          []string `yaml:"reject_if,omitempty" json:"rejectIf,omitempty"`
-}
-
-func (p *AITemplatePolicy) validateAndDefault() error {
-	if p == nil {
-		return nil
-	}
-	if !p.Enabled {
-		return fmt.Errorf("enabled must be true")
-	}
-	if p.MinConfidence == 0 {
-		p.MinConfidence = 0.85
-	}
-	if p.MinConfidence < 0.5 || p.MinConfidence > 1 {
-		return fmt.Errorf("min_confidence must be between 0.5 and 1")
-	}
-	if strings.TrimSpace(p.Invariant) == "" {
-		return fmt.Errorf("invariant must be non-empty")
-	}
-	if len(p.TriggerConditions) == 0 {
-		return fmt.Errorf("trigger_conditions must contain at least one condition")
-	}
-	for i, condition := range p.TriggerConditions {
-		if strings.TrimSpace(condition) == "" {
-			return fmt.Errorf("trigger_conditions[%d] must be non-empty", i)
-		}
-	}
-	for i, condition := range p.RejectIf {
-		if strings.TrimSpace(condition) == "" {
-			return fmt.Errorf("reject_if[%d] must be non-empty", i)
-		}
-	}
-	return nil
-}
-
-func cloneAITemplatePolicy(policy *AITemplatePolicy) *AITemplatePolicy {
-	if policy == nil {
-		return nil
-	}
-	cloned := *policy
-	cloned.TriggerConditions = append([]string(nil), policy.TriggerConditions...)
-	cloned.RejectIf = append([]string(nil), policy.RejectIf...)
-	return &cloned
 }
 
 // UnmarshalYAML prevents callers from bypassing the WQL loaders by decoding
@@ -331,11 +278,6 @@ func finalizeTemplate(tmpl *Template, source string) error {
 func finalizeTemplateWithLogger(tmpl *Template, source string, logger *logging.Logger) error {
 	if err := validateTemplateMeta(tmpl, source); err != nil {
 		return err
-	}
-	if tmpl.AI != nil {
-		if err := tmpl.AI.validateAndDefault(); err != nil {
-			return fmt.Errorf("template %s: ai: %w", source, err)
-		}
 	}
 	if !validSeverities[strings.ToUpper(tmpl.Meta.Severity)] {
 		return fmt.Errorf("template %s: invalid severity %q — must be one of CRITICAL, HIGH, MEDIUM, LOW, INFO", source, tmpl.Meta.Severity)
@@ -721,7 +663,6 @@ func normalizedTemplateCompatibilityCopy(tmpl *Template) (*Template, error) {
 		return nil, fmt.Errorf("empty template")
 	}
 	cloned := *tmpl
-	cloned.AI = cloneAITemplatePolicy(tmpl.AI)
 	query, err := normalizedQueryBlockCompatibilityCopy(&tmpl.Query, "query")
 	if err != nil {
 		return nil, err

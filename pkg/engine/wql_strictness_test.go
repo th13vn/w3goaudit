@@ -8,6 +8,20 @@ import (
 	"github.com/th13vn/w3goaudit/pkg/types"
 )
 
+func TestParseTemplateRejectsRemovedAIKey(t *testing.T) {
+	_, err := ParseTemplate(`
+meta: {id: removed-ai, severity: HIGH}
+ai:
+  enabled: true
+  invariant: Unsafe behavior must be reachable.
+  trigger_conditions: [The behavior has security impact.]
+query: {select: delegatecall, from: entry_function}
+`)
+	if err == nil || !strings.Contains(err.Error(), "field ai not found") {
+		t.Fatalf("error = %v, want strict removed-key rejection", err)
+	}
+}
+
 func TestParseTemplateRejectsExplicitlyEmptyQueryFields(t *testing.T) {
 	cases := []struct {
 		name  string

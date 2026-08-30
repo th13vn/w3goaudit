@@ -16,9 +16,8 @@ import (
 // It is a pure parsing/decoding structure that compiles into the evaluator IR
 // represented by Template, QueryBlock, and Rule.
 type TemplateDoc struct {
-	Meta  TemplateMeta      `yaml:"meta"`
-	AI    *AITemplatePolicy `yaml:"ai,omitempty"`
-	Query *QueryDoc         `yaml:"query"`
+	Meta  TemplateMeta `yaml:"meta"`
+	Query *QueryDoc    `yaml:"query"`
 }
 
 // QueryDoc is the `query:` container. It is either a single
@@ -70,7 +69,6 @@ type QueryBranch struct {
 // YAML decoding target of its own.
 type SimpleQuery struct {
 	Meta   TemplateMeta
-	AI     *AITemplatePolicy
 	Select string
 	From   string
 	Where  []Matcher
@@ -141,11 +139,6 @@ func parseWQL(raw []byte) (*TemplateDoc, error) {
 
 	if doc.Query == nil {
 		return nil, fmt.Errorf("parseWQL: template %q has no query: — templates are meta: plus query: {select, from, where} (or a query-level and:/or: composition)", doc.Meta.ID)
-	}
-	if doc.AI != nil {
-		if err := doc.AI.validateAndDefault(); err != nil {
-			return nil, fmt.Errorf("parseWQL: ai: %w", err)
-		}
 	}
 	if err := recordQueryKeyMetadata(queryNode, doc.Query); err != nil {
 		return nil, fmt.Errorf("parseWQL: inspect query keys: %w", err)
@@ -347,7 +340,7 @@ func (t *TemplateDoc) lower() (*Template, error) {
 		if q.Select == "" && q.From == "" && !q.keys.Where {
 			return nil, fmt.Errorf("template %q has neither select, from, nor where", t.Meta.ID)
 		}
-		simple := &SimpleQuery{Meta: t.Meta, AI: t.AI, Select: q.Select, From: q.From, Where: q.Where}
+		simple := &SimpleQuery{Meta: t.Meta, Select: q.Select, From: q.From, Where: q.Where}
 		return simple.lower()
 	}
 }
@@ -389,7 +382,6 @@ func (t *TemplateDoc) lowerAnd() (*Template, error) {
 
 	return &Template{
 		Meta:  t.Meta,
-		AI:    cloneAITemplatePolicy(t.AI),
 		Query: QueryBlock{Scope: scope, Match: Rule{All: branches}},
 	}, nil
 }
@@ -591,7 +583,7 @@ func (t *TemplateDoc) lowerOr() (*Template, error) {
 		if b.Select == "" && from == "" && len(b.Where) == 0 {
 			return nil, fmt.Errorf("query.or: branch %d has neither select, from, nor where", i+1)
 		}
-		simple := &SimpleQuery{Meta: t.Meta, AI: t.AI, Select: b.Select, From: from, Where: b.Where}
+		simple := &SimpleQuery{Meta: t.Meta, Select: b.Select, From: from, Where: b.Where}
 		bt, err := simple.lower()
 		if err != nil {
 			return nil, fmt.Errorf("query.or: branch %d: %w", i+1, err)
@@ -599,7 +591,7 @@ func (t *TemplateDoc) lowerOr() (*Template, error) {
 		blocks = append(blocks, bt.Query)
 	}
 
-	return &Template{Meta: t.Meta, AI: cloneAITemplatePolicy(t.AI), Query: blocks[0], Queries: blocks}, nil
+	return &Template{Meta: t.Meta, Query: blocks[0], Queries: blocks}, nil
 }
 
 // lower converts one simple select/from/where query into evaluator IR. See
@@ -654,7 +646,6 @@ func (t *SimpleQuery) lower() (*Template, error) {
 
 	return &Template{
 		Meta: t.Meta,
-		AI:   cloneAITemplatePolicy(t.AI),
 		Query: QueryBlock{
 			Scope:  scope,
 			Filter: filter,
