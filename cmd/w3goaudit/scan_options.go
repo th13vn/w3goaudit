@@ -188,6 +188,9 @@ func executeScan(raw scanOptions) error {
 		logger = logging.New(opts.Verbose, opts.Stdout)
 	} else {
 		outDir = resolveOutputDirWithBase(opts.InputPath, opts.DBPath, opts.OutputPath, opts.OutputBaseDir)
+		if err := validateOutputBoundary(opts.InputPath, opts.DBPath, outDir); err != nil {
+			return err
+		}
 		var err error
 		logger, closeLog, err = setupRunLog(outDir, opts.Verbose, opts.Stdout)
 		if err != nil {

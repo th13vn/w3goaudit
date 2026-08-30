@@ -144,6 +144,11 @@ run-output scratch directory.
   missing AST hides declarations from every detector, unlike an unresolved
   reference which only makes the AST imprecise. `--strict-parse` (root and
   `build`, plus `scan.strict_parse`) turns it into a pre-report failure.
+- The resolved report directory must not equal, contain, or be contained by the
+  selected source scope after canonical symlink resolution. This validation
+  runs before `run.log` or any report file is created. For `--db` scans, the
+  persisted `scanTarget` is authoritative, with `projectRoot` as the legacy
+  fallback.
 - A normal scan writes one result folder containing `README.md`, `summary.md`, `overview.md`, `findings.md`, `results.sarif`, `run.log`, `data/` (with `manifest.json` index, plus `nav.json`, `explorer.json`, `xref.json`, and optional `ai-triage.json`), and a `contracts/` tree (per-main-contract folders mirroring source paths, each with its own `README.md`).
 - AST nodes and declarations (`Function`/`Modifier`/`Contract`/`StateVariable`/`Event`/`Struct`/`Enum`/`Parameter`) carry `StartCol`/`EndCol`/`StartByte`/`EndByte` alongside `StartLine`/`EndLine` (one-based Unicode-code-point columns and zero-based UTF-8 byte offsets; both end fields are half-open; zero/omitted for synthetic nodes). `FunctionCall`/`CallEdge` carry point `Col`/`Byte` fields too. The builder derives columns from a once-per-source sparse line/non-ASCII index instead of the parser's byte-oriented column field: O(log non-ASCII runes on the line) per endpoint and O(lines + non-ASCII runes) index memory. Invalid conversions retain lines/bytes, omit columns, and record `location.invalid`. Output schema remains `2.0.0`; this requires solast-go v0.1.7+.
 - A WQL document is meta plus one query: block. The block holds

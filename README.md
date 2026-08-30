@@ -14,7 +14,7 @@ A Go-based CLI & SDK for auditing Solidity smart contracts using rule-based temp
 go install github.com/th13vn/w3goaudit/cmd/w3goaudit@latest
 
 # Scan contracts → writes a ./contracts-audit result folder
-# (the "-audit" suffix is the collision guard: the output can't overwrite the scanned dir)
+# (the "-audit" suffix keeps the default output outside the scanned dir)
 w3goaudit ./contracts/
 
 # Scan one file into a named folder
@@ -192,7 +192,10 @@ human or AI auditor:
 
 The default folder name is the scanned project dir name (or `.sol` file stem);
 `-o/--output` overrides it, and `-audit` is appended if the default would collide
-with the scanned directory. Each `workflows/<entryFn>.md` records the signature
+with the scanned directory. The resolved output is rejected if it equals,
+contains, or is contained by the selected source scope, including through a
+symlink alias. This check occurs before `run.log` or any report file is created.
+Each `workflows/<entryFn>.md` records the signature
 (selector, 4-byte, payable, version), auth / access control (modifiers,
 `msg.sender` checks, ⚠ Unprotected, ⚠ tx.origin), guards/checks, branch
 conditions, transitive state effects, and a Mermaid call-workflow diagram.

@@ -11,6 +11,7 @@ result folder. There is **no `scan` subcommand**.
 | `main.go` | Bootstraps cobra; maps any `RunE` error to `os.Exit(1)`. |
 | `root.go` | Thin Cobra/config wrapper for root scan flags, plus the `version` subcommand. `rootCmd.Version` also wires `--version`. |
 | `scan_options.go` | Immutable `scanOptions`/`databaseLoadOptions`, strict-import policy, and the scan-local `executeScan` pipeline. |
+| `output_safety.go` | Canonical source/output boundary validation, including cached scan targets, symlink aliases, and not-yet-created output suffixes. |
 | `scan_console.go` | Writer-injected progress and console rendering used by concurrent scan pipelines. |
 | `helpers.go` | Scan-local database source/cache loading, logger setup, persisted import-warning rendering, and output helpers. |
 | `build.go` | `build` subcommand — build a database JSON without scanning; shares strict-import and local-logger behavior with root scans. |
@@ -24,6 +25,7 @@ result folder. There is **no `scan` subcommand**.
 
 - **Exit codes:** any pipeline/report-write error propagates from `RunE` → `os.Exit(1)`. A failed report write must return non-zero.
 - **stdout vs files:** `--stdout` prints the summary only and writes no files; `run.log` and the result bundle are both gated on `!stdoutOnly` (so the manifest's `run.log` reference is always valid).
+- **Output cannot overlap the scan scope:** before `setupRunLog` creates a directory or file, `executeScan` canonicalizes the selected source scope and resolved result directory, including symlink aliases and missing output suffixes. It rejects equality and containment in either direction. Cached `--db` scans use `scanTarget`, falling back to `projectRoot`.
 - **Machine-readable output stays clean:** warnings (import resolution, unresolved imports) go to **stderr**, never stdout.
 - **Source/cache parity:** unresolved-import warnings are rendered from persisted database diagnostics after either source build or `--db` load. `--strict-imports` applies the same fail-closed gate in both modes and in `build`; the default remains tolerant.
 - **Findings point at the dangerous statement:** matched-node attribution is the default, so every `Location` field (file, line, columns, bytes, contract, function) describes one place, and the entry hop travels in `entryPoint`/`reachability`. Verifier attribution described two places at once — `contract`/`function` from the entry function, `file`/`line` from the matched node — so an interprocedural finding could name a function the reported line is not inside. `--location-source matched|verifier` selects it; the value is validated in `validateScanOptions` and applied via `Engine.SetLocationSource`.

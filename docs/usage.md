@@ -134,6 +134,12 @@ the full results are written to a **result folder** (see
 4. **⚠ Unresolved references** — bases/imports the builder could not resolve (when any)
 5. **Result location** — where the folder landed
 
+The resolved result folder must be separate from the selected source scope.
+W3GoAudit rejects an output that equals, contains, or is contained by the scan
+scope after resolving symlink aliases. The rejection occurs before `run.log`
+or any report file is created. A `--db` scan uses the cached `scanTarget`, with
+`projectRoot` as the fallback for older databases.
+
 #### Basic Syntax
 
 ```bash
@@ -147,7 +153,7 @@ Every flag has a long and short form.
 
 | Flag                         | Short | Type   | Description                                                                                                                                                      |
 | ---------------------------- | ----- | ------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `--output`                   | `-o`  | string | Result folder path. Default: a folder named after the scanned project dir (or `.sol` file stem); `-audit` is appended if that would collide with the scanned dir |
+| `--output`                   | `-o`  | string | Result folder path. It must not equal, contain, or be contained by the source scope. Default: a folder named after the scanned project dir (or `.sol` file stem); `-audit` is appended if needed |
 | `--template`                 | `-t`  | string | Template file or directory. Precedence: `--template` > `~/.w3goaudit/templates/` (when populated) > embedded official pack                                       |
 | `--db`                       | `-d`  | string | Load a pre-built database JSON (e.g. `data/database.json`) instead of parsing source                                                                           |
 | `--verbose`                  | `-v`  | bool   | Show detailed progress on the terminal. Full detail is **always** written to `run.log` regardless of this flag                                                   |
