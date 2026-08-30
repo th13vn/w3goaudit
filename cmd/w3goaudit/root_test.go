@@ -264,32 +264,6 @@ func TestStrictImportsConfigRespectsExplicitCLIFlag(t *testing.T) {
 	}
 }
 
-func TestResolveAITriageConfigUsesEnvironmentOverrides(t *testing.T) {
-	cfg := &home.Config{}
-	cfg.AITriage.URL = "http://from-config/review"
-	cfg.AITriage.APIKeyFile = "/config/key"
-	cfg.AITriage.Timeout = "4m"
-	t.Setenv("W3GOAUDIT_AI_TRIAGE_URL", "http://from-env/review")
-	t.Setenv("W3GOAUDIT_AI_TRIAGE_KEY_FILE", "/env/key")
-	t.Setenv("W3GOAUDIT_AI_TRIAGE_TIMEOUT", "90s")
-
-	resolved, err := resolveAITriageConfig(cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if resolved.URL != "http://from-env/review" || resolved.APIKeyFile != "/env/key" || resolved.Timeout != 90*time.Second {
-		t.Fatalf("resolved = %#v", resolved)
-	}
-}
-
-func TestResolveAITriageConfigRejectsInvalidTimeout(t *testing.T) {
-	cfg := &home.Config{}
-	cfg.AITriage.Timeout = "eventually"
-	if _, err := resolveAITriageConfig(cfg); err == nil || !strings.Contains(err.Error(), "ai_triage.timeout") {
-		t.Fatalf("error = %v", err)
-	}
-}
-
 func TestBuildVerboseFlagAcceptsNoValue(t *testing.T) {
 	flag := buildCmd.Flags().Lookup("verbose")
 	if flag == nil {
@@ -431,7 +405,7 @@ func TestNoParseLossWarningWhenClean(t *testing.T) {
 	}
 }
 
-func TestExecuteScanRequiresReviewerBeforeRunningAITemplates(t *testing.T) {
+func TestExecuteScanRejectsInCoreAITemplateReview(t *testing.T) {
 	dir := t.TempDir()
 	source := filepath.Join(dir, "C.sol")
 	if err := os.WriteFile(source, []byte("pragma solidity ^0.8.0; contract C { function run() external {} }"), 0o644); err != nil {
@@ -460,7 +434,7 @@ query:
 		InputPath: source, TemplatePath: template, StdoutOnly: true,
 		Stdout: io.Discard, Stderr: io.Discard,
 	})
-	if err == nil || !strings.Contains(err.Error(), "AI triage is required") {
+	if err == nil || !strings.Contains(err.Error(), "external Assistant") {
 		t.Fatalf("executeScan error = %v", err)
 	}
 }

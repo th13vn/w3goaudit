@@ -282,13 +282,13 @@ graph TD
 - `results.sarif` — SARIF 2.1.0 (always)
 - `data/{database.json,findings.json,overview.json,diagnostics.json}` — machine-readable mirror;
   the canonical database lives only here and is reusable via `--db`
-- `data/ai-triage.json` — optional accepted/rejected/error audit trail for every
-  candidate reviewed by an `ai` template
 - `data/manifest.json` — the complete machine index. `projectRoot` is the
   detected project root; `scanTarget` is the original selected file/directory;
   `target` is its compatibility alias. Counts distinguish contracts,
   interfaces, libraries, and total declarations. Completeness/count fields and
   optional emitted HTML paths are indexed explicitly.
+- The scanner emits no model review artifact. External Assistant workflows may
+  consume the deterministic bundle but do not alter official findings.
 - `data/nav.json` — symbol-level navigation index (definitions, reverse call
   graph, interface→implementation), built by
   [nav.go](../pkg/report/nav.go); `data/explorer.json` — per-main-contract

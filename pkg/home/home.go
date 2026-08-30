@@ -43,11 +43,6 @@ type Config struct {
 	Report struct {
 		RepoBase string `yaml:"repo_base"` // "" = relative paths; else source-link base
 	} `yaml:"report"`
-	AITriage struct {
-		URL        string `yaml:"url"`
-		APIKeyFile string `yaml:"api_key_file"`
-		Timeout    string `yaml:"timeout"`
-	} `yaml:"ai_triage"`
 	Color string `yaml:"color"` // auto | never
 }
 
@@ -86,7 +81,6 @@ func defaultConfig() *Config {
 	c.Output.HTML = false
 	c.Scan.ExcludePaths = []string{"node_modules", "lib", "out", "**/test/**", "**/mocks/**"}
 	c.Scan.Workers = 0
-	c.AITriage.Timeout = "10m"
 	c.Color = "auto"
 	return c
 }
@@ -106,6 +100,9 @@ func Load() (*Config, error) {
 		}
 		return cfg, fmt.Errorf("reading config %s: %w", path, err)
 	}
+	if err := rejectRemovedConfigKeys(data); err != nil {
+		return cfg, fmt.Errorf("parsing config %s: %w", path, err)
+	}
 	if err := yaml.Unmarshal(data, cfg); err != nil {
 		return cfg, fmt.Errorf("parsing config %s: %w", path, err)
 	}
@@ -113,6 +110,26 @@ func Load() (*Config, error) {
 		cfg.Templates.Repo = DefaultTemplatesRepo
 	}
 	return cfg, nil
+}
+
+func rejectRemovedConfigKeys(data []byte) error {
+	var document yaml.Node
+	if err := yaml.Unmarshal(data, &document); err != nil {
+		return err
+	}
+	if len(document.Content) == 0 {
+		return nil
+	}
+	root := document.Content[0]
+	if root.Kind != yaml.MappingNode {
+		return nil
+	}
+	for i := 0; i+1 < len(root.Content); i += 2 {
+		if root.Content[i].Value == "ai_triage" {
+			return fmt.Errorf("config key ai_triage was removed; configure AI review in an external Assistant workflow")
+		}
+	}
+	return nil
 }
 
 // ResolveTemplatesDir returns the effective template home, honoring an explicit
@@ -160,10 +177,6 @@ scan:
   workers: 0                       # reserved: 0 = auto
 report:
   repo_base: ""                    # "" = relative source links; else a repo base URL
-ai_triage:
-  url: ""                          # isolated reviewer endpoint; required by templates with ai:
-  api_key_file: ""                 # file containing the bearer credential, preferably mode 0600
-  timeout: 10m                       # per-candidate agent deadline
 color: auto                        # auto | never
 `
 	content := fmt.Sprintf(tmpl, DefaultTemplatesRepo)

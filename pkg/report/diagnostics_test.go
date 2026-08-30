@@ -189,58 +189,42 @@ func TestWriteBundleFixedClockIsByteStable(t *testing.T) {
 	}
 }
 
-func TestWriteBundleEmitsAITriageArtifactOnlyWhenReviewsExist(t *testing.T) {
+func TestWriteBundleRemovesLegacyAIReviewArtifact(t *testing.T) {
 	db := navFixtureDB()
 	summary := NewGeneratorWithOptions(db, GeneratorOptions{Now: func() time.Time { return time.Unix(0, 0) }}).GenerateSummary()
-	base := t.TempDir()
-	withoutReviews := filepath.Join(base, "without")
-	if err := WriteBundle(withoutReviews, db, summary, nil, ToolMeta{Name: "w3goaudit"}, BundleOptions{}); err != nil {
+	out := t.TempDir()
+	dataDir := filepath.Join(out, "data")
+	if err := os.MkdirAll(dataDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := os.Stat(filepath.Join(withoutReviews, "data", "ai-triage.json")); !os.IsNotExist(err) {
-		t.Fatalf("ai-triage.json should be absent, stat error = %v", err)
+	legacy := filepath.Join(dataDir, "ai-triage.json")
+	if err := os.WriteFile(legacy, []byte(`{"reviews":[{"status":"accepted"}]}`), 0o644); err != nil {
+		t.Fatal(err)
 	}
+	if err := WriteBundle(out, db, summary, nil, ToolMeta{Name: "w3goaudit"}, BundleOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(legacy); !os.IsNotExist(err) {
+		t.Fatalf("legacy AI review artifact survived deterministic bundle rewrite: %v", err)
+	}
+}
 
-	withReviews := filepath.Join(base, "with")
-	reviews := []engine.AIReviewRecord{
-		{TemplateID: "accepted", Status: engine.AIReviewAccepted, Verdict: &engine.AIReviewVerdict{ValidBug: true, TriggerConditionsMet: true, Confidence: 0.91}},
-		{TemplateID: "rejected", Status: engine.AIReviewRejected},
-		{TemplateID: "errored", Status: engine.AIReviewError, Error: "timeout"},
-	}
-	if err := WriteBundle(withReviews, db, summary, nil, ToolMeta{Name: "w3goaudit", Version: "test"}, BundleOptions{
-		Now:       func() time.Time { return time.Unix(0, 0) },
-		AIReviews: reviews,
-	}); err != nil {
+func TestWriteBundleRemovesLegacyAIReviewArtifactDirectory(t *testing.T) {
+	db := navFixtureDB()
+	summary := NewGeneratorWithOptions(db, GeneratorOptions{Now: func() time.Time { return time.Unix(0, 0) }}).GenerateSummary()
+	out := t.TempDir()
+	legacy := filepath.Join(out, "data", "ai-triage.json")
+	if err := os.MkdirAll(legacy, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	raw, err := os.ReadFile(filepath.Join(withReviews, "data", "ai-triage.json"))
-	if err != nil {
+	if err := os.WriteFile(filepath.Join(legacy, "stale.json"), []byte(`{}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	var doc struct {
-		SchemaVersion string                  `json:"schemaVersion"`
-		Counts        map[string]int          `json:"counts"`
-		Reviews       []engine.AIReviewRecord `json:"reviews"`
-	}
-	if err := json.Unmarshal(raw, &doc); err != nil {
+	if err := WriteBundle(out, db, summary, nil, ToolMeta{Name: "w3goaudit"}, BundleOptions{}); err != nil {
 		t.Fatal(err)
 	}
-	if doc.SchemaVersion != SchemaVersion || doc.Counts["accepted"] != 1 || doc.Counts["rejected"] != 1 || doc.Counts["error"] != 1 || len(doc.Reviews) != 3 {
-		t.Fatalf("ai triage document = %#v", doc)
-	}
-	manifestRaw, err := os.ReadFile(filepath.Join(withReviews, "data", "manifest.json"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !bytes.Contains(manifestRaw, []byte(`"aiTriage": "data/ai-triage.json"`)) {
-		t.Fatalf("manifest did not index AI triage artifact: %s", manifestRaw)
-	}
-
-	if err := WriteBundle(withReviews, db, summary, nil, ToolMeta{Name: "w3goaudit"}, BundleOptions{}); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := os.Stat(filepath.Join(withReviews, "data", "ai-triage.json")); !os.IsNotExist(err) {
-		t.Fatalf("stale ai-triage.json survived a scan with no reviews, stat error = %v", err)
+	if _, err := os.Stat(legacy); !os.IsNotExist(err) {
+		t.Fatalf("legacy AI review artifact directory survived deterministic bundle rewrite: %v", err)
 	}
 }
 

@@ -336,7 +336,6 @@ to be fed to a human or an AI auditor:
 │   ├── findings.json
 │   ├── overview.json
 │   ├── diagnostics.json    # analysis-quality diagnostics; [] when complete
-│   ├── ai-triage.json      # optional AI candidate verdicts and outcome counts
 │   ├── nav.json           # extension navigation index (symbols, callers, interfaceImpl)
 │   ├── explorer.json      # extension explorer model (per-contract constants/storage/entries/getters)
 │   └── xref.json          # extension cross-reference index (declarations[] + references[])
@@ -892,7 +891,6 @@ Machine-readable mirror; each carries `schemaVersion: "2.0.0"`.
 | `data/overview.json` | `{ schemaVersion, tool, generatedAt, projectRoot, scanTarget, analysisComplete, diagnosticCounts, stats, overview }` |
 | `data/findings.json` | `{ schemaVersion, tool, generatedAt, counts, findings[] }`        |
 | `data/diagnostics.json` | `{ schemaVersion, generatedAt, analysisComplete, counts, diagnostics[] }`; always emitted |
-| `data/ai-triage.json` | Optional `{ schemaVersion, tool, generatedAt, counts, reviews[] }`; emitted when an `ai` template reviews candidates |
 | `data/nav.json` | `{ schemaVersion, symbols[], callers[], interfaceImpl[] }` — navigation index for the VSCode extension |
 | `data/explorer.json` | `{ schemaVersion, contracts[] }` — per-deployable-contract constants/storage/entryFunctions/getters, for the extension's explorer tab |
 | `data/xref.json` | `{ schemaVersion, declarations[], references[] }` — precise, type-resolved cross-reference index: jump targets plus every bound occurrence (`refId` + `refKind`), for regex-free go-to-definition and find-references |
@@ -991,21 +989,14 @@ scan:
   workers: 0                       # reserved: 0 = auto
 report:
   repo_base: ""                    # reserved: "" = relative source links; else a repo base URL
-ai_triage:
-  url: ""                          # isolated reviewer endpoint
-  api_key_file: ""                 # bearer credential file, preferably mode 0600
-  timeout: 10m                     # per-candidate agent deadline
 color: auto                        # auto | never
 ```
 
 The keys consumed today are `templates.dir`, `templates.repo`, `output.base_dir`,
 `output.html`, `scan.min_severity`, `scan.strict_imports`, `scan.strict_parse`,
-`ai_triage.url`, `ai_triage.api_key_file`, `ai_triage.timeout`, and `color`.
-Templates with `ai.enabled: true` fail before execution unless the endpoint and
-key file are configured. Environment overrides are
-`W3GOAUDIT_AI_TRIAGE_URL`, `W3GOAUDIT_AI_TRIAGE_KEY_FILE`, and
-`W3GOAUDIT_AI_TRIAGE_TIMEOUT`; the secret itself belongs only in the referenced
-file. `scan.exclude_paths`,
+and `color`. The removed scanner-side AI review config is rejected explicitly;
+model configuration belongs to a future external Assistant workflow.
+`scan.exclude_paths`,
 `scan.workers`, and `report.repo_base` are reserved for future use.
 
 ### Project Detection

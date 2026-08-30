@@ -85,11 +85,12 @@ files and a state-change report. See [Result folder layout](#result-folder-layou
   `charOffset`/`charLength`. These are not LSP positions; LSP lines and
   characters are zero-based and commonly use UTF-16 code units.
 - **WQL Templates** - Powerful query language for security pattern matching, with load-time validation (regex, preset names, filter/match placement) so typos fail fast instead of producing silent zero-finding scans. Includes a source-scope `regex` matcher for rare raw-source predicates and contract-scope AST matching for same-contract local/inherited combination rules.
-- **Result Folder** - One opinionated folder per scan: a `README.md` landing page, `summary.md`, `overview.md` (metrics + in-scope contract index), `findings.md`, always-on `results.sarif` + `run.log`, a machine-readable `data/` (`manifest.json`, reusable `database.json`, findings/overview, always-on `diagnostics.json`, optional `ai-triage.json`, plus nav/explorer/xref data for the editor extension), and a `contracts/` tree mirroring source paths. Opt-in **fully offline** HTML mirror with `--html` (graph library embedded — no CDN request).
-- **AI-triaged candidates** - A template can keep its deterministic WQL shape
-  broad and declare generalized `ai` trigger/rejection conditions. W3GoAudit
-  then asks a separately configured isolated reviewer to validate the real bug
-  and only reports confirmed, threshold-passing candidates.
+- **Result Folder** - One opinionated folder per scan: a `README.md` landing page, `summary.md`, `overview.md` (metrics + in-scope contract index), `findings.md`, always-on `results.sarif` + `run.log`, a machine-readable `data/` (`manifest.json`, reusable `database.json`, findings/overview, always-on `diagnostics.json`, plus nav/explorer/xref data for the editor extension), and a `contracts/` tree mirroring source paths. Opt-in **fully offline** HTML mirror with `--html` (graph library embedded, no CDN request).
+- **Agent-ready deterministic evidence** - The scanner remains offline and
+  model-independent. A future external AI Assistant can consume findings, the
+  database, exact source locations, reachability, navigation, cross-references,
+  extraction bundles, and workflow artifacts without changing official scan
+  results.
 - **Per-Entry Workflow Files** - For every entry function, a self-contained context block (signature, auth / access control, guards & checks, branch conditions, transitive state effects, Mermaid call workflow) — built to be fed to a human or an AI auditor.
 - **State-Change Matrix** - Per contract, each state variable mapped to the functions that write it and the entry points that reach a writer (reverse call-graph walk).
 - **Self-Provisioning Templates** - Downloads the latest [`w3goaudit-templates`](https://github.com/th13vn/w3goaudit-templates) release on first run (nuclei-style, no git clone), refreshable with `--update-templates`; embedded official pack is the always-available offline fallback. Extraction is size/file-count capped and installed with a rollback-safe staged directory swap. The GitHub zipball is TLS-authenticated but not checksum/signature verified.

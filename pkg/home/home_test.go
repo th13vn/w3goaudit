@@ -3,6 +3,7 @@ package home
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -41,23 +42,34 @@ func TestLoadStrictImportsConfig(t *testing.T) {
 	}
 }
 
-func TestLoadAITriageConfig(t *testing.T) {
+func TestLoadRejectsRemovedAITriageConfig(t *testing.T) {
 	homeDir := t.TempDir()
 	t.Setenv("HOME", homeDir)
 	configDir := filepath.Join(homeDir, ".w3goaudit")
 	if err := os.MkdirAll(configDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	content := "ai_triage:\n  url: http://triage.internal/review\n  api_key_file: /run/secrets/w3_triage\n  timeout: 12m\n"
+	content := "ai_triage:\n  url: http://triage.internal/review\n"
 	if err := os.WriteFile(filepath.Join(configDir, "config.yml"), []byte(content), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	cfg, err := Load()
+	_, err := Load()
+	if err == nil || !strings.Contains(err.Error(), "ai_triage was removed") {
+		t.Fatalf("Load error = %v", err)
+	}
+}
+
+func TestDefaultConfigContainsNoAITriageBlock(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yml")
+	if err := writeDefaultConfig(path); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.AITriage.URL != "http://triage.internal/review" || cfg.AITriage.APIKeyFile != "/run/secrets/w3_triage" || cfg.AITriage.Timeout != "12m" {
-		t.Fatalf("ai_triage = %#v", cfg.AITriage)
+	if strings.Contains(string(raw), "ai_triage") {
+		t.Fatalf("default config still advertises AI triage:\n%s", raw)
 	}
 }
 

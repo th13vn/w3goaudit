@@ -21,9 +21,6 @@ type BundleOptions struct {
 	// Now supplies the one UTC timestamp shared by every generated artifact in
 	// this bundle. Nil uses time.Now.
 	Now func() time.Time
-	// AIReviews emits data/ai-triage.json when at least one candidate was
-	// reviewed. Credentials and HTTP request metadata are never included.
-	AIReviews []engine.AIReviewRecord
 }
 
 func bundleNow(opts BundleOptions) time.Time {
@@ -137,10 +134,8 @@ func writeBundleData(dir string, db *types.Database, summary *SummaryReport, fin
 	if err := os.MkdirAll(dataDir, 0755); err != nil {
 		return fmt.Errorf("creating data folder: %w", err)
 	}
-	if len(opts.AIReviews) == 0 {
-		if err := os.Remove(filepath.Join(dataDir, "ai-triage.json")); err != nil && !os.IsNotExist(err) {
-			return fmt.Errorf("removing stale AI triage artifact: %w", err)
-		}
+	if err := os.RemoveAll(filepath.Join(dataDir, "ai-triage.json")); err != nil {
+		return fmt.Errorf("removing legacy AI review artifact: %w", err)
 	}
 	databaseForOutput := *db
 	databaseForOutput.Diagnostics = diagnostics
@@ -156,15 +151,7 @@ func writeBundleData(dir string, db *types.Database, summary *SummaryReport, fin
 	if err := writeJSONFile(filepath.Join(dataDir, "diagnostics.json"), BuildDiagnosticsJSONAt(now, db), "diagnostics"); err != nil {
 		return err
 	}
-	if len(opts.AIReviews) > 0 {
-		if err := writeJSONFile(filepath.Join(dataDir, "ai-triage.json"), BuildAITriageJSONAt(now, tool, opts.AIReviews), "AI triage"); err != nil {
-			return err
-		}
-	}
 	manifest := BuildManifestAt(now, tool, summary, findings, refs, db, opts.HTML)
-	if len(opts.AIReviews) > 0 {
-		manifest.Files.Data.AITriage = "data/ai-triage.json"
-	}
 	if err := writeJSONFile(filepath.Join(dataDir, "manifest.json"), manifest, "manifest"); err != nil {
 		return err
 	}
