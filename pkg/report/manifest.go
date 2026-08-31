@@ -39,6 +39,7 @@ type ManifestStats struct {
 
 // ManifestFiles lists the result-folder artifacts by relative path.
 type ManifestFiles struct {
+	Audit    string `json:"audit"`
 	Readme   string `json:"readme"`
 	Summary  string `json:"summary"`
 	Findings string `json:"findings"`
@@ -49,6 +50,7 @@ type ManifestFiles struct {
 	// caused those optional artifacts to be emitted.
 	OverviewHTML string `json:"overviewHtml,omitempty"`
 	FindingsHTML string `json:"findingsHtml,omitempty"`
+	AuditHTML    string `json:"auditHtml,omitempty"`
 	Data         struct {
 		Findings    string `json:"findings"`
 		Overview    string `json:"overview"`
@@ -66,6 +68,7 @@ type ContractRef struct {
 	Name     string `json:"name"`
 	Source   string `json:"source"`
 	Dir      string `json:"dir"`
+	Report   string `json:"report"`
 	Findings int    `json:"findings"`
 }
 
@@ -131,9 +134,10 @@ func BuildManifestAt(now time.Time, tool ToolMeta, summary *SummaryReport, findi
 		}
 	}
 	m.Files.Readme = "README.md"
-	m.Files.Summary = "summary.md"
-	m.Files.Findings = "findings.md"
-	m.Files.Overview = "overview.md"
+	m.Files.Audit = "audit.md"
+	m.Files.Summary = "audit.md"
+	m.Files.Findings = "audit.md"
+	m.Files.Overview = "audit.md"
 	m.Files.Sarif = "results.sarif"
 	m.Files.Log = "run.log"
 	m.Files.Data.Findings = "data/findings.json"
@@ -144,8 +148,9 @@ func BuildManifestAt(now time.Time, tool ToolMeta, summary *SummaryReport, findi
 	m.Files.Data.Explorer = "data/explorer.json"
 	m.Files.Data.Xref = "data/xref.json"
 	if html {
-		m.Files.OverviewHTML = "overview.html"
-		m.Files.FindingsHTML = "findings.html"
+		m.Files.AuditHTML = "audit.html"
+		m.Files.OverviewHTML = "audit.html"
+		m.Files.FindingsHTML = "audit.html"
 	}
 	return m
 }

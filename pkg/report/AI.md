@@ -179,10 +179,16 @@ legacy `BuildManifest(...)` remains a current-time compatibility wrapper.
 - `stats.contracts` counts contract + abstract declarations only;
   `interfaces`, `libraries`, and their `declarations` sum are separate.
 - `analysisComplete` and `diagnosticCounts` expose analysis quality.
-- `files.data.diagnostics` always indexes `data/diagnostics.json`; optional
-  `overviewHtml`/`findingsHtml` paths appear only when HTML was requested.
-- `contracts[]` (`ContractRef`: name, source, dir, findings) and the nav/explorer
-  paths let consumers discover the whole tree from this one file.
+- `files.data.diagnostics` always indexes `data/diagnostics.json`. The
+  consolidated layout adds canonical `files.audit` plus optional
+  `files.auditHtml`; during v0.5.x the legacy summary/overview/findings fields
+  point to `audit.md`, and legacy HTML fields point to `audit.html`.
+- `contracts[]` adds canonical `report`; `dir` remains its slash-normalized
+  parent directory. `contract_paths.go` plans portable, length-bound,
+  collision-safe paths before writes using deterministic SHA-256 identity
+  suffixes when sanitized candidates collide.
+- Contract refs and the nav/explorer paths let consumers discover the whole
+  tree from this one file.
 
 ### diagnostics.go
 

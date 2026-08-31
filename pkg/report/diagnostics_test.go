@@ -120,12 +120,12 @@ func TestManifestScopeCountsDiagnosticsOptionalFilesAndClock(t *testing.T) {
 	if m.Files.Data.Diagnostics != "data/diagnostics.json" {
 		t.Fatalf("diagnostics path = %q", m.Files.Data.Diagnostics)
 	}
-	if m.Files.OverviewHTML != "overview.html" || m.Files.FindingsHTML != "findings.html" {
-		t.Fatalf("HTML paths = %q / %q", m.Files.OverviewHTML, m.Files.FindingsHTML)
+	if m.Files.AuditHTML != "audit.html" || m.Files.OverviewHTML != "audit.html" || m.Files.FindingsHTML != "audit.html" {
+		t.Fatalf("HTML paths = canonical %q aliases %q / %q", m.Files.AuditHTML, m.Files.OverviewHTML, m.Files.FindingsHTML)
 	}
 
 	withoutHTML := BuildManifestAt(now, ToolMeta{Name: "w3goaudit"}, summary, nil, nil, db, false)
-	if withoutHTML.Files.OverviewHTML != "" || withoutHTML.Files.FindingsHTML != "" {
+	if withoutHTML.Files.AuditHTML != "" || withoutHTML.Files.OverviewHTML != "" || withoutHTML.Files.FindingsHTML != "" {
 		t.Fatalf("optional HTML indexed when disabled: %#v", withoutHTML.Files)
 	}
 
