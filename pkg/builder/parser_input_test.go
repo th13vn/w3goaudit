@@ -6,7 +6,37 @@ import (
 
 	"github.com/th13vn/solast-go/pkg/ast"
 	"github.com/th13vn/solast-go/pkg/parser"
+	"github.com/th13vn/w3goaudit/pkg/types"
 )
+
+func TestContextualKeywordLocalVariableDoesNotCauseParseLoss(t *testing.T) {
+	db := buildFromSource(t, `pragma solidity ^0.8.20;
+contract A {
+    struct S { uint256 value; }
+    mapping(address => S) records;
+    function write() external {
+        S storage from = records[msg.sender];
+        from.value = 1;
+    }
+    function afterKeyword() external pure returns (uint256) { return 1; }
+}`)
+	contract := db.GetContract(types.MakeContractID("/tmp/T.sol", "A"))
+	if contract == nil {
+		t.Fatal("contract A was dropped")
+	}
+	names := map[string]bool{}
+	for _, fn := range contract.Functions {
+		names[fn.Name] = true
+	}
+	if !names["write"] || !names["afterKeyword"] {
+		t.Fatalf("functions after contextual local were dropped: %#v", names)
+	}
+	for _, diagnostic := range db.Diagnostics {
+		if types.IsParseLoss(diagnostic.Code) {
+			t.Fatalf("contextual local produced parse loss: %#v", diagnostic)
+		}
+	}
+}
 
 func TestNormalizeYulAssignmentsForParserPreservesProtectedTextAndOffsets(t *testing.T) {
 	input := "assembly { x := y }\n" +

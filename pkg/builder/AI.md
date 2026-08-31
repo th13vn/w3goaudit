@@ -137,10 +137,13 @@ Source-location helpers shared by `ast_builder.go` (v0.4).
   fields remain available, both columns are omitted, and exactly one durable
   `location.invalid` diagnostic is recorded for that source file.
 
-Depends on `github.com/th13vn/solast-go` **v0.1.7**, which added `Loc`/`Range`
-accessors to call/member/index postfix expressions — the source of call-site
+Depends on `github.com/th13vn/solast-go` **v0.1.11**. The v0.1.7 location
+accessors remain the source of call-site
 `Col`/`Byte` on `types.FunctionCall`/`types.CallEdge` (see
-[`pkg/types/AI.md`](../types/AI.md#callgraphgo)).
+[`pkg/types/AI.md`](../types/AI.md#callgraphgo)); v0.1.11 additionally makes
+local-declaration lookahead accept contextual-keyword names such as
+`UserInfo storage from = ...`, preventing tolerant-parser desynchronization and
+parse-loss diagnostics that would otherwise hide later functions.
 
 ### ast_builder.go
 Builds simplified AST trees for function bodies.
