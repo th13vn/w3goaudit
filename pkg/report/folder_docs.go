@@ -157,19 +157,36 @@ func FormatFolderReadme(tool ToolMeta, summary *SummaryReport, findings []*engin
 	c := countBySeverity(findings)
 	fmt.Fprintf(&sb, "**%d findings** — %d critical, %d high, %d medium, %d low, %d info.\n\n",
 		len(findings), c["CRITICAL"], c["HIGH"], c["MEDIUM"], c["LOW"], c["INFO"])
-	renderSeverityCounts(&sb, findings)
 	renderAnalysisStatus(&sb, summary)
+	renderProjectMetrics(&sb, summary)
+
+	sb.WriteString("## Priority Findings\n\n")
+	groups := sortedFindingGroups(findings)
+	anchors := buildFindingAnchorIndex(findings)
+	limit := len(groups)
+	if limit > 10 {
+		limit = 10
+	}
+	if limit == 0 {
+		sb.WriteString("_No detector produced a finding. This does not certify that the project is safe._\n\n")
+	} else {
+		for _, group := range groups[:limit] {
+			fmt.Fprintf(&sb, "- [%s: %s](audit.md#%s) — %d occurrence(s)\n", group.Severity, group.Title, anchors[group.Key], len(group.Findings))
+		}
+		if remaining := len(groups) - limit; remaining > 0 {
+			fmt.Fprintf(&sb, "- [%d more finding group(s)](audit.md#security-findings)\n", remaining)
+		}
+		sb.WriteString("\n")
+	}
 
 	sb.WriteString("## Contents\n\n")
 	sb.WriteString("| File | What's inside |\n")
 	sb.WriteString("|------|---------------|\n")
-	sb.WriteString("| [findings.md](findings.md) | Full security findings, severity-sorted, with reachability traces and fixes |\n")
-	sb.WriteString("| [summary.md](summary.md) | Metrics, findings-by-severity, and rules-hit tables |\n")
-	sb.WriteString("| [overview.md](overview.md) | Project metrics and the in-scope contract index |\n")
+	sb.WriteString("| [audit.md](audit.md) | Consolidated findings, evidence, project surface, and contract index |\n")
 	sb.WriteString("| [results.sarif](results.sarif) | SARIF 2.1.0 for CI / GitHub Code Scanning |\n")
-	sb.WriteString("| [contracts/](contracts/) | Per-contract detail (README, state-changes, workflows) mirroring source paths |\n")
+	sb.WriteString("| [Contract reports](audit.md#contract-surface-index) | One architecture, state, interaction, and workflow deep dive per main contract |\n")
 	sb.WriteString("| [data/diagnostics.json](data/diagnostics.json) | Analysis completeness and durable diagnostics |\n")
-	sb.WriteString("| [data/](data/) | Machine-readable output (manifest, findings, overview, diagnostics, database, navigation) |\n")
+	sb.WriteString("| [data/manifest.json](data/manifest.json) | Stable machine-readable discovery index |\n")
 	sb.WriteString("| run.log | Full scan log |\n")
 	sb.WriteString("\n")
 

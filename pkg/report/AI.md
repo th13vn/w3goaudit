@@ -167,6 +167,21 @@ into a navigable tree):
 - Helpers: `contractFolderRel(projectRoot, mc)` (source-mirroring folder path),
   `findingsForContract`, `renderProjectMetrics`, `renderSeverityCounts`.
 
+### project_docs.go
+
+`FormatAuditMarkdown(tool, summary, findings, db)` is the consolidated
+project-level auditor report. It owns executive summary, scan completeness and
+limitations, metrics, the full shared finding renderer, rules hit, a bounded
+contract surface index, state/interaction aggregates, and machine-artifact
+links. It links to contract deep dives rather than duplicating workflows.
+
+Finding groups use the existing grouping key and gain deterministic
+`finding-<slug>-<sha256-prefix>` anchors. `FormatFindingsAsMarkdown` retains its
+standalone SDK meaning and shares the same body renderer, so reachability,
+related sites, source excerpts, fixes, and references have one implementation.
+The folder `README.md` is a bounded landing page with at most ten priority
+finding groups and direct navigation to `audit.md`.
+
 ### manifest.go
 
 `BuildManifestAt(now, tool, summary, findings, contractRefs, db, html)` →

@@ -1,6 +1,8 @@
 package report
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"path/filepath"
 	"sort"
@@ -16,7 +18,6 @@ import (
 // is produced by SummaryReport.ToMarkdown (see markdown.go).
 func FormatFindingsAsMarkdown(findings []*engine.Finding, db *types.Database) string {
 	var sb strings.Builder
-	projectRoot := reportRootFromDB(db)
 
 	sb.WriteString("# Security Findings — W3GoAudit\n\n")
 	sb.WriteString("**Summary**\n\n")
@@ -43,92 +44,7 @@ func FormatFindingsAsMarkdown(findings []*engine.Finding, db *types.Database) st
 	sb.WriteString(fmt.Sprintf("Functions:          %d\n", stats.TotalFunctions))
 	sb.WriteString("```\n\n")
 
-	// Group findings by TemplateID (same issue across multiple sites).
-	grouped := groupFindings(findings)
-
-	// Render highest severity first; UNKNOWN (typo'd severities) is appended so
-	// such findings still appear instead of silently vanishing.
-	issueCounter := 1
-
-	for _, severity := range renderSeverityOrder(grouped) {
-		groups, ok := grouped[severity]
-		if !ok || len(groups) == 0 {
-			continue
-		}
-		sortGroups(groups)
-
-		for _, group := range groups {
-			// Header: ## Severity-N — Title
-			sb.WriteString(fmt.Sprintf("## %s-%d — %s\n\n", severity, issueCounter, group.Title))
-			issueCounter++
-
-			// Metadata block.
-			sb.WriteString(fmt.Sprintf("- **Severity:** `%s`\n", severity))
-			if group.Findings[0].Confidence != "" {
-				sb.WriteString(fmt.Sprintf("- **Confidence:** `%s`\n", group.Findings[0].Confidence))
-			}
-			sb.WriteString(fmt.Sprintf("- **Template:** `%s`\n", group.TemplateID))
-			sb.WriteString(fmt.Sprintf("- **Locations:** %d occurrence(s)\n", len(group.Findings)))
-			for _, f := range group.Findings {
-				sb.WriteString(fmt.Sprintf("  - `%s`\n", formatLocation(projectRoot, f)))
-			}
-			sb.WriteString("\n")
-
-			// Description.
-			sb.WriteString("### Description\n\n")
-			if group.Message != "" {
-				sb.WriteString(group.Message + "\n\n")
-			} else {
-				sb.WriteString("_No description available._\n\n")
-			}
-
-			// Collapsible code sections per location.
-			for _, f := range group.Findings {
-				location := formatLocation(projectRoot, f)
-				sb.WriteString(fmt.Sprintf("<details>\n<summary>%s</summary>\n\n", location))
-				sb.WriteString(renderFindingTraceMarkdown(projectRoot, f))
-				sb.WriteString(renderRelatedLocationsMarkdown(projectRoot, f, db))
-				if len(f.Related) == 0 {
-					// Use a fence longer than any backtick run in the excerpt so
-					// source containing ``` cannot break out of the code block.
-					code := extractCodeForFinding(f, 3, db)
-					fence := mdFence(code)
-					sb.WriteString(fence + "solidity\n")
-					sb.WriteString(code)
-					if !strings.HasSuffix(code, "\n") {
-						sb.WriteString("\n")
-					}
-					sb.WriteString(fence + "\n\n")
-				}
-				sb.WriteString("</details>\n\n")
-			}
-
-			// Recommendation — uses template's own text, not a generic placeholder.
-			sb.WriteString("### Recommendation\n\n")
-			if group.Recommendation != "" {
-				sb.WriteString(group.Recommendation + "\n\n")
-			} else {
-				sb.WriteString("Review the code at the specified locations and apply appropriate security measures.\n\n")
-			}
-
-			// Suggested fix (optional structured block from the template).
-			if group.Fix != "" {
-				sb.WriteString("### Suggested Fix\n\n")
-				sb.WriteString(group.Fix + "\n\n")
-			}
-
-			// References (optional).
-			if len(group.References) > 0 {
-				sb.WriteString("### References\n\n")
-				for _, ref := range group.References {
-					sb.WriteString(fmt.Sprintf("- %s\n", ref))
-				}
-				sb.WriteString("\n")
-			}
-
-			sb.WriteString("---\n\n")
-		}
-	}
+	sb.WriteString(renderFindingsMarkdownGroups(findings, db, 2, nil))
 
 	return sb.String()
 }
@@ -209,6 +125,7 @@ func countBySeverity(findings []*engine.Finding) map[string]int {
 // finding in the group; all findings in a group share the same TemplateID, so
 // these are guaranteed identical.
 type GroupedFinding struct {
+	Key            string
 	TemplateID     string
 	Title          string
 	Severity       string
@@ -235,13 +152,7 @@ func groupFindings(findings []*engine.Finding) map[string][]*GroupedFinding {
 	for _, f := range findings {
 		sev := normalizeSeverity(f.Severity)
 
-		key := f.TemplateID
-		if key == "" {
-			// Fall back to a synthetic key so empty-TemplateID findings don't
-			// silently collapse into a single bogus group.
-			key = fmt.Sprintf("__synthetic__|%s|%s|%s|%s|%d",
-				sev, f.Title, f.Location.File, f.Location.Function, f.Location.Line)
-		}
+		key := findingGroupKey(f)
 		if group, exists := issueMap[key]; exists {
 			// Add to existing group
 			group.Findings = append(group.Findings, f)
@@ -253,6 +164,7 @@ func groupFindings(findings []*engine.Finding) map[string][]*GroupedFinding {
 			}
 
 			group := &GroupedFinding{
+				Key:            key,
 				TemplateID:     f.TemplateID,
 				Title:          title,
 				Severity:       sev,
@@ -268,6 +180,99 @@ func groupFindings(findings []*engine.Finding) map[string][]*GroupedFinding {
 	}
 
 	return result
+}
+
+func findingGroupKey(f *engine.Finding) string {
+	if f.TemplateID != "" {
+		return f.TemplateID
+	}
+	return fmt.Sprintf("__synthetic__|%s|%s|%s|%s|%d",
+		normalizeSeverity(f.Severity), f.Title, f.Location.File, f.Location.Function, f.Location.Line)
+}
+
+func buildFindingAnchorIndex(findings []*engine.Finding) map[string]string {
+	keys := make(map[string]string)
+	for _, f := range findings {
+		key := findingGroupKey(f)
+		if _, ok := keys[key]; ok {
+			continue
+		}
+		digest := sha256.Sum256([]byte(key))
+		slug := sanitizeName(f.TemplateID)
+		if f.TemplateID == "" {
+			slug = "anonymous"
+		}
+		keys[key] = "finding-" + strings.ToLower(slug) + "-" + hex.EncodeToString(digest[:8])
+	}
+	return keys
+}
+
+func renderFindingsMarkdownGroups(findings []*engine.Finding, db *types.Database, headingLevel int, anchors map[string]string) string {
+	if len(findings) == 0 {
+		return "_No detector produced a finding. This does not certify that the project is safe._\n\n"
+	}
+	var sb strings.Builder
+	projectRoot := reportRootFromDB(db)
+	grouped := groupFindings(findings)
+	issueCounter := 1
+	for _, severity := range renderSeverityOrder(grouped) {
+		groups := grouped[severity]
+		sortGroups(groups)
+		for _, group := range groups {
+			if anchor := anchors[group.Key]; anchor != "" {
+				fmt.Fprintf(&sb, "<a id=\"%s\"></a>\n\n", anchor)
+			}
+			fmt.Fprintf(&sb, "%s %s-%d — %s\n\n", strings.Repeat("#", headingLevel), severity, issueCounter, group.Title)
+			issueCounter++
+			fmt.Fprintf(&sb, "- **Severity:** `%s`\n", severity)
+			if group.Findings[0].Confidence != "" {
+				fmt.Fprintf(&sb, "- **Confidence:** `%s`\n", group.Findings[0].Confidence)
+			}
+			fmt.Fprintf(&sb, "- **Template:** `%s`\n- **Locations:** %d occurrence(s)\n", group.TemplateID, len(group.Findings))
+			for _, f := range group.Findings {
+				fmt.Fprintf(&sb, "  - `%s`\n", formatLocation(projectRoot, f))
+			}
+			fmt.Fprintf(&sb, "\n%s Description\n\n", strings.Repeat("#", headingLevel+1))
+			if group.Message == "" {
+				sb.WriteString("_No description available._\n\n")
+			} else {
+				sb.WriteString(group.Message + "\n\n")
+			}
+			for _, f := range group.Findings {
+				fmt.Fprintf(&sb, "<details>\n<summary>%s</summary>\n\n", formatLocation(projectRoot, f))
+				sb.WriteString(renderFindingTraceMarkdown(projectRoot, f))
+				sb.WriteString(renderRelatedLocationsMarkdown(projectRoot, f, db))
+				if len(f.Related) == 0 {
+					code := extractCodeForFinding(f, 3, db)
+					fence := mdFence(code)
+					sb.WriteString(fence + "solidity\n" + code)
+					if !strings.HasSuffix(code, "\n") {
+						sb.WriteString("\n")
+					}
+					sb.WriteString(fence + "\n\n")
+				}
+				sb.WriteString("</details>\n\n")
+			}
+			fmt.Fprintf(&sb, "%s Recommendation\n\n", strings.Repeat("#", headingLevel+1))
+			if group.Recommendation == "" {
+				sb.WriteString("Review the code at the specified locations and apply appropriate security measures.\n\n")
+			} else {
+				sb.WriteString(group.Recommendation + "\n\n")
+			}
+			if group.Fix != "" {
+				fmt.Fprintf(&sb, "%s Suggested Fix\n\n%s\n\n", strings.Repeat("#", headingLevel+1), group.Fix)
+			}
+			if len(group.References) > 0 {
+				fmt.Fprintf(&sb, "%s References\n\n", strings.Repeat("#", headingLevel+1))
+				for _, ref := range group.References {
+					fmt.Fprintf(&sb, "- %s\n", ref)
+				}
+				sb.WriteString("\n")
+			}
+			sb.WriteString("---\n\n")
+		}
+	}
+	return sb.String()
 }
 
 // formatLocation formats a finding location as a string
