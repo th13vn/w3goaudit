@@ -182,6 +182,17 @@ related sites, source excerpts, fixes, and references have one implementation.
 The folder `README.md` is a bounded landing page with at most ten priority
 finding groups and direct navigation to `audit.md`.
 
+### contract_docs.go
+
+`FormatContractReportMarkdown(contract, findings, db, gitInfo, projectRoot,
+rootPrefix, reportPath)` renders one deep dive per main contract. It links compact
+finding rows to the shared audit anchors, reuses the existing architecture and
+state/workflow renderers, and adds a deterministic projection of exact call
+graph interactions reachable from recorded entry functions. Low-level and
+unresolved targets are labeled rather than treated as exact. Exact
+`file#Contract` resolution is mandatory; unavailable database evidence is
+reported explicitly instead of falling back to a same-named contract.
+
 ### manifest.go
 
 `BuildManifestAt(now, tool, summary, findings, contractRefs, db, html)` →
