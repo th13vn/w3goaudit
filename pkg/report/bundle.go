@@ -400,30 +400,6 @@ func sanitizeName(s string) string {
 	return s
 }
 
-// workflowFileNames assigns "<entryFn>.md" to each entry function, appending the
-// 4-byte selector hash to disambiguate overloaded names within one contract.
-func workflowFileNames(fns []*FunctionSummary) []string {
-	counts := make(map[string]int)
-	for _, fn := range fns {
-		counts[fn.Name]++
-	}
-	names := make([]string, len(fns))
-	used := make(map[string]bool)
-	for i, fn := range fns {
-		base := sanitizeName(fn.Name)
-		if counts[fn.Name] > 1 && fn.Signature != "" {
-			base = sanitizeName(fn.Name + "__" + fn.Signature)
-		}
-		name := base + ".md"
-		for n := 2; used[name]; n++ {
-			name = fmt.Sprintf("%s__%d.md", base, n)
-		}
-		used[name] = true
-		names[i] = name
-	}
-	return names
-}
-
 // writeFile writes content to path, creating parent dirs.
 func writeFile(path, content string) error {
 	if dir := filepath.Dir(path); dir != "" && dir != "." {

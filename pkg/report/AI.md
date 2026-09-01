@@ -3,10 +3,10 @@
 ## Purpose
 
 Generates the complete scan result folder plus standalone Markdown, HTML, JSON,
-console, and **SARIF 2.1.0** renderers. The bundle has separate landing,
-summary, overview-index, findings, SARIF, machine-data, and per-contract workflow
-artifacts; standalone SDK formatters remain available where a split
-overview/findings representation is useful.
+console, and **SARIF 2.1.0** renderers. The canonical bundle has a bounded
+landing page, one consolidated project audit, SARIF and machine data, plus one
+deep-dive report per main contract; standalone SDK formatters remain available
+where a split overview/findings representation is useful.
 
 ## Reachability-aware findings — quick map
 
