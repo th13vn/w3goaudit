@@ -52,17 +52,15 @@ Example console output:
   🟠 HIGH (65 findings)
   1. Arbitrary transferFrom Call
   2. Unchecked ERC20 transfer / transferFrom Return Value
-  ... (titles only on console; full detail in findings.md, or use --verbose)
+  ... (titles only on console; full detail in audit.md, or use --verbose)
 
 📂 Results written to: ./contracts-audit
 ```
 
-Results land in a folder — `README.md` (landing page), `summary.md`,
-`overview.md`, `findings.md`, `results.sarif`, `run.log`, a machine-readable
-`data/` folder (JSON + DB + manifest index), and a `contracts/` tree (one
-sub-folder per main contract, mirroring source paths) with per-entry workflow
-files and a state-change report. See [Result folder layout](#result-folder-layout).
-`overview.md` is the report index and links to detailed artifacts.
+Results land in a folder with bounded `README.md`, consolidated `audit.md`,
+`results.sarif`, `run.log`, unchanged machine-readable `data/`, and one
+Markdown deep dive per main contract under `contracts/`. `--html` adds one
+self-contained `audit.html`. See [Result folder layout](#result-folder-layout).
 
 ---
 
@@ -85,14 +83,13 @@ files and a state-change report. See [Result folder layout](#result-folder-layou
   `charOffset`/`charLength`. These are not LSP positions; LSP lines and
   characters are zero-based and commonly use UTF-16 code units.
 - **WQL Templates** - Powerful query language for security pattern matching, with load-time validation (regex, preset names, filter/match placement) so typos fail fast instead of producing silent zero-finding scans. Includes a source-scope `regex` matcher for rare raw-source predicates and contract-scope AST matching for same-contract local/inherited combination rules.
-- **Result Folder** - One opinionated folder per scan: a `README.md` landing page, `summary.md`, `overview.md` (metrics + in-scope contract index), `findings.md`, always-on `results.sarif` + `run.log`, a machine-readable `data/` (`manifest.json`, reusable `database.json`, findings/overview, always-on `diagnostics.json`, plus nav/explorer/xref data for the editor extension), and a `contracts/` tree mirroring source paths. Opt-in **fully offline** HTML mirror with `--html` (graph library embedded, no CDN request).
+- **Result Folder** - One opinionated folder per scan: bounded `README.md`, consolidated `audit.md`, always-on `results.sarif` + `run.log`, unchanged machine-readable `data/` (`manifest.json`, reusable `database.json`, findings/overview, always-on `diagnostics.json`, plus nav/explorer/xref data for the editor extension), and one collision-safe Markdown deep dive per main contract under `contracts/`. Opt-in fully offline `audit.html` with `--html`.
 - **Agent-ready deterministic evidence** - The scanner remains offline and
   model-independent. A future external AI Assistant can consume findings, the
   database, exact source locations, reachability, navigation, cross-references,
   extraction bundles, and workflow artifacts without changing official scan
   results.
-- **Per-Entry Workflow Files** - For every entry function, a self-contained context block (signature, auth / access control, guards & checks, branch conditions, transitive state effects, Mermaid call workflow) — built to be fed to a human or an AI auditor.
-- **State-Change Matrix** - Per contract, each state variable mapped to the functions that write it and the entry points that reach a writer (reverse call-graph walk).
+- **Per-Contract Deep Dives** - One Markdown file per main contract combines architecture, findings, exact external interactions, the state-change matrix, and collapsible entry workflows for a human or external AI auditor.
 - **Self-Provisioning Templates** - Downloads the latest [`w3goaudit-templates`](https://github.com/th13vn/w3goaudit-templates) release on first run (nuclei-style, no git clone), refreshable with `--update-templates`; embedded official pack is the always-available offline fallback. Extraction is size/file-count capped and installed with a rollback-safe staged directory swap. The GitHub zipball is TLS-authenticated but not checksum/signature verified.
 - **Reachability-Aware Findings** - Every finding can carry the full call chain from an externally-callable entry down to the function that hosts the dangerous statement: structured `reachability.steps[]` + `entryPoint` (auditor's fix-here pointer) + `primaryAst` in JSON, `relatedLocations` in SARIF, dotted-level trace block in Markdown / HTML, `↳ via …` continuation line on the `--verbose` console. Multi-site findings also carry `related[]`, and Markdown renders all matched sites with full function context.
 - **SARIF 2.1.0** - Always emitted (`results.sarif`) for GitHub Code Scanning, with portable relative URIs + `srcRoot`; fail-closed template loading, `NO_COLOR`-aware console.
@@ -166,10 +163,9 @@ human or AI auditor:
 
 ```
 <output>/
-├── README.md              # landing page: counts + links to everything
-├── summary.md             # metrics + findings-by-severity + rules-hit tables
-├── overview.md            # metrics + in-scope contract index (table, links into contracts/)
-├── findings.md            # human-readable findings
+├── README.md              # bounded landing page and priority links
+├── audit.md               # consolidated project audit and full findings
+├── audit.html             # optional self-contained offline mirror
 ├── results.sarif          # SARIF 2.1.0 (always)
 ├── run.log                # full verbose detail (always; replaces --log)
 ├── data/                  # machine-readable output
@@ -181,31 +177,31 @@ human or AI auditor:
 │   ├── nav.json           # flat symbol/caller/interface-impl index (extension)
 │   ├── explorer.json      # per-main-contract model: constants, storage, entry/getter fns
 │   └── xref.json          # precise xref: declarations[] + references[] (go-to-def / find-refs)
-└── contracts/             # one sub-tree per main contract, mirroring source paths
-    └── <relative-source-path-without-ext>/
-        └── <ContractName>/
-            ├── README.md          # per-contract landing: findings + architecture detail
-            ├── state-changes.md   # state var → Written By (fns) → Reachable From (entries)
-            └── workflows/
-                ├── <entryFn>.md             # one file per entry function
-                └── <entryFn>__<selector>.md # overloads disambiguated by 4-byte selector
+└── contracts/
+    └── <source-path>__<Contract>.md # findings, architecture, state, interactions, workflows
 ```
+
+The canonical contract-report pattern is
+`contracts/<source-path>__<Contract>.md`. Portable component sanitation, length
+limits, and deterministic identity suffixes prevent collisions.
 
 The default folder name is the scanned project dir name (or `.sol` file stem);
 `-o/--output` overrides it, and `-audit` is appended if the default would collide
 with the scanned directory. The resolved output is rejected if it equals,
 contains, or is contained by the selected source scope, including through a
 symlink alias. This check occurs before `run.log` or any report file is created.
-Each `workflows/<entryFn>.md` records the signature
-(selector, 4-byte, payable, version), auth / access control (modifiers,
-`msg.sender` checks, ⚠ Unprotected, ⚠ tx.origin), guards/checks, branch
-conditions, transitive state effects, and a Mermaid call-workflow diagram.
+Each contract report records exact source identity, linked findings,
+architecture and inheritance, state writers and reaching entries, exact
+external interactions, and a collapsible workflow for every entry function.
 
 `data/manifest.json` distinguishes the detected `projectRoot` from the original
 `scanTarget` (`target` is the compatibility alias), separates declaration
 category counts, exposes `analysisComplete`/diagnostic counts, and indexes every
 emitted artifact. Finding/content ordering is deterministic; generated
 timestamps vary unless SDK callers inject a fixed report/bundle clock.
+The schema version 2.0.0 and all editor-facing data shapes remain unchanged.
+Canonical discovery uses `files.audit`, optional `files.auditHtml`, and
+`contracts[].report`; v0.5.x retains compatibility aliases to the same files.
 
 ---
 
@@ -486,7 +482,7 @@ w3goaudit build test-data/core/build-database/ -o test-db.json --verbose
 # Security scan → writes a test-data/security result folder
 w3goaudit test-data/security/ --template templates/official/ -o scan-report/
 
-# Project overview (always part of the scan — see overview.md in the folder)
+# Project audit (always part of the scan — see audit.md in the folder)
 w3goaudit test-data/core/build-database/ -o overview-out/
 
 # Competitive quality gate (maintainer-only): the benchmark harness under

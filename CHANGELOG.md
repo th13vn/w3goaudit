@@ -4,6 +4,31 @@ All notable changes to w3goaudit are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/). Output changes note the `data/*.json`
 `schemaVersion`.
 
+## v0.5.0 - 2026-09-01
+
+Human-report consolidation release. The scanner remains deterministic and
+model-independent, the machine output schema 2.0.0 and `data/*.json` shapes are
+preserved, and existing SDK formatters remain callable. This local release
+metadata is prepared without a tag or publication.
+
+### Changed: one navigable audit instead of fragmented human files
+
+- The canonical result folder now contains bounded `README.md`, consolidated
+  `audit.md`, always-on SARIF and log files, unchanged machine data, and one
+  collision-safe Markdown deep dive per main contract under `contracts/`.
+- `--html` emits one self-contained `audit.html` with full escaped finding
+  evidence, metrics, analysis limitations, rules hit, contract and state
+  summaries, safe links, offline assets, accessibility, and print styling.
+- Rescans remove split Markdown/HTML, fragmented contract folders, legacy AI
+  artifacts, and a stale manifest before writing. All paths are planned before
+  mutation, and the new manifest is written last.
+- `files.audit`, optional `files.auditHtml`, and `contracts[].report` are the
+  canonical discovery fields. During v0.5.x, manifest compatibility aliases
+  `summary`, `overview`, and `findings` point to `audit.md`; HTML aliases point
+  to `audit.html`.
+- W3Solidity compatibility remains through unchanged
+  `files.data.{nav,explorer,findings,xref}` paths and structured artifacts.
+
 ## v0.4.3 - 2026-07-31
 
 Precision release, cut from real-corpus review of the v0.4.2 output. No CLI, SDK,

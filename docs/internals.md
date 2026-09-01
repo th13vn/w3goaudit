@@ -730,22 +730,24 @@ for MRO and callee resolution, but reachability files prefer each exact
 
 ```
 <out>/
-├── README.md                   # FormatFolderReadme (landing page)
-├── summary.md                  # FormatSummaryMarkdown (metrics + rules-hit)
-├── overview.md                 # FormatOverviewMarkdown (metrics + contract index)
-├── findings.md                 # FormatFindingsAsMarkdown
+├── README.md                   # bounded landing page
+├── audit.md                    # FormatAuditMarkdown, full project audit
+├── audit.html                  # FormatAuditHTML, only with --html
 ├── results.sarif               # FormatFindingsAsSARIF (always)
 ├── run.log                     # CLI tees verbose logs here
-├── data/{manifest.json, database.json, findings.json, overview.json, diagnostics.json, nav.json, explorer.json, xref.json}
-├── contracts/<rel-src-path-no-ext>/<MainContract>/
-│   ├── README.md               # FormatContractReadme (findings + detail)
-│   ├── state-changes.md        # reachability/state-write matrix
-│   └── workflows/<entryFn>.md  # per-entry-point context
-└── overview.html + findings.html   # only with --html
+├── data/
+│   ├── database.json, findings.json, overview.json, diagnostics.json
+│   ├── nav.json, explorer.json, xref.json
+│   └── manifest.json             # written last
+└── contracts/<rel-src-path-no-ext>__<MainContract>.md
+                                # FormatContractReportMarkdown
 ```
 
 Formatters:
-- **Markdown** (`FormatFindingsAsMarkdown`) — grouped by severity/template, one
+- **Canonical Markdown** (`FormatAuditMarkdown`) — project summary, all
+  findings, rules, contract and state indexes; contract reports combine
+  architecture, state, exact interactions, and workflows.
+- **Standalone Markdown** (`FormatFindingsAsMarkdown`) — grouped by severity/template, one
   `<details>` per occurrence, a dotted reachability trace block, and
   `renderRelatedLocationsMarkdown` ("All matched sites" + full-function excerpts).
 - **JSON** — additive structured fields (`reachability`, `entryPoint`,
@@ -767,8 +769,9 @@ legacy metadata searches exact runtime-MRO objects and succeeds only for one
 distinct selector at the known or unknown arity. Ambiguity is omitted.
 
 Determinism: function lists and "Defined in" groupings are sorted; Mermaid node
-IDs use FNV-64a (32-bit collided ~1% over 10k nodes); contract folders mirror
-source paths and overloaded workflow files use `<fn>__<selector>.md`.
+IDs use FNV-64a (32-bit collided ~1% over 10k nodes); all contract report paths
+are planned before mutation from exact source/contract identity and receive
+deterministic SHA-256 suffixes only when sanitized candidates collide.
 `BundleOptions.Now` supplies one UTC timestamp to every bundle artifact; without
 a fixed clock, deterministic content still has intentionally varying timestamps.
 

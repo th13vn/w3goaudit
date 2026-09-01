@@ -11,7 +11,7 @@ import (
 
 // Version information
 var (
-	Version   = "0.4.3"
+	Version   = "0.5.0"
 	BuildTime = "dev"
 )
 
@@ -67,7 +67,7 @@ func init() {
 	rootCmd.Flags().StringVarP(&outputPath, "output", "o", "", "Result folder path (default: a folder named after the scanned project/file)")
 	rootCmd.Flags().StringVarP(&dbPath, "db", "d", "", "Load a pre-built database JSON instead of parsing source")
 	rootCmd.Flags().BoolVarP(&verbose, "verbose", "v", false, "Show detailed progress on the terminal (full detail is always written to run.log)")
-	rootCmd.Flags().BoolVarP(&htmlOutput, "html", "H", false, "Also emit overview.html + findings.html into the result folder")
+	rootCmd.Flags().BoolVarP(&htmlOutput, "html", "H", false, "Also emit audit.html into the result folder")
 	rootCmd.Flags().BoolVarP(&stdoutOnly, "stdout", "q", false, "Print the summary to the terminal only; write no files")
 	rootCmd.Flags().BoolVar(&noColor, "no-color", false, "Disable ANSI color in console output (also honored: NO_COLOR env)")
 	rootCmd.Flags().BoolVar(&ignoreInvalidTemplates, "ignore-invalid-templates", false, "Skip invalid templates in a template directory instead of failing the scan")

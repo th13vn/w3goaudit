@@ -68,6 +68,9 @@ The removed scanner-side AI review key is rejected explicitly instead of being
 silently ignored. AI review configuration belongs to a future external
 Assistant workflow, not the scanner home.
 
+`output.html: true` adds the single self-contained `audit.html` report. The
+scanner no longer emits split `overview.html` and `findings.html` files.
+
 ## Consumers
 
 - `cmd/w3goaudit/config_cli.go` — applies config defaults to one immutable scan

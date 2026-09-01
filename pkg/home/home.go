@@ -164,7 +164,7 @@ templates:
   repo: %s   # releases source for --update-templates
 output:
   base_dir: ""                     # "" = current dir; else write result folders here
-  html: false                      # also emit overview.html + findings.html
+  html: false                      # also emit audit.html
 scan:
   min_severity: ""                 # default severity threshold (critical|high|medium|low|info)
   strict_imports: false            # fail instead of continuing when an import cannot be resolved

@@ -389,15 +389,16 @@ func MakeFunctionID(filePath, contractName, funcSelector string) string
 func NewGenerator(db *types.Database) *Generator
 func NewGeneratorWithOptions(db *types.Database, opts GeneratorOptions) *Generator
 func (g *Generator) GenerateSummary() *SummaryReport
+func FormatAuditMarkdown(tool ToolMeta, summary *SummaryReport, findings []*engine.Finding, db *types.Database) string
+func FormatAuditHTML(tool ToolMeta, summary *SummaryReport, findings []*engine.Finding, db *types.Database) string
+func FormatContractReportMarkdown(contract *ContractSummary, findings []*engine.Finding, db *types.Database, gitInfo *GitInfo, projectRoot, rootPrefix, reportPath string) string
 func FormatFindingsAsMarkdown(findings []*engine.Finding, db *types.Database) string
 func FormatFindingsAsHTML(findings []*engine.Finding, db *types.Database) string
 func FormatFindingsAsSARIF(findings []*engine.Finding, tool ToolMeta, projectRoot string) (string, error)
 
-// WriteBundle renders the complete scan result folder (overview.md, findings.md,
-// results.sarif, data/{manifest,database,findings,overview,diagnostics,nav,explorer,xref}.json, and one
-// folder per main contract with state-changes.md + workflows/<entryFn>.md).
-// run.log is written separately by the CLI; HTML mirrors are added when
-// opts.HTML is set.
+// WriteBundle renders README.md, audit.md, results.sarif, unchanged machine
+// JSON, and one Markdown deep dive per main contract. run.log is CLI-owned;
+// opts.HTML adds only audit.html. The manifest is written last.
 func WriteBundle(dir string, db *types.Database, summary *SummaryReport,
     findings []*engine.Finding, tool ToolMeta, opts BundleOptions) error
 
@@ -416,6 +417,14 @@ func SeverityRank(severity string) int           // lower = more severe; unknown
 func SeverityAtLeast(severity, threshold string) bool
 func IsKnownSeverity(s string) bool
 ```
+
+`FormatAuditMarkdown`, `FormatAuditHTML`, and
+`FormatContractReportMarkdown` are the canonical consolidated renderers.
+`SummaryReport.ToMarkdown`, `SummaryReport.ToHTML`,
+`FormatFindingsAsMarkdown`, `FormatFindingsAsHTML`,
+`FormatSummaryMarkdown`, `FormatOverviewMarkdown`, and
+`FormatContractReadme` remain standalone compatibility APIs for existing SDK
+callers; `WriteBundle` no longer emits their former split files.
 
 **What It Does:**
 - Format findings as Markdown/HTML/SARIF/JSON

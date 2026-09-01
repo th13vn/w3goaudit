@@ -263,22 +263,20 @@ HTML mirror is opt-in via `--html`.
 ```mermaid
 graph TD
     A[Findings + Database + Summary] --> B[WriteBundle]
-    B --> C[overview.md / findings.md]
+    B --> C[audit.md / results.sarif / run.log]
     B --> D[results.sarif]
     B --> E[data/ database.json, findings.json, overview.json, diagnostics.json, manifest.json, nav.json, explorer.json, xref.json]
-    B --> F["per-contract: state-changes.md + workflows/&lt;entryFn&gt;.md"]
-    B -->|--html| G[overview.html / findings.html]
+    B --> F[one consolidated Markdown deep dive per main contract]
+    B -->|--html| G[audit.html]
     H[CLI] --> I[run.log: full verbose detail, always]
 ```
 
 **Top-level artifacts:**
-`overview.md` is the report index and links to detailed artifacts.
 
-- `overview.md` – the report index, with project metrics and links to detailed
-  per-contract artifacts
-- `findings.md` — severity-sorted findings with recommendation, fix,
-  references, per-occurrence reachability trace blocks, and `All matched sites`
-  blocks for multi-site findings
+- `README.md` – bounded landing page with analysis status, priority findings,
+  and navigation
+- `audit.md` – consolidated project report with all finding evidence, metrics,
+  rules, contract surface, state/interaction summary, and machine links
 - `results.sarif` — SARIF 2.1.0 (always)
 - `data/{database.json,findings.json,overview.json,diagnostics.json}` — machine-readable mirror;
   the canonical database lives only here and is reusable via `--db`
@@ -301,14 +299,10 @@ graph TD
   [docs/extension-output.md](./extension-output.md))
 - `run.log` — full verbose detail, always written by the CLI regardless of `--verbose`
 
-**Per-main-contract folders** (built using the Phase-7 effects):
-- `state-changes.md` — each state variable, the functions that write it, and the
-  entry points that reach a writer (reverse call-graph walk;
-  [state_matrix.go](../pkg/report/state_matrix.go))
-- `workflows/<entryFn>.md` — one self-contained context block per entry function:
-  signature (selector, 4-byte, payable, version), auth/access control (modifiers,
-  `msg.sender` checks, ⚠ Unprotected, ⚠ tx.origin), guards/checks, branch
-  conditions, transitive state effects, and a Mermaid call workflow
+**Per-main-contract report** (built using Phase-7 effects):
+- one consolidated Markdown deep dive per main contract under `contracts/`;
+  it combines findings, architecture, state matrix, exact external
+  interactions, and every entry workflow in collapsible sections
 
 **Output includes (across the artifacts):**
 - Severity grouping (CRITICAL → HIGH → MEDIUM → LOW → INFO)
@@ -431,7 +425,7 @@ bare `w3goaudit <path>` produces findings with no repository checkout.
   (`--severity` and `--min-severity` are mutually exclusive.)
 - `--include/-i` / `--exclude/-e <id-globs>` — narrow the reported findings by template ID.
 - `--list-templates/-l` — print the rule inventory that would run, then exit (no path needed).
-- `--html/-H` — also emit `overview.html` + `findings.html`; `--stdout/-q` prints the summary only and writes no files.
+- `--html/-H` — also emit audit.html; `--stdout/-q` prints the summary only and writes no files.
 
 The terminal shows staged progress (`▶ Reading sources`, `▶ Building database`,
 `▶ Scanning`, `▶ Writing report`), a summary header, findings, an unresolved-
@@ -455,9 +449,9 @@ graph LR
     E --> F[Engine + Report]
     F --> G[Console Summary]
     F --> H[Result Folder]
-    H --> I[overview.md / findings.md / results.sarif / run.log]
+    H --> I[audit.md / results.sarif / run.log]
     H --> J[data/ JSON]
-    H --> K[per-contract workflows + state-changes]
+    H --> K[one contract deep dive per main contract]
     H -->|--html| L[HTML mirror]
 ```
 
@@ -704,7 +698,7 @@ w3goaudit ./contracts/ \
 4. **Engine** iterates entry functions (scope: entrypoint)
 5. **Engine** verifies each function against template rules
 6. **Engine** creates findings for matches
-7. **Report** writes the `report/` result folder (overview, findings, SARIF, data/, per-contract workflows + state-changes)
+7. **Report** writes the `report/` result folder (README, consolidated audit, SARIF, data/, and one contract deep dive per main contract)
 8. **CLI** prints the terminal summary and captures full detail in `report/run.log`
 
 **Verbose output shows:**

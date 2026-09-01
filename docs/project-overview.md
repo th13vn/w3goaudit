@@ -18,9 +18,10 @@
 - Comprehensive call graph with recursive tracing
 - Per-function effects analysis (state writes, guards, access control)
 - WQL template-based vulnerability detection (`meta` plus one `query:` block)
-- Result-folder output: `overview.md`, `findings.md`, `results.sarif`, `run.log`, a machine-readable `data/`
-  (including extension-facing `nav.json`/`explorer.json`/`xref.json`), and per-main-contract workflow files + a
-  state-change matrix; opt-in HTML mirror
+- Result-folder output: README.md, audit.md, `results.sarif`, `run.log`, a
+  machine-readable `data/` (including extension-facing
+  `nav.json`/`explorer.json`/`xref.json`), and one Markdown deep dive per main
+  contract; Opt-in audit.html
 - Self-provisioning template home (`~/.w3goaudit`) with release download + embedded fallback
 - Project framework detection (Foundry, Hardhat, Truffle)
 
@@ -49,16 +50,16 @@
   file/line/column/byte locations
 
 **3. Reporting**
-- A single opinionated **result folder** per scan (overview, findings, SARIF, run.log, JSON data/)
-- `overview.md` is the report index and links to detailed artifacts
-- Per-entry-function workflow files (signature, auth, guards, branch conditions, state effects, call workflow)
-- A per-contract state-change matrix (state var → writers → reaching entry points)
+- A single opinionated **result folder** per scan with README.md, audit.md,
+  SARIF, run.log, JSON data, and one Markdown deep dive per main contract
+- Each contract deep dive combines findings, architecture, exact interactions,
+  state-change evidence, and collapsible entry workflows
 - An extension-facing data layer — `data/nav.json` (symbol navigation index),
   `data/explorer.json` (per-contract explorer model), and `data/xref.json`
   (precise cross-reference: declarations + bound references) — for the VSCode
   Solidity extension
 - Console output with color-coded severity and reachability traces
-- Opt-in HTML mirror with interactive visualizations
+- Opt-in audit.html, self-contained and offline
 
 ---
 
@@ -257,7 +258,8 @@ w3goaudit/
    `FunctionEffects`: the state variables it writes (with write kind), its guards
    (`require`/`assert`/`revert` and `if`/ternary branch conditions), and its auth
    facts (modifiers, inline `msg.sender` checks, `tx.origin` use, controlled vs
-   unprotected). These feed `state-changes.md` and the per-entry workflow files.
+   unprotected). These feed the State Changes and Entry-Point Workflows
+   sections of each consolidated contract report.
    Implementation: [pkg/builder/effects.go](../pkg/builder/effects.go)
 
 The Yul classifier in phase 2 now recognizes `create`, `create2`, `log0`–`log4`,
@@ -440,7 +442,7 @@ byte offsets.
 **Responsibility:** Format results and write the scan **result folder**.
 
 **Result folder** (`report.WriteBundle`, [pkg/report/bundle.go](../pkg/report/bundle.go)):
-- `overview.md`, `findings.md` — human-readable Markdown
+- `README.md`, `audit.md` — bounded landing and consolidated human audit
 - `results.sarif` — SARIF 2.1.0 (always)
 - `data/{database.json,findings.json,overview.json,diagnostics.json}` — machine-readable; the
   canonical database lives only here (reusable via `--db`)
@@ -458,18 +460,14 @@ byte offsets.
   the scanner's official findings.
   and schema-versioned like the rest of `data/` (see
   [docs/extension-output.md](./extension-output.md))
-- `contracts/<relative-source>/<MainContract>/state-changes.md` — per-contract state-change matrix built by
-  [pkg/report/state_matrix.go](../pkg/report/state_matrix.go): each state variable,
-  the functions that write it, and the entry points that reach a writer (reverse
-  call-graph walk)
-- `contracts/<relative-source>/<MainContract>/workflows/<entryFn>.md` — one self-contained context block per
-  entry function (signature, auth/access control, guards, branch conditions,
-  transitive state effects, Mermaid call workflow)
-- Contract folders mirror the source path, so duplicate names in different
-  files do not collide. Overloaded workflow names use
-  `<entryFn>__<selector>`. The complete `contracts/` tree is regenerated on
-  re-scan.
-- Opt-in `overview.html` + `findings.html` mirror (`--html`)
+- `contracts/<source-path>__<Contract>.md` — one exact-identity contract deep
+  dive combining findings, architecture, the state matrix from
+  [pkg/report/state_matrix.go](../pkg/report/state_matrix.go), external
+  interactions, and every entry workflow
+- Contract paths are planned before mutation with portable sanitation, length
+  bounds, and deterministic collision suffixes. The tree is regenerated on
+  rescan.
+- Opt-in `audit.html` mirror (`--html`)
 
 **Console:** color-coded summary header, findings grouped by severity with
 reachability traces, an unresolved-references section, and the result-folder
@@ -704,14 +702,11 @@ function _processWithdraw() internal {
 
 
 **Reporting**
-- One **result folder** per scan: `overview.md`, `findings.md`, always-on
-  `results.sarif` + `run.log`, a `data/` (database.json + findings.json +
-  overview.json + diagnostics.json + manifest/nav/explorer), and one sub-folder
-  per main contract
-- Per-entry workflow files (signature, auth, guards, branches, state effects,
-  call workflow) and a per-contract state-change matrix
+- One **result folder** per scan: README.md, audit.md, always-on
+  `results.sarif` + `run.log`, unchanged `data/`, and one Markdown deep dive per
+  main contract
 - Console with severity icons and reachability traces
-- Opt-in HTML mirror (`--html`) with interactive vis.js call graphs
+- Opt-in audit.html (`--html`), offline and self-contained
 - **Reachability-aware findings** — every finding can carry the call chain
   from an externally-callable entry down to the function that hosts the
   dangerous statement. Formats:

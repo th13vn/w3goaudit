@@ -128,7 +128,7 @@ the full results are written to a **result folder** (see
 3. **Findings** — grouped by severity. The console shows **titles only** (one
    line per finding) to stay within terminal width; full per-finding detail
    (location, reachability trace, related matched sites, message,
-   recommendation) is written to the result folder (`findings.md`,
+   recommendation) is written to the result folder (`audit.md`,
    `data/findings.json`). Re-run with
    `--verbose` to tee the full detail to the terminal as well.
 4. **⚠ Unresolved references** — bases/imports the builder could not resolve (when any)
@@ -162,7 +162,7 @@ Every flag has a long and short form.
 | `--include`                  | `-i`  | string | Comma-separated template-ID glob(s); only matching findings are reported                                                                                         |
 | `--exclude`                  | `-e`  | string | Comma-separated template-ID glob(s); matching findings are suppressed                                                                                            |
 | `--list-templates`           | `-l`  | bool   | List the templates that would run (id, severity, confidence, title) and exit — **no path needed**                                                                |
-| `--html`                     | `-H`  | bool   | Also emit `overview.html` + `findings.html` into the result folder                                                                                               |
+| `--html`                     | `-H`  | bool   | Also emit audit.html into the result folder                                                                                                                      |
 | `--stdout`                   | `-q`  | bool   | Print the summary to the terminal only; write **no** files                                                                                                       |
 | `--no-color`                 |       | bool   | Disable ANSI color in console output; `NO_COLOR` env always wins                                                                                                 |
 | `--ignore-invalid-templates` |       | bool   | Skip invalid templates in a directory instead of failing the scan                                                                                                |
@@ -310,28 +310,27 @@ w3goaudit ./contracts/ -v
   (full detail in the result folder; re-run with --verbose for console detail)
 
 📂 Results written to: ./contracts-audit
-   README.md · summary.md · overview.md · findings.md · results.sarif · run.log
+   README.md · audit.md · results.sarif · run.log
    data/ (manifest.json, findings.json, overview.json, diagnostics.json, database.json, nav.json, explorer.json, xref.json)
-   contracts/<path>/<Contract>/ (README.md, state-changes.md, workflows/)
+   contracts/<source-path>__<Contract>.md
 ```
 
 ---
 
 ### Result Folder Layout
 
-Every scan (unless `--stdout/-q`) writes an opinionated result folder, optimized
-to be fed to a human or an AI auditor:
+Every scan (unless `--stdout/-q`) writes an opinionated result folder for a
+human auditor and stable machine consumers:
 
 ```
 <output>/
-├── README.md              # landing page: counts + links to everything
-├── summary.md             # metrics + findings-by-severity + rules-hit tables
-├── overview.md            # metrics + in-scope contract index (table, links into contracts/)
-├── findings.md            # human-readable findings
+├── README.md              # bounded landing page and priority links
+├── audit.md               # consolidated project audit and full findings
+├── audit.html             # only with --html
 ├── results.sarif          # SARIF 2.1.0 (always)
 ├── run.log                # full verbose detail (always; replaces --log)
 ├── data/                  # machine-readable output
-│   ├── manifest.json      # index: tool, scope, counts, file list, per-contract refs
+│   ├── manifest.json      # machine discovery index, written last
 │   ├── database.json      # canonical DB — reuse via --db data/database.json
 │   ├── findings.json
 │   ├── overview.json
@@ -339,57 +338,47 @@ to be fed to a human or an AI auditor:
 │   ├── nav.json           # extension navigation index (symbols, callers, interfaceImpl)
 │   ├── explorer.json      # extension explorer model (per-contract constants/storage/entries/getters)
 │   └── xref.json          # extension cross-reference index (declarations[] + references[])
-└── contracts/             # one sub-tree per main contract, mirroring source paths
-    └── <relative-source-path-without-ext>/
-        └── <ContractName>/
-            ├── README.md          # per-contract landing: findings + architecture detail
-            ├── state-changes.md   # state var → Written By (fns) → Reachable From (entries)
-            └── workflows/
-                ├── <entryFn>.md             # one file per entry function
-                └── <entryFn>__<selector>.md # overloads disambiguated by 4-byte selector
+└── contracts/<source-path>__<Contract>.md
+                            # findings, architecture, state, interactions, workflows
 ```
 
-**Naming & dedup:**
+**Naming and compatibility:**
 
 - The default folder name is the scanned project directory name (or the `.sol`
   file stem). `-o/--output` overrides the full path. If the default would equal
   the scanned directory, `-audit` is appended so source is never overwritten.
   `config.yml: output.base_dir` redirects where default-named folders are created.
-- Per-contract folders live under `contracts/` and mirror the source layout:
-  `contracts/<relative-source-path-without-ext>/<ContractName>/`. Because the
-  path already encodes the source file, contracts that share a name in different
-  files never collide — no `Name__<filestem>` suffix is needed. Contract names
-  are sanitized to filesystem-safe components.
+- Contract reports use `contracts/<source-path>__<Contract>.md`. Portable
+  sanitation, component length limits, and deterministic SHA-256 suffixes
+  prevent collisions after path sanitation.
 - The `contracts/` tree is regenerated wholesale on every run, so a re-scan is
-  idempotent (no stale folders from deleted contracts).
+  idempotent and cannot retain the old fragmented contract layout.
 - `data/database.json` is the **only** copy of the database; reuse it with
   `--db data/database.json`.
 - `data/diagnostics.json` is always present. It distinguishes analyzer coverage
   loss (unresolved imports/bases, parser recovery/skips, invalid locations,
   unresolved identity) from security findings and is identical for source and
   equivalent `--db` scans.
-- `data/manifest.json` is the machine index. `projectRoot` is the detected
+- `data/manifest.json` is written last. `projectRoot` is the detected
   project root; `scanTarget` is the selected file/directory represented by the
   database; `target` is a compatibility alias of `scanTarget`. It exposes
   `analysisComplete`, diagnostic counts, separate declaration-category counts,
-  and only those optional HTML paths that were actually emitted.
+  and only those optional HTML paths that were actually emitted. Canonical
+  discovery uses `files.audit`, optional `files.auditHtml`, and
+  `contracts[].report`; v0.5.x compatibility aliases point to the same files.
 
-**Per-entry-function workflow file**
-(`contracts/<path>/<Contract>/workflows/<entryFn>.md`)
-is a self-contained context block for one entry point:
+Each `contracts/<source-path>__<Contract>.md` deep dive combines:
 
 - **Signature** — selector, 4-byte hash, `payable`, pragma version of the file
 - **Auth / Access Control** — modifiers, inline `msg.sender` checks, an explicit
   **⚠ Unprotected** marker when neither is present, and a **⚠ tx.origin** warning
 - **Guards / Checks** — every `require` / `assert` / `revert` condition
 - **Branch Conditions** — `if` conditions that gate logic
-- **State Effects** — state variables written transitively (directly or via
-  internal calls), cross-linked to `state-changes.md`
+- **State Effects** — state variables written transitively, the functions that
+  write them, and the entries that reach a writer
 - **Call Workflow** — a Mermaid call-graph diagram (internal → external/library/ETH calls)
-
-**State-change matrix** (`<MainContract>/state-changes.md`) lists, per state
-variable: its type, where it is defined, the functions that **write** it, and —
-walking the reverse call graph — the **entry points** that reach a writer.
+- **External Interactions** — exact entry-reachable external and low-level call
+  edges, with unresolved targets labeled instead of guessed
 
 ---
 
@@ -865,21 +854,16 @@ Location: …/Vault.sol:352 in _commit()
 By default the console lists **finding titles only** (one line each) so output
 fits the terminal; the `Location:`/`Confidence:`/`Details:` block and the
 reachability continuation shown above are printed to the terminal only under
-`--verbose`. The full detail is always written to `findings.md` and
+`--verbose`. The full detail is always written to `audit.md` and
 `data/findings.json` in the result folder.
 
-### Markdown — `overview.md` + `findings.md`
+### Markdown – consolidated audit and contract deep dives
 
-`overview.md` is the report index and links to detailed artifacts.
-
-| File          | Content                                                                                                                                                                                                                                                                                                             |
-| ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `overview.md` | Report index with project metrics and links to the detailed per-contract artifacts                                                                                                                                                                                                                                  |
-| `findings.md` | Severity-sorted findings with recommendation, suggested fix, and references. Each occurrence includes a **reachability trace block** when present — file path, entry-point (fix-here), and a dotted-level list (`.`, `..`, `...`) from the entry function down to the host of the dangerous statement, with line numbers per hop. Multi-site findings also include `All matched sites` and full matched-function excerpts |
-
-Per-main-contract folders add `state-changes.md` and one
-`workflows/<entryFn>.md` per entry point (see
-[Result Folder Layout](#result-folder-layout) for their structure).
+| File | Content |
+| ---- | ------- |
+| `README.md` | Bounded headline counts, analysis status, priority groups, and navigation |
+| `audit.md` | Complete findings and evidence, metrics, rules hit, contract surface, state/interaction summary, and machine links |
+| `contracts/<source-path>__<Contract>.md` | Exact contract findings, architecture, state matrix, external interactions, and collapsible entry workflows |
 
 ### JSON — `data/`
 
@@ -934,15 +918,15 @@ function in a contract-scope combination rule. Each entry's `label` is taken
 from the matched `where`-level `and:` branch's `label:` field in the template
 (falling back to `condition N` when the branch has none).
 
-### HTML (`--html/-H`) — Accessible
+### HTML (`--html/-H`) – accessible and offline
 
-| File            | Content                                                                  |
-| --------------- | ------------------------------------------------------------------------ |
-| `overview.html` | Interactive report with vis.js call graphs, full-screen mode, PDF export |
-| `findings.html` | Findings table with severity badges and collapsible code snippets        |
+| File | Content |
+| ---- | ------- |
+| `audit.html` | One self-contained project audit with full escaped finding evidence, metrics, limitations, rules, contract/state indexes, and machine links |
 
-A11y: `lang="en"`, semantic `<main>`/`<section>`/`<article>`, ARIA labels on
-severity badges and locations, focus rings for keyboard nav, skip-to-findings link.
+The document uses semantic landmarks, severity labels, focus rings, a
+skip-to-findings link, and print styling. The graph asset is embedded, so
+opening the report makes no CDN request.
 
 ### SARIF — `results.sarif`
 
@@ -975,7 +959,7 @@ templates:
   repo: th13vn/w3goaudit-templates # releases source for --update-templates
 output:
   base_dir: ""                     # "" = current dir; else write result folders here
-  html: false                      # also emit overview.html + findings.html
+  html: false                      # also emit audit.html
 scan:
   min_severity: ""                 # default --min-severity threshold
   strict_imports: false            # fail when any source/cache import is unresolved

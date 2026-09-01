@@ -572,8 +572,9 @@ bodies, inline caller checks, or recursively resolved internal auth helpers.
 
 `SetFunctionEffects` / `GetFunctionEffects` access the map by function ID
 (`MakeFunctionID(sourceFile, contract, selector)`). These facts serialize into
-`data/database.json` and power `state-changes.md` and the per-entry workflow
-files. (WQL exposure of these facts is intentionally out of scope for now.)
+`data/database.json` and power the State Changes and Entry-Point Workflows
+sections inside each consolidated contract Markdown report. (WQL exposure of
+these facts is intentionally out of scope for now.)
 
 **What is inferred today:**
 - Function parameters, state variables, and local declarations

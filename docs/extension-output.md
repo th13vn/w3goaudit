@@ -312,6 +312,11 @@ across runs.
 
 ## Consumption model
 
+The human reports are not an editor data dependency. W3Solidity and other
+editor consumers discover only `files.data.nav`, `files.data.explorer`,
+`files.data.findings`, and `files.data.xref`. Consolidating Markdown and HTML
+therefore does not require an editor schema change.
+
 All three files are plain, static JSON — no server, no long-lived process, no
 schema negotiation beyond checking `schemaVersion`. A consumer:
 

@@ -13,9 +13,8 @@ import (
 	"github.com/th13vn/w3goaudit/pkg/types"
 )
 
-// FormatFindingsAsMarkdown formats findings as Markdown.
-// This produces the "findings" half of the split report. The "overview" half
-// is produced by SummaryReport.ToMarkdown (see markdown.go).
+// FormatFindingsAsMarkdown formats findings as a standalone Markdown document.
+// WriteBundle uses FormatAuditMarkdown for the canonical consolidated report.
 func FormatFindingsAsMarkdown(findings []*engine.Finding, db *types.Database) string {
 	var sb strings.Builder
 
@@ -350,8 +349,7 @@ func countUniqueIssues(findings []*engine.Finding) int {
 }
 
 // FormatFindingsAsHTML formats findings as a standalone HTML document.
-// This produces the "findings" half of the split report. The "overview" half
-// is produced by SummaryReport.ToHTML (see html.go).
+// WriteBundle uses FormatAuditHTML for the canonical consolidated report.
 //
 // Accessibility: lang="en", semantic <main>/<section>, aria-labels on
 // interactive elements, sufficient contrast (Tokyo Night palette), focus
