@@ -150,19 +150,29 @@ func TestManifestLegacyScanTargetFallsBackToProjectRoot(t *testing.T) {
 
 func TestWriteBundleFixedClockIsByteStable(t *testing.T) {
 	db := navFixtureDB()
-	db.ProjectRoot, db.ScanTarget = "/repo", "/repo/src"
+	db.ProjectRoot, db.ScanTarget = "/", "/x.sol"
+	db.MainContracts["/x.sol#C"] = &types.MainContractEntry{
+		EntryFunctions: []string{"/x.sol#C.f()"}, LinearizedBaseIDs: []string{"/x.sol#C"},
+	}
 	now := time.Date(2026, 7, 14, 1, 2, 3, 0, time.UTC)
 	differentSummaryTime := now.Add(24 * time.Hour)
 	summary := NewGeneratorWithOptions(db, GeneratorOptions{Now: func() time.Time { return differentSummaryTime }}).GenerateSummary()
 	base := t.TempDir()
 	left, right := filepath.Join(base, "left"), filepath.Join(base, "right")
-	opts := BundleOptions{Now: func() time.Time { return now }}
+	opts := BundleOptions{HTML: true, Now: func() time.Time { return now }}
 	for _, out := range []string{left, right} {
 		if err := WriteBundle(out, db, summary, nil, ToolMeta{Name: "w3goaudit", Version: "test"}, opts); err != nil {
 			t.Fatal(err)
 		}
 	}
-	for _, rel := range []string{
+	idx, err := buildContractReportIndex(summary, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rels := []string{
+		"README.md",
+		"audit.md",
+		"audit.html",
 		"data/database.json",
 		"data/findings.json",
 		"data/overview.json",
@@ -171,7 +181,11 @@ func TestWriteBundleFixedClockIsByteStable(t *testing.T) {
 		"data/nav.json",
 		"data/explorer.json",
 		"results.sarif",
-	} {
+	}
+	for _, ref := range idx.refs {
+		rels = append(rels, ref.Report)
+	}
+	for _, rel := range rels {
 		a, err := os.ReadFile(filepath.Join(left, rel))
 		if err != nil {
 			t.Fatal(err)
