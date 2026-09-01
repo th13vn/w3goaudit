@@ -119,7 +119,7 @@ func TestFindingAnchorPlanRejectsFullDigestCollision(t *testing.T) {
 }
 
 func TestFolderReadmeIsBoundedAndLinksToAudit(t *testing.T) {
-	summary := &SummaryReport{ProjectRoot: "/repo", GeneratedAt: time.Unix(0, 0), Stats: &types.DatabaseStats{}}
+	summary := &SummaryReport{ProjectRoot: "/repo", ScanTarget: "/repo/src", GeneratedAt: time.Unix(0, 0), Stats: &types.DatabaseStats{}}
 	findings := make([]*engine.Finding, 15)
 	for i := range findings {
 		findings[i] = &engine.Finding{
@@ -136,5 +136,15 @@ func TestFolderReadmeIsBoundedAndLinksToAudit(t *testing.T) {
 	}
 	if strings.Count(got, "finding-") > 10 || !strings.Contains(got, "5 more") {
 		t.Fatalf("README priority list is not bounded:\n%s", got)
+	}
+	for _, want := range []string{
+		"**Scan target:** `/repo/src`",
+		"**15 issue groups across 15 occurrences**",
+		"[run.log](run.log)",
+		"stable machine interface",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("README missing %q:\n%s", want, got)
+		}
 	}
 }

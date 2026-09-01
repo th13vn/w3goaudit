@@ -67,13 +67,17 @@ func TestFormatAuditHTMLViaBundleConsolidatesAndEscapesEvidence(t *testing.T) {
 	}
 	for _, want := range []string{
 		`lang="en"`, `href="#security-findings"`, `role="main"`, "analysis incomplete",
-		"HIGH-CALL", "Call before effects.", "Move effects first.", "Use CEI.",
+		"HIGH-CALL", "Confidence", "high", "Call before effects.", "Move effects first.", "Use CEI.",
 		"address(msg.sender).call", "contracts/src/Vault__Vault_script_alert_1_script.md",
 		"data/diagnostics.json", "results.sarif", "vis-network", "&lt;script&gt;alert(2)&lt;/script&gt;",
 	} {
 		if !strings.Contains(strings.ToLower(html), strings.ToLower(want)) {
 			t.Fatalf("audit HTML missing %q:\n%s", want, html)
 		}
+	}
+	anchor := buildFindingAnchorIndex(findings)[findingGroupKey(findings[0])]
+	if !strings.Contains(html, `aria-labelledby="`+anchor+`-title"`) {
+		t.Fatalf("finding article does not reference its heading: %s", anchor)
 	}
 	for _, forbidden := range []string{
 		"<script>alert(1)</script>", "<script>alert(2)</script>", `href="javascript:`,

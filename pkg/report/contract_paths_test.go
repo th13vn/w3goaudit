@@ -33,6 +33,11 @@ func TestContractReportPathProtectsReservedAndLongComponents(t *testing.T) {
 	if len(strings.TrimSuffix(got, ".md")) > 160 {
 		t.Fatalf("long report path was not bounded: len=%d path=%q", len(got), got)
 	}
+
+	withExtension := contractReportPath("/repo", &ContractSummary{Name: "Vault", SourceFile: "/repo/src/CON.txt.sol"})
+	if withExtension != "contracts/src/CON_.txt__Vault.md" {
+		t.Fatalf("reserved device stem with extension = %q", withExtension)
+	}
 }
 
 func TestContractReportIndexDisambiguatesSameNamesAndSorts(t *testing.T) {
@@ -119,6 +124,9 @@ func TestContractReportIndexEscalatesShortDigestCollision(t *testing.T) {
 		if !strings.Contains(ref.Report, digests[key]) {
 			t.Fatalf("report did not escalate to full digest: %#v", ref)
 		}
+	}
+	if idx.refs[0].Name != "A/B" {
+		t.Fatalf("refs not sorted by final report path: %#v", idx.refs)
 	}
 }
 

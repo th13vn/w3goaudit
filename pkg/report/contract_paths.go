@@ -96,6 +96,19 @@ func buildContractReportIndexWithDigest(summary *SummaryReport, findings []*engi
 			}
 		}
 	}
+	sort.SliceStable(candidates, func(i, j int) bool {
+		left, right := portableReportPathKey(candidates[i].path), portableReportPathKey(candidates[j].path)
+		if left != right {
+			return left < right
+		}
+		if candidates[i].path != candidates[j].path {
+			return candidates[i].path < candidates[j].path
+		}
+		if candidates[i].contract.Name != candidates[j].contract.Name {
+			return candidates[i].contract.Name < candidates[j].contract.Name
+		}
+		return candidates[i].key < candidates[j].key
+	})
 
 	seen := make(map[string]string, len(candidates))
 	idx.refs = make([]ContractRef, 0, len(candidates))
@@ -170,12 +183,21 @@ func normalizedContractSource(projectRoot, sourceFile string) string {
 
 func sanitizeReportComponent(component string) string {
 	component = sanitizeName(component)
-	if isWindowsDeviceName(strings.ToLower(component)) {
-		component += "_"
-	}
+	component = protectWindowsDeviceName(component)
 	if len(component) > 96 {
 		digest := identityDigest(component)
 		component = component[:77] + "__" + digest[:16]
+	}
+	return component
+}
+
+func protectWindowsDeviceName(component string) string {
+	stem, suffix := component, ""
+	if dot := strings.IndexByte(component, '.'); dot >= 0 {
+		stem, suffix = component[:dot], component[dot:]
+	}
+	if isWindowsDeviceName(strings.ToLower(stem)) {
+		return stem + "_" + suffix
 	}
 	return component
 }

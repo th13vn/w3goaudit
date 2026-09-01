@@ -137,6 +137,9 @@ func writeDocHeader(sb *strings.Builder, summary *SummaryReport) {
 	} else if summary.ProjectRoot != "" {
 		fmt.Fprintf(sb, "**Project Root:** `%s`  \n", summary.ProjectRoot)
 	}
+	if summary.ScanTarget != "" {
+		fmt.Fprintf(sb, "**Scan target:** `%s`  \n", summary.ScanTarget)
+	}
 	sb.WriteString("\n")
 }
 
@@ -155,8 +158,8 @@ func FormatFolderReadme(tool ToolMeta, summary *SummaryReport, findings []*engin
 	writeDocHeader(&sb, summary)
 
 	c := countBySeverity(findings)
-	fmt.Fprintf(&sb, "**%d findings** — %d critical, %d high, %d medium, %d low, %d info.\n\n",
-		len(findings), c["CRITICAL"], c["HIGH"], c["MEDIUM"], c["LOW"], c["INFO"])
+	fmt.Fprintf(&sb, "**%d issue groups across %d occurrences** – %d critical, %d high, %d medium, %d low, %d info.\n\n",
+		countUniqueIssues(findings), len(findings), c["CRITICAL"], c["HIGH"], c["MEDIUM"], c["LOW"], c["INFO"])
 	renderAnalysisStatus(&sb, summary)
 	renderProjectMetrics(&sb, summary)
 
@@ -187,8 +190,8 @@ func FormatFolderReadme(tool ToolMeta, summary *SummaryReport, findings []*engin
 	sb.WriteString("| [Contract reports](audit.md#contract-surface-index) | One architecture, state, interaction, and workflow deep dive per main contract |\n")
 	sb.WriteString("| [data/diagnostics.json](data/diagnostics.json) | Analysis completeness and durable diagnostics |\n")
 	sb.WriteString("| [data/manifest.json](data/manifest.json) | Stable machine-readable discovery index |\n")
-	sb.WriteString("| run.log | Full scan log |\n")
-	sb.WriteString("\n")
+	sb.WriteString("| [run.log](run.log) | Full scan log |\n")
+	sb.WriteString("\nThe versioned JSON documents under `data/` are the stable machine interface; Markdown and HTML are human-readable views.\n\n")
 
 	return sb.String()
 }

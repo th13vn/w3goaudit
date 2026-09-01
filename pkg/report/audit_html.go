@@ -197,6 +197,9 @@ func renderAuditFindingsHTML(sb *strings.Builder, findings []*engine.Finding, db
 		fmt.Fprintf(sb, `<article class="issue" id="%s" aria-labelledby="%s-title"><h3 id="%s-title">%s</h3>`, htmlEscape(anchor), htmlEscape(anchor), htmlEscape(anchor), htmlEscape(group.Title))
 		fmt.Fprintf(sb, `<p><span class="severity severity-%s" aria-label="Severity: %s">%s</span> Rule <code>%s</code> - %d occurrence(s)</p>`,
 			strings.ToLower(group.Severity), htmlEscape(group.Severity), htmlEscape(group.Severity), htmlEscape(group.TemplateID), len(group.Findings))
+		if confidence := group.Findings[0].Confidence; confidence != "" {
+			fmt.Fprintf(sb, `<p><strong>Confidence:</strong> <code>%s</code></p>`, htmlEscape(confidence))
+		}
 		if group.Message != "" {
 			fmt.Fprintf(sb, `<h4>Description</h4><p>%s</p>`, htmlEscape(group.Message))
 		}

@@ -147,8 +147,9 @@ Writes the **result folder** — the default output of a scan. One call,
 Retains the folder landing page and standalone SDK formatters:
 
 - `FormatFolderReadme(tool, summary, findings)` → `README.md` landing page:
-  bounded headline counts, analysis-completeness summary, priority findings,
-  and direct links to `audit.md` and machine artifacts.
+  bounded issue-group/occurrence counts, explicit scan scope, analysis status,
+  priority findings, and direct links to `audit.md`, `run.log`, and machine
+  artifacts, with JSON identified as the stable machine interface.
 - `FormatSummaryMarkdown`, `FormatOverviewMarkdown`, and
   `FormatContractReadme` remain standalone SDK APIs but are not emitted as
   split bundle files.
@@ -321,7 +322,7 @@ trace, excerpt, escaping, safe-reference, exact contract-path, and aggregate
 helpers instead of invoking the two legacy standalone HTML documents.
 
 The page is self-contained and offline through the embedded vis-network asset,
-HTML-escapes source/template/path values, drops non-http(s) reference hrefs,
+HTML-escapes source/template/path values, preserves finding confidence, drops non-http(s) reference hrefs,
 has semantic landmarks and a skip link, supports keyboard focus and printing,
 and deliberately does not inline every contract workflow.
 
