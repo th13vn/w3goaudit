@@ -4,9 +4,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
 	"regexp"
-	"sort"
 	"strings"
 	"time"
 
@@ -16,7 +16,7 @@ import (
 
 // BundleOptions controls optional artifacts in a result folder.
 type BundleOptions struct {
-	// HTML additionally emits overview.html + findings.html mirrors.
+	// HTML additionally emits the consolidated audit.html report.
 	HTML bool
 	// Now supplies the one UTC timestamp shared by every generated artifact in
 	// this bundle. Nil uses time.Now.
@@ -33,21 +33,15 @@ func bundleNow(opts BundleOptions) time.Time {
 // WriteBundle renders a complete result folder for a scan:
 //
 //	<dir>/
-//	├── README.md          # landing page (counts + links to everything)
-//	├── summary.md         # metrics + findings-by-severity + rules-hit
-//	├── overview.md        # metrics + in-scope contract index
-//	├── findings.md        # full findings
+//	├── README.md          # bounded landing page
+//	├── audit.md           # consolidated human-readable audit
+//	├── audit.html         # optional offline mirror
 //	├── results.sarif
 //	├── data/{manifest.json,findings.json,overview.json,diagnostics.json,database.json,nav.json,explorer.json,xref.json}
-//	└── contracts/<relative-source-path-without-ext>/<ContractName>/
-//	    ├── README.md          # per-contract landing (findings + detail)
-//	    ├── state-changes.md
-//	    └── workflows/<entryFn>.md
+//	└── contracts/<relative-source-path>__<ContractName>.md
 //
-// run.log is written separately (it is open for the whole scan), and HTML
-// mirrors are added when opts.HTML is set. The canonical database lives only
-// under data/ (reusable via --db). The contracts/ tree is regenerated wholesale
-// on every run so a re-scan is idempotent.
+// run.log is written separately because it is open for the whole CLI scan. The
+// canonical database lives only under data/ and remains reusable via --db.
 func WriteBundle(dir string, db *types.Database, summary *SummaryReport, findings []*engine.Finding, tool ToolMeta, opts BundleOptions) error {
 	if db == nil {
 		return fmt.Errorf("writing report bundle: nil database")
@@ -57,24 +51,50 @@ func WriteBundle(dir string, db *types.Database, summary *SummaryReport, finding
 	}
 	now := bundleNow(opts)
 	summary, diagnostics := prepareBundleSummary(db, summary, now)
+	index, err := buildContractReportIndex(summary, findings)
+	if err != nil {
+		return err
+	}
 
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return fmt.Errorf("creating output folder %s: %w", dir, err)
 	}
+	if err := cleanLegacyBundleArtifacts(dir); err != nil {
+		return err
+	}
 	if err := writeBundleReports(dir, db, summary, findings, tool); err != nil {
 		return err
 	}
-	contractRefs := buildContractRefs(summary, findings)
-	if err := writeBundleData(dir, db, summary, findings, contractRefs, diagnostics, tool, now, opts); err != nil {
+	if err := writeBundleContractReports(dir, db, summary, findings, index); err != nil {
 		return err
 	}
-	if err := writeBundleHTML(dir, db, summary, findings, opts.HTML); err != nil {
+	if err := writeBundleHTML(dir, summary, opts.HTML); err != nil {
 		return err
 	}
-	if err := writeBundleContractFolders(dir, db, summary, findings, contractRefs); err != nil {
+	if err := writeBundleData(dir, db, summary, findings, index.refs, diagnostics, tool, now, opts); err != nil {
 		return err
 	}
 
+	return nil
+}
+
+func cleanLegacyBundleArtifacts(dir string) error {
+	for _, rel := range []string{
+		"summary.md",
+		"overview.md",
+		"findings.md",
+		"overview.html",
+		"findings.html",
+		"audit.html",
+		"contracts",
+		"corpus",
+		filepath.Join("data", "ai-triage.json"),
+		filepath.Join("data", "manifest.json"),
+	} {
+		if err := os.RemoveAll(filepath.Join(dir, rel)); err != nil {
+			return fmt.Errorf("removing stale report artifact %s: %w", rel, err)
+		}
+	}
 	return nil
 }
 
@@ -98,13 +118,7 @@ func writeBundleReports(dir string, db *types.Database, summary *SummaryReport, 
 	if err := writeFile(filepath.Join(dir, "README.md"), FormatFolderReadme(tool, summary, findings)); err != nil {
 		return err
 	}
-	if err := writeFile(filepath.Join(dir, "summary.md"), FormatSummaryMarkdown(tool, summary, findings)); err != nil {
-		return err
-	}
-	if err := writeFile(filepath.Join(dir, "overview.md"), FormatOverviewMarkdown(summary, findings, db)); err != nil {
-		return err
-	}
-	if err := writeFile(filepath.Join(dir, "findings.md"), FormatFindingsAsMarkdown(findings, db)); err != nil {
+	if err := writeFile(filepath.Join(dir, "audit.md"), FormatAuditMarkdown(tool, summary, findings, db)); err != nil {
 		return err
 	}
 	sarif, err := FormatFindingsAsSARIF(findings, tool, summary.ProjectRoot)
@@ -114,28 +128,10 @@ func writeBundleReports(dir string, db *types.Database, summary *SummaryReport, 
 	return writeFile(filepath.Join(dir, "results.sarif"), sarif)
 }
 
-func buildContractRefs(summary *SummaryReport, findings []*engine.Finding) []ContractRef {
-	refs := make([]ContractRef, len(summary.MainContracts))
-	for i, contract := range summary.MainContracts {
-		refs[i] = ContractRef{
-			Name:     contract.Name,
-			Source:   filepath.ToSlash(relPathForReport(summary.ProjectRoot, contract.SourceFile)),
-			Dir:      contractFolderRel(summary.ProjectRoot, contract),
-			Findings: len(findingsForContract(findings, contract)),
-		}
-	}
-	return refs
-}
-
 func writeBundleData(dir string, db *types.Database, summary *SummaryReport, findings []*engine.Finding, refs []ContractRef, diagnostics []types.Diagnostic, tool ToolMeta, now time.Time, opts BundleOptions) error {
-	// Remove the pre-v0.4 location so re-scans migrate to the canonical data/ tree.
-	_ = os.RemoveAll(filepath.Join(dir, "corpus"))
 	dataDir := filepath.Join(dir, "data")
 	if err := os.MkdirAll(dataDir, 0755); err != nil {
 		return fmt.Errorf("creating data folder: %w", err)
-	}
-	if err := os.RemoveAll(filepath.Join(dataDir, "ai-triage.json")); err != nil {
-		return fmt.Errorf("removing legacy AI review artifact: %w", err)
 	}
 	databaseForOutput := *db
 	databaseForOutput.Diagnostics = diagnostics
@@ -151,17 +147,17 @@ func writeBundleData(dir string, db *types.Database, summary *SummaryReport, fin
 	if err := writeJSONFile(filepath.Join(dataDir, "diagnostics.json"), BuildDiagnosticsJSONAt(now, db), "diagnostics"); err != nil {
 		return err
 	}
-	manifest := BuildManifestAt(now, tool, summary, findings, refs, db, opts.HTML)
-	if err := writeJSONFile(filepath.Join(dataDir, "manifest.json"), manifest, "manifest"); err != nil {
-		return err
-	}
 	if err := writeJSONFile(filepath.Join(dataDir, "nav.json"), BuildNavJSON(db), "nav"); err != nil {
 		return err
 	}
 	if err := writeJSONFile(filepath.Join(dataDir, "xref.json"), BuildXrefJSON(db), "xref"); err != nil {
 		return err
 	}
-	return writeJSONFile(filepath.Join(dataDir, "explorer.json"), BuildExplorerJSON(db), "explorer")
+	if err := writeJSONFile(filepath.Join(dataDir, "explorer.json"), BuildExplorerJSON(db), "explorer"); err != nil {
+		return err
+	}
+	manifest := BuildManifestAt(now, tool, summary, findings, refs, db, opts.HTML)
+	return writeJSONFile(filepath.Join(dataDir, "manifest.json"), manifest, "manifest")
 }
 
 func writeJSONFile(path string, value interface{}, context string) error {
@@ -172,28 +168,25 @@ func writeJSONFile(path string, value interface{}, context string) error {
 	return writeFile(path, string(encoded))
 }
 
-func writeBundleHTML(dir string, db *types.Database, summary *SummaryReport, findings []*engine.Finding, enabled bool) error {
+func writeBundleHTML(dir string, summary *SummaryReport, enabled bool) error {
 	if !enabled {
 		return nil
 	}
-	if err := writeFile(filepath.Join(dir, "overview.html"), summary.ToHTML()); err != nil {
-		return err
-	}
-	return writeFile(filepath.Join(dir, "findings.html"), FormatFindingsAsHTML(findings, db))
+	return writeFile(filepath.Join(dir, "audit.html"), summary.ToHTML())
 }
 
-func writeBundleContractFolders(dir string, db *types.Database, summary *SummaryReport, findings []*engine.Finding, refs []ContractRef) error {
-	if err := os.RemoveAll(filepath.Join(dir, "contracts")); err != nil {
-		return fmt.Errorf("clearing contracts folder: %w", err)
-	}
-	for i, contract := range summary.MainContracts {
-		var matrix *stateMatrixBuilder
-		if resolved := db.GetContract(types.MakeContractID(contract.SourceFile, contract.Name)); resolved != nil {
-			matrix = newStateMatrixBuilder(db, resolved)
+func writeBundleContractReports(dir string, db *types.Database, summary *SummaryReport, findings []*engine.Finding, index contractReportIndex) error {
+	for _, contract := range summary.MainContracts {
+		if contract == nil {
+			continue
 		}
-		contractDir := filepath.Join(dir, filepath.FromSlash(refs[i].Dir))
-		rootPrefix := rootPrefixFor(refs[i].Dir)
-		if err := writeContractFolder(contractDir, db, contract, matrix, findings, summary.GitInfo, summary.ProjectRoot, rootPrefix); err != nil {
+		reportPath, ok := index.reports[contractIdentityKey(contract)]
+		if !ok {
+			return fmt.Errorf("missing planned report path for %s#%s", contract.SourceFile, contract.Name)
+		}
+		rootPrefix := rootPrefixFor(path.Dir(reportPath))
+		content := FormatContractReportMarkdown(contract, findings, db, summary.GitInfo, summary.ProjectRoot, rootPrefix, reportPath)
+		if err := writeFile(filepath.Join(dir, filepath.FromSlash(reportPath)), content); err != nil {
 			return err
 		}
 	}
@@ -206,50 +199,6 @@ func writeBundleContractFolders(dir string, db *types.Database, summary *Summary
 func rootPrefixFor(relDir string) string {
 	depth := strings.Count(relDir, "/") + 1
 	return strings.Repeat("../", depth)
-}
-
-// writeContractFolder writes README.md, state-changes.md and workflows/<entry>.md
-// for one main contract. smb may be nil when the contract could not be resolved.
-func writeContractFolder(cdir string, db *types.Database, mc *ContractSummary, smb *stateMatrixBuilder, findings []*engine.Finding, gitInfo *GitInfo, projectRoot, rootPrefix string) error {
-	if err := os.MkdirAll(cdir, 0755); err != nil {
-		return fmt.Errorf("creating contract folder %s: %w", cdir, err)
-	}
-
-	if err := writeFile(filepath.Join(cdir, "README.md"),
-		FormatContractReadme(mc, findings, gitInfo, projectRoot, rootPrefix)); err != nil {
-		return err
-	}
-
-	var rows []StateRow
-	if smb != nil {
-		rows = BuildStateMatrix(db, smb.main, mc.StateVariables)
-	}
-	if err := writeFile(filepath.Join(cdir, "state-changes.md"), renderStateChanges(mc, rows)); err != nil {
-		return err
-	}
-
-	wdir := filepath.Join(cdir, "workflows")
-	if err := os.MkdirAll(wdir, 0755); err != nil {
-		return fmt.Errorf("creating workflows folder %s: %w", wdir, err)
-	}
-	fileNames := workflowFileNames(mc.EntryFunctions)
-	for i, fn := range mc.EntryFunctions {
-		var fe *types.FunctionEffects
-		var writes []string
-		if smb != nil {
-			if rf, ok := smb.resolveEntry(fn.Selector, fn.Name); ok {
-				fe = smb.effects(rf)
-				for v := range smb.transitiveWrites(rf) {
-					writes = append(writes, v)
-				}
-				sort.Strings(writes)
-			}
-		}
-		if err := writeFile(filepath.Join(wdir, fileNames[i]), renderWorkflow(mc, fn, fe, writes)); err != nil {
-			return err
-		}
-	}
-	return nil
 }
 
 // renderStateChanges renders the per-contract state-change matrix: each state

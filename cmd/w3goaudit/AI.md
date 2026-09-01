@@ -25,6 +25,7 @@ result folder. There is **no `scan` subcommand**.
 
 - **Exit codes:** any pipeline/report-write error propagates from `RunE` → `os.Exit(1)`. A failed report write must return non-zero.
 - **stdout vs files:** `--stdout` prints the summary only and writes no files; `run.log` and the result bundle are both gated on `!stdoutOnly` (so the manifest's `run.log` reference is always valid).
+- **Consolidated result layout:** successful scans advertise `README.md`, `audit.md`, SARIF, `data/`, and one Markdown report per main contract. `--html` adds only `audit.html`; the CLI no longer advertises split summary/overview/findings or workflow folders.
 - **Output cannot overlap the scan scope:** before `setupRunLog` creates a directory or file, `executeScan` canonicalizes the selected source scope and resolved result directory, including symlink aliases and missing output suffixes. It rejects equality and containment in either direction. Cached `--db` scans use `scanTarget`, falling back to `projectRoot`.
 - **Machine-readable output stays clean:** warnings (import resolution, unresolved imports) go to **stderr**, never stdout.
 - **Source/cache parity:** unresolved-import warnings are rendered from persisted database diagnostics after either source build or `--db` load. `--strict-imports` applies the same fail-closed gate in both modes and in `build`; the default remains tolerant.

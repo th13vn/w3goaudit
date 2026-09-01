@@ -257,30 +257,20 @@ func TestDuplicateNamesStayExactInReportArtifacts(t *testing.T) {
 	if err := WriteBundle(out, db, summary, nil, ToolMeta{Name: "w3goaudit", Version: "test"}, BundleOptions{}); err != nil {
 		t.Fatal(err)
 	}
-	zDir := filepath.Join(out, filepath.FromSlash(contractFolderRel(db.ProjectRoot, zSummary)))
-	state, err := os.ReadFile(filepath.Join(zDir, "state-changes.md"))
+	idx, err := buildContractReportIndex(summary, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(state), "destroyed") || strings.Contains(string(state), "safeCount") {
-		t.Fatalf("z.Token state matrix crossed identities:\n%s", state)
-	}
-
-	workflowFiles, err := filepath.Glob(filepath.Join(zDir, "workflows", "*.md"))
+	zReport := idx.reports[contractIdentityKey(zSummary)]
+	content, err := os.ReadFile(filepath.Join(out, filepath.FromSlash(zReport)))
 	if err != nil {
 		t.Fatal(err)
 	}
-	var workflows strings.Builder
-	for _, path := range workflowFiles {
-		b, readErr := os.ReadFile(path)
-		if readErr != nil {
-			t.Fatal(readErr)
-		}
-		workflows.Write(b)
+	if !strings.Contains(string(content), "destroyed") || strings.Contains(string(content), "safeCount") {
+		t.Fatalf("z.Token consolidated report crossed state identities:\n%s", content)
 	}
-	workflow := workflows.String()
-	if !strings.Contains(workflow, "danger") || !strings.Contains(workflow, "destroyed") || strings.Contains(workflow, "safeCount") || strings.Contains(workflow, aFile) {
-		t.Fatalf("z.Token workflow crossed identities:\n%s", workflow)
+	if !strings.Contains(string(content), "danger") || strings.Contains(string(content), aFile) {
+		t.Fatalf("z.Token consolidated report crossed workflow identities:\n%s", content)
 	}
 }
 

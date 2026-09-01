@@ -16,7 +16,7 @@ import (
 )
 
 // TestRunScanWritesBundle verifies a scan produces the full result folder:
-// top-level reports, the machine-readable data/ folder, and per-contract folders.
+// consolidated human reports, machine data, and one file per main contract.
 func TestRunScanWritesBundle(t *testing.T) {
 	resetScanGlobals := func() {
 		templatePath = ""
@@ -54,7 +54,7 @@ func TestRunScanWritesBundle(t *testing.T) {
 	}
 
 	// Top-level artifacts.
-	for _, name := range []string{"README.md", "summary.md", "overview.md", "findings.md", "results.sarif", "run.log"} {
+	for _, name := range []string{"README.md", "audit.md", "results.sarif", "run.log"} {
 		if _, err := os.Stat(filepath.Join(outDir, name)); err != nil {
 			t.Errorf("expected %s to be created: %v", name, err)
 		}
@@ -72,19 +72,23 @@ func TestRunScanWritesBundle(t *testing.T) {
 		t.Error("unexpected legacy corpus/ folder in new-layout bundle")
 	}
 
-	// At least one per-contract folder under contracts/ with a README.md,
-	// state-changes.md, mirroring the source path.
+	for _, legacy := range []string{"summary.md", "overview.md", "findings.md", "overview.html", "findings.html"} {
+		if _, err := os.Stat(filepath.Join(outDir, legacy)); !os.IsNotExist(err) {
+			t.Errorf("legacy root artifact survived: %s (%v)", legacy, err)
+		}
+	}
+
+	// At least one per-contract Markdown report, with no fragmented detail files.
 	foundContract := false
 	err := filepath.WalkDir(filepath.Join(outDir, "contracts"), func(p string, d os.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
-		if d.IsDir() {
-			if _, statErr := os.Stat(filepath.Join(p, "state-changes.md")); statErr == nil {
-				if _, rmErr := os.Stat(filepath.Join(p, "README.md")); rmErr == nil {
-					foundContract = true
-				}
-			}
+		if !d.IsDir() && strings.HasSuffix(p, ".md") {
+			foundContract = true
+		}
+		if d.Name() == "state-changes.md" || d.Name() == "workflows" || d.Name() == "README.md" {
+			t.Errorf("fragmented contract artifact survived: %s", p)
 		}
 		return nil
 	})
@@ -92,7 +96,41 @@ func TestRunScanWritesBundle(t *testing.T) {
 		t.Fatalf("walking contracts dir: %v", err)
 	}
 	if !foundContract {
-		t.Error("expected a per-contract folder under contracts/ with README.md + state-changes.md")
+		t.Error("expected one Markdown report under contracts/")
+	}
+
+	manifestBytes, err := os.ReadFile(filepath.Join(outDir, "data", "manifest.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var manifest struct {
+		Contracts []struct {
+			Report string `json:"report"`
+		} `json:"contracts"`
+	}
+	if err := json.Unmarshal(manifestBytes, &manifest); err != nil {
+		t.Fatal(err)
+	}
+	for _, contract := range manifest.Contracts {
+		if _, err := os.Stat(filepath.Join(outDir, filepath.FromSlash(contract.Report))); err != nil {
+			t.Errorf("manifest contract report %s is missing: %v", contract.Report, err)
+		}
+	}
+}
+
+func TestPrintResultLocationUsesConsolidatedLayout(t *testing.T) {
+	var out bytes.Buffer
+	printResultLocationTo(&out, "result", true, true)
+	got := out.String()
+	for _, want := range []string{"README.md", "audit.md", "audit.html", "contracts/<source-path>__<Contract>.md"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("completion output missing %q:\n%s", want, got)
+		}
+	}
+	for _, legacy := range []string{"summary.md", "overview.md", "findings.md", "overview.html", "findings.html", "workflows/"} {
+		if strings.Contains(got, legacy) {
+			t.Errorf("completion output still advertises %q:\n%s", legacy, got)
+		}
 	}
 }
 

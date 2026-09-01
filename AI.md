@@ -41,7 +41,7 @@ it does not mutate the scanner's official findings.
 | `pkg/builder/` | Parse source into database, build simplified ASTs, C3 inheritance, call graph, selectors, effects | `pkg/builder/AI.md` |
 | `pkg/types/` | Core serialized data structures: database, contracts, functions, AST, call graph, semantic facts | `pkg/types/AI.md` |
 | `pkg/engine/` | WQL template loading, validation, execution, taint/reachability, finding construction | `pkg/engine/AI.md` |
-| `pkg/report/` | Markdown/HTML/SARIF/JSON output, result folder, state matrix, workflow files, source excerpts | `pkg/report/AI.md` |
+| `pkg/report/` | Consolidated Markdown/HTML, SARIF/JSON output, contract deep dives, state/workflow evidence, source excerpts | `pkg/report/AI.md` |
 | `pkg/home/` | `~/.w3goaudit` config/template-home management and release download | `pkg/home/AI.md` |
 | `templates/` | Official embedded WQL detector pack plus benchmark and feature-test templates | `templates/AI.md` |
 | `scripts/benchmark/` | **Dev-only, git-ignored** (not in a fresh clone): competitive analyzer benchmark harness, corpora, fixtures, adapters, and quality threshold gate. Benchmark-dependent Go tests skip when it is absent. | `scripts/benchmark/README.md` |
@@ -146,7 +146,7 @@ run-output scratch directory.
   runs before `run.log` or any report file is created. For `--db` scans, the
   persisted `scanTarget` is authoritative, with `projectRoot` as the legacy
   fallback.
-- A normal scan writes one result folder containing `README.md`, `summary.md`, `overview.md`, `findings.md`, `results.sarif`, `run.log`, `data/` (with `manifest.json`, `database.json`, `findings.json`, `overview.json`, `diagnostics.json`, `nav.json`, `explorer.json`, and `xref.json`), and a `contracts/` tree (per-main-contract folders mirroring source paths, each with its own `README.md`).
+- A normal scan writes one result folder containing bounded `README.md`, consolidated `audit.md`, `results.sarif`, `run.log`, `data/` (with `manifest.json`, `database.json`, `findings.json`, `overview.json`, `diagnostics.json`, `nav.json`, `explorer.json`, and `xref.json`), and exactly one Markdown deep dive per main contract under `contracts/`. `--html` adds only `audit.html`; rescans remove the previous split human layout and write `manifest.json` last.
 - AST nodes and declarations (`Function`/`Modifier`/`Contract`/`StateVariable`/`Event`/`Struct`/`Enum`/`Parameter`) carry `StartCol`/`EndCol`/`StartByte`/`EndByte` alongside `StartLine`/`EndLine` (one-based Unicode-code-point columns and zero-based UTF-8 byte offsets; both end fields are half-open; zero/omitted for synthetic nodes). `FunctionCall`/`CallEdge` carry point `Col`/`Byte` fields too. The builder derives columns from a once-per-source sparse line/non-ASCII index instead of the parser's byte-oriented column field: O(log non-ASCII runes on the line) per endpoint and O(lines + non-ASCII runes) index memory. Invalid conversions retain lines/bytes, omit columns, and record `location.invalid`. Output schema remains `2.0.0`; the dependency floor is solast-go v0.1.11 so contextual-keyword local declarations cannot desynchronize tolerant parsing and hide later functions.
 - A WQL document is meta plus one query: block. The block holds
   `select`/`from`/`where` or a one-level `and:`/`or:` query composition.
@@ -242,7 +242,7 @@ run-output scratch directory.
 - Entry-function resolution gives each signature to the most-derived declaration
   before filtering by entrypoint status, so an inherited interface stub can never
   substitute for a `view`/`pure` override.
-- Finding output is deterministic: `Engine.ExecuteAll` applies a total-order sort (`SortFindings`) before returning, so `findings.json`/`results.sarif`/`findings.md` are byte-stable across runs despite map-order iteration internally.
+- Finding output is deterministic: `Engine.ExecuteAll` applies a total-order sort (`SortFindings`) before returning, so `findings.json`, `results.sarif`, and the findings section of `audit.md` are byte-stable across runs despite map-order iteration internally.
 - A WQL document contains exactly `meta` plus one `query`. Unknown top-level
   keys, including the removed `ai` key, fail strict decoding. Engine findings
   are produced only by deterministic template execution.

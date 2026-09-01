@@ -99,31 +99,29 @@ Writes the **result folder** — the default output of a scan. One call,
 `WriteBundle(dir, db, summary, findings, tool, BundleOptions{HTML, Now})`, produces:
 
 ```
-<dir>/README.md, summary.md, overview.md, findings.md, results.sarif
+<dir>/README.md, audit.md, results.sarif
 <dir>/data/{manifest.json, database.json, findings.json, overview.json, diagnostics.json, nav.json, xref.json, explorer.json}   # canonical DB lives here only
-<dir>/contracts/<rel-src-path-no-ext>/<MainContract>/README.md
-<dir>/contracts/<rel-src-path-no-ext>/<MainContract>/state-changes.md
-<dir>/contracts/<rel-src-path-no-ext>/<MainContract>/workflows/<entryFn>.md
+<dir>/contracts/<rel-src-path-no-ext>__<MainContract>.md
 ```
 
-- Folder-level docs (README/summary/overview/per-contract README) are rendered by
-  `folder_docs.go`; `manifest.json` by `manifest.go` (see below).
+- `README.md` is rendered by `folder_docs.go`, `audit.md` by
+  `project_docs.go`, contract reports by `contract_docs.go`, and
+  `manifest.json` by `manifest.go` (see below).
 - `data/nav.json` (`BuildNavJSON`, `nav.go`) and `data/explorer.json`
   (`BuildExplorerJSON`, `explorer.go`) are the VSCode-extension data layer —
-  written right after `manifest.json` in the same `data/` step. See
+  written before `manifest.json` in the same `data/` step. See
   "nav.go" / "explorer.go" below and
   [`docs/extension-output.md`](../../docs/extension-output.md) for the schema.
-- Per-contract folders mirror the source layout via
-  `contractFolderRel(projectRoot, mc)` =
-  `contracts/<relPathForReport(src) without ext>/<sanitizeName(Name)>`. Because
-  the path encodes the source file, same-named contracts in different files never
-  collide — no `Name__<filestem>` suffix. `workflowFileNames` still disambiguates
-  overloaded entries as `<fn>__<selector>.md`.
-- `rootPrefixFor(relDir)` returns the `../` chain from a per-contract folder back
-  to the result root, so links in the per-contract README resolve at any depth.
-- Idempotency: the whole `contracts/` tree is `os.RemoveAll`'d and regenerated
-  each run (no stale-folder pruning needed); a legacy `corpus/` folder is also
-  removed so older bundles migrate to `data/`.
+- `contract_paths.go` plans every contract report path before filesystem
+  mutation. The whole `contracts/` tree is then removed and regenerated, so
+  rescans cannot retain stale landing, state, or workflow fragments.
+- `rootPrefixFor(relDir)` returns the `../` chain from a contract report's
+  parent directory to the result root.
+- Idempotency cleanup also removes split Markdown, split HTML, stale
+  `audit.html`, legacy `corpus/`, and `data/ai-triage.json`, whether each path
+  is a file or directory. The previous `data/manifest.json` is removed before
+  writing starts so a failed rescan cannot leave a stale index over a partial
+  new bundle. Cleanup errors propagate.
 - `renderStateChanges(mc, rows)` renders the reachability matrix (see
   `state_matrix.go`); falls back to a plain variable list when rows are absent.
 - `renderWorkflow(mc, fn, *types.FunctionEffects, stateWrites)` renders one
@@ -132,40 +130,30 @@ Writes the **result folder** — the default output of a scan. One call,
   Conditions, State Effects (transitive), Call Workflow mermaid. Effects come
   from `Database.Semantics.FunctionEffects` (builder Phase 7).
 - `run.log` is NOT written here — the CLI owns it (open for the whole scan).
-  HTML mirrors are added only when `BundleOptions.HTML` is set.
+  `audit.html` is added only when `BundleOptions.HTML` is set.
 - `BundleOptions.Now` is called once. That UTC value is used for the bundle's
   human headers and all timestamped machine files, including the nested
   `SummaryReport` inside `overview.json`; a fixed clock therefore makes the
   complete machine-readable bundle byte-stable.
 - `data/diagnostics.json` is always emitted, including the complete-analysis
   case where `diagnostics` is `[]`.
-- A bundle rewrite removes the legacy scanner-side AI review artifact so stale
-  model verdicts cannot be mistaken for deterministic output from the new run.
-- Internally, `WriteBundle` is a thin phase orchestrator: summary snapshot,
-  human/SARIF reports, contract refs, machine JSON, optional HTML, and contract
-  folders are handled by private helpers in the same output order. Exported APIs
-  and artifact bytes remain unchanged.
+- Internally, `WriteBundle` is a thin phase orchestrator: summary snapshot and
+  complete path planning, cleanup, project reports, contract reports, optional
+  HTML, machine JSON, then `manifest.json` last. A failed earlier write cannot
+  replace the manifest with one that indexes missing artifacts.
 
 ### folder_docs.go
 
-Renders the folder-level human documents (the pieces that reorganized the bundle
-into a navigable tree):
+Retains the folder landing page and standalone SDK formatters:
 
 - `FormatFolderReadme(tool, summary, findings)` → `README.md` landing page:
-  headline counts, analysis-completeness summary, and a Contents table linking
-  every artifact, including `data/diagnostics.json`.
-- `FormatSummaryMarkdown(tool, summary, findings)` → `summary.md`: project
-  metrics, findings-by-severity, and a rules-hit table (`renderRulesHit`, sorted
-  by severity then occurrence count).
-- `FormatOverviewMarkdown(summary, findings, db)` → `overview.md`: metrics,
-  analysis-completeness/diagnostic counts, plus a one-row-per-contract **index**
-  table (with per-contract finding counts and a link into `contracts/`).
-  Replaces the old inline per-contract dump.
-- `FormatContractReadme(mc, findings, gitInfo, projectRoot, rootPrefix)` →
-  per-contract `README.md`: header, "Findings in this contract" table, detail
-  links, then the architectural detail via `mc.renderRestOfContract()`.
-- Helpers: `contractFolderRel(projectRoot, mc)` (source-mirroring folder path),
-  `findingsForContract`, `renderProjectMetrics`, `renderSeverityCounts`.
+  bounded headline counts, analysis-completeness summary, priority findings,
+  and direct links to `audit.md` and machine artifacts.
+- `FormatSummaryMarkdown`, `FormatOverviewMarkdown`, and
+  `FormatContractReadme` remain standalone SDK APIs but are not emitted as
+  split bundle files.
+- Helpers include `findingsForContract`, `renderProjectMetrics`, and
+  `renderSeverityCounts`.
 
 ### project_docs.go
 
@@ -301,8 +289,8 @@ explorer-tab model: one `ExplorerContract` per **deployable** contract
 
 ### state_matrix.go
 
-Computes the per-contract state-change matrix consumed by `state-changes.md` and
-the workflow files' State-Effects section.
+Computes the per-contract state-change matrix embedded in each consolidated
+contract report's State Changes and Entry-Point Workflows sections.
 
 - `BuildStateMatrix(db, main, states) []StateRow` — for each state variable:
   the functions that write it (`Written By`) and the entry points that reach a
@@ -526,7 +514,7 @@ decorations are suppressed consistently with the header.
 prints only the numbered finding title per severity group on the terminal,
 because the full per-finding block overflowed narrow terminals on large scans.
 The full detail (`Location:`, `Confidence:`, `Details:`, and the reachability
-continuation below) is always written to the result folder (`findings.md`,
+continuation below) is always written to the result folder (`audit.md`,
 `data/findings.json`) and is teed to the terminal only when `--verbose` is
 set. The footer prints a one-line hint pointing at the result folder /
 `--verbose` when not verbose.
@@ -667,10 +655,9 @@ A scan writes a **result folder** via `WriteBundle` (`bundle.go`):
 
 ```
 <output>/
-├── README.md              # FormatFolderReadme (landing page: counts + links)
-├── summary.md             # FormatSummaryMarkdown (metrics + severity + rules-hit)
-├── overview.md            # FormatOverviewMarkdown (metrics + in-scope contract index)
-├── findings.md            # FormatFindingsAsMarkdown
+├── README.md              # bounded landing page
+├── audit.md               # consolidated project audit and full findings
+├── audit.html             # optional self-contained offline mirror
 ├── results.sarif          # FormatFindingsAsSARIF (always)
 ├── run.log                # written by the CLI (always)
 ├── data/                  # machine-readable mirror
@@ -682,19 +669,15 @@ A scan writes a **result folder** via `WriteBundle` (`bundle.go`):
 │   ├── nav.json           # BuildNavJSON
 │   ├── xref.json          # BuildXrefJSON (precise xref: declarations + references)
 │   └── explorer.json      # BuildExplorerJSON
-└── contracts/<rel-src-path-no-ext>/<MainContract>/
-    ├── README.md          # FormatContractReadme (findings + architecture detail)
-    ├── state-changes.md   # reachability matrix (state_matrix.go)
-    └── workflows/<entryFn>.md
+└── contracts/<rel-src-path-no-ext>__<MainContract>.md
 ```
 
-`overview.md` is now a navigable index (project metrics + a one-row-per-contract
-table linking into `contracts/`), NOT a per-contract inline dump — the full
-per-contract detail lives in each `contracts/.../README.md`. `SummaryReport.ToMarkdown`
-(the old inline dump) is retained for `ToHTML`/SDK callers but no longer drives
-`overview.md`.
+`audit.md` contains the project summary, analysis limitations, metrics, every
+finding, rules hit, contract surface, state/interaction aggregates, and links
+to machine artifacts. Each main contract gets one consolidated Markdown deep
+dive. Standalone SDK formatters retain their existing meanings.
 
-`--html` additionally emits `overview.html` + `findings.html`. The default
+`--html` additionally emits only `audit.html`. The default
 folder name and the `--stdout` (no-files) path are owned by
 `cmd/w3goaudit/root.go`; the `report` package owns the folder's internal layout
 via `WriteBundle`. The previous `-o report.<ext>` split (`splitOutputPaths`) and

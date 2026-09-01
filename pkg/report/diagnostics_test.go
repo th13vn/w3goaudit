@@ -350,7 +350,7 @@ func TestWriteBundleEmitsDiagnosticsAndHumanLinks(t *testing.T) {
 	if err := WriteBundle(out, db, summary, nil, ToolMeta{Name: "w3goaudit", Version: "test"}, BundleOptions{Now: func() time.Time { return time.Unix(0, 0) }}); err != nil {
 		t.Fatal(err)
 	}
-	for _, rel := range []string{"README.md", "overview.md"} {
+	for _, rel := range []string{"README.md", "audit.md"} {
 		b, err := os.ReadFile(filepath.Join(out, rel))
 		if err != nil {
 			t.Fatal(err)
@@ -377,5 +377,54 @@ func TestWriteBundleEmitsDiagnosticsAndHumanLinks(t *testing.T) {
 	}
 	if len(databaseCopy.Diagnostics) != 1 {
 		t.Fatalf("bundled database diagnostics = %#v, want one normalized record", databaseCopy.Diagnostics)
+	}
+}
+
+func TestWriteBundleRemovesLegacyHumanArtifactsAndStaleHTML(t *testing.T) {
+	db := navFixtureDB()
+	summary := NewGeneratorWithOptions(db, GeneratorOptions{Now: func() time.Time { return time.Unix(0, 0) }}).GenerateSummary()
+	out := t.TempDir()
+	for _, legacy := range []string{"summary.md", "overview.md", "findings.md", "overview.html", "findings.html", "audit.html"} {
+		path := filepath.Join(out, legacy)
+		if err := os.MkdirAll(path, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	staleContract := filepath.Join(out, "contracts", "old", "workflows")
+	if err := os.MkdirAll(staleContract, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(staleContract, "entry.md"), []byte("stale"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := WriteBundle(out, db, summary, nil, ToolMeta{Name: "w3goaudit"}, BundleOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	for _, legacy := range []string{"summary.md", "overview.md", "findings.md", "overview.html", "findings.html", "audit.html", "contracts/old"} {
+		if _, err := os.Stat(filepath.Join(out, legacy)); !os.IsNotExist(err) {
+			t.Fatalf("stale artifact survived: %s (%v)", legacy, err)
+		}
+	}
+}
+
+func TestWriteBundleWritesManifestOnlyAfterIndexedArtifacts(t *testing.T) {
+	db := navFixtureDB()
+	summary := NewGeneratorWithOptions(db, GeneratorOptions{Now: func() time.Time { return time.Unix(0, 0) }}).GenerateSummary()
+	out := t.TempDir()
+	dataDir := filepath.Join(out, "data")
+	if err := os.MkdirAll(filepath.Join(dataDir, "explorer.json"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	manifestPath := filepath.Join(dataDir, "manifest.json")
+	if err := os.WriteFile(manifestPath, []byte("stale manifest"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := WriteBundle(out, db, summary, nil, ToolMeta{Name: "w3goaudit"}, BundleOptions{}); err == nil {
+		t.Fatal("expected explorer write failure")
+	}
+	if _, err := os.Stat(manifestPath); !os.IsNotExist(err) {
+		t.Fatalf("manifest survived a failed rewrite and may index a partial bundle: %v", err)
 	}
 }
