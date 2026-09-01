@@ -90,11 +90,13 @@ func TestReportDeterministic(t *testing.T) {
 	}
 	a := []*engine.Finding{
 		mk("B-RULE", "HIGH", "Beta", 1),
+		mk("B-RULE", "HIGH", "Beta", 4),
 		mk("A-RULE", "HIGH", "Alpha", 2),
 		mk("C-RULE", "MEDIUM", "Gamma", 3),
 	}
 	b := []*engine.Finding{
 		mk("C-RULE", "MEDIUM", "Gamma", 3),
+		mk("B-RULE", "HIGH", "Beta", 4),
 		mk("A-RULE", "HIGH", "Alpha", 2),
 		mk("B-RULE", "HIGH", "Beta", 1),
 	}

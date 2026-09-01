@@ -261,6 +261,8 @@ func renderFindingsMarkdownGroups(findings []*engine.Finding, db *types.Database
 		groups := grouped[severity]
 		sortGroups(groups)
 		for _, group := range groups {
+			occurrences := append([]*engine.Finding(nil), group.Findings...)
+			engine.SortFindings(occurrences)
 			if anchor := anchors[group.Key]; anchor != "" {
 				fmt.Fprintf(&sb, "<a id=\"%s\"></a>\n\n", anchor)
 			}
@@ -270,8 +272,8 @@ func renderFindingsMarkdownGroups(findings []*engine.Finding, db *types.Database
 			if group.Findings[0].Confidence != "" {
 				fmt.Fprintf(&sb, "- **Confidence:** `%s`\n", group.Findings[0].Confidence)
 			}
-			fmt.Fprintf(&sb, "- **Template:** `%s`\n- **Locations:** %d occurrence(s)\n", group.TemplateID, len(group.Findings))
-			for _, f := range group.Findings {
+			fmt.Fprintf(&sb, "- **Template:** `%s`\n- **Locations:** %d occurrence(s)\n", group.TemplateID, len(occurrences))
+			for _, f := range occurrences {
 				fmt.Fprintf(&sb, "  - `%s`\n", formatLocation(projectRoot, f))
 			}
 			fmt.Fprintf(&sb, "\n%s Description\n\n", strings.Repeat("#", headingLevel+1))
@@ -280,7 +282,7 @@ func renderFindingsMarkdownGroups(findings []*engine.Finding, db *types.Database
 			} else {
 				sb.WriteString(group.Message + "\n\n")
 			}
-			for _, f := range group.Findings {
+			for _, f := range occurrences {
 				fmt.Fprintf(&sb, "<details>\n<summary>%s</summary>\n\n", formatLocation(projectRoot, f))
 				sb.WriteString(renderFindingTraceMarkdown(projectRoot, f))
 				sb.WriteString(renderRelatedLocationsMarkdown(projectRoot, f, db))

@@ -169,6 +169,8 @@ collision escalates every member to the full SHA-256 digest; a full collision
 fails path planning before filesystem mutation. `FormatFindingsAsMarkdown` retains its
 standalone SDK meaning and shares the same body renderer, so reachability,
 related sites, source excerpts, fixes, and references have one implementation.
+Each finding group sorts a copied occurrence slice with the engine total order,
+so direct SDK callers get byte-stable output without mutating their findings.
 The folder `README.md` is a bounded landing page with at most ten priority
 finding groups and direct navigation to `audit.md`.
 
