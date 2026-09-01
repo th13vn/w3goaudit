@@ -202,7 +202,7 @@ legacy `BuildManifest(...)` remains a current-time compatibility wrapper.
 - `contracts[]` adds canonical `report`; `dir` remains its slash-normalized
   parent directory. `contract_paths.go` plans portable, length-bound,
   collision-safe paths before writes using deterministic SHA-256 identity
-  suffixes when sanitized candidates collide.
+  suffixes when sanitized or case-insensitive portable candidates collide.
 - Contract refs and the nav/explorer paths let consumers discover the whole
   tree from this one file.
 

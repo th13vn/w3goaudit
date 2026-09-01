@@ -28,6 +28,10 @@ type contractReportCandidate struct {
 // buildContractReportIndex plans every report path before result-folder
 // cleanup or writing. Findings are used only for the manifest tally.
 func buildContractReportIndex(summary *SummaryReport, findings []*engine.Finding) (contractReportIndex, error) {
+	return buildContractReportIndexWithDigest(summary, findings, identityDigest)
+}
+
+func buildContractReportIndexWithDigest(summary *SummaryReport, findings []*engine.Finding, digestFor func(string) string) (contractReportIndex, error) {
 	idx := contractReportIndex{reports: make(map[string]string)}
 	if summary == nil {
 		return idx, fmt.Errorf("building contract report index: nil summary")
@@ -57,34 +61,38 @@ func buildContractReportIndex(summary *SummaryReport, findings []*engine.Finding
 
 	byCandidate := make(map[string][]int)
 	for i, candidate := range candidates {
-		byCandidate[candidate.path] = append(byCandidate[candidate.path], i)
+		key := portableReportPathKey(candidate.path)
+		byCandidate[key] = append(byCandidate[key], i)
 	}
-	for candidatePath, members := range byCandidate {
+	for _, members := range byCandidate {
 		if len(members) == 1 {
 			continue
 		}
 		shortHashes := make(map[string][]int)
 		for _, member := range members {
-			hash := identityDigest(candidates[member].key)
+			hash := digestFor(candidates[member].key)
+			if len(hash) < 16 {
+				return idx, fmt.Errorf("contract report digest for %q has length %d, want at least 16", candidates[member].key, len(hash))
+			}
 			shortHashes[hash[:16]] = append(shortHashes[hash[:16]], member)
 		}
 		for short, hashedMembers := range shortHashes {
 			if len(hashedMembers) == 1 {
 				member := hashedMembers[0]
-				candidates[member].path = appendPathDigest(candidatePath, short)
+				candidates[member].path = appendPathDigest(candidates[member].path, short)
 				continue
 			}
 			fullHashes := make(map[string][]int)
 			for _, member := range hashedMembers {
-				hash := identityDigest(candidates[member].key)
+				hash := digestFor(candidates[member].key)
 				fullHashes[hash] = append(fullHashes[hash], member)
 			}
 			for full, fullMembers := range fullHashes {
 				if len(fullMembers) > 1 {
-					return idx, fmt.Errorf("contract report path collision after full digest %s for %q", full, candidatePath)
+					return idx, fmt.Errorf("contract report path collision after full digest %s for %q", full, candidates[fullMembers[0]].path)
 				}
 				member := fullMembers[0]
-				candidates[member].path = appendPathDigest(candidatePath, full)
+				candidates[member].path = appendPathDigest(candidates[member].path, full)
 			}
 		}
 	}
@@ -92,10 +100,11 @@ func buildContractReportIndex(summary *SummaryReport, findings []*engine.Finding
 	seen := make(map[string]string, len(candidates))
 	idx.refs = make([]ContractRef, 0, len(candidates))
 	for _, candidate := range candidates {
-		if previous, ok := seen[candidate.path]; ok {
+		portableKey := portableReportPathKey(candidate.path)
+		if previous, ok := seen[portableKey]; ok {
 			return idx, fmt.Errorf("contract report path collision: %q for %q and %q", candidate.path, previous, candidate.key)
 		}
-		seen[candidate.path] = candidate.key
+		seen[portableKey] = candidate.key
 		idx.reports[candidate.key] = candidate.path
 		idx.refs = append(idx.refs, ContractRef{
 			Name:     candidate.contract.Name,
@@ -106,6 +115,14 @@ func buildContractReportIndex(summary *SummaryReport, findings []*engine.Finding
 		})
 	}
 	return idx, nil
+}
+
+// portableReportPathKey models the case-insensitive path aliases used by
+// Windows and common macOS filesystems. Sanitized report paths are ASCII, so
+// lowercase comparison is sufficient to prevent one report overwriting
+// another when a bundle is moved between supported platforms.
+func portableReportPathKey(reportPath string) string {
+	return strings.ToLower(reportPath)
 }
 
 func contractIdentityKey(contract *ContractSummary) string {

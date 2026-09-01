@@ -78,6 +78,64 @@ func TestContractReportIndexAddsIdentityDigestForSanitizedCollision(t *testing.T
 	}
 }
 
+func TestContractReportIndexDisambiguatesCaseInsensitiveCollision(t *testing.T) {
+	summary := &SummaryReport{
+		ProjectRoot: "/repo",
+		MainContracts: []*ContractSummary{
+			{Name: "Vault", SourceFile: "/repo/src/Foo.sol"},
+			{Name: "Vault", SourceFile: "/repo/src/foo.sol"},
+		},
+	}
+	idx, err := buildContractReportIndex(summary, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(idx.refs) != 2 {
+		t.Fatalf("refs = %d, want 2", len(idx.refs))
+	}
+	if strings.EqualFold(idx.refs[0].Report, idx.refs[1].Report) {
+		t.Fatalf("case-insensitive collision was not disambiguated: %#v", idx.refs)
+	}
+}
+
+func TestContractReportIndexEscalatesShortDigestCollision(t *testing.T) {
+	summary := &SummaryReport{
+		ProjectRoot: "/repo",
+		MainContracts: []*ContractSummary{
+			{Name: "A/B", SourceFile: "/repo/src/A.sol"},
+			{Name: "A B", SourceFile: "/repo/src/A.sol"},
+		},
+	}
+	digests := map[string]string{
+		contractIdentityKey(summary.MainContracts[0]): "0123456789abcdefaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		contractIdentityKey(summary.MainContracts[1]): "0123456789abcdefbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+	}
+	idx, err := buildContractReportIndexWithDigest(summary, nil, func(key string) string { return digests[key] })
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, ref := range idx.refs {
+		key := "/repo/" + ref.Source + "\x00" + ref.Name
+		if !strings.Contains(ref.Report, digests[key]) {
+			t.Fatalf("report did not escalate to full digest: %#v", ref)
+		}
+	}
+}
+
+func TestContractReportIndexRejectsFullDigestCollision(t *testing.T) {
+	summary := &SummaryReport{
+		ProjectRoot: "/repo",
+		MainContracts: []*ContractSummary{
+			{Name: "A/B", SourceFile: "/repo/src/A.sol"},
+			{Name: "A B", SourceFile: "/repo/src/A.sol"},
+		},
+	}
+	digest := "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	if _, err := buildContractReportIndexWithDigest(summary, nil, func(string) string { return digest }); err == nil {
+		t.Fatal("expected full contract-report digest collision to fail")
+	}
+}
+
 func TestManifestCanonicalPaths(t *testing.T) {
 	summary := &SummaryReport{ProjectRoot: "/repo", MainContracts: []*ContractSummary{{Name: "C", SourceFile: "/repo/C.sol"}}}
 	idx, err := buildContractReportIndex(summary, nil)
