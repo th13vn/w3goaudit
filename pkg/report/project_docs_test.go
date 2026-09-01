@@ -69,6 +69,31 @@ func TestFormatAuditMarkdownConsolidatesProjectEvidence(t *testing.T) {
 	}
 }
 
+func TestFormatAuditMarkdownKeepsOutOfRootContractIdentity(t *testing.T) {
+	summary := &SummaryReport{
+		ProjectRoot: "/repo",
+		GeneratedAt: time.Unix(0, 0).UTC(),
+		Stats:       &types.DatabaseStats{},
+		MainContracts: []*ContractSummary{
+			{Name: "Vault", SourceFile: "/vendor/a/Vault.sol", Version: "0.8.19", EntryFunctionCount: 1, StateVariableCount: 2},
+			{Name: "Vault", SourceFile: "/vendor/b/Vault.sol", Version: "0.8.20", EntryFunctionCount: 9, StateVariableCount: 8},
+		},
+	}
+	idx, err := buildContractReportIndex(summary, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := FormatAuditMarkdown(ToolMeta{Name: "w3goaudit"}, summary, nil, nil)
+	for _, contract := range summary.MainContracts {
+		reportPath := idx.reports[contractIdentityKey(contract)]
+		want := fmt.Sprintf("| `Vault.sol` | `Vault` | `%s` | %d | 0 | 0 | %d | 0 | 0 | [report](%s) |",
+			contract.Version, contract.EntryFunctionCount, contract.StateVariableCount, reportPath)
+		if !strings.Contains(got, want) {
+			t.Fatalf("audit lost exact out-of-root identity for %s:\nwant %s\n%s", contract.SourceFile, want, got)
+		}
+	}
+}
+
 func TestFindingAnchorsAreStableAndDistinct(t *testing.T) {
 	findings := []*engine.Finding{
 		{TemplateID: "A/B", Severity: "HIGH", Title: "one", Location: engine.Location{File: "/a.sol", Line: 1}},

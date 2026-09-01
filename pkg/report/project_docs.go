@@ -61,7 +61,7 @@ func renderContractSurfaceIndex(sb *strings.Builder, summary *SummaryReport, fin
 	sb.WriteString("| Source | Contract | Version | Entries | Payable | Without detected access-control evidence | State vars | External interaction edges | Findings | Deep dive |\n")
 	sb.WriteString("|--------|----------|---------|---------|---------|------------------------------------------|------------|----------------------------|----------|-----------|\n")
 	for _, ref := range idx.refs {
-		mc := findContractSummary(summary, ref.Source, ref.Name)
+		mc := findContractSummaryByReport(summary, idx, ref.Report)
 		version, entries, states := "—", 0, 0
 		payable, unprotected := 0, 0
 		if mc != nil {
@@ -95,7 +95,7 @@ func renderStateInteractionSummary(sb *strings.Builder, summary *SummaryReport, 
 	sb.WriteString("| Contract | State variables | State writes recorded | External interaction edges | Detail |\n")
 	sb.WriteString("|----------|-----------------|-----------------------|----------------------------|--------|\n")
 	for _, ref := range idx.refs {
-		mc := findContractSummary(summary, ref.Source, ref.Name)
+		mc := findContractSummaryByReport(summary, idx, ref.Report)
 		stateVars, writes := 0, 0
 		if mc != nil {
 			stateVars = mc.StateVariableCount
@@ -133,12 +133,12 @@ func renderMachineArtifacts(sb *strings.Builder) {
 	sb.WriteString("\n")
 }
 
-func findContractSummary(summary *SummaryReport, relSource, name string) *ContractSummary {
+func findContractSummaryByReport(summary *SummaryReport, idx contractReportIndex, reportPath string) *ContractSummary {
 	if summary == nil {
 		return nil
 	}
 	for _, mc := range summary.MainContracts {
-		if mc != nil && mc.Name == name && normalizedContractSource(summary.ProjectRoot, mc.SourceFile) == relSource {
+		if mc != nil && idx.reports[contractIdentityKey(mc)] == reportPath {
 			return mc
 		}
 	}

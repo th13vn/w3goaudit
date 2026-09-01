@@ -162,7 +162,9 @@ Retains the folder landing page and standalone SDK formatters:
 project-level auditor report. It owns executive summary, scan completeness and
 limitations, metrics, the full shared finding renderer, rules hit, a bounded
 contract surface index, state/interaction aggregates, and machine-artifact
-links. It links to contract deep dives rather than duplicating workflows.
+links. It links to contract deep dives rather than duplicating workflows and
+joins aggregate rows through the exact planned report path, not an alias-prone
+basename/name pair for out-of-root legacy sources.
 
 Finding groups use the existing grouping key and gain deterministic
 `finding-<slug>-<sha256-prefix>` anchors. A sanitized-slug plus short-digest

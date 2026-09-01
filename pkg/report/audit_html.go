@@ -138,7 +138,7 @@ func renderAuditContractsHTML(sb *strings.Builder, summary *SummaryReport, findi
 	}
 	sb.WriteString(`<div class="table-wrap"><table><thead><tr><th>Source</th><th>Contract</th><th>Entries</th><th>State vars</th><th>External edges</th><th>Findings</th><th>Deep dive</th></tr></thead><tbody>`)
 	for _, ref := range idx.refs {
-		mc := findContractSummary(summary, ref.Source, ref.Name)
+		mc := findContractSummaryByReport(summary, idx, ref.Report)
 		entries, states := 0, 0
 		if mc != nil {
 			entries, states = mc.EntryFunctionCount, mc.StateVariableCount
@@ -158,7 +158,7 @@ func renderAuditStateHTML(sb *strings.Builder, summary *SummaryReport, db *types
 	}
 	sb.WriteString(`<div class="table-wrap"><table><thead><tr><th>Contract</th><th>State variables</th><th>State writes recorded</th><th>External edges</th><th>Detail</th></tr></thead><tbody>`)
 	for _, ref := range idx.refs {
-		mc := findContractSummary(summary, ref.Source, ref.Name)
+		mc := findContractSummaryByReport(summary, idx, ref.Report)
 		states, writes := 0, 0
 		if mc != nil {
 			states = mc.StateVariableCount
