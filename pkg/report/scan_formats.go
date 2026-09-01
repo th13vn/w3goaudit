@@ -995,6 +995,9 @@ func sortGroups(groups []*GroupedFinding) {
 		if groups[i].TemplateID != groups[j].TemplateID {
 			return groups[i].TemplateID < groups[j].TemplateID
 		}
-		return groups[i].Title < groups[j].Title
+		if groups[i].Title != groups[j].Title {
+			return groups[i].Title < groups[j].Title
+		}
+		return groups[i].Key < groups[j].Key
 	})
 }

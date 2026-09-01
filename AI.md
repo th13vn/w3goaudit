@@ -147,6 +147,10 @@ run-output scratch directory.
   persisted `scanTarget` is authoritative, with `projectRoot` as the legacy
   fallback.
 - A normal scan writes one result folder containing bounded `README.md`, consolidated `audit.md`, `results.sarif`, `run.log`, `data/` (with `manifest.json`, `database.json`, `findings.json`, `overview.json`, `diagnostics.json`, `nav.json`, `explorer.json`, and `xref.json`), and exactly one Markdown deep dive per main contract under `contracts/`. `--html` adds only `audit.html`; rescans remove the previous split human layout and write `manifest.json` last.
+- CLI/report-owned artifact paths are reset before exclusive creation and are
+  never followed through prepared symlinks, so rescanning an existing result
+  folder cannot redirect `run.log`, human reports, or structured data outside
+  the validated output boundary.
 - AST nodes and declarations (`Function`/`Modifier`/`Contract`/`StateVariable`/`Event`/`Struct`/`Enum`/`Parameter`) carry `StartCol`/`EndCol`/`StartByte`/`EndByte` alongside `StartLine`/`EndLine` (one-based Unicode-code-point columns and zero-based UTF-8 byte offsets; both end fields are half-open; zero/omitted for synthetic nodes). `FunctionCall`/`CallEdge` carry point `Col`/`Byte` fields too. The builder derives columns from a once-per-source sparse line/non-ASCII index instead of the parser's byte-oriented column field: O(log non-ASCII runes on the line) per endpoint and O(lines + non-ASCII runes) index memory. Invalid conversions retain lines/bytes, omit columns, and record `location.invalid`. Output schema remains `2.0.0`; the dependency floor is solast-go v0.1.11 so contextual-keyword local declarations cannot desynchronize tolerant parsing and hide later functions.
 - A WQL document is meta plus one query: block. The block holds
   `select`/`from`/`where` or a one-level `and:`/`or:` query composition.

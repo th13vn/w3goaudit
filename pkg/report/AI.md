@@ -175,7 +175,8 @@ fails path planning before filesystem mutation. `FormatFindingsAsMarkdown` retai
 standalone SDK meaning and shares the same body renderer, so reachability,
 related sites, source excerpts, fixes, and references have one implementation.
 Each finding group sorts a copied occurrence slice with the engine total order,
-so direct SDK callers get byte-stable output without mutating their findings.
+and group order ties break on the complete grouping key, so direct SDK callers
+get byte-stable output without mutating their findings.
 The folder `README.md` is a bounded landing page with at most ten priority
 finding groups and direct navigation to `audit.md`.
 

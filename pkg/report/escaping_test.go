@@ -100,6 +100,8 @@ func TestReportDeterministic(t *testing.T) {
 		mk("A-RULE", "HIGH", "Alpha", 2),
 		mk("B-RULE", "HIGH", "Beta", 1),
 	}
+	a = append(a, mk("", "LOW", "Anonymous", 6), mk("", "LOW", "Anonymous", 5))
+	b = append(b, mk("", "LOW", "Anonymous", 5), mk("", "LOW", "Anonymous", 6))
 	if FormatFindingsAsMarkdown(a, minimalDB()) != FormatFindingsAsMarkdown(b, minimalDB()) {
 		t.Error("Markdown report differs when input finding order differs (non-deterministic)")
 	}
