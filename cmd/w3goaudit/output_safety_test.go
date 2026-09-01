@@ -123,3 +123,46 @@ func TestExecuteScanRejectsOverlapBeforeWritingAnything(t *testing.T) {
 		t.Fatalf("run.log was created before safety validation: %v", err)
 	}
 }
+
+func TestExecuteScanDoesNotFollowRunLogSymlink(t *testing.T) {
+	root := t.TempDir()
+	source := filepath.Join(root, "project")
+	out := filepath.Join(root, "result")
+	if err := os.MkdirAll(source, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(source, "C.sol"), []byte("contract C {}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(out, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sentinel := filepath.Join(root, "outside.log")
+	if err := os.WriteFile(sentinel, []byte("outside-log"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(sentinel, filepath.Join(out, "run.log")); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+
+	if err := executeScan(scanOptions{
+		InputPath: source, TemplatePath: "../../templates/official", OutputPath: out,
+		Stdout: io.Discard, Stderr: io.Discard,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(sentinel)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "outside-log" {
+		t.Fatalf("outside run-log sentinel = %q", got)
+	}
+	info, err := os.Lstat(filepath.Join(out, "run.log"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		t.Fatal("run.log remained a symlink")
+	}
+}

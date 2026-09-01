@@ -409,11 +409,15 @@ func TestWriteBundleRemovesLegacyHumanArtifactsAndStaleHTML(t *testing.T) {
 }
 
 func TestWriteBundleWritesManifestOnlyAfterIndexedArtifacts(t *testing.T) {
-	db := navFixtureDB()
-	summary := NewGeneratorWithOptions(db, GeneratorOptions{Now: func() time.Time { return time.Unix(0, 0) }}).GenerateSummary()
+	db := types.NewDatabase()
+	longSource := "/" + strings.Repeat("very-long-source-component/", 600) + "Vault.sol"
+	summary := &SummaryReport{
+		ProjectRoot: "/", GeneratedAt: time.Unix(0, 0), Stats: &types.DatabaseStats{},
+		MainContracts: []*ContractSummary{{Name: "Vault", SourceFile: longSource}},
+	}
 	out := t.TempDir()
 	dataDir := filepath.Join(out, "data")
-	if err := os.MkdirAll(filepath.Join(dataDir, "explorer.json"), 0o755); err != nil {
+	if err := os.MkdirAll(dataDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
 	manifestPath := filepath.Join(dataDir, "manifest.json")
@@ -422,9 +426,59 @@ func TestWriteBundleWritesManifestOnlyAfterIndexedArtifacts(t *testing.T) {
 	}
 
 	if err := WriteBundle(out, db, summary, nil, ToolMeta{Name: "w3goaudit"}, BundleOptions{}); err == nil {
-		t.Fatal("expected explorer write failure")
+		t.Fatal("expected overlong contract report write failure")
 	}
 	if _, err := os.Stat(manifestPath); !os.IsNotExist(err) {
 		t.Fatalf("manifest survived a failed rewrite and may index a partial bundle: %v", err)
+	}
+}
+
+func TestWriteBundleDoesNotFollowManagedArtifactSymlinks(t *testing.T) {
+	db := navFixtureDB()
+	summary := NewGeneratorWithOptions(db, GeneratorOptions{Now: func() time.Time { return time.Unix(0, 0) }}).GenerateSummary()
+	base := t.TempDir()
+	out := filepath.Join(base, "result")
+	external := filepath.Join(base, "external")
+	if err := os.MkdirAll(external, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	readmeSentinel := filepath.Join(external, "README.md")
+	manifestSentinel := filepath.Join(external, "manifest.json")
+	if err := os.WriteFile(readmeSentinel, []byte("outside-readme"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(manifestSentinel, []byte("outside-manifest"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(out, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(readmeSentinel, filepath.Join(out, "README.md")); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	if err := os.Symlink(external, filepath.Join(out, "data")); err != nil {
+		t.Skipf("directory symlink unavailable: %v", err)
+	}
+
+	if err := WriteBundle(out, db, summary, nil, ToolMeta{Name: "w3goaudit"}, BundleOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	for path, want := range map[string]string{readmeSentinel: "outside-readme", manifestSentinel: "outside-manifest"} {
+		got, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("outside sentinel %s was removed: %v", path, err)
+		}
+		if string(got) != want {
+			t.Fatalf("outside sentinel %s = %q, want %q", path, got, want)
+		}
+	}
+	for _, path := range []string{filepath.Join(out, "README.md"), filepath.Join(out, "data")} {
+		info, err := os.Lstat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			t.Fatalf("managed artifact remained a symlink: %s", path)
+		}
 	}
 }

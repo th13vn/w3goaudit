@@ -27,6 +27,10 @@ result folder. There is **no `scan` subcommand**.
 - **stdout vs files:** `--stdout` prints the summary only and writes no files; `run.log` and the result bundle are both gated on `!stdoutOnly` (so the manifest's `run.log` reference is always valid).
 - **Consolidated result layout:** successful scans advertise `README.md`, `audit.md`, SARIF, `data/`, and one Markdown report per main contract. `--html` adds only `audit.html`; the CLI no longer advertises split summary/overview/findings or workflow folders.
 - **Output cannot overlap the scan scope:** before `setupRunLog` creates a directory or file, `executeScan` canonicalizes the selected source scope and resolved result directory, including symlink aliases and missing output suffixes. It rejects equality and containment in either direction. Cached `--db` scans use `scanTarget`, falling back to `projectRoot`.
+- **Managed artifacts never follow prepared symlinks:** `setupRunLog` removes the
+  existing `run.log` path before exclusive creation, and the report bundle resets
+  its managed files/directories before writes. A pre-existing result folder cannot
+  redirect scanner output outside itself.
 - **Machine-readable output stays clean:** warnings (import resolution, unresolved imports) go to **stderr**, never stdout.
 - **Source/cache parity:** unresolved-import warnings are rendered from persisted database diagnostics after either source build or `--db` load. `--strict-imports` applies the same fail-closed gate in both modes and in `build`; the default remains tolerant.
 - **Findings point at the dangerous statement:** matched-node attribution is the default, so every `Location` field (file, line, columns, bytes, contract, function) describes one place, and the entry hop travels in `entryPoint`/`reachability`. Verifier attribution described two places at once — `contract`/`function` from the entry function, `file`/`line` from the matched node — so an interprocedural finding could name a function the reported line is not inside. `--location-source matched|verifier` selects it; the value is validated in `validateScanOptions` and applied via `Engine.SetLocationSource`.

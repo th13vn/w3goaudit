@@ -121,7 +121,9 @@ Writes the **result folder** — the default output of a scan. One call,
   `audit.html`, legacy `corpus/`, and `data/ai-triage.json`, whether each path
   is a file or directory. The previous `data/manifest.json` is removed before
   writing starts so a failed rescan cannot leave a stale index over a partial
-  new bundle. Cleanup errors propagate.
+  new bundle. Canonical managed files plus `data/` and `contracts/` are reset
+  without symlink traversal before recreation, so a prepared result folder
+  cannot redirect report writes outside itself. Cleanup errors propagate.
 - `renderStateChanges(mc, rows)` renders the reachability matrix (see
   `state_matrix.go`); falls back to a plain variable list when rows are absent.
 - `renderWorkflow(mc, fn, *types.FunctionEffects, stateWrites)` renders one

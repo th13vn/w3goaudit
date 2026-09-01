@@ -62,6 +62,9 @@ func WriteBundle(dir string, db *types.Database, summary *SummaryReport, finding
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return fmt.Errorf("creating output folder %s: %w", dir, err)
 	}
+	if err := resetManagedBundlePaths(dir); err != nil {
+		return err
+	}
 	if err := cleanLegacyBundleArtifacts(dir); err != nil {
 		return err
 	}
@@ -96,6 +99,20 @@ func cleanLegacyBundleArtifacts(dir string) error {
 	} {
 		if err := os.RemoveAll(filepath.Join(dir, rel)); err != nil {
 			return fmt.Errorf("removing stale report artifact %s: %w", rel, err)
+		}
+	}
+	return nil
+}
+
+func resetManagedBundlePaths(dir string) error {
+	for _, rel := range []string{
+		"README.md",
+		"audit.md",
+		"results.sarif",
+		"data",
+	} {
+		if err := os.RemoveAll(filepath.Join(dir, rel)); err != nil {
+			return fmt.Errorf("resetting managed report artifact %s: %w", rel, err)
 		}
 	}
 	return nil

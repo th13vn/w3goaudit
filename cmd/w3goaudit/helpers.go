@@ -72,7 +72,11 @@ func setupRunLog(dir string, terminalVerbose bool, stdout io.Writer) (*logging.L
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return nil, nil, fmt.Errorf("creating output folder %s: %w", dir, err)
 	}
-	f, err := os.Create(filepath.Join(dir, "run.log"))
+	logPath := filepath.Join(dir, "run.log")
+	if err := os.RemoveAll(logPath); err != nil {
+		return nil, nil, fmt.Errorf("resetting run.log: %w", err)
+	}
+	f, err := os.OpenFile(logPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
 	if err != nil {
 		return nil, nil, fmt.Errorf("creating run.log: %w", err)
 	}
