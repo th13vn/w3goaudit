@@ -427,7 +427,9 @@ Input → Reader → Builder → Database → Engine → Findings → Result-fol
 4. Load WQL templates (home → embedded fallback)
 5. Execute queries
 6. Generate findings
-7. Write the result folder (overview, findings, SARIF, run.log, data/, per-contract workflows + state-changes)
+7. Write the result folder (`README.md`, consolidated `audit.md`, SARIF,
+   `run.log`, structured `data/`, and one deep-dive Markdown report per main
+   contract)
 
 ### 2. Build Workflow
 

@@ -263,7 +263,7 @@ HTML mirror is opt-in via `--html`.
 ```mermaid
 graph TD
     A[Findings + Database + Summary] --> B[WriteBundle]
-    B --> C[audit.md / results.sarif / run.log]
+    B --> C[README.md / audit.md]
     B --> D[results.sarif]
     B --> E[data/ database.json, findings.json, overview.json, diagnostics.json, manifest.json, nav.json, explorer.json, xref.json]
     B --> F[one consolidated Markdown deep dive per main contract]
@@ -411,8 +411,8 @@ aliases and namespace-qualified names after a database-cache round trip.
 
 **Purpose:** The scan is the root command (there is no `scan` subcommand). It
 builds the database, runs the templates, prints a terminal summary, and writes
-the result folder (overview, findings, SARIF, run.log, data/, per-contract
-workflows + state-changes).
+the result folder (`README.md`, consolidated `audit.md`, SARIF, `run.log`,
+structured `data/`, and one deep-dive Markdown report per main contract).
 
 **Template source:** precedence is `--template` (explicit path) >
 `~/.w3goaudit/templates/` (when populated) > the embedded official pack, so a
