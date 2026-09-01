@@ -266,7 +266,7 @@ func TestAuthoritativeCorrectnessDocsDescribeRelationships(t *testing.T) {
 		"README.md": {
 			`(?is)Function\.Selector\W+stores\s+canonical\s+text.{0,160}Function\.Signature\W+stores\s+its\s+four-byte\s+Keccak\s+value`,
 			`(?is)one-based.{0,60}Unicode-code-point\s+columns.{0,100}zero-based.{0,60}UTF-8\s+byte\s+offsets.{0,180}not\s+LSP\s+positions`,
-			`(?is)overview\.md\W+is\s+the\s+report\s+index\s+and\s+links\s+to\s+detailed\s+artifacts`,
+			`(?is)README\.md.{0,80}bounded\s+landing\s+page.{0,220}audit\.md.{0,120}consolidated\s+project\s+audit`,
 			`(?s)inputPath\s*:=\s*"\./contracts/".{0,160}projectRoot,\s*err\s*:=\s*reader\.DetectProjectRoot\(inputPath\).{0,180}if\s+err\s*!=\s*nil.{0,260}if\s+err\s*:=\s*r\.ResolveImports\(projectRoot\);\s*err\s*!=\s*nil.{0,180}sources\s*=\s*r\.GetAllSources\(\)`,
 		},
 		"docs/sdk.md": {

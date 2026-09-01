@@ -6,12 +6,15 @@ Executes WQL templates against the contract database to find security vulnerabil
 
 ## WQL (template surface)
 
-**A WQL document is meta plus one query: block, with an optional `ai` review
-contract.** The block holds
+**A WQL document is meta plus one query: block.** The block holds
 `select`/`from`/`where` or a one-level `and:`/`or:` query
 composition; see [`docs/wql-syntax.md`](../../docs/wql-syntax.md) for the
 full language reference. All 120 official/benchmark/feature-test templates in
 this repo use it.
+
+Authoritative documentation tests also pin the canonical v0.5 human-report
+relationship: bounded `README.md` landing page, consolidated `audit.md`, and
+standalone compatibility formatters rather than the removed split bundle.
 
 - `wql.go` — parses a WQL document (`TemplateDoc`) and **lowers** it to
   the evaluator `Template`/`Rule` IR below (`TemplateDoc.lower()`): simple
