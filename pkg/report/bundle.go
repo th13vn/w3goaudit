@@ -55,6 +55,9 @@ func WriteBundle(dir string, db *types.Database, summary *SummaryReport, finding
 	if err != nil {
 		return err
 	}
+	if _, err := planFindingAnchors(findings, findingIdentityDigest); err != nil {
+		return err
+	}
 
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return fmt.Errorf("creating output folder %s: %w", dir, err)

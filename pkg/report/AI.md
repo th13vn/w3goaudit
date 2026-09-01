@@ -164,7 +164,9 @@ contract surface index, state/interaction aggregates, and machine-artifact
 links. It links to contract deep dives rather than duplicating workflows.
 
 Finding groups use the existing grouping key and gain deterministic
-`finding-<slug>-<sha256-prefix>` anchors. `FormatFindingsAsMarkdown` retains its
+`finding-<slug>-<sha256-prefix>` anchors. A sanitized-slug plus short-digest
+collision escalates every member to the full SHA-256 digest; a full collision
+fails path planning before filesystem mutation. `FormatFindingsAsMarkdown` retains its
 standalone SDK meaning and shares the same body renderer, so reachability,
 related sites, source excerpts, fixes, and references have one implementation.
 The folder `README.md` is a bounded landing page with at most ten priority

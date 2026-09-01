@@ -86,6 +86,38 @@ func TestFindingAnchorsAreStableAndDistinct(t *testing.T) {
 	}
 }
 
+func TestFindingAnchorPlanEscalatesShortDigestCollision(t *testing.T) {
+	findings := []*engine.Finding{
+		{TemplateID: "A/B", Severity: "HIGH", Title: "one", Location: engine.Location{File: "/a.sol", Line: 1}},
+		{TemplateID: "A B", Severity: "HIGH", Title: "two", Location: engine.Location{File: "/b.sol", Line: 2}},
+	}
+	digests := map[string]string{
+		findingGroupKey(findings[0]): "0123456789abcdefaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		findingGroupKey(findings[1]): "0123456789abcdefbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+	}
+	anchors, err := planFindingAnchors(findings, func(key string) string { return digests[key] })
+	if err != nil {
+		t.Fatal(err)
+	}
+	for key, digest := range digests {
+		if !strings.HasSuffix(anchors[key], digest) {
+			t.Fatalf("anchor did not escalate to full digest: %q", anchors[key])
+		}
+	}
+}
+
+func TestFindingAnchorPlanRejectsFullDigestCollision(t *testing.T) {
+	findings := []*engine.Finding{
+		{TemplateID: "A/B", Severity: "HIGH", Location: engine.Location{File: "/a.sol", Line: 1}},
+		{TemplateID: "A B", Severity: "HIGH", Location: engine.Location{File: "/b.sol", Line: 2}},
+	}
+	if _, err := planFindingAnchors(findings, func(string) string {
+		return "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	}); err == nil {
+		t.Fatal("expected full finding-anchor digest collision to fail")
+	}
+}
+
 func TestFolderReadmeIsBoundedAndLinksToAudit(t *testing.T) {
 	summary := &SummaryReport{ProjectRoot: "/repo", GeneratedAt: time.Unix(0, 0), Stats: &types.DatabaseStats{}}
 	findings := make([]*engine.Finding, 15)

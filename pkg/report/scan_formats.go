@@ -190,20 +190,63 @@ func findingGroupKey(f *engine.Finding) string {
 }
 
 func buildFindingAnchorIndex(findings []*engine.Finding) map[string]string {
-	keys := make(map[string]string)
+	anchors, _ := planFindingAnchors(findings, findingIdentityDigest)
+	return anchors
+}
+
+func findingIdentityDigest(key string) string {
+	digest := sha256.Sum256([]byte(key))
+	return hex.EncodeToString(digest[:])
+}
+
+func planFindingAnchors(findings []*engine.Finding, digestFor func(string) string) (map[string]string, error) {
+	type candidate struct {
+		key, slug, digest string
+	}
+	byKey := make(map[string]candidate)
 	for _, f := range findings {
 		key := findingGroupKey(f)
-		if _, ok := keys[key]; ok {
+		if _, ok := byKey[key]; ok {
 			continue
 		}
-		digest := sha256.Sum256([]byte(key))
 		slug := sanitizeName(f.TemplateID)
 		if f.TemplateID == "" {
 			slug = "anonymous"
 		}
-		keys[key] = "finding-" + strings.ToLower(slug) + "-" + hex.EncodeToString(digest[:8])
+		digest := digestFor(key)
+		if len(digest) < 16 {
+			return nil, fmt.Errorf("finding anchor digest for %q has length %d, want at least 16", key, len(digest))
+		}
+		byKey[key] = candidate{key: key, slug: strings.ToLower(slug), digest: digest}
 	}
-	return keys
+	candidates := make([]candidate, 0, len(byKey))
+	for _, item := range byKey {
+		candidates = append(candidates, item)
+	}
+	sort.Slice(candidates, func(i, j int) bool { return candidates[i].key < candidates[j].key })
+
+	groups := make(map[string][]candidate)
+	for _, item := range candidates {
+		short := "finding-" + item.slug + "-" + item.digest[:16]
+		groups[short] = append(groups[short], item)
+	}
+	anchors := make(map[string]string, len(candidates))
+	for short, members := range groups {
+		if len(members) == 1 {
+			anchors[members[0].key] = short
+			continue
+		}
+		seenFull := make(map[string]string)
+		for _, item := range members {
+			full := "finding-" + item.slug + "-" + item.digest
+			if previous, exists := seenFull[full]; exists {
+				return nil, fmt.Errorf("finding anchor collision after full digest for %q and %q", previous, item.key)
+			}
+			seenFull[full] = item.key
+			anchors[item.key] = full
+		}
+	}
+	return anchors, nil
 }
 
 func renderFindingsMarkdownGroups(findings []*engine.Finding, db *types.Database, headingLevel int, anchors map[string]string) string {
