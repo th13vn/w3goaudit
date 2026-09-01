@@ -307,6 +307,20 @@ contract report's State Changes and Entry-Point Workflows sections.
 ### html.go
 Interactive HTML report renderer.
 
+### audit_html.go
+
+`FormatAuditHTML(tool, summary, findings, db)` renders the canonical optional
+`audit.html`: executive summary, analysis limitations, metrics, every finding
+and source excerpt, rules hit, contract surface, state/interaction summary,
+contract Markdown links, and machine-artifact links. It shares the finding
+trace, excerpt, escaping, safe-reference, exact contract-path, and aggregate
+helpers instead of invoking the two legacy standalone HTML documents.
+
+The page is self-contained and offline through the embedded vis-network asset,
+HTML-escapes source/template/path values, drops non-http(s) reference hrefs,
+has semantic landmarks and a skip link, supports keyboard focus and printing,
+and deliberately does not inline every contract workflow.
+
 **Features:**
 - **Interactive Graphs**: Uses `vis.js` (vis-network) for call graphs and
   inheritance. The library is **embedded inline** (see `assets.go` /
@@ -606,9 +620,12 @@ Source-code excerpt for finding rendering.
 gen := report.NewGenerator(db)
 summary := gen.GenerateSummary()
 
-// 2a. Render markdown / HTML (overview + findings rendered separately).
-//     Each occurrence carries a reachability trace block when
-//     finding.Reachability is populated by the engine.
+// 2a. Render canonical consolidated reports. Each occurrence carries a
+//     reachability trace block when Finding.Reachability is populated.
+auditMD := report.FormatAuditMarkdown(tool, summary, findings, db)
+auditHTML := report.FormatAuditHTML(tool, summary, findings, db)
+
+// Standalone SDK formatters remain available for existing callers.
 overviewMD  := summary.ToMarkdown()
 findingsMD  := report.FormatFindingsAsMarkdown(findings, db)
 

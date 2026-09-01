@@ -68,7 +68,7 @@ func WriteBundle(dir string, db *types.Database, summary *SummaryReport, finding
 	if err := writeBundleContractReports(dir, db, summary, findings, index); err != nil {
 		return err
 	}
-	if err := writeBundleHTML(dir, summary, opts.HTML); err != nil {
+	if err := writeBundleHTML(dir, db, summary, findings, tool, opts.HTML); err != nil {
 		return err
 	}
 	if err := writeBundleData(dir, db, summary, findings, index.refs, diagnostics, tool, now, opts); err != nil {
@@ -168,11 +168,11 @@ func writeJSONFile(path string, value interface{}, context string) error {
 	return writeFile(path, string(encoded))
 }
 
-func writeBundleHTML(dir string, summary *SummaryReport, enabled bool) error {
+func writeBundleHTML(dir string, db *types.Database, summary *SummaryReport, findings []*engine.Finding, tool ToolMeta, enabled bool) error {
 	if !enabled {
 		return nil
 	}
-	return writeFile(filepath.Join(dir, "audit.html"), summary.ToHTML())
+	return writeFile(filepath.Join(dir, "audit.html"), FormatAuditHTML(tool, summary, findings, db))
 }
 
 func writeBundleContractReports(dir string, db *types.Database, summary *SummaryReport, findings []*engine.Finding, index contractReportIndex) error {
