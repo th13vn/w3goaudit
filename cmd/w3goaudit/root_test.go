@@ -122,7 +122,7 @@ func TestPrintResultLocationUsesConsolidatedLayout(t *testing.T) {
 	var out bytes.Buffer
 	printResultLocationTo(&out, "result", true, true)
 	got := out.String()
-	for _, want := range []string{"README.md", "audit.md", "audit.html", "contracts/<source-path>__<Contract>.md"} {
+	for _, want := range []string{"README.md", "audit.md", "audit.html", "data/ (interactions.json", "contracts/<source-path>__<Contract>.md"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("completion output missing %q:\n%s", want, got)
 		}

@@ -31,7 +31,7 @@ func printResultLocationTo(w io.Writer, dir string, html, plain bool) {
 	fmt.Fprintln(w)
 	fmt.Fprintf(w, "%sResults written to: %s\n", icon, dir)
 	fmt.Fprintln(w, "   README.md · audit.md · results.sarif · run.log")
-	fmt.Fprintln(w, "   data/ (manifest.json, findings.json, overview.json, diagnostics.json, database.json, nav.json, explorer.json, xref.json)")
+	fmt.Fprintln(w, "   data/ (interactions.json + manifest/database/findings/overview/diagnostics/nav/explorer/xref)")
 	fmt.Fprintln(w, "   contracts/<source-path>__<Contract>.md")
 	if html {
 		fmt.Fprintln(w, "   audit.html")
