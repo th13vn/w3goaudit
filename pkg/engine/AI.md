@@ -705,6 +705,11 @@ WQL rule verification logic (THE CORE).
   legacy schema-2.0.0 caches derives the same value from the immediate
   `call_receiver` child when the copied attribute is absent, without mutating
   the AST.
+  The catalog also exposes protocol-neutral external-boundary attributes such
+  as `external_boundary_id`, `boundary_target_resolution`,
+  `boundary_receiver_control`, `boundary_value_control`, and
+  `boundary_arguments_controlled`. These are derived from the versioned fact
+  index and do not embed detector IDs or protocol names in the evaluator.
 - `matchArgs()` - Validate function call arguments
   - Skips metadata children tagged `call_receiver` or `call_option`, so `args.0`
     stays the first Solidity argument even though receivers and call options are

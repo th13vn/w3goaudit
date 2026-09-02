@@ -142,6 +142,11 @@ func (b *Builder) Build(sources []*types.SourceFile) (*types.Database, error) {
 	b.analyzeEffects()
 	b.logf("Phase 7 complete")
 
+	// Phase 8: Stable protocol-neutral external-boundary evidence.
+	b.logf("Phase 8: Building external-boundary facts")
+	b.buildExternalBoundaries()
+	b.logf("Phase 8 complete")
+
 	b.logf("Database build complete")
 	return b.db, nil
 }

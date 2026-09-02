@@ -2,18 +2,18 @@
 
 ## Purpose
 
-Parses Solidity AST and builds a comprehensive contract database through 7 phases.
+Parses Solidity AST and builds a comprehensive contract database through 8 phases.
 
 ## Key Files
 
 ### builder.go
-Main orchestrator for the 7-phase build process.
+Main orchestrator for the 8-phase build process.
 
 **Exports:**
 - `Builder` struct
 - `New()` - Create a builder using deprecated package-global verbose logging
 - `NewWithOptions(Options{Logger, ProjectRoot, ScanTarget, Diagnostics})` - Create a scan-local builder with durable scan metadata and reader diagnostics; a nil logger is disabled
-- `Build(sources)` - Main entry point (7 phases)
+- `Build(sources)` - Main entry point (8 phases)
 - `GetDatabase()` - Get built database
 
 **Build Phases:**
@@ -26,6 +26,11 @@ Main orchestrator for the 7-phase build process.
 7. **Analyze Effects** (`effects.go`) - Walk each function's AST to record
    per-function `FunctionEffects` (state writes, require/assert/revert + branch
    guards, access control) into `Database.Semantics.FunctionEffects`.
+8. **Build External-Boundary Facts** (`external_boundaries.go`) - Walk exact
+   function ASTs in deterministic child-index order and populate versioned,
+   protocol-neutral `ExternalBoundaryFact` records. The initial phase records
+   stable fact identity, exact or explicitly unresolved target metadata,
+   receiver/value/gas/argument provenance, and fact-backed WQL attributes.
 
 Phase 2 visits functions and modifiers in a total order keyed by exact owning
 source/contract before source position and name. This keeps serialized data-flow
@@ -81,7 +86,7 @@ compatibility; normal scan-local builds never consult global logging state.
 **Output Prefix:** None (clean output)
 
 **What it logs:**
-- All 7 build phases (start and completion)
+- All 8 build phases (start and completion)
 - File parsing progress
 - Contract extraction with types and function counts
 - AST building statistics
@@ -396,6 +401,28 @@ are stored in `Database.Semantics.Symbols` and mirrored onto AST attributes:
 
 Unknown or complex expressions keep the previous heuristic behavior.
 
+### external_boundaries.go
+
+Phase 8 builds the durable external-control-boundary index after call graph,
+entry-point, and direct-effect analysis are complete. It covers high-level
+external/low-level/transfer/send/create nodes plus Yul
+`call`/`delegatecall`/`staticcall`/`create`/`create2`. Internal, inherited,
+library, modifier, and `super` calls remain traversal edges rather than
+boundaries.
+
+Each fact ID combines the exact function ID, call span, AST kind, and stable
+child-index path. Resolved targets come only from exact recorded call metadata;
+dynamic targets stay `unresolved` and Yul targets without callgraph identities
+stay `not_applicable`. Values retain exact dependency RefIDs, sorted coarse
+taint sources, inferred `TypeInfo`, and conservative control classification.
+For indexed or member receivers, provenance follows only the base chain, never
+the index key. `targets[i]` therefore remains caller-controlled while
+`savedTargets[i]` remains state-derived.
+
+The pass annotates the exact AST boundary with protocol-neutral fields beginning
+with `external_boundary_id` and `boundary_`. Later evidence phases add result,
+state-order, and entry-reachability fields without changing the fact identity.
+
 **Member Access Attributes:**
 - Stores `parent` attribute for member accesses
 - Example: For `tx.origin`, stores `parent="tx"`, `name="origin"`
@@ -679,7 +706,7 @@ expression's already stamped range, excluding the semicolon; other real
 statements retain the central statement-location chokepoint.
 
 ```
-Options metadata + reader diagnostics → Sources → Parse → AST Trees + Semantic Facts → Selectors → Inheritance → Call Graph → Entry Points → normalized Database diagnostics
+Options metadata + reader diagnostics → Sources → Parse → AST Trees + Semantic Facts → Selectors → Inheritance → Call Graph → Entry Points → Effects → External-Boundary Facts → normalized Database diagnostics
 ```
 
 ## Integration Points

@@ -140,6 +140,13 @@ var attrNameToIRTable = map[string]string{
 	"receiver_type":            "receiver_type",
 	"receiver_type_kind":       "receiver_type_kind",
 	"receiver_type_is_address": "receiver_type_is_address",
+
+	// Protocol-neutral external-boundary evidence.
+	"external_boundary_id":          "external_boundary_id",
+	"boundary_target_resolution":    "boundary_target_resolution",
+	"boundary_receiver_control":     "boundary_receiver_control",
+	"boundary_value_control":        "boundary_value_control",
+	"boundary_arguments_controlled": "boundary_arguments_controlled",
 }
 
 // attrNameToIR resolves a WQL attribute name (§7) to the IR node-attribute

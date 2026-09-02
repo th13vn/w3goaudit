@@ -121,6 +121,13 @@ func TestAttrNameToIR(t *testing.T) {
 		{"receiver_type_kind", "receiver_type_kind", true},
 		{"receiver_type_is_address", "receiver_type_is_address", true},
 
+		// External-boundary facts.
+		{"external_boundary_id", "external_boundary_id", true},
+		{"boundary_target_resolution", "boundary_target_resolution", true},
+		{"boundary_receiver_control", "boundary_receiver_control", true},
+		{"boundary_value_control", "boundary_value_control", true},
+		{"boundary_arguments_controlled", "boundary_arguments_controlled", true},
+
 		// Unknown.
 		{"not-a-real-attr", "", false},
 		{"", "", false},
