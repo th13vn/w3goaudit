@@ -265,7 +265,7 @@ graph TD
     A[Findings + Database + Summary] --> B[WriteBundle]
     B --> C[README.md / audit.md]
     B --> D[results.sarif]
-    B --> E[data/ database.json, findings.json, overview.json, diagnostics.json, manifest.json, nav.json, explorer.json, xref.json]
+    B --> E[data/ database.json, findings.json, overview.json, diagnostics.json, interactions.json, manifest.json, nav.json, explorer.json, xref.json]
     B --> F[one consolidated Markdown deep dive per main contract]
     B -->|--html| G[audit.html]
     H[CLI] --> I[run.log: full verbose detail, always]
@@ -280,11 +280,17 @@ graph TD
 - `results.sarif` — SARIF 2.1.0 (always)
 - `data/{database.json,findings.json,overview.json,diagnostics.json}` — machine-readable mirror;
   the canonical database lives only here and is reusable via `--db`
+- `data/interactions.json` — timestamp-free semantic external-boundary facts
+  for SDK, Agent, and downstream-tool consumption. It contains deterministic
+  evidence plus analysis metadata; legacy caches receive `available: false`
+  and an explicit rebuild limitation rather than reconstructed weaker facts.
 - `data/manifest.json` — the complete machine index. `projectRoot` is the
   detected project root; `scanTarget` is the original selected file/directory;
   `target` is its compatibility alias. Counts distinguish contracts,
   interfaces, libraries, and total declarations. Completeness/count fields and
   optional emitted HTML paths are indexed explicitly.
+  `files.data.interactions` always discovers `data/interactions.json`; the
+  manifest remains the last artifact written.
 - The scanner emits no model review artifact. External Assistant workflows may
   consume the deterministic bundle but do not alter official findings.
 - `data/nav.json` — symbol-level navigation index (definitions, reverse call

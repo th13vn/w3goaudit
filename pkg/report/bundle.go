@@ -37,7 +37,7 @@ func bundleNow(opts BundleOptions) time.Time {
 //	├── audit.md           # consolidated human-readable audit
 //	├── audit.html         # optional offline mirror
 //	├── results.sarif
-//	├── data/{manifest.json,findings.json,overview.json,diagnostics.json,database.json,nav.json,explorer.json,xref.json}
+//	├── data/{manifest.json,findings.json,overview.json,diagnostics.json,database.json,interactions.json,nav.json,explorer.json,xref.json}
 //	└── contracts/<relative-source-path>__<ContractName>.md
 //
 // run.log is written separately because it is open for the whole CLI scan. The
@@ -165,6 +165,9 @@ func writeBundleData(dir string, db *types.Database, summary *SummaryReport, fin
 		return err
 	}
 	if err := writeJSONFile(filepath.Join(dataDir, "diagnostics.json"), BuildDiagnosticsJSONAt(now, db), "diagnostics"); err != nil {
+		return err
+	}
+	if err := writeJSONFile(filepath.Join(dataDir, "interactions.json"), BuildInteractionsJSON(db), "interactions"); err != nil {
 		return err
 	}
 	if err := writeJSONFile(filepath.Join(dataDir, "nav.json"), BuildNavJSON(db), "nav"); err != nil {

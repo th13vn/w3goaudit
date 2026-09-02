@@ -100,7 +100,7 @@ Writes the **result folder** — the default output of a scan. One call,
 
 ```
 <dir>/README.md, audit.md, results.sarif
-<dir>/data/{manifest.json, database.json, findings.json, overview.json, diagnostics.json, nav.json, xref.json, explorer.json}   # canonical DB lives here only
+<dir>/data/{manifest.json, database.json, findings.json, overview.json, diagnostics.json, interactions.json, nav.json, xref.json, explorer.json}   # canonical DB lives here only
 <dir>/contracts/<rel-src-path-no-ext>__<MainContract>.md
 ```
 
@@ -139,6 +139,10 @@ Writes the **result folder** — the default output of a scan. One call,
   complete machine-readable bundle byte-stable.
 - `data/diagnostics.json` is always emitted, including the complete-analysis
   case where `diagnostics` is `[]`.
+- `data/interactions.json` is always emitted before the manifest. It has no
+  timestamp, snapshots deterministic external-boundary facts without aliases,
+  and reports `available: false` plus a rebuild limitation for legacy caches
+  whose capability version is absent.
 - Internally, `WriteBundle` is a thin phase orchestrator: summary snapshot and
   complete path planning, cleanup, project reports, contract reports, optional
   HTML, machine JSON, then `manifest.json` last. A failed earlier write cannot
@@ -203,7 +207,9 @@ legacy `BuildManifest(...)` remains a current-time compatibility wrapper.
 - `stats.contracts` counts contract + abstract declarations only;
   `interfaces`, `libraries`, and their `declarations` sum are separate.
 - `analysisComplete` and `diagnosticCounts` expose analysis quality.
-- `files.data.diagnostics` always indexes `data/diagnostics.json`. The
+- `files.data.diagnostics` always indexes `data/diagnostics.json`.
+  `files.data.interactions` always indexes `data/interactions.json`, including
+  legacy-cache runs where the artifact explicitly reports unavailability. The
   consolidated layout adds canonical `files.audit` plus optional
   `files.auditHtml`; during v0.5.x the legacy summary/overview/findings fields
   point to `audit.md`, and legacy HTML fields point to `audit.html`.
@@ -223,6 +229,15 @@ an additive `unknown` count for forward-compatible/noncanonical severities,
 and a deduplicated total-order-sorted `diagnostics[]`. Empty diagnostics are a
 non-nil `[]`, and generation does not mutate the database. Human completeness
 summaries render the unknown count rather than silently hiding those records.
+
+### interactions.go
+
+`BuildInteractionsJSON(db)` produces the timestamp-free, schema-`2.0.0`
+semantic boundary artifact. `factsVersion` is `1.0.0` only when the capability
+is available; `interactions` and `limitations` are always arrays. The builder
+uses `Database.ExternalBoundarySnapshot`, so facts are normalized, sorted, and
+deep-copied. Analysis completeness and diagnostic counts mirror
+`data/diagnostics.json`.
 
 ### nav.go
 

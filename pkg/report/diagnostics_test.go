@@ -177,6 +177,7 @@ func TestWriteBundleFixedClockIsByteStable(t *testing.T) {
 		"data/findings.json",
 		"data/overview.json",
 		"data/diagnostics.json",
+		"data/interactions.json",
 		"data/manifest.json",
 		"data/nav.json",
 		"data/explorer.json",
@@ -305,7 +306,7 @@ func TestLegacyFixedClockBundleDoesNotMutateDatabase(t *testing.T) {
 	}
 	for _, rel := range []string{
 		"data/database.json", "data/findings.json", "data/overview.json",
-		"data/diagnostics.json", "data/manifest.json", "data/nav.json",
+		"data/diagnostics.json", "data/interactions.json", "data/manifest.json", "data/nav.json",
 		"data/explorer.json", "results.sarif",
 	} {
 		a, err := os.ReadFile(filepath.Join(left, rel))

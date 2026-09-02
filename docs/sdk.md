@@ -383,6 +383,7 @@ func MakeFunctionID(filePath, contractName, funcSelector string) string
 - `BundleOptions` - Result-folder options (`HTML`, injectable `Now` clock)
 - `ToolMeta` - Tool name/version metadata stamped into reports
 - `NavJSON` / `ExplorerJSON` - extension data-layer models (v0.4, see below)
+- `InteractionsJSON` - timestamp-free external-boundary evidence artifact
 
 **Exported Functions:**
 ```go
@@ -409,6 +410,7 @@ func BuildNavJSON(db *types.Database) *NavJSON
 func BuildExplorerJSON(db *types.Database) *ExplorerJSON
 func BuildXrefJSON(db *types.Database) *XrefJSON
 func BuildDiagnosticsJSON(db *types.Database) *DiagnosticsJSON
+func BuildInteractionsJSON(db *types.Database) *InteractionsJSON
 
 // Severity helpers — the single source of truth shared by the formatters and
 // the CLI's --severity / --min-severity filters.
@@ -434,13 +436,17 @@ callers; `WriteBundle` no longer emits their former split files.
 - Create call graph visualizations
 - Extract code snippets
 
-`WriteBundle` always emits `data/diagnostics.json`. Its manifest distinguishes
-`projectRoot` from the represented `scanTarget` (`target` remains the
-compatibility alias), reports `analysisComplete`/diagnostic counts, separates
-contract/interface/library/declaration counts, and indexes optional HTML only
-when emitted. Finding/content order is deterministic. Real timestamps vary;
-inject the same fixed `Now` into `GeneratorOptions` and `BundleOptions` when a
-byte-stable complete bundle is required.
+`WriteBundle` always emits `data/diagnostics.json` and
+`data/interactions.json`. `BuildInteractionsJSON` returns a deterministic deep
+copy of the complete versioned boundary fact set, or `available: false` with a
+rebuild limitation for legacy caches. It intentionally stores no timestamp and
+always emits array-shaped `interactions` and `limitations`. Its manifest
+distinguishes `projectRoot` from the represented `scanTarget` (`target` remains
+the compatibility alias), reports `analysisComplete`/diagnostic counts,
+separates contract/interface/library/declaration counts, and indexes optional
+HTML only when emitted. Finding/content order is deterministic. Real timestamps
+vary; inject the same fixed `Now` into `GeneratorOptions` and `BundleOptions`
+when a byte-stable complete bundle is required.
 
 > **v0.4 — extension data layer:** `BuildNavJSON`, `BuildExplorerJSON`, and
 > `BuildXrefJSON` (`pkg/report/nav.go`, `pkg/report/explorer.go`,

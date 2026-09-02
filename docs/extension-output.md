@@ -2,7 +2,8 @@
 
 Every scan's result folder (see [Result Folder Layout](./usage.md#result-folder-layout))
 writes three additional files under `data/` alongside `manifest.json`,
-`database.json`, `findings.json`, `overview.json`, and `diagnostics.json`:
+`database.json`, `findings.json`, `overview.json`, `diagnostics.json`, and the
+Agent-facing `interactions.json`:
 
 - **`data/nav.json`** — a flat, symbol-level navigation index: every
   declaration in the database, the reverse call graph, and
@@ -22,6 +23,13 @@ any other downstream tool — build jump-to-definition, find-references,
 "who calls this", and a per-contract explorer tree **without re-parsing
 Solidity**. They are read directly off disk; nothing here requires the CLI to
 run a server.
+
+`data/interactions.json` is a separate protocol-neutral semantic boundary
+index discovered through `files.data.interactions`. It is additive and does not
+change the current editor dependency set: W3Solidity may ignore it until an
+interaction view is implemented. The document is timestamp-free, reports its
+independent fact version and availability, and always uses arrays for facts and
+limitations.
 
 All three documents share a `schemaVersion` field, currently `"2.0.0"`
 (`report.SchemaVersion`), the same version used by `overview.json` /
@@ -315,7 +323,9 @@ across runs.
 The human reports are not an editor data dependency. W3Solidity and other
 editor consumers discover only `files.data.nav`, `files.data.explorer`,
 `files.data.findings`, and `files.data.xref`. Consolidating Markdown and HTML
-therefore does not require an editor schema change.
+therefore does not require an editor schema change. The additive
+`files.data.interactions` path is likewise optional for current editor
+consumers.
 
 All three files are plain, static JSON — no server, no long-lived process, no
 schema negotiation beyond checking `schemaVersion`. A consumer:
