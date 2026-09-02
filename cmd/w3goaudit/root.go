@@ -22,10 +22,10 @@ var rootCmd = &cobra.Command{
 	Long: `W3GoAudit - A Go-based static analysis engine for Solidity smart contracts.
 
 Scan a project (or a single .sol file) for security vulnerabilities using WQL
-templates. Results are written to a folder: README, summary, overview, findings,
-a machine-readable data/ folder (JSON + SARIF), and one sub-folder per main
-contract (under contracts/, mirroring source paths) containing per-entry workflow
-files and a state-change report.
+templates. Results are written to one consolidated folder: bounded README.md,
+complete audit.md, results.sarif, run.log, machine-readable data/ artifacts
+including data/interactions.json, and one Markdown deep dive per main contract
+under contracts/. Use --html to add the self-contained audit.html.
 
 Examples:
   w3goaudit ./contracts/                       # scan → ./contracts result folder

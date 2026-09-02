@@ -25,7 +25,7 @@ result folder. There is **no `scan` subcommand**.
 
 - **Exit codes:** any pipeline/report-write error propagates from `RunE` → `os.Exit(1)`. A failed report write must return non-zero.
 - **stdout vs files:** `--stdout` prints the summary only and writes no files; `run.log` and the result bundle are both gated on `!stdoutOnly` (so the manifest's `run.log` reference is always valid).
-- **Consolidated result layout:** successful scans advertise `README.md`, `audit.md`, SARIF, the Agent-facing `data/interactions.json` alongside the remaining `data/` artifacts, and one Markdown report per main contract. `--html` adds only `audit.html`; the CLI no longer advertises split summary/overview/findings or workflow folders.
+- **Consolidated result layout:** root help and successful scans advertise `README.md`, `audit.md`, SARIF, the Agent-facing `data/interactions.json` alongside the remaining `data/` artifacts, and one Markdown report per main contract. `--html` adds only `audit.html`; the CLI no longer advertises split summary/overview/findings or workflow folders.
 - **Output cannot overlap the scan scope:** before `setupRunLog` creates a directory or file, `executeScan` canonicalizes the selected source scope and resolved result directory, including symlink aliases and missing output suffixes. It rejects equality and containment in either direction. Cached `--db` scans use `scanTarget`, falling back to `projectRoot`.
 - **Managed artifacts never follow prepared symlinks:** `setupRunLog` removes the
   existing `run.log` path before exclusive creation, and the report bundle resets

@@ -134,6 +134,19 @@ func TestPrintResultLocationUsesConsolidatedLayout(t *testing.T) {
 	}
 }
 
+func TestRootHelpDescribesConsolidatedAgentReadyLayout(t *testing.T) {
+	for _, want := range []string{"README.md", "audit.md", "data/interactions.json", "one Markdown deep dive per main contract"} {
+		if !strings.Contains(rootCmd.Long, want) {
+			t.Errorf("root help missing %q:\n%s", want, rootCmd.Long)
+		}
+	}
+	for _, legacy := range []string{"README, summary, overview, findings", "per-entry workflow files", "state-change report"} {
+		if strings.Contains(rootCmd.Long, legacy) {
+			t.Errorf("root help still advertises legacy layout %q:\n%s", legacy, rootCmd.Long)
+		}
+	}
+}
+
 func TestStrictImportsRejectsSourceAndCacheWithStderrParity(t *testing.T) {
 	dir := t.TempDir()
 	source := filepath.Join(dir, "Missing.sol")
