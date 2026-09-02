@@ -14,6 +14,7 @@ import (
 type ASTBuilder struct {
 	contract        *types.Contract
 	function        *types.Function
+	scopeID         string
 	rawFunction     *ast.FunctionDefinition
 	db              *types.Database
 	locator         *sourceLocator
@@ -103,6 +104,9 @@ func buildFunctionASTWithLocator(fndef *ast.FunctionDefinition, fn *types.Functi
 		paramNames:      make(map[string]bool),
 		stateVarNames:   make(map[string]bool),
 	}
+	if fn != nil && fn.Selector != "" && fn.SourceFile != "" && fn.ContractName != "" {
+		builder.scopeID = types.MakeFunctionID(fn.SourceFile, fn.ContractName, fn.Selector)
+	}
 
 	// Build symbol table
 	builder.buildSymbolTable()
@@ -139,6 +143,9 @@ func buildDetachedExpressionAST(expr ast.Node, fn *types.Function, contract *typ
 		taintTable:      make(map[string][]string),
 		paramNames:      make(map[string]bool),
 		stateVarNames:   make(map[string]bool),
+	}
+	if fn != nil && fn.Selector != "" && fn.SourceFile != "" && fn.ContractName != "" {
+		builder.scopeID = types.MakeFunctionID(fn.SourceFile, fn.ContractName, fn.Selector)
 	}
 	// Seed contract storage first. Function parameters are added afterward so
 	// their active RefKind/type wins when Solidity permits declaration shadowing.
@@ -202,6 +209,9 @@ func buildModifierASTWithLocator(moddef *ast.ModifierDefinition, contract *types
 		paramNames:      make(map[string]bool),
 		stateVarNames:   make(map[string]bool),
 	}
+	if moddef != nil && contract != nil {
+		builder.scopeID = types.MakeModifierID(contract.SourceFile, contract.Name, moddef.Name)
+	}
 
 	// Add the owning contract's state variables so writes/reads of them inside
 	if contract != nil {
@@ -224,7 +234,7 @@ func buildModifierASTWithLocator(moddef *ast.ModifierDefinition, contract *types
 			builder.paramNames[param.Name] = true
 			builder.symbolTypes[param.Name] = builder.typeInfoFromTypeName(getTypeName(param.TypeName), "modifier_parameter")
 			builder.symbolLocations[param.Name] = param.StorageLocation
-			delete(builder.symbolRefIDs, param.Name)
+			builder.symbolRefIDs[param.Name] = builder.parameterRefID(param.Name)
 		}
 	}
 

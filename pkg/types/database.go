@@ -252,6 +252,18 @@ func (db *Database) QueryExternalBoundaries(query ExternalBoundaryQuery) (*Exter
 			return nil, fmt.Errorf("external-boundary function %s is not declared by contract %s", query.FunctionID, query.ContractID)
 		}
 	}
+	if query.ScopeID != "" {
+		scopeContractID, scopeKind, ok := db.externalBoundaryScope(query.ScopeID)
+		if !ok {
+			return nil, fmt.Errorf("external-boundary scope not found: %s", query.ScopeID)
+		}
+		if contract != nil && scopeContractID != contract.ID {
+			return nil, fmt.Errorf("external-boundary scope %s is not declared by contract %s", query.ScopeID, query.ContractID)
+		}
+		if function != nil && (scopeKind != ExternalBoundaryScopeFunction || query.ScopeID != query.FunctionID) {
+			return nil, fmt.Errorf("external-boundary scope %s does not match function %s", query.ScopeID, query.FunctionID)
+		}
+	}
 	if query.EntryFunctionID != "" && !db.isExactEntryFunctionID(query.EntryFunctionID) {
 		return nil, fmt.Errorf("external-boundary entry function not found: %s", query.EntryFunctionID)
 	}
@@ -273,6 +285,9 @@ func (db *Database) QueryExternalBoundaries(query ExternalBoundaryQuery) (*Exter
 			continue
 		}
 		if function != nil && fact.FunctionID != query.FunctionID {
+			continue
+		}
+		if query.ScopeID != "" && fact.ScopeID != query.ScopeID {
 			continue
 		}
 		if query.EntryFunctionID != "" && !containsString(fact.ReachableFrom, query.EntryFunctionID) {
@@ -298,6 +313,23 @@ func (db *Database) QueryExternalBoundaries(query ExternalBoundaryQuery) (*Exter
 		Limit:     query.Limit,
 		Truncated: end < len(matches),
 	}, nil
+}
+
+func (db *Database) externalBoundaryScope(id string) (string, ExternalBoundaryScopeKind, bool) {
+	if fn, ok := db.GetFunctionByID(id); ok {
+		return MakeContractID(fn.SourceFile, fn.ContractName), ExternalBoundaryScopeFunction, true
+	}
+	for contractID, contract := range db.Contracts {
+		if contract == nil {
+			continue
+		}
+		for _, modifier := range contract.Modifiers {
+			if modifier != nil && MakeModifierID(contract.SourceFile, contract.Name, modifier.Name) == id {
+				return contractID, ExternalBoundaryScopeModifier, true
+			}
+		}
+	}
+	return "", "", false
 }
 
 func (db *Database) isExactEntryFunctionID(id string) bool {

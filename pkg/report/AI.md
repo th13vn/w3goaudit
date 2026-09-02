@@ -193,7 +193,8 @@ state/workflow renderers, and projects the versioned semantic boundary index.
 Facts are selected by exact direct contract ownership or exact intersection
 with the main contract's recorded entry IDs, so internal/library-hosted facts
 remain attributed to the entry that reaches them. The table emits one row per
-fact with target resolution, receiver/value/argument control, result/check,
+fact with the exact function or modifier host scope, target resolution,
+receiver/value/argument control, result/check,
 before/after direct-state counts, reentry class, and exact location. It is
 bounded at `maxContractInteractionRows` (50) and links to the full
 `data/interactions.json`. Legacy caches explicitly retain the old call-graph

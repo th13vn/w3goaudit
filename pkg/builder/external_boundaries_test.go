@@ -257,6 +257,47 @@ func TestBuildExternalBoundariesRecordsExactEntryReachability(t *testing.T) {
 	}
 }
 
+func TestBuildExternalBoundariesIndexesModifierHostedBoundary(t *testing.T) {
+	db := buildFixture(t, externalBoundariesFixture)
+	abs := fixtureAbs(t, externalBoundariesFixture)
+	contractID := types.MakeContractID(abs, "ExternalBoundaryMatrix")
+	scopeID := types.MakeModifierID(abs, "ExternalBoundaryMatrix", "boundaryCall")
+	entryID := types.MakeFunctionID(abs, "ExternalBoundaryMatrix", "modifierEntry(address,bytes)")
+
+	fact := boundaryScopeFact(t, db, contractID, scopeID, types.KindCallLowlevelCall)
+	if fact.ScopeKind != types.ExternalBoundaryScopeModifier || fact.FunctionID != "" {
+		t.Fatalf("modifier scope identity = kind %q function %q", fact.ScopeKind, fact.FunctionID)
+	}
+	if !reflect.DeepEqual(fact.ReachableFrom, []string{entryID}) {
+		t.Fatalf("modifier reachability = %v, want %v", fact.ReachableFrom, []string{entryID})
+	}
+	if fact.Receiver == nil || fact.Receiver.Control != types.BoundaryValueCallerControlled {
+		t.Fatalf("modifier receiver = %+v", fact.Receiver)
+	}
+	if fact.Result.Disposition != types.BoundaryResultCaptured || fact.Result.DirectCheck != types.BoundaryResultYes {
+		t.Fatalf("modifier result evidence = %+v", fact.Result)
+	}
+
+	contract := db.GetContractByID(contractID)
+	if contract == nil {
+		t.Fatal("modifier contract missing")
+	}
+	var modifier *types.Modifier
+	for _, candidate := range contract.Modifiers {
+		if candidate != nil && candidate.Name == "boundaryCall" {
+			modifier = candidate
+			break
+		}
+	}
+	if modifier == nil {
+		t.Fatal("modifier missing")
+	}
+	node := findASTNodeByPath(modifier.AST, fact.ASTPath)
+	if node == nil || node.GetAttributeString("external_boundary_id") != fact.ID {
+		t.Fatalf("modifier boundary AST attributes = %+v", node)
+	}
+}
+
 func TestExternalBoundaryFactsSourceCacheParity(t *testing.T) {
 	db := buildFixture(t, externalBoundariesFixture)
 	raw, err := json.Marshal(db)
@@ -277,11 +318,7 @@ func TestExternalBoundaryFactsSourceCacheParity(t *testing.T) {
 		t.Fatalf("source/cache facts differ\nfresh: %s\ncached: %s", freshFacts, cachedFacts)
 	}
 	for _, fact := range loaded.Semantics.ExternalBoundaries {
-		fn, ok := loaded.GetFunctionByID(fact.FunctionID)
-		if !ok {
-			t.Fatalf("cached function %s missing", fact.FunctionID)
-		}
-		node := findASTNodeByPath(fn.AST, fact.ASTPath)
+		node := findBoundaryScopeAST(loaded, fact)
 		if node == nil || node.GetAttributeString("external_boundary_id") != fact.ID || node.GetAttributeString("boundary_result_disposition") != fact.Result.Disposition {
 			t.Fatalf("cached fact-backed attributes differ for %s: %+v", fact.ID, node)
 		}
@@ -291,16 +328,46 @@ func TestExternalBoundaryFactsSourceCacheParity(t *testing.T) {
 func boundaryFact(t *testing.T, db *types.Database, contractID, selector, kind string) *types.ExternalBoundaryFact {
 	t.Helper()
 	functionID := types.MakeFunctionID(db.Contracts[contractID].SourceFile, db.Contracts[contractID].Name, selector)
+	return boundaryScopeFact(t, db, contractID, functionID, kind)
+}
+
+func boundaryScopeFact(t *testing.T, db *types.Database, contractID, scopeID, kind string) *types.ExternalBoundaryFact {
+	t.Helper()
 	var matches []*types.ExternalBoundaryFact
 	for _, fact := range db.Semantics.ExternalBoundaries {
-		if fact.ContractID == contractID && fact.FunctionID == functionID && fact.Kind == kind {
+		if fact.ContractID == contractID && fact.ScopeID == scopeID && fact.Kind == kind {
 			matches = append(matches, fact)
 		}
 	}
 	if len(matches) != 1 {
-		t.Fatalf("facts for %s %s = %d, want 1: %+v", selector, kind, len(matches), matches)
+		t.Fatalf("facts for %s %s = %d, want 1: %+v", scopeID, kind, len(matches), matches)
 	}
 	return matches[0]
+}
+
+func findBoundaryScopeAST(db *types.Database, fact *types.ExternalBoundaryFact) *types.ASTNode {
+	if db == nil || fact == nil {
+		return nil
+	}
+	if fact.ScopeKind == types.ExternalBoundaryScopeFunction {
+		fn, ok := db.GetFunctionByID(fact.ScopeID)
+		if !ok {
+			return nil
+		}
+		return findASTNodeByPath(fn.AST, fact.ASTPath)
+	}
+	if fact.ScopeKind == types.ExternalBoundaryScopeModifier {
+		contract := db.GetContractByID(fact.ContractID)
+		if contract == nil {
+			return nil
+		}
+		for _, modifier := range contract.Modifiers {
+			if modifier != nil && types.MakeModifierID(contract.SourceFile, contract.Name, modifier.Name) == fact.ScopeID {
+				return findASTNodeByPath(modifier.AST, fact.ASTPath)
+			}
+		}
+	}
+	return nil
 }
 
 func findASTNodeByPath(root *types.ASTNode, path string) *types.ASTNode {

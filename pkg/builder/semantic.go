@@ -430,23 +430,33 @@ func (b *ASTBuilder) semanticFunctionID() string {
 }
 
 func (b *ASTBuilder) parameterRefID(name string) string {
-	functionID := b.semanticFunctionID()
-	if functionID == "" || name == "" {
+	scopeID := b.semanticScopeID()
+	if scopeID == "" || name == "" {
 		return ""
 	}
-	return functionID + "." + name
+	return scopeID + "." + name
 }
 
 func (b *ASTBuilder) solidityLocalDeclarationRefID(name string, declaration ast.Node) string {
-	functionID := b.semanticFunctionID()
-	if functionID == "" || name == "" || declaration == nil {
+	scopeID := b.semanticScopeID()
+	if scopeID == "" || name == "" || declaration == nil {
 		return ""
 	}
 	rng := declaration.GetRange()
 	if rng == nil || rng[0] < 0 || rng[1] <= rng[0] {
 		return ""
 	}
-	return fmt.Sprintf("%s:local:%d:%d:%s", functionID, rng[0], rng[1], name)
+	return fmt.Sprintf("%s:local:%d:%d:%s", scopeID, rng[0], rng[1], name)
+}
+
+func (b *ASTBuilder) semanticScopeID() string {
+	if b == nil {
+		return ""
+	}
+	if b.scopeID != "" {
+		return b.scopeID
+	}
+	return b.semanticFunctionID()
 }
 
 func (b *ASTBuilder) isKnownUserType(name string) bool {

@@ -9,6 +9,15 @@ import (
 	"github.com/th13vn/w3goaudit/pkg/types"
 )
 
+type externalBoundaryScope struct {
+	id         string
+	kind       types.ExternalBoundaryScopeKind
+	functionID string
+	file       string
+	root       *types.ASTNode
+	calls      []*types.FunctionCall
+}
+
 func (b *Builder) buildExternalBoundaries() {
 	if b == nil || b.db == nil {
 		return
@@ -29,21 +38,13 @@ func (b *Builder) buildExternalBoundaries() {
 		if contract == nil {
 			continue
 		}
-		functions := append([]*types.Function(nil), contract.Functions...)
-		sort.SliceStable(functions, func(i, j int) bool {
-			return externalBoundaryFunctionID(functions[i]) < externalBoundaryFunctionID(functions[j])
-		})
-		for _, fn := range functions {
-			functionID := externalBoundaryFunctionID(fn)
-			if fn == nil || fn.AST == nil || functionID == "" {
-				continue
-			}
-			walkBoundaryAST(fn.AST, "0", func(node *types.ASTNode, path string) {
+		for _, scope := range externalBoundaryScopes(contract) {
+			walkBoundaryAST(scope.root, "0", func(node *types.ASTNode, path string) {
 				if !types.IsExternalBoundaryKind(node.Kind) {
 					return
 				}
-				recorded := matchBoundaryCall(fn, node)
-				fact := b.externalBoundaryFact(contract, fn, functionID, node, path, recorded)
+				recorded := matchBoundaryCall(scope.calls, node)
+				fact := b.externalBoundaryFact(contract, scope, node, path, recorded)
 				facts = append(facts, fact)
 				factNodes[fact.ID] = node
 			})
@@ -51,13 +52,41 @@ func (b *Builder) buildExternalBoundaries() {
 	}
 	reachableFrom := b.externalBoundaryEntryReachability()
 	for _, fact := range facts {
-		fact.ReachableFrom = append([]string(nil), reachableFrom[fact.FunctionID]...)
+		fact.ReachableFrom = append([]string(nil), reachableFrom[fact.ScopeID]...)
 	}
 	b.db.Semantics.ExternalBoundaries = types.NormalizeExternalBoundaryFacts(facts)
 	for _, fact := range b.db.Semantics.ExternalBoundaries {
 		annotateExternalBoundaryNode(factNodes[fact.ID], fact)
 	}
 	b.db.Semantics.ExternalBoundaryVersion = types.ExternalBoundaryFactsVersion
+}
+
+func externalBoundaryScopes(contract *types.Contract) []externalBoundaryScope {
+	if contract == nil {
+		return nil
+	}
+	scopes := make([]externalBoundaryScope, 0, len(contract.Functions)+len(contract.Modifiers))
+	for _, fn := range contract.Functions {
+		id := externalBoundaryFunctionID(fn)
+		if fn == nil || fn.AST == nil || id == "" {
+			continue
+		}
+		scopes = append(scopes, externalBoundaryScope{id: id, kind: types.ExternalBoundaryScopeFunction, functionID: id, file: fn.SourceFile, root: fn.AST, calls: fn.Calls})
+	}
+	for _, modifier := range contract.Modifiers {
+		if modifier == nil || modifier.AST == nil || modifier.Name == "" {
+			continue
+		}
+		id := types.MakeModifierID(contract.SourceFile, contract.Name, modifier.Name)
+		scopes = append(scopes, externalBoundaryScope{id: id, kind: types.ExternalBoundaryScopeModifier, file: contract.SourceFile, root: modifier.AST, calls: modifier.Calls})
+	}
+	sort.Slice(scopes, func(i, j int) bool {
+		if scopes[i].id != scopes[j].id {
+			return scopes[i].id < scopes[j].id
+		}
+		return scopes[i].kind < scopes[j].kind
+	})
+	return scopes
 }
 
 func (b *Builder) externalBoundaryEntryReachability() map[string][]string {
@@ -183,12 +212,12 @@ func walkBoundaryAST(root *types.ASTNode, path string, visit func(*types.ASTNode
 	}
 }
 
-func matchBoundaryCall(fn *types.Function, node *types.ASTNode) *types.FunctionCall {
-	if fn == nil || node == nil {
+func matchBoundaryCall(calls []*types.FunctionCall, node *types.ASTNode) *types.FunctionCall {
+	if node == nil {
 		return nil
 	}
 	var matches []*types.FunctionCall
-	for _, call := range fn.Calls {
+	for _, call := range calls {
 		if call == nil || call.Target != node.Name || !boundaryCallTypeMatchesNode(call.CallType, node.Kind) {
 			continue
 		}
@@ -226,15 +255,17 @@ func boundaryCallTypeMatchesNode(callType types.CallType, kind string) bool {
 	}
 }
 
-func (b *Builder) externalBoundaryFact(contract *types.Contract, fn *types.Function, functionID string, node *types.ASTNode, astPath string, recorded *types.FunctionCall) *types.ExternalBoundaryFact {
+func (b *Builder) externalBoundaryFact(contract *types.Contract, scope externalBoundaryScope, node *types.ASTNode, astPath string, recorded *types.FunctionCall) *types.ExternalBoundaryFact {
 	fact := &types.ExternalBoundaryFact{
-		ID:            fmt.Sprintf("%s@interaction:%d:%d:%s:%s", functionID, node.StartByte, node.EndByte, node.Kind, astPath),
+		ID:            fmt.Sprintf("%s@interaction:%d:%d:%s:%s", scope.id, node.StartByte, node.EndByte, node.Kind, astPath),
 		ASTPath:       astPath,
 		ContractID:    contract.ID,
-		FunctionID:    functionID,
+		ScopeID:       scope.id,
+		ScopeKind:     scope.kind,
+		FunctionID:    scope.functionID,
 		Kind:          node.Kind,
 		CallType:      externalBoundaryCallType(node.Kind, recorded),
-		Range:         boundaryRange(fn.SourceFile, node),
+		Range:         boundaryRange(scope.file, node),
 		Target:        b.boundaryTarget(node, recorded),
 		Arguments:     []types.BoundaryValue{},
 		Result:        types.BoundaryResult{Availability: types.BoundaryResultUnknown, Disposition: types.BoundaryResultUnknown, DirectCheck: types.BoundaryResultUnknown, Targets: []types.BoundaryValue{}, CheckSites: []types.SemanticSourceRange{}},
@@ -243,9 +274,9 @@ func (b *Builder) externalBoundaryFact(contract *types.Contract, fn *types.Funct
 		StateEffects:  []types.BoundaryStateEffect{},
 		Limitations:   []string{},
 	}
-	b.populateBoundaryValues(fact, fn, node)
-	b.populateBoundaryResult(fact, fn, node)
-	b.populateBoundaryStateEffects(fact, fn, node)
+	b.populateBoundaryValues(fact, scope.file, node)
+	b.populateBoundaryResult(fact, scope.file, scope.root, node)
+	b.populateBoundaryStateEffects(fact, scope.file, scope.root, node)
 	fact.ReentryClass = boundaryReentryClass(fact)
 	fact.Limitations = boundaryLimitations(fact)
 	return fact
@@ -294,9 +325,9 @@ func (b *Builder) boundaryTarget(node *types.ASTNode, recorded *types.FunctionCa
 	return target
 }
 
-func (b *Builder) populateBoundaryValues(fact *types.ExternalBoundaryFact, fn *types.Function, node *types.ASTNode) {
+func (b *Builder) populateBoundaryValues(fact *types.ExternalBoundaryFact, file string, node *types.ASTNode) {
 	if strings.HasPrefix(node.Kind, "asm.") {
-		b.populateYulBoundaryValues(fact, fn, node)
+		b.populateYulBoundaryValues(fact, file, node)
 		return
 	}
 	argumentIndex := 0
@@ -306,43 +337,43 @@ func (b *Builder) populateBoundaryValues(fact *types.ExternalBoundaryFact, fn *t
 		}
 		switch {
 		case child.GetAttributeBool("call_receiver"):
-			value := b.boundaryValue(fn, child, types.BoundaryValueRoleReceiver, -1, true)
+			value := b.boundaryValue(file, child, types.BoundaryValueRoleReceiver, -1, true)
 			fact.Receiver = &value
 		case child.GetAttributeString("call_option") == "value":
-			value := b.boundaryValue(fn, child, types.BoundaryValueRoleValue, -1, false)
+			value := b.boundaryValue(file, child, types.BoundaryValueRoleValue, -1, false)
 			fact.Value = &value
 		case child.GetAttributeString("call_option") == "gas":
-			value := b.boundaryValue(fn, child, types.BoundaryValueRoleGas, -1, false)
+			value := b.boundaryValue(file, child, types.BoundaryValueRoleGas, -1, false)
 			fact.Gas = &value
 		default:
-			fact.Arguments = append(fact.Arguments, b.boundaryValue(fn, child, types.BoundaryValueRoleArgument, argumentIndex, false))
+			fact.Arguments = append(fact.Arguments, b.boundaryValue(file, child, types.BoundaryValueRoleArgument, argumentIndex, false))
 			argumentIndex++
 		}
 	}
 }
 
-func (b *Builder) populateYulBoundaryValues(fact *types.ExternalBoundaryFact, fn *types.Function, node *types.ASTNode) {
+func (b *Builder) populateYulBoundaryValues(fact *types.ExternalBoundaryFact, file string, node *types.ASTNode) {
 	for index, child := range node.Children {
-		fact.Arguments = append(fact.Arguments, b.boundaryValue(fn, child, types.BoundaryValueRoleArgument, index, false))
+		fact.Arguments = append(fact.Arguments, b.boundaryValue(file, child, types.BoundaryValueRoleArgument, index, false))
 	}
 	switch node.Kind {
 	case types.KindAsmCall:
-		b.setYulBoundaryValue(fact, fn, node, 0, types.BoundaryValueRoleGas)
-		b.setYulBoundaryValue(fact, fn, node, 1, types.BoundaryValueRoleReceiver)
-		b.setYulBoundaryValue(fact, fn, node, 2, types.BoundaryValueRoleValue)
+		b.setYulBoundaryValue(fact, file, node, 0, types.BoundaryValueRoleGas)
+		b.setYulBoundaryValue(fact, file, node, 1, types.BoundaryValueRoleReceiver)
+		b.setYulBoundaryValue(fact, file, node, 2, types.BoundaryValueRoleValue)
 	case types.KindAsmDelegatecall, types.KindAsmStaticcall:
-		b.setYulBoundaryValue(fact, fn, node, 0, types.BoundaryValueRoleGas)
-		b.setYulBoundaryValue(fact, fn, node, 1, types.BoundaryValueRoleReceiver)
+		b.setYulBoundaryValue(fact, file, node, 0, types.BoundaryValueRoleGas)
+		b.setYulBoundaryValue(fact, file, node, 1, types.BoundaryValueRoleReceiver)
 	case types.KindAsmCreate, types.KindAsmCreate2:
-		b.setYulBoundaryValue(fact, fn, node, 0, types.BoundaryValueRoleValue)
+		b.setYulBoundaryValue(fact, file, node, 0, types.BoundaryValueRoleValue)
 	}
 }
 
-func (b *Builder) setYulBoundaryValue(fact *types.ExternalBoundaryFact, fn *types.Function, node *types.ASTNode, index int, role string) {
+func (b *Builder) setYulBoundaryValue(fact *types.ExternalBoundaryFact, file string, node *types.ASTNode, index int, role string) {
 	if index < 0 || index >= len(node.Children) {
 		return
 	}
-	value := b.boundaryValue(fn, node.Children[index], role, -1, role == types.BoundaryValueRoleReceiver)
+	value := b.boundaryValue(file, node.Children[index], role, -1, role == types.BoundaryValueRoleReceiver)
 	switch role {
 	case types.BoundaryValueRoleReceiver:
 		fact.Receiver = &value
@@ -353,13 +384,13 @@ func (b *Builder) setYulBoundaryValue(fact *types.ExternalBoundaryFact, fn *type
 	}
 }
 
-func (b *Builder) boundaryValue(fn *types.Function, node *types.ASTNode, role string, index int, receiver bool) types.BoundaryValue {
+func (b *Builder) boundaryValue(file string, node *types.ASTNode, role string, index int, receiver bool) types.BoundaryValue {
 	refs, taints := boundaryDependencies(node, receiver)
 	return types.BoundaryValue{
 		Role:         role,
 		Index:        index,
 		Expression:   astText(node),
-		Range:        boundaryRange(fn.SourceFile, node),
+		Range:        boundaryRange(file, node),
 		Type:         boundaryTypeInfo(node, b.db),
 		Control:      boundaryValueControl(node, receiver),
 		RefIDs:       refs,
@@ -524,7 +555,7 @@ func annotateExternalBoundaryNode(node *types.ASTNode, fact *types.ExternalBound
 	node.SetAttribute("boundary_reachable_from_entry", len(fact.ReachableFrom) > 0)
 }
 
-func (b *Builder) populateBoundaryResult(fact *types.ExternalBoundaryFact, fn *types.Function, node *types.ASTNode) {
+func (b *Builder) populateBoundaryResult(fact *types.ExternalBoundaryFact, file string, root, node *types.ASTNode) {
 	fact.Result.Availability = b.boundaryResultAvailability(fact)
 	if fact.Result.Availability == types.BoundaryResultNo {
 		fact.Result.Disposition = types.BoundaryResultNone
@@ -535,7 +566,7 @@ func (b *Builder) populateBoundaryResult(fact *types.ExternalBoundaryFact, fn *t
 	if check := boundaryConditionOwner(node); check != nil {
 		fact.Result.Disposition = types.BoundaryResultCondition
 		fact.Result.DirectCheck = types.BoundaryResultYes
-		fact.Result.CheckSites = []types.SemanticSourceRange{boundaryRange(fn.SourceFile, check)}
+		fact.Result.CheckSites = []types.SemanticSourceRange{boundaryRange(file, check)}
 		return
 	}
 	if boundaryAncestor(node, types.KindStmtReturn) != nil {
@@ -545,11 +576,11 @@ func (b *Builder) populateBoundaryResult(fact *types.ExternalBoundaryFact, fn *t
 	}
 	if assignment := boundaryCapturingAssignment(node); assignment != nil {
 		fact.Result.Disposition = types.BoundaryResultCaptured
-		fact.Result.Targets = b.boundaryResultTargets(fn, assignment)
+		fact.Result.Targets = b.boundaryResultTargets(file, assignment)
 		fact.Result.DirectCheck = types.BoundaryResultNo
 		for _, target := range fact.Result.Targets {
-			for _, check := range laterBoundaryChecks(fn.AST, node, target.RefIDs) {
-				fact.Result.CheckSites = append(fact.Result.CheckSites, boundaryRange(fn.SourceFile, check))
+			for _, check := range laterBoundaryChecks(root, node, target.RefIDs) {
+				fact.Result.CheckSites = append(fact.Result.CheckSites, boundaryRange(file, check))
 			}
 		}
 		if len(fact.Result.CheckSites) > 0 {
@@ -644,7 +675,7 @@ func boundaryCapturingAssignment(node *types.ASTNode) *types.ASTNode {
 	return nil
 }
 
-func (b *Builder) boundaryResultTargets(fn *types.Function, assignment *types.ASTNode) []types.BoundaryValue {
+func (b *Builder) boundaryResultTargets(file string, assignment *types.ASTNode) []types.BoundaryValue {
 	lhsCount, err := strconv.Atoi(assignment.GetAttributeString("assignment_lhs_count"))
 	if err != nil || lhsCount <= 0 || lhsCount > len(assignment.Children) {
 		return []types.BoundaryValue{}
@@ -654,7 +685,7 @@ func (b *Builder) boundaryResultTargets(fn *types.Function, assignment *types.AS
 		if lhs == nil {
 			continue
 		}
-		targets = append(targets, b.boundaryValue(fn, lhs, types.BoundaryValueRoleResult, -1, false))
+		targets = append(targets, b.boundaryValue(file, lhs, types.BoundaryValueRoleResult, -1, false))
 	}
 	return targets
 }
@@ -704,12 +735,12 @@ func boundaryIsStandalone(node *types.ASTNode) bool {
 	return boundaryIsSequentialContainer(node.Parent)
 }
 
-func (b *Builder) populateBoundaryStateEffects(fact *types.ExternalBoundaryFact, fn *types.Function, boundary *types.ASTNode) {
-	if fn == nil || fn.AST == nil {
+func (b *Builder) populateBoundaryStateEffects(fact *types.ExternalBoundaryFact, file string, root, boundary *types.ASTNode) {
+	if root == nil {
 		return
 	}
-	walkBoundaryAST(fn.AST, "0", func(node *types.ASTNode, _ string) {
-		effect, ok := boundaryStateEffect(fn.SourceFile, node)
+	walkBoundaryAST(root, "0", func(node *types.ASTNode, _ string) {
+		effect, ok := boundaryStateEffect(file, node)
 		if !ok {
 			return
 		}
@@ -909,7 +940,7 @@ func boundaryReentryClass(fact *types.ExternalBoundaryFact) string {
 func boundaryLimitations(fact *types.ExternalBoundaryFact) []string {
 	limitations := []string{
 		"external target effects are not analyzed",
-		"state effects include direct same-function writes only",
+		"state effects include direct writes in the hosting function or modifier only",
 		"entry reachability records call-graph paths and is not a path-feasibility proof",
 	}
 	if fact.Target.Resolution != types.BoundaryTargetResolved {

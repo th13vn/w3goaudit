@@ -170,6 +170,26 @@ func TestContractReportUsesCallGraphInteractionFallbackForLegacyCache(t *testing
 	}
 }
 
+func TestContractReportNamesModifierHostedBoundaryScope(t *testing.T) {
+	db := types.NewDatabase()
+	file := "/repo/C.sol"
+	contractID := types.MakeContractID(file, "C")
+	modifierID := types.MakeModifierID(file, "C", "guard")
+	contract := &types.Contract{ID: contractID, Name: "C", SourceFile: file, Kind: types.ContractKindContract, Modifiers: []*types.Modifier{{Name: "guard"}}}
+	db.AddContract(contract)
+	db.Semantics.ExternalBoundaryVersion = types.ExternalBoundaryFactsVersion
+	db.Semantics.ExternalBoundaries = []*types.ExternalBoundaryFact{{
+		ID: "modifier-boundary", ContractID: contractID, ScopeID: modifierID, ScopeKind: types.ExternalBoundaryScopeModifier,
+		Kind: types.KindCallLowlevelCall, Range: types.SemanticSourceRange{File: file, StartLine: 4},
+		Arguments: []types.BoundaryValue{}, ReachableFrom: []string{}, StateEffects: []types.BoundaryStateEffect{}, Limitations: []string{},
+	}}
+
+	got := FormatContractReportMarkdown(&ContractSummary{Name: "C", SourceFile: file}, nil, db, nil, "/repo", "../", "contracts/C__C.md")
+	if !strings.Contains(got, "| Host scope |") || !strings.Contains(got, "| `modifier-boundary` | none recorded | `"+modifierID+"` |") {
+		t.Fatalf("modifier boundary scope not rendered:\n%s", got)
+	}
+}
+
 func TestContractReportMarksUnavailableExactDatabase(t *testing.T) {
 	mc := &ContractSummary{Name: "C", SourceFile: "/repo/C.sol"}
 	got := FormatContractReportMarkdown(mc, nil, types.NewDatabase(), nil, "/repo", "../", "contracts/C__C.md")

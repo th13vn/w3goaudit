@@ -27,7 +27,8 @@ Main orchestrator for the 8-phase build process.
    per-function `FunctionEffects` (state writes, require/assert/revert + branch
    guards, access control) into `Database.Semantics.FunctionEffects`.
 8. **Build External-Boundary Facts** (`external_boundaries.go`) - Walk exact
-   function ASTs in deterministic child-index order and populate versioned,
+   function and modifier ASTs in deterministic scope-ID and child-index order
+   and populate versioned,
    protocol-neutral `ExternalBoundaryFact` records. The initial phase records
    stable fact identity, exact or explicitly unresolved target metadata,
    receiver/value/gas/argument provenance, and fact-backed WQL attributes.
@@ -169,7 +170,8 @@ Builds simplified AST trees for function bodies.
   a modifier AST with `nil` context (the old signature) silently missed every
   state-write/taint fact inside modifier bodies. With context, local and exact
   inherited state identifiers receive owner RefIDs even though modifiers have
-  no function context; parameter/local IDs remain function-dependent.
+  no function context; parameter/local IDs use the exact hosting function or
+  modifier scope.
 
 **Interior-node locations (v0.4):** every interior node is stamped via a
 dispatch-wrapper chokepoint rather than ad hoc call sites, so no statement or
@@ -410,8 +412,10 @@ external/low-level/transfer/send/create nodes plus Yul
 library, modifier, and `super` calls remain traversal edges rather than
 boundaries.
 
-Each fact ID combines the exact function ID, call span, AST kind, and stable
-child-index path. Resolved targets come only from exact recorded call metadata;
+Each fact ID combines the exact function or modifier scope ID, call span, AST
+kind, and stable child-index path. `ScopeID`/`ScopeKind` identify the generic
+host; `FunctionID` remains populated only for function-hosted facts. Resolved
+targets come only from exact recorded call metadata;
 dynamic targets stay `unresolved` and Yul targets without callgraph identities
 stay `not_applicable`. Values retain exact dependency RefIDs, sorted coarse
 taint sources, inferred `TypeInfo`, and conservative control classification.
@@ -429,7 +433,8 @@ uses. A captured target is directly checked only when the same exact RefID is
 used by a later `require`, `assert`, or `if` condition with a proven execution
 relation. Variable names and comments never prove a check.
 
-Direct state writes are related to each boundary by an AST execution partial
+Direct state writes in the same hosting function or modifier are related to
+each boundary by an AST execution partial
 order, not by line numbers. Sequential block/function children preserve order;
 an enclosing effect follows its operand; conditions precede their arms; opposite
 conditional arms are incompatible; sibling operands are unordered; and events
@@ -449,9 +454,10 @@ entry ID. Traversal follows only resolved exact `internal`, `inherited`,
 cycle detection. It never invokes the call graph's compatibility prefix lookup,
 never falls back to names, and never crosses an ordinary external edge. Entry
 IDs are deduplicated and sorted before facts are normalized, then the final
-fact is used to set `boundary_reachable_from_entry` on the persisted AST node.
-Modifier scopes participate in traversal, although this fact version indexes
-boundary occurrences hosted by function ASTs only.
+fact is used to set `boundary_reachable_from_entry` on the persisted function
+or modifier AST node. Modifier-hosted boundaries retain their own exact
+modifier `ScopeID`; the entry function that applies the modifier appears only
+in `ReachableFrom`.
 
 **Member Access Attributes:**
 - Stores `parent` attribute for member accesses

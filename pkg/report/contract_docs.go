@@ -300,14 +300,14 @@ func renderContractBoundaryFacts(sb *strings.Builder, facts []*types.ExternalBou
 	if len(visible) > maxContractInteractionRows {
 		visible = visible[:maxContractInteractionRows]
 	}
-	sb.WriteString("| Fact | Reachable entries | Caller | Kind | Target | Value control | Result | State effects | Reentry | Location |\n")
+	sb.WriteString("| Fact | Reachable entries | Host scope | Kind | Target | Value control | Result | State effects | Reentry | Location |\n")
 	sb.WriteString("|------|-------------------|--------|------|--------|---------------|--------|---------------|---------|----------|\n")
 	for _, fact := range visible {
 		if fact == nil {
 			continue
 		}
 		fmt.Fprintf(sb, "| `%s` | %s | `%s` | `%s` | %s | %s | %s | %s | `%s` | `%s` |\n",
-			mdCell(fact.ID), boundaryEntrySummary(fact.ReachableFrom), mdCell(fact.FunctionID), mdCell(fact.Kind), boundaryTargetSummary(fact.Target),
+			mdCell(fact.ID), boundaryEntrySummary(fact.ReachableFrom), mdCell(boundaryScopeID(fact)), mdCell(fact.Kind), boundaryTargetSummary(fact.Target),
 			boundaryControlSummary(fact), boundaryResultSummary(fact.Result), boundaryStateSummary(fact.StateEffects), fact.ReentryClass,
 			mdCell(boundaryLocation(projectRoot, fact.Range)))
 	}
@@ -316,6 +316,16 @@ func renderContractBoundaryFacts(sb *strings.Builder, facts []*types.ExternalBou
 		fmt.Fprintf(sb, "_%d additional interaction(s) omitted by the %d-row contract limit._\n\n", omitted, maxContractInteractionRows)
 	}
 	fmt.Fprintf(sb, "Full values, target evidence, checks, state relations, and limitations: [data/interactions.json](%sdata/interactions.json).\n\n", rootPrefix)
+}
+
+func boundaryScopeID(fact *types.ExternalBoundaryFact) string {
+	if fact == nil {
+		return ""
+	}
+	if fact.ScopeID != "" {
+		return fact.ScopeID
+	}
+	return fact.FunctionID
 }
 
 func boundaryEntrySummary(entryIDs []string) string {

@@ -25,6 +25,13 @@ const (
 
 var ErrExternalBoundaryFactsUnavailable = errors.New("external-boundary facts unavailable; rebuild the database from source")
 
+type ExternalBoundaryScopeKind string
+
+const (
+	ExternalBoundaryScopeFunction ExternalBoundaryScopeKind = "function"
+	ExternalBoundaryScopeModifier ExternalBoundaryScopeKind = "modifier"
+)
+
 type BoundaryValueControl string
 
 const (
@@ -127,27 +134,30 @@ type BoundaryStateEffect struct {
 // ExternalBoundaryFact is the stable public evidence record for one external
 // control boundary. It is descriptive and does not declare a vulnerability.
 type ExternalBoundaryFact struct {
-	ID            string                `json:"id"`
-	ASTPath       string                `json:"astPath"`
-	ContractID    string                `json:"contractId"`
-	FunctionID    string                `json:"functionId"`
-	Kind          string                `json:"kind"`
-	CallType      CallType              `json:"callType"`
-	Range         SemanticSourceRange   `json:"range"`
-	Target        BoundaryTarget        `json:"target"`
-	Receiver      *BoundaryValue        `json:"receiver,omitempty"`
-	Value         *BoundaryValue        `json:"value,omitempty"`
-	Gas           *BoundaryValue        `json:"gas,omitempty"`
-	Arguments     []BoundaryValue       `json:"arguments"`
-	Result        BoundaryResult        `json:"result"`
-	ReentryClass  string                `json:"reentryClass"`
-	ReachableFrom []string              `json:"reachableFrom"`
-	StateEffects  []BoundaryStateEffect `json:"stateEffects"`
-	Limitations   []string              `json:"limitations"`
+	ID            string                    `json:"id"`
+	ASTPath       string                    `json:"astPath"`
+	ContractID    string                    `json:"contractId"`
+	ScopeID       string                    `json:"scopeId"`
+	ScopeKind     ExternalBoundaryScopeKind `json:"scopeKind"`
+	FunctionID    string                    `json:"functionId,omitempty"`
+	Kind          string                    `json:"kind"`
+	CallType      CallType                  `json:"callType"`
+	Range         SemanticSourceRange       `json:"range"`
+	Target        BoundaryTarget            `json:"target"`
+	Receiver      *BoundaryValue            `json:"receiver,omitempty"`
+	Value         *BoundaryValue            `json:"value,omitempty"`
+	Gas           *BoundaryValue            `json:"gas,omitempty"`
+	Arguments     []BoundaryValue           `json:"arguments"`
+	Result        BoundaryResult            `json:"result"`
+	ReentryClass  string                    `json:"reentryClass"`
+	ReachableFrom []string                  `json:"reachableFrom"`
+	StateEffects  []BoundaryStateEffect     `json:"stateEffects"`
+	Limitations   []string                  `json:"limitations"`
 }
 
 type ExternalBoundaryQuery struct {
 	ContractID      string
+	ScopeID         string
 	FunctionID      string
 	EntryFunctionID string
 	Kinds           []string
@@ -289,8 +299,8 @@ func NormalizeExternalBoundaryFacts(facts []*ExternalBoundaryFact) []*ExternalBo
 		if out[i].ID != out[j].ID {
 			return out[i].ID < out[j].ID
 		}
-		if out[i].FunctionID != out[j].FunctionID {
-			return out[i].FunctionID < out[j].FunctionID
+		if out[i].ScopeID != out[j].ScopeID {
+			return out[i].ScopeID < out[j].ScopeID
 		}
 		return out[i].ASTPath < out[j].ASTPath
 	})
@@ -298,6 +308,12 @@ func NormalizeExternalBoundaryFacts(facts []*ExternalBoundaryFact) []*ExternalBo
 }
 
 func normalizeExternalBoundaryFact(fact *ExternalBoundaryFact) {
+	if fact.ScopeID == "" && fact.FunctionID != "" {
+		fact.ScopeID = fact.FunctionID
+	}
+	if fact.ScopeKind == "" && fact.FunctionID != "" && fact.ScopeID == fact.FunctionID {
+		fact.ScopeKind = ExternalBoundaryScopeFunction
+	}
 	fact.Arguments = normalizeBoundaryValues(fact.Arguments)
 	fact.Result.Targets = normalizeBoundaryValues(fact.Result.Targets)
 	fact.Result.CheckSites = normalizeSemanticRanges(fact.Result.CheckSites)

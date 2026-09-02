@@ -557,6 +557,14 @@ type SemanticFacts struct {
     ExternalBoundaries []*ExternalBoundaryFact   // sorted protocol-neutral evidence
 }
 
+type ExternalBoundaryFact struct {
+    ID, ASTPath, ContractID string
+    ScopeID                 string // exact function or modifier identity
+    ScopeKind               ExternalBoundaryScopeKind // function|modifier
+    FunctionID              string // function hosts only; empty for modifiers
+    // target, value, result, state, reachability, and limitation evidence
+}
+
 // Per-function analysis facts (builder Phase 7), consumed by the report layer.
 type FunctionEffects struct {
     StateWrites []StateWrite // state vars written directly
@@ -592,7 +600,7 @@ falls back to existing heuristics.
 
 The external-boundary surface is versioned independently by
 `ExternalBoundaryFactsVersion` (`1.0.0`). `ExternalBoundaryFact` is a durable,
-descriptive evidence record for one external-control boundary: exact caller and
+descriptive evidence record for one external-control boundary: exact host scope and
 source identity, target resolution, bounded receiver/value/argument provenance,
 direct result handling, state-effect relations, entry reachability, reentry
 class, and explicit limitations. It is not a vulnerability verdict. The builder
@@ -603,17 +611,27 @@ to empty containers but never invents the missing capability version, keeping
 legacy queries explicitly unavailable. Serialized AST attributes and sorted
 `ReachableFrom` exact entry IDs survive cache round trips.
 
+`ScopeID` is canonical for both supported hosts: an exact function ID with
+`ScopeKind: function`, or `MakeModifierID(file, contract, name)` with
+`ScopeKind: modifier`. `FunctionID` remains populated for function-hosted facts
+and is empty for modifier-hosted facts, so a modifier identity is never placed
+into a function field. Schema-2.0.0 caches produced before this additive field
+normalize a non-empty legacy `FunctionID` into a function `ScopeID`.
+
 Agent and SDK consumers use exact bounded queries:
 
 ```go
 page, err := db.QueryExternalBoundaries(types.ExternalBoundaryQuery{
     ContractID: "/abs/Vault.sol#Vault",
+    ScopeID:    "/abs/Vault.sol#Vault.nonReentrant",
     Limit:      50,
 })
 ```
 
 Limits must be between 1 and `MaxExternalBoundaryQueryLimit` (200). Contract,
-function, and entry filters are exact IDs; invalid identities return errors.
+scope, function, and entry filters are exact IDs; invalid identities return
+errors. `ScopeID` accepts exact function or modifier identities. If both
+`ScopeID` and `FunctionID` are supplied, they must identify the same function.
 An entry identity must both resolve to an exact function and occur in a
 `MainContractEntry.EntryFunctions` list; matching uses only the fact's exact
 `ReachableFrom` values.

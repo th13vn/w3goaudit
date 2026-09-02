@@ -23,6 +23,12 @@ contract ExternalBoundaryMatrix {
     uint256 public total;
     event Result(bool value);
 
+    modifier boundaryCall(address target, bytes memory data) {
+        (bool ok, ) = target.call(data);
+        require(ok, "modifier call failed");
+        _;
+    }
+
     function callerControlled(
         address payable[] calldata targets,
         uint256 index,
@@ -66,6 +72,8 @@ contract ExternalBoundaryMatrix {
     function helperEntry(address payable target, bytes calldata data) external {
         _helper(target, data);
     }
+
+    function modifierEntry(address target, bytes calldata data) external boundaryCall(target, data) {}
 
     function libraryEntry(address target, bytes calldata data) external {
         BoundaryLibrary.forward(target, data);

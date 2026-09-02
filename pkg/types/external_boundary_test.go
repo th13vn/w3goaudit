@@ -140,6 +140,32 @@ func TestQueryExternalBoundariesFiltersByExactEntryID(t *testing.T) {
 	}
 }
 
+func TestQueryExternalBoundariesFiltersByExactModifierScopeID(t *testing.T) {
+	db := NewDatabase()
+	file := "/src/Vault.sol"
+	contract := &Contract{ID: MakeContractID(file, "Vault"), Name: "Vault", SourceFile: file}
+	modifier := &Modifier{Name: "guard"}
+	contract.Modifiers = []*Modifier{modifier}
+	db.AddContract(contract)
+	scopeID := MakeModifierID(file, contract.Name, modifier.Name)
+	db.Semantics.ExternalBoundaryVersion = ExternalBoundaryFactsVersion
+	db.Semantics.ExternalBoundaries = []*ExternalBoundaryFact{{
+		ID: "modifier-boundary", ContractID: contract.ID, ScopeID: scopeID, ScopeKind: ExternalBoundaryScopeModifier,
+		Kind: KindCallLowlevelCall, Arguments: []BoundaryValue{}, ReachableFrom: []string{}, StateEffects: []BoundaryStateEffect{}, Limitations: []string{},
+	}}
+
+	page, err := db.QueryExternalBoundaries(ExternalBoundaryQuery{ScopeID: scopeID, Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if page.Total != 1 || len(page.Items) != 1 || page.Items[0].ScopeID != scopeID || page.Items[0].FunctionID != "" {
+		t.Fatalf("modifier scope page = %+v", page)
+	}
+	if _, err := db.QueryExternalBoundaries(ExternalBoundaryQuery{ScopeID: MakeModifierID(file, contract.Name, "missing"), Limit: 10}); err == nil {
+		t.Fatal("unknown modifier scope query unexpectedly succeeded")
+	}
+}
+
 func TestLoadFromJSONInitializesLegacySemanticContainersWithoutEnablingBoundaryFacts(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "legacy.json")
 	if err := os.WriteFile(path, []byte(`{"semantics":{}}`), 0o600); err != nil {
