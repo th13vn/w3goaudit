@@ -617,6 +617,9 @@ legacy queries explicitly unavailable. Serialized AST attributes and sorted
 and is empty for modifier-hosted facts, so a modifier identity is never placed
 into a function field. Schema-2.0.0 caches produced before this additive field
 normalize a non-empty legacy `FunctionID` into a function `ScopeID`.
+Constructors have no EVM selector, so their unique exact host identity uses the
+synthetic selector member `constructor`; `GetFunctionByID` accepts that member
+only for the owning contract's constructor.
 
 Agent and SDK consumers use exact bounded queries:
 
@@ -639,10 +642,12 @@ An entry identity must both resolve to an exact function and occur in a
 `ExternalBoundarySnapshot` return deep copies so callers cannot mutate the
 database. Missing or unsupported fact versions return
 `ErrExternalBoundaryFactsUnavailable` and require rebuilding the cache from
-source rather than silently inferring weaker facts. Query compilation keeps
-bounds, exact-identity relationships, kind validation, filtering, and pagination
-separate so the public method remains auditable under the repository complexity
-gate.
+source rather than silently inferring weaker facts. Capability validation runs
+before filter compilation, so legacy caches and nil databases return that
+sentinel instead of leaking filter-validation errors or panicking. Query
+compilation keeps bounds, exact-identity relationships, kind validation,
+filtering, and pagination separate so the public method remains auditable under
+the repository complexity gate.
 
 ### callgraph.go
 Call graph structures.

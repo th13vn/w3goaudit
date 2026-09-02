@@ -298,6 +298,29 @@ func TestBuildExternalBoundariesIndexesModifierHostedBoundary(t *testing.T) {
 	}
 }
 
+func TestBuildExternalBoundariesIndexesQueryableConstructorBoundary(t *testing.T) {
+	db := buildFixture(t, externalBoundariesFixture)
+	abs := fixtureAbs(t, externalBoundariesFixture)
+	contractID := types.MakeContractID(abs, "ExternalBoundaryMatrix")
+	scopeID := types.MakeFunctionID(abs, "ExternalBoundaryMatrix", "constructor")
+
+	fact := boundaryScopeFact(t, db, contractID, scopeID, types.KindCallLowlevelCall)
+	if fact.ScopeKind != types.ExternalBoundaryScopeFunction || fact.FunctionID != scopeID {
+		t.Fatalf("constructor scope identity = kind %q function %q", fact.ScopeKind, fact.FunctionID)
+	}
+	if len(fact.ReachableFrom) != 0 {
+		t.Fatalf("constructor reachability = %v, want no runtime entry", fact.ReachableFrom)
+	}
+
+	page, err := db.QueryExternalBoundaries(types.ExternalBoundaryQuery{ScopeID: scopeID, Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if page.Total != 1 || len(page.Items) != 1 || page.Items[0].ID != fact.ID {
+		t.Fatalf("constructor scope page = %+v", page)
+	}
+}
+
 func TestExternalBoundaryFactsSourceCacheParity(t *testing.T) {
 	db := buildFixture(t, externalBoundariesFixture)
 	raw, err := json.Marshal(db)

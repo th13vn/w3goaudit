@@ -23,6 +23,10 @@ contract ExternalBoundaryMatrix {
     uint256 public total;
     event Result(bool value);
 
+    constructor(address target, bytes memory data) {
+        target.call(data);
+    }
+
     modifier boundaryCall(address target, bytes memory data) {
         (bool ok, ) = target.call(data);
         require(ok, "modifier call failed");

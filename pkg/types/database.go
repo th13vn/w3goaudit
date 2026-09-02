@@ -194,7 +194,7 @@ func (db *Database) GetFunctionByID(id string) (*Function, bool) {
 	}
 	var match *Function
 	for _, fn := range contract.Functions {
-		if fn == nil || fn.Selector != selector {
+		if fn == nil || fn.Selector != selector && !(fn.IsConstructor && selector == "constructor") {
 			continue
 		}
 		if match != nil {
@@ -228,11 +228,11 @@ func (db *Database) GetExternalBoundaryByID(id string) (*ExternalBoundaryFact, b
 
 // QueryExternalBoundaries performs a bounded exact-ID query over boundary facts.
 func (db *Database) QueryExternalBoundaries(query ExternalBoundaryQuery) (*ExternalBoundaryPage, error) {
-	filter, err := db.compileExternalBoundaryQuery(query)
+	facts, err := db.ExternalBoundarySnapshot()
 	if err != nil {
 		return nil, err
 	}
-	facts, err := db.ExternalBoundarySnapshot()
+	filter, err := db.compileExternalBoundaryQuery(query)
 	if err != nil {
 		return nil, err
 	}

@@ -13,6 +13,21 @@ func TestQueryExternalBoundariesRequiresAvailableBoundedExactFacts(t *testing.T)
 	if _, err := db.QueryExternalBoundaries(ExternalBoundaryQuery{Limit: 10}); !errors.Is(err, ErrExternalBoundaryFactsUnavailable) {
 		t.Fatalf("legacy query error = %v, want unavailable sentinel", err)
 	}
+	filteredLegacy := ExternalBoundaryQuery{
+		ContractID:      "/src/Missing.sol#Missing",
+		ScopeID:         "/src/Missing.sol#Missing.guard",
+		FunctionID:      "/src/Missing.sol#Missing.run()",
+		EntryFunctionID: "/src/Missing.sol#Missing.run()",
+		Kinds:           []string{KindCallLowlevelCall},
+		Limit:           10,
+	}
+	if _, err := db.QueryExternalBoundaries(filteredLegacy); !errors.Is(err, ErrExternalBoundaryFactsUnavailable) {
+		t.Fatalf("filtered legacy query error = %v, want unavailable sentinel", err)
+	}
+	var nilDB *Database
+	if _, err := nilDB.QueryExternalBoundaries(filteredLegacy); !errors.Is(err, ErrExternalBoundaryFactsUnavailable) {
+		t.Fatalf("nil database query error = %v, want unavailable sentinel", err)
+	}
 
 	contract := &Contract{ID: MakeContractID("/src/Vault.sol", "Vault"), Name: "Vault", SourceFile: "/src/Vault.sol"}
 	fn := &Function{Name: "withdraw", ContractName: contract.Name, SourceFile: contract.SourceFile, Selector: "withdraw(uint256)"}
@@ -119,6 +134,21 @@ func TestGetFunctionByIDUsesExactSelectorIdentity(t *testing.T) {
 	}
 	if got, ok := db.GetFunctionByID("/src/Vault.sol#Vault.withdraw"); ok || got != nil {
 		t.Fatalf("name-only function lookup = %v, %v; want nil, false", got, ok)
+	}
+}
+
+func TestGetFunctionByIDResolvesExactConstructorScopeIdentity(t *testing.T) {
+	db := NewDatabase()
+	file := "/src/Vault.sol"
+	contract := &Contract{ID: MakeContractID(file, "Vault"), Name: "Vault", SourceFile: file}
+	constructor := &Function{Name: "constructor", ContractName: contract.Name, SourceFile: file, IsConstructor: true}
+	contract.Functions = []*Function{constructor}
+	db.AddContract(contract)
+
+	id := MakeFunctionID(file, contract.Name, "constructor")
+	got, ok := db.GetFunctionByID(id)
+	if !ok || got != constructor {
+		t.Fatalf("constructor lookup = %p, %v; want %p, true", got, ok, constructor)
 	}
 }
 
