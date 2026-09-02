@@ -1,6 +1,10 @@
 package types
 
-import "strings"
+import (
+	"errors"
+	"sort"
+	"strings"
+)
 
 const (
 	TypeKindUnknown   = "unknown"
@@ -13,6 +17,150 @@ const (
 	TypeKindArray     = "array"
 	TypeKindMapping   = "mapping"
 )
+
+const (
+	ExternalBoundaryFactsVersion  = "1.0.0"
+	MaxExternalBoundaryQueryLimit = 200
+)
+
+var ErrExternalBoundaryFactsUnavailable = errors.New("external-boundary facts unavailable; rebuild the database from source")
+
+type BoundaryValueControl string
+
+const (
+	BoundaryValueUnknown          BoundaryValueControl = "unknown"
+	BoundaryValueCallerControlled BoundaryValueControl = "caller_controlled"
+	BoundaryValueStateDerived     BoundaryValueControl = "state_derived"
+	BoundaryValueFixed            BoundaryValueControl = "fixed"
+)
+
+const (
+	BoundaryValueRoleReceiver = "receiver"
+	BoundaryValueRoleValue    = "value"
+	BoundaryValueRoleGas      = "gas"
+	BoundaryValueRoleArgument = "argument"
+
+	BoundaryTargetResolved      = "resolved"
+	BoundaryTargetUnresolved    = "unresolved"
+	BoundaryTargetNotApplicable = "not_applicable"
+
+	BoundaryResultYes     = "yes"
+	BoundaryResultNo      = "no"
+	BoundaryResultUnknown = "unknown"
+
+	BoundaryResultNone      = "none"
+	BoundaryResultDiscarded = "discarded"
+	BoundaryResultCaptured  = "captured"
+	BoundaryResultReturned  = "returned"
+	BoundaryResultCondition = "condition"
+	BoundaryResultConsumed  = "consumed"
+
+	BoundaryStateBefore       = "before"
+	BoundaryStateAfter        = "after"
+	BoundaryStateUnordered    = "unordered"
+	BoundaryStateIncompatible = "incompatible"
+	BoundaryStateUnknown      = "unknown"
+
+	BoundaryReentryPossible            = "possible"
+	BoundaryReentryDelegateContext     = "delegate_context"
+	BoundaryReentryReadOnlyPossible    = "read_only_possible"
+	BoundaryReentryStipendLimited      = "stipend_limited"
+	BoundaryReentrySameContract        = "same_contract"
+	BoundaryReentryConstructorPossible = "constructor_possible"
+	BoundaryReentryUnknown             = "unknown"
+)
+
+// SemanticSourceRange is an exact source span owned by one semantic fact.
+type SemanticSourceRange struct {
+	File      string `json:"file,omitempty"`
+	StartLine int    `json:"startLine,omitempty"`
+	StartCol  int    `json:"startCol,omitempty"`
+	EndLine   int    `json:"endLine,omitempty"`
+	EndCol    int    `json:"endCol,omitempty"`
+	StartByte int    `json:"startByte,omitempty"`
+	EndByte   int    `json:"endByte,omitempty"`
+}
+
+// BoundaryValue records bounded value provenance at an external boundary.
+type BoundaryValue struct {
+	Role         string               `json:"role"`
+	Index        int                  `json:"index"`
+	Expression   string               `json:"expression,omitempty"`
+	Range        SemanticSourceRange  `json:"range"`
+	Type         TypeInfo             `json:"type"`
+	Control      BoundaryValueControl `json:"control"`
+	RefIDs       []string             `json:"refIds"`
+	TaintSources []string             `json:"taintSources"`
+}
+
+// BoundaryTarget records target identity without guessing unresolved calls.
+type BoundaryTarget struct {
+	Resolution       string       `json:"resolution"`
+	CalledName       string       `json:"calledName,omitempty"`
+	CalledSignature  string       `json:"calledSignature,omitempty"`
+	ContractID       string       `json:"contractId,omitempty"`
+	ContractName     string       `json:"contractName,omitempty"`
+	FunctionID       string       `json:"functionId,omitempty"`
+	FunctionSelector string       `json:"functionSelector,omitempty"`
+	Kind             ContractKind `json:"kind,omitempty"`
+}
+
+// BoundaryResult describes direct handling of a call result.
+type BoundaryResult struct {
+	Availability string                `json:"availability"`
+	Disposition  string                `json:"disposition"`
+	DirectCheck  string                `json:"directCheck"`
+	Targets      []BoundaryValue       `json:"targets"`
+	CheckSites   []SemanticSourceRange `json:"checkSites"`
+}
+
+// BoundaryStateEffect relates one direct state write to a boundary occurrence.
+type BoundaryStateEffect struct {
+	Relation string              `json:"relation"`
+	RefID    string              `json:"refId,omitempty"`
+	Name     string              `json:"name,omitempty"`
+	Kind     string              `json:"kind,omitempty"`
+	Range    SemanticSourceRange `json:"range"`
+}
+
+// ExternalBoundaryFact is the stable public evidence record for one external
+// control boundary. It is descriptive and does not declare a vulnerability.
+type ExternalBoundaryFact struct {
+	ID            string                `json:"id"`
+	ASTPath       string                `json:"astPath"`
+	ContractID    string                `json:"contractId"`
+	FunctionID    string                `json:"functionId"`
+	Kind          string                `json:"kind"`
+	CallType      CallType              `json:"callType"`
+	Range         SemanticSourceRange   `json:"range"`
+	Target        BoundaryTarget        `json:"target"`
+	Receiver      *BoundaryValue        `json:"receiver,omitempty"`
+	Value         *BoundaryValue        `json:"value,omitempty"`
+	Gas           *BoundaryValue        `json:"gas,omitempty"`
+	Arguments     []BoundaryValue       `json:"arguments"`
+	Result        BoundaryResult        `json:"result"`
+	ReentryClass  string                `json:"reentryClass"`
+	ReachableFrom []string              `json:"reachableFrom"`
+	StateEffects  []BoundaryStateEffect `json:"stateEffects"`
+	Limitations   []string              `json:"limitations"`
+}
+
+type ExternalBoundaryQuery struct {
+	ContractID      string
+	FunctionID      string
+	EntryFunctionID string
+	Kinds           []string
+	Offset          int
+	Limit           int
+}
+
+type ExternalBoundaryPage struct {
+	Items     []*ExternalBoundaryFact `json:"items"`
+	Total     int                     `json:"total"`
+	Offset    int                     `json:"offset"`
+	Limit     int                     `json:"limit"`
+	Truncated bool                    `json:"truncated"`
+}
 
 // TypeInfo is the normalized semantic type attached to symbols and AST nodes.
 // It is intentionally lightweight: enough to improve call classification and
@@ -61,6 +209,9 @@ type SemanticFacts struct {
 	// pass and consumed by the report layer (per-entry workflow files and the
 	// state-change matrix).
 	FunctionEffects map[string]*FunctionEffects `json:"functionEffects,omitempty"`
+
+	ExternalBoundaryVersion string                  `json:"externalBoundaryVersion,omitempty"`
+	ExternalBoundaries      []*ExternalBoundaryFact `json:"externalBoundaries,omitempty"`
 }
 
 // FunctionEffects captures what a single function does that an auditor needs to
@@ -102,9 +253,168 @@ type AuthInfo struct {
 // NewSemanticFacts creates an empty semantic index.
 func NewSemanticFacts() *SemanticFacts {
 	return &SemanticFacts{
-		Symbols:         make(map[string]*SemanticSymbol),
-		FunctionEffects: make(map[string]*FunctionEffects),
+		Symbols:            make(map[string]*SemanticSymbol),
+		FunctionEffects:    make(map[string]*FunctionEffects),
+		ExternalBoundaries: make([]*ExternalBoundaryFact, 0),
 	}
+}
+
+// IsExternalBoundaryKind reports whether an AST kind belongs to the stable
+// boundary-fact coverage set.
+func IsExternalBoundaryKind(kind string) bool {
+	switch kind {
+	case KindCallExternal, KindCallLowlevelCall, KindCallLowlevelDelegate,
+		KindCallLowlevelStatic, KindCallBuiltinTransfer, KindCallBuiltinSend,
+		KindCallCreate, KindAsmCall, KindAsmDelegatecall, KindAsmStaticcall,
+		KindAsmCreate, KindAsmCreate2:
+		return true
+	default:
+		return false
+	}
+}
+
+// NormalizeExternalBoundaryFacts returns a deterministic deep-copy snapshot.
+func NormalizeExternalBoundaryFacts(facts []*ExternalBoundaryFact) []*ExternalBoundaryFact {
+	out := make([]*ExternalBoundaryFact, 0, len(facts))
+	for _, fact := range facts {
+		if fact == nil {
+			continue
+		}
+		copy := cloneExternalBoundaryFact(fact)
+		normalizeExternalBoundaryFact(copy)
+		out = append(out, copy)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].ID != out[j].ID {
+			return out[i].ID < out[j].ID
+		}
+		if out[i].FunctionID != out[j].FunctionID {
+			return out[i].FunctionID < out[j].FunctionID
+		}
+		return out[i].ASTPath < out[j].ASTPath
+	})
+	return out
+}
+
+func normalizeExternalBoundaryFact(fact *ExternalBoundaryFact) {
+	fact.Arguments = normalizeBoundaryValues(fact.Arguments)
+	fact.Result.Targets = normalizeBoundaryValues(fact.Result.Targets)
+	fact.Result.CheckSites = normalizeSemanticRanges(fact.Result.CheckSites)
+	fact.ReachableFrom = normalizedStrings(fact.ReachableFrom)
+	fact.Limitations = normalizedStrings(fact.Limitations)
+	if fact.Receiver != nil {
+		normalizeBoundaryValue(fact.Receiver)
+	}
+	if fact.Value != nil {
+		normalizeBoundaryValue(fact.Value)
+	}
+	if fact.Gas != nil {
+		normalizeBoundaryValue(fact.Gas)
+	}
+	if fact.StateEffects == nil {
+		fact.StateEffects = []BoundaryStateEffect{}
+	}
+	sort.Slice(fact.StateEffects, func(i, j int) bool {
+		a, b := fact.StateEffects[i], fact.StateEffects[j]
+		if a.Relation != b.Relation {
+			return a.Relation < b.Relation
+		}
+		if a.Range.File != b.Range.File {
+			return a.Range.File < b.Range.File
+		}
+		if a.Range.StartByte != b.Range.StartByte {
+			return a.Range.StartByte < b.Range.StartByte
+		}
+		if a.RefID != b.RefID {
+			return a.RefID < b.RefID
+		}
+		return a.Name < b.Name
+	})
+}
+
+func normalizeBoundaryValues(values []BoundaryValue) []BoundaryValue {
+	if values == nil {
+		return []BoundaryValue{}
+	}
+	out := append([]BoundaryValue(nil), values...)
+	for index := range out {
+		normalizeBoundaryValue(&out[index])
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Role != out[j].Role {
+			return out[i].Role < out[j].Role
+		}
+		if out[i].Index != out[j].Index {
+			return out[i].Index < out[j].Index
+		}
+		return out[i].Expression < out[j].Expression
+	})
+	return out
+}
+
+func normalizeBoundaryValue(value *BoundaryValue) {
+	value.RefIDs = normalizedStrings(value.RefIDs)
+	value.TaintSources = normalizedStrings(value.TaintSources)
+}
+
+func normalizeSemanticRanges(ranges []SemanticSourceRange) []SemanticSourceRange {
+	if ranges == nil {
+		return []SemanticSourceRange{}
+	}
+	out := append([]SemanticSourceRange(nil), ranges...)
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].File != out[j].File {
+			return out[i].File < out[j].File
+		}
+		if out[i].StartByte != out[j].StartByte {
+			return out[i].StartByte < out[j].StartByte
+		}
+		return out[i].EndByte < out[j].EndByte
+	})
+	return out
+}
+
+func normalizedStrings(values []string) []string {
+	if values == nil {
+		return []string{}
+	}
+	out := append([]string(nil), values...)
+	sort.Strings(out)
+	write := 0
+	for _, value := range out {
+		if value == "" || write > 0 && out[write-1] == value {
+			continue
+		}
+		out[write] = value
+		write++
+	}
+	return out[:write]
+}
+
+func cloneExternalBoundaryFact(fact *ExternalBoundaryFact) *ExternalBoundaryFact {
+	if fact == nil {
+		return nil
+	}
+	copy := *fact
+	if fact.Receiver != nil {
+		receiver := *fact.Receiver
+		copy.Receiver = &receiver
+	}
+	if fact.Value != nil {
+		value := *fact.Value
+		copy.Value = &value
+	}
+	if fact.Gas != nil {
+		gas := *fact.Gas
+		copy.Gas = &gas
+	}
+	copy.Arguments = append([]BoundaryValue(nil), fact.Arguments...)
+	copy.Result.Targets = append([]BoundaryValue(nil), fact.Result.Targets...)
+	copy.Result.CheckSites = append([]SemanticSourceRange(nil), fact.Result.CheckSites...)
+	copy.ReachableFrom = append([]string(nil), fact.ReachableFrom...)
+	copy.StateEffects = append([]BoundaryStateEffect(nil), fact.StateEffects...)
+	copy.Limitations = append([]string(nil), fact.Limitations...)
+	return &copy
 }
 
 // SetFunctionEffects stores effects for a function ID.

@@ -553,6 +553,8 @@ type TypeInfo struct {
 type SemanticFacts struct {
     Symbols         map[string]*SemanticSymbol   // RefID -> symbol fact
     FunctionEffects map[string]*FunctionEffects  // function ID -> effects
+    ExternalBoundaryVersion string               // empty for legacy caches
+    ExternalBoundaries []*ExternalBoundaryFact   // sorted protocol-neutral evidence
 }
 
 // Per-function analysis facts (builder Phase 7), consumed by the report layer.
@@ -587,6 +589,33 @@ these facts is intentionally out of scope for now.)
 These facts are intentionally an MVP semantic layer, not a full solc-compatible
 type checker. Unknown or complex types remain low-confidence and classification
 falls back to existing heuristics.
+
+The external-boundary surface is versioned independently by
+`ExternalBoundaryFactsVersion` (`1.0.0`). `ExternalBoundaryFact` is a durable,
+descriptive evidence record for one external-control boundary: exact caller and
+source identity, target resolution, bounded receiver/value/argument provenance,
+direct result handling, state-effect relations, entry reachability, reentry
+class, and explicit limitations. It is not a vulnerability verdict. The builder
+sets `SemanticFacts.ExternalBoundaryVersion` only after completing the fact
+pass, so a legacy cache is distinguishable from a current database with zero
+boundaries.
+
+Agent and SDK consumers use exact bounded queries:
+
+```go
+page, err := db.QueryExternalBoundaries(types.ExternalBoundaryQuery{
+    ContractID: "/abs/Vault.sol#Vault",
+    Limit:      50,
+})
+```
+
+Limits must be between 1 and `MaxExternalBoundaryQueryLimit` (200). Contract,
+function, and entry filters are exact IDs; invalid identities return errors.
+`GetExternalBoundaryByID`, `QueryExternalBoundaries`, and
+`ExternalBoundarySnapshot` return deep copies so callers cannot mutate the
+database. Missing or unsupported fact versions return
+`ErrExternalBoundaryFactsUnavailable` and require rebuilding the cache from
+source rather than silently inferring weaker facts.
 
 ### callgraph.go
 Call graph structures.

@@ -1144,6 +1144,49 @@ for _, f := range findings {
 
 ### types.Database
 
+#### Exact external-boundary evidence queries
+
+External-boundary facts are a versioned, deterministic SDK surface for Agent
+and audit-tool consumers. They describe external calls, low-level operations,
+ETH sends, creates, and Yul boundaries without deciding whether the site is a
+vulnerability. `ExternalBoundaryFactsVersion` is currently `1.0.0`; output
+schema remains `2.0.0`.
+
+```go
+page, err := db.QueryExternalBoundaries(types.ExternalBoundaryQuery{
+    FunctionID: "/abs/src/Vault.sol#Vault.withdraw(uint256)",
+    Kinds:      []string{types.KindCallLowlevelCall},
+    Offset:     0,
+    Limit:      25,
+})
+if err != nil {
+    if errors.Is(err, types.ErrExternalBoundaryFactsUnavailable) {
+        // The database is an older cache. Rebuild it from source.
+    }
+    return err
+}
+for _, interaction := range page.Items {
+    fmt.Printf("%s %s %s\n", interaction.ID, interaction.Kind, interaction.Target.Resolution)
+}
+```
+
+`Limit` is mandatory and must be between 1 and
+`MaxExternalBoundaryQueryLimit` (200). `ContractID`, `FunctionID`, and
+`EntryFunctionID` accept exact identities only. An empty match returns a valid
+empty page; an unknown identity or kind is an error. `Truncated` reports whether
+more filtered facts follow the returned page.
+
+```go
+func (db *Database) GetFunctionByID(id string) (*types.Function, bool)
+func (db *Database) GetExternalBoundaryByID(id string) (*types.ExternalBoundaryFact, bool)
+func (db *Database) ExternalBoundarySnapshot() ([]*types.ExternalBoundaryFact, error)
+func (db *Database) QueryExternalBoundaries(q types.ExternalBoundaryQuery) (*types.ExternalBoundaryPage, error)
+```
+
+Every returned boundary fact is a deep copy. Mutating a result cannot change the
+database or a later query. The fact model keeps unknown analysis states and
+limitations explicit; absence of proof is never exposed as a safe verdict.
+
 #### GetStats
 
 ```go

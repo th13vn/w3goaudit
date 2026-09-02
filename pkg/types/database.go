@@ -179,6 +179,148 @@ func ParseFunctionID(id string) (filePath, contractName, funcSelector string) {
 	return
 }
 
+// GetFunctionByID resolves only a fully qualified exact function identity.
+func (db *Database) GetFunctionByID(id string) (*Function, bool) {
+	if db == nil || id == "" {
+		return nil, false
+	}
+	file, contractName, selector := ParseFunctionID(id)
+	if file == "" || contractName == "" || selector == "" {
+		return nil, false
+	}
+	contract := db.GetContractByID(MakeContractID(file, contractName))
+	if contract == nil {
+		return nil, false
+	}
+	var match *Function
+	for _, fn := range contract.Functions {
+		if fn == nil || fn.Selector != selector {
+			continue
+		}
+		if match != nil {
+			return nil, false
+		}
+		match = fn
+	}
+	return match, match != nil
+}
+
+// ExternalBoundarySnapshot returns a deterministic deep-copy fact snapshot.
+func (db *Database) ExternalBoundarySnapshot() ([]*ExternalBoundaryFact, error) {
+	if db == nil || db.Semantics == nil || db.Semantics.ExternalBoundaryVersion != ExternalBoundaryFactsVersion {
+		return nil, ErrExternalBoundaryFactsUnavailable
+	}
+	return NormalizeExternalBoundaryFacts(db.Semantics.ExternalBoundaries), nil
+}
+
+// GetExternalBoundaryByID returns a deep copy of one exact fact identity.
+func (db *Database) GetExternalBoundaryByID(id string) (*ExternalBoundaryFact, bool) {
+	facts, err := db.ExternalBoundarySnapshot()
+	if err != nil {
+		return nil, false
+	}
+	index := sort.Search(len(facts), func(i int) bool { return facts[i].ID >= id })
+	if index >= len(facts) || facts[index].ID != id {
+		return nil, false
+	}
+	return facts[index], true
+}
+
+// QueryExternalBoundaries performs a bounded exact-ID query over boundary facts.
+func (db *Database) QueryExternalBoundaries(query ExternalBoundaryQuery) (*ExternalBoundaryPage, error) {
+	if query.Limit < 1 || query.Limit > MaxExternalBoundaryQueryLimit {
+		return nil, fmt.Errorf("external-boundary query limit must be between 1 and %d", MaxExternalBoundaryQueryLimit)
+	}
+	if query.Offset < 0 {
+		return nil, fmt.Errorf("external-boundary query offset must be non-negative")
+	}
+	var contract *Contract
+	if query.ContractID != "" {
+		contract = db.GetContractByID(query.ContractID)
+		if contract == nil {
+			return nil, fmt.Errorf("external-boundary contract not found: %s", query.ContractID)
+		}
+	}
+	var function *Function
+	if query.FunctionID != "" {
+		var ok bool
+		function, ok = db.GetFunctionByID(query.FunctionID)
+		if !ok {
+			return nil, fmt.Errorf("external-boundary function not found: %s", query.FunctionID)
+		}
+		if contract != nil && (function.SourceFile != contract.SourceFile || function.ContractName != contract.Name) {
+			return nil, fmt.Errorf("external-boundary function %s is not declared by contract %s", query.FunctionID, query.ContractID)
+		}
+	}
+	if query.EntryFunctionID != "" && !db.isExactEntryFunctionID(query.EntryFunctionID) {
+		return nil, fmt.Errorf("external-boundary entry function not found: %s", query.EntryFunctionID)
+	}
+	kinds := make(map[string]bool, len(query.Kinds))
+	for _, kind := range query.Kinds {
+		if !IsExternalBoundaryKind(kind) {
+			return nil, fmt.Errorf("unsupported external-boundary kind: %s", kind)
+		}
+		kinds[kind] = true
+	}
+
+	facts, err := db.ExternalBoundarySnapshot()
+	if err != nil {
+		return nil, err
+	}
+	matches := make([]*ExternalBoundaryFact, 0, len(facts))
+	for _, fact := range facts {
+		if contract != nil && fact.ContractID != contract.ID {
+			continue
+		}
+		if function != nil && fact.FunctionID != query.FunctionID {
+			continue
+		}
+		if query.EntryFunctionID != "" && !containsString(fact.ReachableFrom, query.EntryFunctionID) {
+			continue
+		}
+		if len(kinds) > 0 && !kinds[fact.Kind] {
+			continue
+		}
+		matches = append(matches, fact)
+	}
+	start := query.Offset
+	if start > len(matches) {
+		start = len(matches)
+	}
+	end := start + query.Limit
+	if end > len(matches) {
+		end = len(matches)
+	}
+	return &ExternalBoundaryPage{
+		Items:     matches[start:end],
+		Total:     len(matches),
+		Offset:    query.Offset,
+		Limit:     query.Limit,
+		Truncated: end < len(matches),
+	}, nil
+}
+
+func (db *Database) isExactEntryFunctionID(id string) bool {
+	if _, ok := db.GetFunctionByID(id); !ok {
+		return false
+	}
+	for _, entry := range db.MainContracts {
+		if entry != nil && containsString(entry.EntryFunctions, id) {
+			return true
+		}
+	}
+	return false
+}
+
+func containsString(values []string, target string) bool {
+	for _, value := range values {
+		if value == target {
+			return true
+		}
+	}
+	return false
+}
+
 // NewDatabase creates an empty database that preserves legacy package-global
 // verbose logging. New scan pipelines should use NewDatabaseWithOptions.
 func NewDatabase() *Database {
