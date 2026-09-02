@@ -5,6 +5,13 @@ interface IBoundaryTarget {
     function ping(bytes calldata data) external returns (bool);
 }
 
+library BoundaryLibrary {
+    function forward(address target, bytes memory data) internal {
+        (bool ok, ) = target.call(data);
+        require(ok, "library failed");
+    }
+}
+
 contract BoundaryChild {
     constructor(uint256 value) payable {
         value;
@@ -60,9 +67,17 @@ contract ExternalBoundaryMatrix {
         _helper(target, data);
     }
 
+    function libraryEntry(address target, bytes calldata data) external {
+        BoundaryLibrary.forward(target, data);
+    }
+
     function _helper(address payable target, bytes calldata data) internal {
         (bool ok, ) = target.call(data);
         require(ok, "helper failed");
+    }
+
+    function _orphan(address target, bytes calldata data) internal {
+        target.call(data);
     }
 
     function yulKinds(address target, uint256 amount) external {

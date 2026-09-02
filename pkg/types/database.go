@@ -462,6 +462,16 @@ func loadFromJSON(path string, logger *logging.Logger, legacy bool) (*Database, 
 	}
 	if db.Semantics == nil {
 		db.Semantics = NewSemanticFacts()
+	} else {
+		if db.Semantics.Symbols == nil {
+			db.Semantics.Symbols = make(map[string]*SemanticSymbol)
+		}
+		if db.Semantics.FunctionEffects == nil {
+			db.Semantics.FunctionEffects = make(map[string]*FunctionEffects)
+		}
+		if db.Semantics.ExternalBoundaries == nil {
+			db.Semantics.ExternalBoundaries = make([]*ExternalBoundaryFact, 0)
+		}
 	}
 	if db.Diagnostics == nil {
 		db.Diagnostics = make([]Diagnostic, 0)

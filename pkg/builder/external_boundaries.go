@@ -23,6 +23,7 @@ func (b *Builder) buildExternalBoundaries() {
 	sort.Strings(contractIDs)
 
 	var facts []*types.ExternalBoundaryFact
+	factNodes := make(map[string]*types.ASTNode)
 	for _, contractID := range contractIDs {
 		contract := b.db.Contracts[contractID]
 		if contract == nil {
@@ -43,13 +44,119 @@ func (b *Builder) buildExternalBoundaries() {
 				}
 				recorded := matchBoundaryCall(fn, node)
 				fact := b.externalBoundaryFact(contract, fn, functionID, node, path, recorded)
-				annotateExternalBoundaryNode(node, fact)
 				facts = append(facts, fact)
+				factNodes[fact.ID] = node
 			})
 		}
 	}
+	reachableFrom := b.externalBoundaryEntryReachability()
+	for _, fact := range facts {
+		fact.ReachableFrom = append([]string(nil), reachableFrom[fact.FunctionID]...)
+	}
 	b.db.Semantics.ExternalBoundaries = types.NormalizeExternalBoundaryFacts(facts)
+	for _, fact := range b.db.Semantics.ExternalBoundaries {
+		annotateExternalBoundaryNode(factNodes[fact.ID], fact)
+	}
 	b.db.Semantics.ExternalBoundaryVersion = types.ExternalBoundaryFactsVersion
+}
+
+func (b *Builder) externalBoundaryEntryReachability() map[string][]string {
+	reachable := make(map[string][]string)
+	if b == nil || b.db == nil || b.db.CallGraph == nil {
+		return reachable
+	}
+
+	exactScopes := b.externalBoundaryExactScopes()
+	adjacency := make(map[string][]string)
+	for _, edge := range b.db.CallGraph.Edges {
+		if edge == nil || !edge.Resolved || !externalBoundaryTraversableCallType(edge.Type) || !exactScopes[edge.From] || !exactScopes[edge.To] {
+			continue
+		}
+		adjacency[edge.From] = append(adjacency[edge.From], edge.To)
+	}
+	for from, targets := range adjacency {
+		adjacency[from] = sortedBoundaryStrings(targets)
+	}
+
+	entrySet := make(map[string]bool)
+	for _, main := range b.db.MainContracts {
+		if main == nil {
+			continue
+		}
+		for _, entryID := range main.EntryFunctions {
+			if exactScopes[entryID] {
+				entrySet[entryID] = true
+			}
+		}
+	}
+	entries := sortedBoundarySet(entrySet)
+	for _, entryID := range entries {
+		visited := make(map[string]bool)
+		stack := []string{entryID}
+		for len(stack) > 0 {
+			last := len(stack) - 1
+			scopeID := stack[last]
+			stack = stack[:last]
+			if visited[scopeID] {
+				continue
+			}
+			visited[scopeID] = true
+			reachable[scopeID] = append(reachable[scopeID], entryID)
+			for index := len(adjacency[scopeID]) - 1; index >= 0; index-- {
+				target := adjacency[scopeID][index]
+				if !visited[target] {
+					stack = append(stack, target)
+				}
+			}
+		}
+	}
+	for scopeID, entryIDs := range reachable {
+		reachable[scopeID] = sortedBoundaryStrings(entryIDs)
+	}
+	return reachable
+}
+
+func (b *Builder) externalBoundaryExactScopes() map[string]bool {
+	scopes := make(map[string]bool)
+	if b == nil || b.db == nil {
+		return scopes
+	}
+	for _, contract := range b.db.Contracts {
+		if contract == nil {
+			continue
+		}
+		for _, fn := range contract.Functions {
+			if id := externalBoundaryFunctionID(fn); id != "" {
+				scopes[id] = true
+			}
+		}
+		for _, modifier := range contract.Modifiers {
+			if modifier != nil && modifier.Name != "" {
+				scopes[types.MakeModifierID(contract.SourceFile, contract.Name, modifier.Name)] = true
+			}
+		}
+	}
+	return scopes
+}
+
+func externalBoundaryTraversableCallType(callType types.CallType) bool {
+	switch callType {
+	case types.CallTypeInternal, types.CallTypeInherited, types.CallTypeLibrary,
+		types.CallTypeSuper, types.CallTypeModifier, types.CallTypeSelf:
+		return true
+	default:
+		return false
+	}
+}
+
+func sortedBoundaryStrings(values []string) []string {
+	set := make(map[string]bool, len(values))
+	for _, value := range values {
+		if value != "" {
+			set[value] = true
+		}
+	}
+	return sortedBoundarySet(set)
 }
 
 func externalBoundaryFunctionID(fn *types.Function) string {

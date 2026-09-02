@@ -598,7 +598,10 @@ direct result handling, state-effect relations, entry reachability, reentry
 class, and explicit limitations. It is not a vulnerability verdict. The builder
 sets `SemanticFacts.ExternalBoundaryVersion` only after completing the fact
 pass, so a legacy cache is distinguishable from a current database with zero
-boundaries.
+boundaries. JSON loading initializes nil semantic maps and the boundary slice
+to empty containers but never invents the missing capability version, keeping
+legacy queries explicitly unavailable. Serialized AST attributes and sorted
+`ReachableFrom` exact entry IDs survive cache round trips.
 
 Agent and SDK consumers use exact bounded queries:
 
@@ -611,6 +614,9 @@ page, err := db.QueryExternalBoundaries(types.ExternalBoundaryQuery{
 
 Limits must be between 1 and `MaxExternalBoundaryQueryLimit` (200). Contract,
 function, and entry filters are exact IDs; invalid identities return errors.
+An entry identity must both resolve to an exact function and occur in a
+`MainContractEntry.EntryFunctions` list; matching uses only the fact's exact
+`ReachableFrom` values.
 `GetExternalBoundaryByID`, `QueryExternalBoundaries`, and
 `ExternalBoundarySnapshot` return deep copies so callers cannot mutate the
 database. Missing or unsupported fact versions return

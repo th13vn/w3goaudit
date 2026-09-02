@@ -443,6 +443,16 @@ reentry, transfer/send are stipend-limited, self calls target the same contract,
 and create/create2 invoke constructor code. None of these labels is a safety or
 vulnerability verdict.
 
+`ReachableFrom` is computed after fact discovery from each exact main-contract
+entry ID. Traversal follows only resolved exact `internal`, `inherited`,
+`library`, `super`, `modifier`, and `self` call-graph edges, with per-entry
+cycle detection. It never invokes the call graph's compatibility prefix lookup,
+never falls back to names, and never crosses an ordinary external edge. Entry
+IDs are deduplicated and sorted before facts are normalized, then the final
+fact is used to set `boundary_reachable_from_entry` on the persisted AST node.
+Modifier scopes participate in traversal, although this fact version indexes
+boundary occurrences hosted by function ASTs only.
+
 **Member Access Attributes:**
 - Stores `parent` attribute for member accesses
 - Example: For `tx.origin`, stores `parent="tx"`, `name="origin"`

@@ -2,6 +2,8 @@ package types
 
 import (
 	"errors"
+	"os"
+	"path/filepath"
 	"reflect"
 	"testing"
 )
@@ -117,6 +119,44 @@ func TestGetFunctionByIDUsesExactSelectorIdentity(t *testing.T) {
 	}
 	if got, ok := db.GetFunctionByID("/src/Vault.sol#Vault.withdraw"); ok || got != nil {
 		t.Fatalf("name-only function lookup = %v, %v; want nil, false", got, ok)
+	}
+}
+
+func TestQueryExternalBoundariesFiltersByExactEntryID(t *testing.T) {
+	db, _, firstFunction, secondFunction := boundaryQueryDatabase(t)
+	firstEntry := MakeFunctionID(firstFunction.SourceFile, firstFunction.ContractName, firstFunction.Selector)
+	secondEntry := MakeFunctionID(secondFunction.SourceFile, secondFunction.ContractName, secondFunction.Selector)
+	page, err := db.QueryExternalBoundaries(ExternalBoundaryQuery{EntryFunctionID: firstEntry, Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if page.Total != 2 || len(page.Items) != 2 {
+		t.Fatalf("first entry page = %+v", page)
+	}
+	for _, fact := range page.Items {
+		if !containsString(fact.ReachableFrom, firstEntry) || containsString(fact.ReachableFrom, secondEntry) {
+			t.Fatalf("entry filter leaked fact: %+v", fact)
+		}
+	}
+}
+
+func TestLoadFromJSONInitializesLegacySemanticContainersWithoutEnablingBoundaryFacts(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "legacy.json")
+	if err := os.WriteFile(path, []byte(`{"semantics":{}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	db, err := LoadFromJSON(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if db.Semantics.Symbols == nil || db.Semantics.FunctionEffects == nil || db.Semantics.ExternalBoundaries == nil {
+		t.Fatalf("legacy semantic containers were not initialized: %+v", db.Semantics)
+	}
+	if db.Semantics.ExternalBoundaryVersion != "" {
+		t.Fatalf("legacy cache gained boundary capability version %q", db.Semantics.ExternalBoundaryVersion)
+	}
+	if _, err := db.QueryExternalBoundaries(ExternalBoundaryQuery{Limit: 1}); !errors.Is(err, ErrExternalBoundaryFactsUnavailable) {
+		t.Fatalf("legacy boundary query error = %v, want unavailable", err)
 	}
 }
 

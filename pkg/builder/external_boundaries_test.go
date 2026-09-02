@@ -1,7 +1,9 @@
 package builder
 
 import (
+	"bytes"
 	"encoding/json"
+	"os"
 	"reflect"
 	"sort"
 	"strconv"
@@ -217,6 +219,72 @@ func TestBuildExternalBoundariesClassifiesReentryAndLimitations(t *testing.T) {
 		node.GetAttributeString("boundary_result_checked") != types.BoundaryResultNo ||
 		!node.GetAttributeBool("boundary_has_state_after") {
 		t.Fatalf("completed WQL bridge attrs = %+v", node.Attributes)
+	}
+}
+
+func TestBuildExternalBoundariesRecordsExactEntryReachability(t *testing.T) {
+	db := buildFixture(t, externalBoundariesFixture)
+	abs := fixtureAbs(t, externalBoundariesFixture)
+	contractID := types.MakeContractID(abs, "ExternalBoundaryMatrix")
+	direct := boundaryFact(t, db, contractID, "callerControlled(address[],uint256,uint256,bytes)", types.KindCallLowlevelCall)
+	wantDirect := types.MakeFunctionID(abs, "ExternalBoundaryMatrix", "callerControlled(address[],uint256,uint256,bytes)")
+	if !reflect.DeepEqual(direct.ReachableFrom, []string{wantDirect}) {
+		t.Fatalf("direct reachability = %v, want %v", direct.ReachableFrom, []string{wantDirect})
+	}
+
+	helper := boundaryFact(t, db, contractID, "_helper(address,bytes)", types.KindCallLowlevelCall)
+	wantHelper := types.MakeFunctionID(abs, "ExternalBoundaryMatrix", "helperEntry(address,bytes)")
+	if !reflect.DeepEqual(helper.ReachableFrom, []string{wantHelper}) {
+		t.Fatalf("helper reachability = %v, want %v", helper.ReachableFrom, []string{wantHelper})
+	}
+
+	libraryContractID := types.MakeContractID(abs, "BoundaryLibrary")
+	library := boundaryFact(t, db, libraryContractID, "forward(address,bytes)", types.KindCallLowlevelCall)
+	wantLibrary := types.MakeFunctionID(abs, "ExternalBoundaryMatrix", "libraryEntry(address,bytes)")
+	if !reflect.DeepEqual(library.ReachableFrom, []string{wantLibrary}) {
+		t.Fatalf("library reachability = %v, want %v", library.ReachableFrom, []string{wantLibrary})
+	}
+
+	orphan := boundaryFact(t, db, contractID, "_orphan(address,bytes)", types.KindCallLowlevelCall)
+	if len(orphan.ReachableFrom) != 0 {
+		t.Fatalf("internal-only boundary reachability = %v, want none", orphan.ReachableFrom)
+	}
+
+	fn, _ := db.GetFunctionByID(helper.FunctionID)
+	node := findASTNodeByPath(fn.AST, helper.ASTPath)
+	if !node.GetAttributeBool("boundary_reachable_from_entry") {
+		t.Fatalf("reachable boundary AST attributes = %+v", node.Attributes)
+	}
+}
+
+func TestExternalBoundaryFactsSourceCacheParity(t *testing.T) {
+	db := buildFixture(t, externalBoundariesFixture)
+	raw, err := json.Marshal(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cache := t.TempDir() + "/database.json"
+	if err := os.WriteFile(cache, raw, 0600); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := types.LoadFromJSON(cache)
+	if err != nil {
+		t.Fatal(err)
+	}
+	freshFacts, _ := json.Marshal(db.Semantics.ExternalBoundaries)
+	cachedFacts, _ := json.Marshal(loaded.Semantics.ExternalBoundaries)
+	if !bytes.Equal(freshFacts, cachedFacts) {
+		t.Fatalf("source/cache facts differ\nfresh: %s\ncached: %s", freshFacts, cachedFacts)
+	}
+	for _, fact := range loaded.Semantics.ExternalBoundaries {
+		fn, ok := loaded.GetFunctionByID(fact.FunctionID)
+		if !ok {
+			t.Fatalf("cached function %s missing", fact.FunctionID)
+		}
+		node := findASTNodeByPath(fn.AST, fact.ASTPath)
+		if node == nil || node.GetAttributeString("external_boundary_id") != fact.ID || node.GetAttributeString("boundary_result_disposition") != fact.Result.Disposition {
+			t.Fatalf("cached fact-backed attributes differ for %s: %+v", fact.ID, node)
+		}
 	}
 }
 
