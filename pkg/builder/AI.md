@@ -423,6 +423,26 @@ The pass annotates the exact AST boundary with protocol-neutral fields beginning
 with `external_boundary_id` and `boundary_`. Later evidence phases add result,
 state-order, and entry-reachability fields without changing the fact identity.
 
+Result evidence is structural. The pass distinguishes no-result `transfer`,
+discarded, captured, returned, direct-condition, consumed, and unknown result
+uses. A captured target is directly checked only when the same exact RefID is
+used by a later `require`, `assert`, or `if` condition with a proven execution
+relation. Variable names and comments never prove a check.
+
+Direct state writes are related to each boundary by an AST execution partial
+order, not by line numbers. Sequential block/function children preserve order;
+an enclosing effect follows its operand; conditions precede their arms; opposite
+conditional arms are incompatible; sibling operands are unordered; and events
+sharing a loop remain unknown because another iteration can reverse their
+relative transaction order. The first fact version deliberately excludes
+transitive callee writes and external-target effects and records those limits.
+
+`ReentryClass` describes the call mechanism only: opaque calls may reenter,
+delegatecall runs in caller storage context, staticcall may create read-only
+reentry, transfer/send are stipend-limited, self calls target the same contract,
+and create/create2 invoke constructor code. None of these labels is a safety or
+vulnerability verdict.
+
 **Member Access Attributes:**
 - Stores `parent` attribute for member accesses
 - Example: For `tx.origin`, stores `parent="tx"`, `name="origin"`

@@ -13,6 +13,8 @@ contract BoundaryChild {
 
 contract ExternalBoundaryMatrix {
     mapping(uint256 => address payable) public savedTargets;
+    uint256 public total;
+    event Result(bool value);
 
     function callerControlled(
         address payable[] calldata targets,
@@ -71,5 +73,65 @@ contract ExternalBoundaryMatrix {
             pop(create(amount, 0, 0))
             pop(create2(amount, 0, 0, 0))
         }
+    }
+
+    function capturedChecked(address target, bytes calldata data) external {
+        (bool ok, ) = target.call(data);
+        require(ok, "checked");
+    }
+
+    function capturedUnchecked(address target, bytes calldata data) external {
+        (bool looksChecked, ) = target.call(data);
+        total = looksChecked ? 1 : 0;
+    }
+
+    function discarded(address target, bytes calldata data) external {
+        target.call(data);
+    }
+
+    function returned(address target, bytes calldata data) external returns (bool, bytes memory) {
+        return target.call(data);
+    }
+
+    function directCondition(address payable target, uint256 amount) external {
+        require(target.send(amount), "direct");
+    }
+
+    function consumed(address payable target, uint256 amount) external {
+        emit Result(target.send(amount));
+    }
+
+    function stateBefore(address target, bytes calldata data) external {
+        total = 1;
+        target.call(data);
+    }
+
+    function stateAfter(address target, bytes calldata data) external {
+        target.call(data);
+        total = 1;
+    }
+
+    function incompatible(address target, bytes calldata data, bool branch) external {
+        if (branch) {
+            target.call(data);
+        } else {
+            total = 1;
+        }
+    }
+
+    function unordered(address payable target, uint256 amount) external {
+        _consumePair(target.send(amount), total = 1);
+    }
+
+    function loopUnknown(address payable target, uint256 amount) external {
+        for (uint256 i = 0; i < 1; i++) {
+            target.send(amount);
+            total = i;
+        }
+    }
+
+    function _consumePair(bool sent, uint256 value) internal pure {
+        sent;
+        value;
     }
 }

@@ -147,6 +147,12 @@ var attrNameToIRTable = map[string]string{
 	"boundary_receiver_control":     "boundary_receiver_control",
 	"boundary_value_control":        "boundary_value_control",
 	"boundary_arguments_controlled": "boundary_arguments_controlled",
+	"boundary_result_disposition":   "boundary_result_disposition",
+	"boundary_result_checked":       "boundary_result_checked",
+	"boundary_reentry_class":        "boundary_reentry_class",
+	"boundary_has_state_before":     "boundary_has_state_before",
+	"boundary_has_state_after":      "boundary_has_state_after",
+	"boundary_reachable_from_entry": "boundary_reachable_from_entry",
 }
 
 // attrNameToIR resolves a WQL attribute name (§7) to the IR node-attribute

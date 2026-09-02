@@ -127,6 +127,12 @@ func TestAttrNameToIR(t *testing.T) {
 		{"boundary_receiver_control", "boundary_receiver_control", true},
 		{"boundary_value_control", "boundary_value_control", true},
 		{"boundary_arguments_controlled", "boundary_arguments_controlled", true},
+		{"boundary_result_disposition", "boundary_result_disposition", true},
+		{"boundary_result_checked", "boundary_result_checked", true},
+		{"boundary_reentry_class", "boundary_reentry_class", true},
+		{"boundary_has_state_before", "boundary_has_state_before", true},
+		{"boundary_has_state_after", "boundary_has_state_after", true},
+		{"boundary_reachable_from_entry", "boundary_reachable_from_entry", true},
 
 		// Unknown.
 		{"not-a-real-attr", "", false},

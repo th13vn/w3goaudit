@@ -250,6 +250,22 @@ while the durable record stays in `Database.Semantics`. Confidence is
 (reconstructing condition text via `astText` since nodes don't store source
 positions).
 
+Phase 8 builds `SemanticFacts.ExternalBoundaries`, a versioned public evidence
+index rather than an evaluator-private operation dump. Each fact owns a stable
+function/span/kind/AST-path identity, exact or explicitly unresolved target
+metadata, conservative receiver/value/gas/argument provenance, structural
+result disposition, direct check evidence, descriptive reentry class, and
+direct same-function state effects.
+
+Boundary state ordering is an execution partial order. Sequential function and
+block children retain order; operands precede their enclosing effect; conditions
+precede their arms; distinct conditional arms are incompatible; sibling
+operands whose evaluation order is unspecified are unordered. If both sites are
+inside one loop, their relation is unknown because a later iteration may invert
+the apparent textual order. Source lines are never substituted for execution
+order. The first fact version does not summarize transitive callee writes,
+external target effects, callback edges, or transaction-level path feasibility.
+
 ---
 
 ## 5. Layer 3 — `pkg/types`: Core Data Structures

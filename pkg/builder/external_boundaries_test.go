@@ -123,6 +123,103 @@ func TestBuildExternalBoundariesDeterministicAcrossBuilds(t *testing.T) {
 	}
 }
 
+func TestBuildExternalBoundariesClassifiesResultUseAndChecks(t *testing.T) {
+	db := buildFixture(t, externalBoundariesFixture)
+	contractID := types.MakeContractID(fixtureAbs(t, externalBoundariesFixture), "ExternalBoundaryMatrix")
+	cases := []struct {
+		selector     string
+		kind         string
+		availability string
+		disposition  string
+		directCheck  string
+	}{
+		{"capturedChecked(address,bytes)", types.KindCallLowlevelCall, types.BoundaryResultYes, types.BoundaryResultCaptured, types.BoundaryResultYes},
+		{"capturedUnchecked(address,bytes)", types.KindCallLowlevelCall, types.BoundaryResultYes, types.BoundaryResultCaptured, types.BoundaryResultNo},
+		{"discarded(address,bytes)", types.KindCallLowlevelCall, types.BoundaryResultYes, types.BoundaryResultDiscarded, types.BoundaryResultNo},
+		{"returned(address,bytes)", types.KindCallLowlevelCall, types.BoundaryResultYes, types.BoundaryResultReturned, types.BoundaryResultNo},
+		{"directCondition(address,uint256)", types.KindCallBuiltinSend, types.BoundaryResultYes, types.BoundaryResultCondition, types.BoundaryResultYes},
+		{"consumed(address,uint256)", types.KindCallBuiltinSend, types.BoundaryResultYes, types.BoundaryResultConsumed, types.BoundaryResultNo},
+		{"etherKinds(address,uint256)", types.KindCallBuiltinTransfer, types.BoundaryResultNo, types.BoundaryResultNone, types.BoundaryResultNo},
+	}
+	for _, tc := range cases {
+		t.Run(tc.selector, func(t *testing.T) {
+			fact := boundaryFact(t, db, contractID, tc.selector, tc.kind)
+			if fact.Result.Availability != tc.availability || fact.Result.Disposition != tc.disposition || fact.Result.DirectCheck != tc.directCheck {
+				t.Fatalf("result = %+v, want availability=%s disposition=%s directCheck=%s", fact.Result, tc.availability, tc.disposition, tc.directCheck)
+			}
+			if tc.directCheck == types.BoundaryResultYes && len(fact.Result.CheckSites) == 0 {
+				t.Fatal("checked result has no enforcing site")
+			}
+		})
+	}
+	unchecked := boundaryFact(t, db, contractID, "capturedUnchecked(address,bytes)", types.KindCallLowlevelCall)
+	if len(unchecked.Result.Targets) != 1 || unchecked.Result.Targets[0].Expression != "looksChecked" {
+		t.Fatalf("captured result targets = %+v", unchecked.Result.Targets)
+	}
+}
+
+func TestBuildExternalBoundariesRelatesDirectStateEffects(t *testing.T) {
+	db := buildFixture(t, externalBoundariesFixture)
+	contractID := types.MakeContractID(fixtureAbs(t, externalBoundariesFixture), "ExternalBoundaryMatrix")
+	cases := []struct {
+		selector string
+		want     string
+	}{
+		{"stateBefore(address,bytes)", types.BoundaryStateBefore},
+		{"stateAfter(address,bytes)", types.BoundaryStateAfter},
+		{"incompatible(address,bytes,bool)", types.BoundaryStateIncompatible},
+		{"unordered(address,uint256)", types.BoundaryStateUnordered},
+		{"loopUnknown(address,uint256)", types.BoundaryStateUnknown},
+	}
+	for _, tc := range cases {
+		t.Run(tc.selector, func(t *testing.T) {
+			kind := types.KindCallLowlevelCall
+			if tc.selector == "unordered(address,uint256)" || tc.selector == "loopUnknown(address,uint256)" {
+				kind = types.KindCallBuiltinSend
+			}
+			fact := boundaryFact(t, db, contractID, tc.selector, kind)
+			if len(fact.StateEffects) != 1 || fact.StateEffects[0].Name != "total" || fact.StateEffects[0].Relation != tc.want {
+				t.Fatalf("state effects = %+v, want one total/%s", fact.StateEffects, tc.want)
+			}
+		})
+	}
+}
+
+func TestBuildExternalBoundariesClassifiesReentryAndLimitations(t *testing.T) {
+	db := buildFixture(t, externalBoundariesFixture)
+	contractID := types.MakeContractID(fixtureAbs(t, externalBoundariesFixture), "ExternalBoundaryMatrix")
+	cases := []struct {
+		selector string
+		kind     string
+		want     string
+	}{
+		{"callerControlled(address[],uint256,uint256,bytes)", types.KindCallLowlevelCall, types.BoundaryReentryPossible},
+		{"lowLevelKinds(address,bytes)", types.KindCallLowlevelDelegate, types.BoundaryReentryDelegateContext},
+		{"lowLevelKinds(address,bytes)", types.KindCallLowlevelStatic, types.BoundaryReentryReadOnlyPossible},
+		{"etherKinds(address,uint256)", types.KindCallBuiltinSend, types.BoundaryReentryStipendLimited},
+		{"selfTarget(bytes)", types.KindCallExternal, types.BoundaryReentrySameContract},
+		{"createKinds(uint256)", types.KindCallCreate, types.BoundaryReentryConstructorPossible},
+	}
+	for _, tc := range cases {
+		fact := boundaryFact(t, db, contractID, tc.selector, tc.kind)
+		if fact.ReentryClass != tc.want {
+			t.Errorf("%s %s reentry = %q, want %q", tc.selector, tc.kind, fact.ReentryClass, tc.want)
+		}
+		if len(fact.Limitations) == 0 {
+			t.Errorf("%s %s has no explicit limitations", tc.selector, tc.kind)
+		}
+	}
+
+	stateAfter := boundaryFact(t, db, contractID, "stateAfter(address,bytes)", types.KindCallLowlevelCall)
+	fn, _ := db.GetFunctionByID(stateAfter.FunctionID)
+	node := findASTNodeByPath(fn.AST, stateAfter.ASTPath)
+	if node.GetAttributeString("boundary_result_disposition") != types.BoundaryResultDiscarded ||
+		node.GetAttributeString("boundary_result_checked") != types.BoundaryResultNo ||
+		!node.GetAttributeBool("boundary_has_state_after") {
+		t.Fatalf("completed WQL bridge attrs = %+v", node.Attributes)
+	}
+}
+
 func boundaryFact(t *testing.T, db *types.Database, contractID, selector, kind string) *types.ExternalBoundaryFact {
 	t.Helper()
 	functionID := types.MakeFunctionID(db.Contracts[contractID].SourceFile, db.Contracts[contractID].Name, selector)

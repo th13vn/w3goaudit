@@ -137,6 +137,10 @@ func (b *Builder) externalBoundaryFact(contract *types.Contract, fn *types.Funct
 		Limitations:   []string{},
 	}
 	b.populateBoundaryValues(fact, fn, node)
+	b.populateBoundaryResult(fact, fn, node)
+	b.populateBoundaryStateEffects(fact, fn, node)
+	fact.ReentryClass = boundaryReentryClass(fact)
+	fact.Limitations = boundaryLimitations(fact)
 	return fact
 }
 
@@ -396,4 +400,416 @@ func annotateExternalBoundaryNode(node *types.ASTNode, fact *types.ExternalBound
 		}
 	}
 	node.SetAttribute("boundary_arguments_controlled", controlled)
+	node.SetAttribute("boundary_result_disposition", fact.Result.Disposition)
+	node.SetAttribute("boundary_result_checked", fact.Result.DirectCheck)
+	node.SetAttribute("boundary_reentry_class", fact.ReentryClass)
+	hasBefore, hasAfter := false, false
+	for _, effect := range fact.StateEffects {
+		if effect.Relation == types.BoundaryStateBefore {
+			hasBefore = true
+		}
+		if effect.Relation == types.BoundaryStateAfter {
+			hasAfter = true
+		}
+	}
+	node.SetAttribute("boundary_has_state_before", hasBefore)
+	node.SetAttribute("boundary_has_state_after", hasAfter)
+	node.SetAttribute("boundary_reachable_from_entry", len(fact.ReachableFrom) > 0)
+}
+
+func (b *Builder) populateBoundaryResult(fact *types.ExternalBoundaryFact, fn *types.Function, node *types.ASTNode) {
+	fact.Result.Availability = b.boundaryResultAvailability(fact)
+	if fact.Result.Availability == types.BoundaryResultNo {
+		fact.Result.Disposition = types.BoundaryResultNone
+		fact.Result.DirectCheck = types.BoundaryResultNo
+		return
+	}
+
+	if check := boundaryConditionOwner(node); check != nil {
+		fact.Result.Disposition = types.BoundaryResultCondition
+		fact.Result.DirectCheck = types.BoundaryResultYes
+		fact.Result.CheckSites = []types.SemanticSourceRange{boundaryRange(fn.SourceFile, check)}
+		return
+	}
+	if boundaryAncestor(node, types.KindStmtReturn) != nil {
+		fact.Result.Disposition = types.BoundaryResultReturned
+		fact.Result.DirectCheck = types.BoundaryResultNo
+		return
+	}
+	if assignment := boundaryCapturingAssignment(node); assignment != nil {
+		fact.Result.Disposition = types.BoundaryResultCaptured
+		fact.Result.Targets = b.boundaryResultTargets(fn, assignment)
+		fact.Result.DirectCheck = types.BoundaryResultNo
+		for _, target := range fact.Result.Targets {
+			for _, check := range laterBoundaryChecks(fn.AST, node, target.RefIDs) {
+				fact.Result.CheckSites = append(fact.Result.CheckSites, boundaryRange(fn.SourceFile, check))
+			}
+		}
+		if len(fact.Result.CheckSites) > 0 {
+			fact.Result.DirectCheck = types.BoundaryResultYes
+		}
+		return
+	}
+	if boundaryIsStandalone(node) {
+		fact.Result.Disposition = types.BoundaryResultDiscarded
+	} else {
+		fact.Result.Disposition = types.BoundaryResultConsumed
+	}
+	if fact.Result.Availability == types.BoundaryResultUnknown {
+		fact.Result.DirectCheck = types.BoundaryResultUnknown
+	} else {
+		fact.Result.DirectCheck = types.BoundaryResultNo
+	}
+}
+
+func (b *Builder) boundaryResultAvailability(fact *types.ExternalBoundaryFact) string {
+	switch fact.Kind {
+	case types.KindCallBuiltinTransfer:
+		return types.BoundaryResultNo
+	case types.KindCallBuiltinSend, types.KindCallLowlevelCall,
+		types.KindCallLowlevelDelegate, types.KindCallLowlevelStatic,
+		types.KindCallCreate, types.KindAsmCall, types.KindAsmDelegatecall,
+		types.KindAsmStaticcall, types.KindAsmCreate, types.KindAsmCreate2:
+		return types.BoundaryResultYes
+	case types.KindCallExternal:
+		if fact.Target.FunctionID == "" {
+			return types.BoundaryResultUnknown
+		}
+		if target, ok := b.db.GetFunctionByID(fact.Target.FunctionID); ok {
+			if len(target.Returns) > 0 {
+				return types.BoundaryResultYes
+			}
+			return types.BoundaryResultNo
+		}
+	}
+	return types.BoundaryResultUnknown
+}
+
+func boundaryConditionOwner(node *types.ASTNode) *types.ASTNode {
+	for current := node; current != nil && current.Parent != nil; current = current.Parent {
+		parent := current.Parent
+		switch parent.Kind {
+		case types.KindCheckRequire, types.KindCheckAssert:
+			if len(parent.Children) > 0 && nodeIsWithin(current, parent.Children[0]) {
+				return parent
+			}
+			return nil
+		case types.KindStmtIf:
+			if len(parent.Children) > 0 && nodeIsWithin(current, parent.Children[0]) {
+				return parent
+			}
+			return nil
+		case types.KindStmtAssign, types.KindStmtReturn, types.KindStmtEmit:
+			return nil
+		}
+	}
+	return nil
+}
+
+func boundaryAncestor(node *types.ASTNode, kind string) *types.ASTNode {
+	for current := node.Parent; current != nil; current = current.Parent {
+		if current.Kind == kind {
+			return current
+		}
+	}
+	return nil
+}
+
+func boundaryCapturingAssignment(node *types.ASTNode) *types.ASTNode {
+	for current := node; current != nil && current.Parent != nil; current = current.Parent {
+		parent := current.Parent
+		if parent.Kind == types.KindStmtAssign || parent.Kind == types.KindDeclVariable {
+			lhsCount, err := strconv.Atoi(parent.GetAttributeString("assignment_lhs_count"))
+			if err != nil || lhsCount <= 0 || lhsCount >= len(parent.Children) {
+				return nil
+			}
+			for _, rhs := range parent.Children[lhsCount:] {
+				if nodeIsWithin(node, rhs) {
+					return parent
+				}
+			}
+			return nil
+		}
+		if boundaryIsSequentialContainer(parent) || parent.Kind == types.KindStmtReturn || parent.Kind == types.KindStmtEmit {
+			return nil
+		}
+	}
+	return nil
+}
+
+func (b *Builder) boundaryResultTargets(fn *types.Function, assignment *types.ASTNode) []types.BoundaryValue {
+	lhsCount, err := strconv.Atoi(assignment.GetAttributeString("assignment_lhs_count"))
+	if err != nil || lhsCount <= 0 || lhsCount > len(assignment.Children) {
+		return []types.BoundaryValue{}
+	}
+	targets := make([]types.BoundaryValue, 0, lhsCount)
+	for _, lhs := range assignment.Children[:lhsCount] {
+		if lhs == nil {
+			continue
+		}
+		targets = append(targets, b.boundaryValue(fn, lhs, types.BoundaryValueRoleResult, -1, false))
+	}
+	return targets
+}
+
+func laterBoundaryChecks(root, boundary *types.ASTNode, refIDs []string) []*types.ASTNode {
+	if root == nil || boundary == nil || len(refIDs) == 0 {
+		return nil
+	}
+	refSet := make(map[string]bool, len(refIDs))
+	for _, refID := range refIDs {
+		refSet[refID] = true
+	}
+	var checks []*types.ASTNode
+	walkBoundaryAST(root, "0", func(candidate *types.ASTNode, _ string) {
+		if candidate == nil || candidate.Kind != types.KindCheckRequire && candidate.Kind != types.KindCheckAssert && candidate.Kind != types.KindStmtIf {
+			return
+		}
+		if len(candidate.Children) == 0 || !subtreeReferencesAny(candidate.Children[0], refSet) {
+			return
+		}
+		if boundaryExecutionRelation(boundary, candidate) == types.BoundaryStateAfter {
+			checks = append(checks, candidate)
+		}
+	})
+	return checks
+}
+
+func subtreeReferencesAny(node *types.ASTNode, refSet map[string]bool) bool {
+	if node == nil {
+		return false
+	}
+	if node.RefID != "" && refSet[node.RefID] {
+		return true
+	}
+	for _, child := range node.Children {
+		if subtreeReferencesAny(child, refSet) {
+			return true
+		}
+	}
+	return false
+}
+
+func boundaryIsStandalone(node *types.ASTNode) bool {
+	if node == nil || node.Parent == nil {
+		return true
+	}
+	return boundaryIsSequentialContainer(node.Parent)
+}
+
+func (b *Builder) populateBoundaryStateEffects(fact *types.ExternalBoundaryFact, fn *types.Function, boundary *types.ASTNode) {
+	if fn == nil || fn.AST == nil {
+		return
+	}
+	walkBoundaryAST(fn.AST, "0", func(node *types.ASTNode, _ string) {
+		effect, ok := boundaryStateEffect(fn.SourceFile, node)
+		if !ok {
+			return
+		}
+		effect.Relation = boundaryExecutionRelation(boundary, node)
+		fact.StateEffects = append(fact.StateEffects, effect)
+	})
+}
+
+func boundaryStateEffect(file string, node *types.ASTNode) (types.BoundaryStateEffect, bool) {
+	if node == nil {
+		return types.BoundaryStateEffect{}, false
+	}
+	var target *types.ASTNode
+	kind := ""
+	switch node.Kind {
+	case types.KindStmtAssign:
+		if !node.GetAttributeBool("is_state_var") || len(node.Children) == 0 {
+			return types.BoundaryStateEffect{}, false
+		}
+		target, kind = node.Children[0], assignKind(node)
+	case types.KindStmtStateMutation:
+		if !node.GetAttributeBool("is_state_var") {
+			return types.BoundaryStateEffect{}, false
+		}
+		for _, child := range node.Children {
+			if child.GetAttributeBool("call_receiver") {
+				target = child
+				break
+			}
+		}
+		kind = node.GetAttributeString("operator")
+	case types.KindExprUnaryOp:
+		operator := node.GetAttributeString("operator")
+		if operator != "delete" && operator != "++" && operator != "--" || len(node.Children) == 0 {
+			return types.BoundaryStateEffect{}, false
+		}
+		target, kind = node.Children[0], operator
+	case types.KindAsmSstore:
+		return types.BoundaryStateEffect{Name: "<assembly sstore>", Kind: "sstore", Range: boundaryRange(file, node)}, true
+	default:
+		return types.BoundaryStateEffect{}, false
+	}
+	root := boundaryStateRoot(target)
+	if root == nil || root.RefKind != "state_var" {
+		return types.BoundaryStateEffect{}, false
+	}
+	return types.BoundaryStateEffect{RefID: root.RefID, Name: root.Name, Kind: kind, Range: boundaryRange(file, node)}, true
+}
+
+func boundaryStateRoot(node *types.ASTNode) *types.ASTNode {
+	for node != nil {
+		if node.Kind == types.KindExprIdentifier {
+			return node
+		}
+		if len(node.Children) == 0 {
+			return nil
+		}
+		node = node.Children[0]
+	}
+	return nil
+}
+
+func boundaryExecutionRelation(boundary, effect *types.ASTNode) string {
+	if boundary == nil || effect == nil || boundary == effect {
+		return types.BoundaryStateUnknown
+	}
+	if shareBoundaryLoop(boundary, effect) {
+		return types.BoundaryStateUnknown
+	}
+	if nodeIsWithin(boundary, effect) {
+		return types.BoundaryStateAfter
+	}
+	if nodeIsWithin(effect, boundary) {
+		return types.BoundaryStateBefore
+	}
+	lca, boundaryChild, effectChild := boundaryLCA(boundary, effect)
+	if lca == nil || boundaryChild == nil || effectChild == nil {
+		return types.BoundaryStateUnknown
+	}
+	boundaryIndex, effectIndex := directBoundaryChildIndex(lca, boundaryChild), directBoundaryChildIndex(lca, effectChild)
+	if boundaryIndex < 0 || effectIndex < 0 {
+		return types.BoundaryStateUnknown
+	}
+	if lca.Kind == types.KindStmtIf || lca.Kind == types.KindExprConditional {
+		if boundaryIndex > 0 && effectIndex > 0 && boundaryIndex != effectIndex {
+			return types.BoundaryStateIncompatible
+		}
+		if boundaryIndex == 0 {
+			return types.BoundaryStateAfter
+		}
+		if effectIndex == 0 {
+			return types.BoundaryStateBefore
+		}
+	}
+	if boundaryIsSequentialContainer(lca) {
+		if boundaryIndex < effectIndex {
+			return types.BoundaryStateAfter
+		}
+		return types.BoundaryStateBefore
+	}
+	return types.BoundaryStateUnordered
+}
+
+func nodeIsWithin(node, ancestor *types.ASTNode) bool {
+	for current := node; current != nil; current = current.Parent {
+		if current == ancestor {
+			return true
+		}
+	}
+	return false
+}
+
+func shareBoundaryLoop(left, right *types.ASTNode) bool {
+	loops := map[*types.ASTNode]bool{}
+	for current := left; current != nil; current = current.Parent {
+		if current.Kind == types.KindStmtLoop {
+			loops[current] = true
+		}
+	}
+	for current := right; current != nil; current = current.Parent {
+		if loops[current] {
+			return true
+		}
+	}
+	return false
+}
+
+func boundaryLCA(left, right *types.ASTNode) (*types.ASTNode, *types.ASTNode, *types.ASTNode) {
+	leftPath := boundaryAncestorPath(left)
+	rightPath := boundaryAncestorPath(right)
+	limit := len(leftPath)
+	if len(rightPath) < limit {
+		limit = len(rightPath)
+	}
+	last := -1
+	for index := 0; index < limit && leftPath[index] == rightPath[index]; index++ {
+		last = index
+	}
+	if last < 0 || last+1 >= len(leftPath) || last+1 >= len(rightPath) {
+		return nil, nil, nil
+	}
+	return leftPath[last], leftPath[last+1], rightPath[last+1]
+}
+
+func boundaryAncestorPath(node *types.ASTNode) []*types.ASTNode {
+	var reversed []*types.ASTNode
+	for current := node; current != nil; current = current.Parent {
+		reversed = append(reversed, current)
+	}
+	path := make([]*types.ASTNode, len(reversed))
+	for index := range reversed {
+		path[len(reversed)-1-index] = reversed[index]
+	}
+	return path
+}
+
+func directBoundaryChildIndex(parent, child *types.ASTNode) int {
+	for index, candidate := range parent.Children {
+		if candidate == child {
+			return index
+		}
+	}
+	return -1
+}
+
+func boundaryIsSequentialContainer(node *types.ASTNode) bool {
+	if node == nil {
+		return false
+	}
+	switch node.Kind {
+	case types.KindDeclFunction, types.KindDeclModifier, types.KindStmtBlock, types.KindStmtUnchecked, types.KindAsmBlock:
+		return true
+	default:
+		return false
+	}
+}
+
+func boundaryReentryClass(fact *types.ExternalBoundaryFact) string {
+	switch {
+	case fact.CallType == types.CallTypeSelf:
+		return types.BoundaryReentrySameContract
+	case fact.Kind == types.KindCallLowlevelDelegate || fact.Kind == types.KindAsmDelegatecall:
+		return types.BoundaryReentryDelegateContext
+	case fact.Kind == types.KindCallLowlevelStatic || fact.Kind == types.KindAsmStaticcall:
+		return types.BoundaryReentryReadOnlyPossible
+	case fact.Kind == types.KindCallBuiltinTransfer || fact.Kind == types.KindCallBuiltinSend:
+		return types.BoundaryReentryStipendLimited
+	case fact.Kind == types.KindCallCreate || fact.Kind == types.KindAsmCreate || fact.Kind == types.KindAsmCreate2:
+		return types.BoundaryReentryConstructorPossible
+	case fact.Kind == types.KindCallExternal || fact.Kind == types.KindCallLowlevelCall || fact.Kind == types.KindAsmCall:
+		return types.BoundaryReentryPossible
+	default:
+		return types.BoundaryReentryUnknown
+	}
+}
+
+func boundaryLimitations(fact *types.ExternalBoundaryFact) []string {
+	limitations := []string{
+		"external target effects are not analyzed",
+		"state effects include direct same-function writes only",
+		"entry reachability records call-graph paths and is not a path-feasibility proof",
+	}
+	if fact.Target.Resolution != types.BoundaryTargetResolved {
+		limitations = append(limitations, "exact external target identity is unavailable")
+	}
+	if fact.Result.Availability == types.BoundaryResultUnknown {
+		limitations = append(limitations, "result availability is unknown")
+	}
+	return limitations
 }

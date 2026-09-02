@@ -39,6 +39,7 @@ const (
 	BoundaryValueRoleValue    = "value"
 	BoundaryValueRoleGas      = "gas"
 	BoundaryValueRoleArgument = "argument"
+	BoundaryValueRoleResult   = "result"
 
 	BoundaryTargetResolved      = "resolved"
 	BoundaryTargetUnresolved    = "unresolved"
