@@ -421,7 +421,8 @@ stay `not_applicable`. Values retain exact dependency RefIDs, sorted coarse
 taint sources, inferred `TypeInfo`, and conservative control classification.
 Constructors have no EVM selector, so their exact fact host uses the unique
 synthetic member `constructor`; `Database.GetFunctionByID` resolves it only to
-the owning contract's constructor.
+the owning contract's constructor. AST semantic scope and parameter/local
+RefIDs use that same synthetic identity instead of becoming anonymous.
 For indexed or member receivers, provenance follows only the base chain, never
 the index key. `targets[i]` therefore remains caller-controlled while
 `savedTargets[i]` remains state-derived.

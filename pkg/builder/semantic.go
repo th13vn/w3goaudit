@@ -412,7 +412,14 @@ func (b *ASTBuilder) refIDForSymbol(name, kind string) string {
 }
 
 func (b *ASTBuilder) semanticFunctionID() string {
-	if b == nil || b.contract == nil || b.function == nil || b.function.Selector == "" {
+	if b == nil || b.contract == nil || b.function == nil {
+		return ""
+	}
+	selector := b.function.Selector
+	if selector == "" && b.function.IsConstructor {
+		selector = "constructor"
+	}
+	if selector == "" {
 		return ""
 	}
 	file := b.function.SourceFile
@@ -426,7 +433,7 @@ func (b *ASTBuilder) semanticFunctionID() string {
 	if file == "" || contractName == "" {
 		return ""
 	}
-	return types.MakeFunctionID(file, contractName, b.function.Selector)
+	return types.MakeFunctionID(file, contractName, selector)
 }
 
 func (b *ASTBuilder) parameterRefID(name string) string {

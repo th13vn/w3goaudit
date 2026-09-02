@@ -308,6 +308,9 @@ func TestBuildExternalBoundariesIndexesQueryableConstructorBoundary(t *testing.T
 	if fact.ScopeKind != types.ExternalBoundaryScopeFunction || fact.FunctionID != scopeID {
 		t.Fatalf("constructor scope identity = kind %q function %q", fact.ScopeKind, fact.FunctionID)
 	}
+	if fact.Receiver == nil || !reflect.DeepEqual(fact.Receiver.RefIDs, []string{scopeID + ".target"}) {
+		t.Fatalf("constructor receiver provenance = %+v, want exact parameter RefID", fact.Receiver)
+	}
 	if len(fact.ReachableFrom) != 0 {
 		t.Fatalf("constructor reachability = %v, want no runtime entry", fact.ReachableFrom)
 	}
