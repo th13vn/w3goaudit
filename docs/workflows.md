@@ -67,7 +67,7 @@ graph LR
 #### Phase 2: Database Building
 **Component:** [`pkg/builder`](../pkg/builder)
 
-The builder constructs a comprehensive database through **7 phases**:
+The builder constructs a comprehensive database through **8 phases**:
 
 **Phase 1: Parse Files**
 - Parse each `.sol` file using [solast-go](https://github.com/th13vn/solast-go)
@@ -135,6 +135,17 @@ The builder constructs a comprehensive database through **7 phases**:
   workflow files written in Phase 5 (report generation)
 - **Code:** [effects.go](../pkg/builder/effects.go)
 
+**Phase 8: Build External-Boundary Facts**
+- Walk exact function and modifier scopes in deterministic order
+- Build `ExternalBoundaryFactsVersion` `1.0.0` records with exact `ScopeID`,
+  source range, target/value/result/state/reentry evidence, and limitations
+- Trace exact entry reachability over resolved internal, inherited, library,
+  `super`, modifier, and self edges without name or prefix fallback
+- Add the protocol-neutral WQL attributes, including
+  `boundary_result_checked`, to the exact boundary AST node
+- Keep unknown states explicit; the evidence is not a vulnerability verdict
+- **Code:** [external_boundaries.go](../pkg/builder/external_boundaries.go)
+
 **Code:** [builder.go](../pkg/builder/builder.go)
 
 ```mermaid
@@ -146,7 +157,8 @@ graph TD
     E --> F[Phase 5: Build Call Graph]
     F --> G[Phase 6: Calculate Entry Points]
     G --> G2[Phase 7: Per-Function Effects]
-    G2 --> H[Complete Database]
+    G2 --> G3[Phase 8: External-Boundary Facts]
+    G3 --> H[Complete Database]
 ```
 
 #### Phase 3: Template Loading
@@ -345,7 +357,7 @@ graph TD
 graph LR
     A[Input Path] --> B[Reader]
     B --> C[Source Files]
-    C --> D[Builder: 7 Phases]
+    C --> D[Builder: 8 Phases]
     D --> E[Database]
     E --> F[JSON Export]
 ```
@@ -707,7 +719,8 @@ w3goaudit ./contracts/ \
 **What happens:**
 
 1. **Reader** discovers all `.sol` files in `./contracts/`
-2. **Builder** parses files and builds the database (7 phases, incl. per-function effects)
+2. **Builder** parses files and builds the database (8 phases, including
+   per-function effects and semantic external-boundary evidence)
 3. **Engine** loads `reentrancy-pattern.yaml` template
 4. **Engine** iterates entry functions (scope: entrypoint)
 5. **Engine** verifies each function against template rules

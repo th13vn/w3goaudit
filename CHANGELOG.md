@@ -4,6 +4,43 @@ All notable changes to w3goaudit are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/). Output changes note the `data/*.json`
 `schemaVersion`.
 
+## Unreleased
+
+### Added: deterministic semantic external-boundary evidence
+
+- Builder Phase 8 now records versioned `ExternalBoundaryFact` evidence for
+  Solidity and Yul external-control boundaries hosted by exact function or
+  modifier scopes. `ExternalBoundaryFactsVersion` is `1.0.0`; `ScopeID` and
+  `ScopeKind` keep modifier identities out of the function-only `FunctionID`.
+- Facts retain exact or explicitly unresolved targets, bounded receiver/value/
+  gas/argument provenance, structural result disposition and direct checks,
+  direct host-scope state-effect ordering, reentry class, exact entry
+  reachability, source ranges, and explicit limitations. Unknown evidence is
+  never converted into a safe verdict.
+- The SDK adds `GetExternalBoundaryByID`, `ExternalBoundarySnapshot`, and
+  `QueryExternalBoundaries`. Agent queries require exact identities and a
+  caller-supplied limit between 1 and `MaxExternalBoundaryQueryLimit` (200),
+  paginate deterministically, and return deep copies.
+- Canonical bundles add timestamp-free `data/interactions.json`, discovered by
+  `manifest.files.data.interactions`. Contract reports render at most 50
+  semantic rows and link to the complete artifact; legacy caches expose
+  `available: false`, a rebuild limitation, and the human call-graph fallback.
+- The WQL attribute catalog now accepts the protocol-neutral boundary bridge,
+  including `boundary_result_checked`, without adding protocol-specific engine
+  behavior or changing any official template.
+
+### Compatibility
+
+- Output schema remains `2.0.0`; there is no CLI break. Database, manifest, and
+  SDK fields are additive. Existing W3Solidity consumers may ignore
+  `files.data.interactions` and continue reading nav, explorer, findings, and
+  xref artifacts.
+- Core remains offline, deterministic, and independent of models, credentials,
+  providers, callbacks, or AI triage. External Assistants consume evidence but
+  cannot modify official scanner findings.
+- The official rule pack is unchanged. This entry describes unreleased local
+  work only and does not claim a tag, push, publication, or release.
+
 ## v0.5.0 - 2026-09-01
 
 Human-report consolidation release. The scanner remains deterministic and

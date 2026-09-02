@@ -31,11 +31,49 @@ interaction view is implemented. The document is timestamp-free, reports its
 independent fact version and availability, and always uses arrays for facts and
 limitations.
 
-All three documents share a `schemaVersion` field, currently `"2.0.0"`
-(`report.SchemaVersion`), the same version used by `overview.json` /
-`findings.json`. Consumers should refuse to parse on a major-version
-mismatch, per the general JSON versioning policy (see
-[`docs/usage.md`](./usage.md)).
+Its `schemaVersion` remains `"2.0.0"` and `factsVersion` is `"1.0.0"` when
+`ExternalBoundaryFactsVersion` is available. Each fact carries an exact
+function-or-modifier `scopeId` plus `scopeKind`; modifier facts leave the
+function-only `functionId` absent. A legacy cache emits `available: false`, an
+empty `interactions` array, and a rebuild limitation rather than a guessed
+index. Agent code needing filters and pagination should use the bounded
+`Database.QueryExternalBoundaries` SDK surface, whose maximum limit is 200.
+
+Minimal available-artifact shape:
+
+```jsonc
+{
+  "schemaVersion": "2.0.0",
+  "factsVersion": "1.0.0",
+  "available": true,
+  "analysisComplete": true,
+  "diagnosticCounts": {
+    "info": 0, "warning": 0, "error": 0
+  },
+  "count": 1,
+  "limitations": [],
+  "interactions": [{
+    "id": "/abs/Vault.sol#Vault.guard@interaction:120:137:call.lowlevel.call:0.0",
+    "contractId": "/abs/Vault.sol#Vault",
+    "scopeId": "/abs/Vault.sol#Vault.guard",
+    "scopeKind": "modifier",
+    "kind": "call.lowlevel.call",
+    "reachableFrom": ["/abs/Vault.sol#Vault.withdraw(uint256)"],
+    "arguments": [],
+    "stateEffects": [],
+    "limitations": []
+  }]
+}
+```
+
+The complete fact also contains its exact source range, target, optional
+receiver/value/gas evidence, result handling, reentry class, and direct
+host-scope state relations. Consumers must preserve explicit `unknown` values.
+
+The three editor-navigation documents share a `schemaVersion` field, currently
+`"2.0.0"` (`report.SchemaVersion`), the same version used by `overview.json` /
+`findings.json`. Consumers should refuse to parse on a major-version mismatch,
+per the general JSON versioning policy (see [`docs/usage.md`](./usage.md)).
 
 ## Shared: `SrcRange`
 
@@ -331,7 +369,8 @@ All three files are plain, static JSON — no server, no long-lived process, no
 schema negotiation beyond checking `schemaVersion`. A consumer:
 
 1. Reads `data/manifest.json` to discover the relative paths
-   (`files.data.nav`, `files.data.explorer`, `files.data.xref`) alongside every
+   (`files.data.nav`, `files.data.explorer`, `files.data.xref`, and optionally
+   `files.data.interactions`) alongside every
    other artifact.
 2. Loads `nav.json` once per scan to build a symbol table + reverse-call
    index in memory (ID → `SrcRange`, ID → `[]NavCaller`).

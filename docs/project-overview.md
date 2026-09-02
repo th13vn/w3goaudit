@@ -38,6 +38,8 @@
   Keccak value in `Function.Signature`
 - Builds call graphs tracking all function invocations
 - Identifies main contracts and entry points
+- Builds versioned semantic external-boundary evidence for exact function and
+  modifier host scopes
 
 **2. Security Analysis**
 - Executes user-defined WQL templates against the database. The strict loader
@@ -58,6 +60,8 @@
   `data/explorer.json` (per-contract explorer model), and `data/xref.json`
   (precise cross-reference: declarations + bound references) — for the VSCode
   Solidity extension
+- A deterministic Agent-facing `data/interactions.json` artifact, discovered
+  through `manifest.files.data.interactions`, plus bounded exact-ID SDK queries
 - Console output with color-coded severity and reachability traces
 - Opt-in audit.html, self-contained and offline
 
@@ -112,7 +116,7 @@ w3goaudit/
 │   │   └── git.go          # Git repository detection and URL building
 │   │
 │   ├── builder/            # Database construction
-│   │   ├── builder.go      # 7-phase build orchestration
+│   │   ├── builder.go      # 8-phase build orchestration
 │   │   ├── contract.go     # Contract extraction from AST
 │   │   ├── ast_builder.go  # Function AST tree building
 │   │   ├── location.go     # Unicode columns / UTF-8 byte-range index
@@ -120,7 +124,8 @@ w3goaudit/
 │   │   ├── semantic.go     # Lightweight semantic type facts
 │   │   ├── inheritance.go  # C3 linearization
 │   │   ├── callgraph.go    # Call graph construction
-│   │   └── effects.go      # Phase 7: per-function effects (writes/guards/auth)
+│   │   ├── effects.go      # Phase 7: per-function effects (writes/guards/auth)
+│   │   └── external_boundaries.go # Phase 8: semantic boundary evidence
 │   │
 │   ├── engine/             # Template execution
 │   │   ├── engine.go       # Query execution engine
@@ -261,6 +266,13 @@ w3goaudit/
    unprotected). These feed the State Changes and Entry-Point Workflows
    sections of each consolidated contract report.
    Implementation: [pkg/builder/effects.go](../pkg/builder/effects.go)
+8. **Build External-Boundary Facts** - Walk function and modifier ASTs in exact
+   scope-ID order. Emit `ExternalBoundaryFact` records with `ScopeID`,
+   `ScopeKind`, target/value/result/state/reentry evidence, exact entry
+   reachability, and the WQL attribute bridge.
+   `ExternalBoundaryFactsVersion` is `1.0.0`. Unknown evidence remains unknown.
+   Implementation:
+   [pkg/builder/external_boundaries.go](../pkg/builder/external_boundaries.go)
 
 The Yul classifier in phase 2 now recognizes `create`, `create2`, `log0`–`log4`,
 `revert`, and `return` opcodes in addition to the original
@@ -282,11 +294,11 @@ interface/contract methods with the same names.
 
 **Responsibility:** Execute WQL templates to find vulnerabilities.
 
-Templates may optionally attach an `ai` review contract. In that mode the WQL
-query remains a deterministic candidate filter, and an SDK-injected reviewer
-must confirm the bug and all necessary trigger conditions before the candidate
-is returned as a finding. The engine records suppressed and errored reviews
-separately and never selects a model, provider, or isolation mechanism itself.
+The engine boundary is deterministic. A template contains only `meta` plus one
+`query`; the removed top-level `ai` key fails strict decoding. Core contains no
+model transport, credentials, provider selection, reviewer callback, or AI
+dependency. An external Assistant may consume the emitted evidence but cannot
+alter the scanner's official finding set.
 
 **Capabilities:**
 - Load YAML templates as **WQL** (`meta` plus `query:` — `select`/`from`/
@@ -383,6 +395,14 @@ type MainContractEntry struct {
     LinearizedBaseIDs []string  // exact C3 file#Contract identities
 }
 
+type ExternalBoundaryFact struct {
+    ID, ContractID, ScopeID string
+    ScopeKind               ExternalBoundaryScopeKind // function|modifier
+    FunctionID              string // empty for modifier hosts
+    ReachableFrom           []string // exact entry function IDs
+    // target, values, result, state effects, reentry, locations, limitations
+}
+
 // Contract - Single contract/interface/library
 type Contract struct {
     Name             string
@@ -446,6 +466,9 @@ byte offsets.
 - `results.sarif` — SARIF 2.1.0 (always)
 - `data/{database.json,findings.json,overview.json,diagnostics.json}` — machine-readable; the
   canonical database lives only here (reusable via `--db`)
+- `data/interactions.json` — timestamp-free semantic external-boundary evidence
+  with schema `2.0.0`, independent fact version `1.0.0`, non-null arrays, and
+  explicit legacy-cache unavailability
 - `data/nav.json`, `data/explorer.json`, `data/xref.json` — extension-facing
   data layer for the VSCode Solidity extension: a flat symbol navigation index
   (defs, caller edges, interface→implementation), a per-main-contract explorer
@@ -458,8 +481,10 @@ byte offsets.
 - Scanner output is deterministic and contains no model verdict artifact. A
   future external Assistant may consume these evidence files without changing
   the scanner's official findings.
-  and schema-versioned like the rest of `data/` (see
-  [docs/extension-output.md](./extension-output.md))
+- The navigation data is schema-versioned like the rest of `data/` (see
+  [docs/extension-output.md](./extension-output.md)).
+- `manifest.files.data.interactions` is additive. Existing W3Solidity versions
+  continue to consume nav/explorer/findings/xref and may ignore this path.
 - `contracts/<source-path>__<Contract>.md` — one exact-identity contract deep
   dive combining findings, architecture, the state matrix from
   [pkg/report/state_matrix.go](../pkg/report/state_matrix.go), external
@@ -661,6 +686,7 @@ function _processWithdraw() internal {
 - Function selector calculation
 - Call graph construction
 - Entry point identification
+- Semantic external-boundary discovery and exact entry reachability
 
 **WQL Query Language**
 - A WQL document is meta plus one query: block. Unknown keys are rejected at every
@@ -741,6 +767,7 @@ function _processWithdraw() internal {
 **SDK**
 - Go library for integration
 - Builder, Engine, Report APIs
+- `QueryExternalBoundaries` with mandatory limit 1–200
 - Database caching (load/save JSON)
 - Scan-local immutable logger/options APIs; package-global logging wrappers are
   deprecated compatibility surfaces

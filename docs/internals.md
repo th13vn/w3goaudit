@@ -49,7 +49,7 @@ integrated engine with a user-extensible query language.
      ▼                                                                │
 ┌─────────┐   ┌──────────┐   ┌──────────┐   ┌──────────┐   ┌──────────┐
 │ reader  │──▶│ builder  │──▶│ Database │──▶│  engine  │──▶│  report  │
-│ discover│   │ 7 phases │   │ (types)  │   │ WQL exec │   │ workspace│
+│ discover│   │ 8 phases │   │ (types)  │   │ WQL exec │   │ workspace│
 │ +imports│   │          │   │          │   │ +findings│   │ md/json/ │
 └─────────┘   └──────────┘   └──────────┘   └──────────┘   │ sarif/html│
                                   ▲              ▲          └──────────┘
@@ -118,9 +118,9 @@ remappings**:
 
 ---
 
-## 4. Layer 2 — `pkg/builder`: The 7 Build Phases
+## 4. Layer 2 — `pkg/builder`: The 8 Build Phases
 
-`Builder.Build(sources)` runs seven phases in order; each populates part of the
+`Builder.Build(sources)` runs eight phases in order; each populates part of the
 Database. Parsing is tolerant — one broken file is logged and skipped, never
 aborts the build (an audit target with one bad file should still yield findings).
 
@@ -133,9 +133,11 @@ aborts the build (an audit target with one bad file should still yield findings)
 | **5. Call graph** | `buildCallGraph` + `ResolveSuperAcrossLeaves` | `db.CallGraph.Edges`, `Function.Calls`, `Modifier.Calls` |
 | **6. Entry points** | `db.CalculateMainContracts` | `db.MainContracts` (deployable contracts + resolved entry functions) |
 | **7. Effects** | `analyzeEffects` | `db.Semantics.FunctionEffects` (state writes, guards, auth) |
+| **8. External boundaries** | `buildExternalBoundaries` | versioned `db.Semantics.ExternalBoundaries`, exact entry reachability, fact-backed WQL attributes |
 
-*(The skill historically called this "6 phases" — effects analysis is a distinct
-7th phase in `builder.go`.)*
+Phase 8 is intentionally after entry and effect analysis because each boundary
+fact relates one exact host occurrence to recorded entry reachability and direct
+state effects.
 
 Determinism is enforced throughout: functions are sorted by
 `(contract, startLine, endLine, name)` before AST building; modifiers by
@@ -252,10 +254,13 @@ positions).
 
 Phase 8 builds `SemanticFacts.ExternalBoundaries`, a versioned public evidence
 index rather than an evaluator-private operation dump. Each fact owns a stable
-function/span/kind/AST-path identity, exact or explicitly unresolved target
+host-scope/span/kind/AST-path identity, exact or explicitly unresolved target
 metadata, conservative receiver/value/gas/argument provenance, structural
 result disposition, direct check evidence, descriptive reentry class, and
-direct same-function state effects.
+direct writes in the same function or modifier host.
+`ExternalBoundaryFactsVersion` is `1.0.0`. `ScopeID` and `ScopeKind` distinguish
+exact function and modifier hosts; `FunctionID` remains empty for a modifier
+fact rather than being overloaded with a modifier identity.
 
 Boundary state ordering is an execution partial order. Sequential function and
 block children retain order; operands precede their enclosing effect; conditions
@@ -265,6 +270,19 @@ inside one loop, their relation is unknown because a later iteration may invert
 the apparent textual order. Source lines are never substituted for execution
 order. The first fact version does not summarize transitive callee writes,
 external target effects, callback edges, or transaction-level path feasibility.
+Target resolution never uses prefix, same-directory, name, or lexicographic
+fallback. Entry reachability follows only exact resolved internal, inherited,
+library, `super`, modifier, and self edges. An empty `ReachableFrom` means no
+recorded path, not a proof of unreachability.
+
+The exact function or modifier boundary AST node receives the protocol-neutral
+WQL bridge: `external_boundary_id`, `boundary_target_resolution`,
+`boundary_receiver_control`, `boundary_value_control`,
+`boundary_arguments_controlled`, `boundary_result_disposition`,
+`boundary_result_checked`, `boundary_reentry_class`,
+`boundary_has_state_before`, `boundary_has_state_after`, and
+`boundary_reachable_from_entry`. These are data attributes, not protocol
+presets or detector-specific engine behavior.
 
 ---
 
@@ -295,6 +313,10 @@ Lookup hardening:
   can distinguish an authored alias whose imported declaration is absent.
 - `LinearizedContracts(contract)` — materialize the exact
   `LinearizedBaseIDs` C3 chain for identity-sensitive consumers.
+- `QueryExternalBoundaries(query)` — validates exact contract, scope, function,
+  and entry identities, requires a limit between 1 and
+  `MaxExternalBoundaryQueryLimit` (200), and returns deterministic deep-copy
+  pages. Legacy caches return `ErrExternalBoundaryFactsUnavailable`.
 
 When a legacy cache has only display `LinearizedBases`, normalization records
 one incomplete `identity.unresolved` diagnostic for every base entry that exact
@@ -753,7 +775,7 @@ for MRO and callee resolution, but reachability files prefer each exact
 ├── run.log                     # CLI tees verbose logs here
 ├── data/
 │   ├── database.json, findings.json, overview.json, diagnostics.json
-│   ├── nav.json, explorer.json, xref.json
+│   ├── interactions.json, nav.json, explorer.json, xref.json
 │   └── manifest.json             # written last
 └── contracts/<rel-src-path-no-ext>__<MainContract>.md
                                 # FormatContractReportMarkdown
@@ -768,6 +790,10 @@ Formatters:
   `renderRelatedLocationsMarkdown` ("All matched sites" + full-function excerpts).
 - **JSON** — additive structured fields (`reachability`, `entryPoint`,
   `primaryAst`, `related`), all `omitempty` so old consumers parse unchanged.
+- **Interactions JSON** (`BuildInteractionsJSON`) — schema `2.0.0`, fact version
+  `1.0.0`, no timestamp, normalized deep-copy facts, explicit analysis quality,
+  and arrays that never serialize as `null`. Legacy caches use
+  `available: false` with a rebuild limitation.
 - **SARIF 2.1.0** (`FormatFindingsAsSARIF`) — **relative** `artifactLocation.uri`
   with `uriBaseId: srcRoot` (portable across machines), one `relatedLocations[]`
   per reachability hop (`entry:`/`hop:`/`host:` labels), severity → level +
@@ -933,7 +959,8 @@ These are the deliberate calls that separate w3goaudit's output from a naive mat
 ## 11. Performance & Limits
 
 - Caps: `MaxRuleRecursionDepth=64`, `MaxInterproceduralTaintDepth=12`,
-  `MaxTaintFixpointPasses=8`.
+  `MaxTaintFixpointPasses=8`, `MaxExternalBoundaryQueryLimit=200`, and 50
+  rendered boundary rows per contract report.
 - The Rule depth cap includes supported nested `Attr` containers; active cycles
   fail closed without rejecting shared DAG values.
 - Benchmark fallback attribution uses one length- and newline-preserving

@@ -117,12 +117,14 @@ func SetVerboseWriter(w io.Writer)  // Set custom verbose output writer
 ```
 
 **What It Does:**
-- Parse Solidity files (7-phase process)
+- Parse Solidity files (8-phase process)
 - Build AST trees
 - Calculate function selectors
 - Resolve inheritance (C3 linearization)
 - Build call graphs
 - Identify entry points
+- Build `ExternalBoundaryFactsVersion` `1.0.0` evidence for exact function and
+  modifier host scopes
 
 ---
 
@@ -261,7 +263,18 @@ type TypeInfo struct {
 }
 
 type SemanticFacts struct {
-    Symbols map[string]*SemanticSymbol
+    Symbols                 map[string]*SemanticSymbol
+    FunctionEffects         map[string]*FunctionEffects
+    ExternalBoundaryVersion string
+    ExternalBoundaries      []*ExternalBoundaryFact
+}
+
+type ExternalBoundaryFact struct {
+    ID, ContractID, ScopeID string
+    ScopeKind               ExternalBoundaryScopeKind // function|modifier
+    FunctionID              string // empty for modifier hosts
+    ReachableFrom           []string
+    // target, values, result, state effects, reentry, range, limitations
 }
 
 type MainContractEntry struct {
@@ -397,8 +410,9 @@ func FormatFindingsAsMarkdown(findings []*engine.Finding, db *types.Database) st
 func FormatFindingsAsHTML(findings []*engine.Finding, db *types.Database) string
 func FormatFindingsAsSARIF(findings []*engine.Finding, tool ToolMeta, projectRoot string) (string, error)
 
-// WriteBundle renders README.md, audit.md, results.sarif, unchanged machine
-// JSON, and one Markdown deep dive per main contract. run.log is CLI-owned;
+// WriteBundle renders README.md, audit.md, results.sarif, machine JSON
+// including data/interactions.json, and one Markdown deep dive per main
+// contract. run.log is CLI-owned;
 // opts.HTML adds only audit.html. The manifest is written last.
 func WriteBundle(dir string, db *types.Database, summary *SummaryReport,
     findings []*engine.Finding, tool ToolMeta, opts BundleOptions) error
@@ -441,12 +455,14 @@ callers; `WriteBundle` no longer emits their former split files.
 copy of the complete versioned boundary fact set, or `available: false` with a
 rebuild limitation for legacy caches. It intentionally stores no timestamp and
 always emits array-shaped `interactions` and `limitations`. Its manifest
-distinguishes `projectRoot` from the represented `scanTarget` (`target` remains
-the compatibility alias), reports `analysisComplete`/diagnostic counts,
-separates contract/interface/library/declaration counts, and indexes optional
-HTML only when emitted. Finding/content order is deterministic. Real timestamps
-vary; inject the same fixed `Now` into `GeneratorOptions` and `BundleOptions`
-when a byte-stable complete bundle is required.
+indexes the artifact at `files.data.interactions`; output schema remains
+`2.0.0`. The manifest distinguishes `projectRoot` from the represented
+`scanTarget` (`target` remains the compatibility alias), reports
+`analysisComplete`/diagnostic counts, separates
+contract/interface/library/declaration counts, and indexes optional HTML only
+when emitted. Finding/content order is deterministic. Real timestamps vary;
+inject the same fixed `Now` into `GeneratorOptions` and `BundleOptions` when a
+byte-stable complete bundle is required.
 
 > **v0.4 — extension data layer:** `BuildNavJSON`, `BuildExplorerJSON`, and
 > `BuildXrefJSON` (`pkg/report/nav.go`, `pkg/report/explorer.go`,
@@ -838,7 +854,7 @@ b := builder.New()
 func (b *Builder) Build(sources []*types.SourceFile) (*types.Database, error)
 ```
 
-Builds a complete database from source files through 7 phases.
+Builds a complete database from source files through 8 phases.
 
 **Parameters:**
 - `sources` ([]*types.SourceFile) - Source files from reader
@@ -855,6 +871,8 @@ Builds a complete database from source files through 7 phases.
 5. Build call graph
 6. Calculate entry points
 7. Analyze per-function effects (state writes, guards, access control)
+8. Build semantic external-boundary facts, WQL attributes, and exact entry
+   reachability for function and modifier hosts
 
 **Errors:**
 - Parse errors (syntax errors in Solidity)
@@ -1160,7 +1178,7 @@ schema remains `2.0.0`.
 
 ```go
 page, err := db.QueryExternalBoundaries(types.ExternalBoundaryQuery{
-    FunctionID: "/abs/src/Vault.sol#Vault.withdraw(uint256)",
+    ScopeID:    "/abs/src/Vault.sol#Vault.withdraw(uint256)",
     Kinds:      []string{types.KindCallLowlevelCall},
     Offset:     0,
     Limit:      25,
@@ -1177,10 +1195,12 @@ for _, interaction := range page.Items {
 ```
 
 `Limit` is mandatory and must be between 1 and
-`MaxExternalBoundaryQueryLimit` (200). `ContractID`, `FunctionID`, and
-`EntryFunctionID` accept exact identities only. An empty match returns a valid
-empty page; an unknown identity or kind is an error. `Truncated` reports whether
-more filtered facts follow the returned page.
+`MaxExternalBoundaryQueryLimit` (200). `ContractID`, `ScopeID`, `FunctionID`,
+and `EntryFunctionID` accept exact identities only. `ScopeID` may identify a
+function or modifier; `FunctionID` remains a function-only compatibility
+filter, and the two must match when both are present. An empty match returns a
+valid empty page; an unknown identity or kind is an error. `Truncated` reports
+whether more filtered facts follow the returned page.
 
 ```go
 func (db *Database) GetFunctionByID(id string) (*types.Function, bool)
@@ -1192,6 +1212,12 @@ func (db *Database) QueryExternalBoundaries(q types.ExternalBoundaryQuery) (*typ
 Every returned boundary fact is a deep copy. Mutating a result cannot change the
 database or a later query. The fact model keeps unknown analysis states and
 limitations explicit; absence of proof is never exposed as a safe verdict.
+Function-hosted facts populate both `ScopeID` and `FunctionID`. Modifier-hosted
+facts use `ScopeKind: modifier` and leave `FunctionID` empty, while
+`ReachableFrom` records the exact entry functions that apply or reach the
+modifier. Schema-2.0.0 caches with only `FunctionID` normalize additively to a
+function `ScopeID`; caches with no fact capability remain unavailable and must
+be rebuilt from source.
 
 #### GetStats
 

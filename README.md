@@ -69,6 +69,12 @@ self-contained `audit.html`. See [Result folder layout](#result-folder-layout).
 - **AST Parsing** - Parse Solidity using [solast-go](https://github.com/th13vn/solast-go)
 - **Contract Database** - Comprehensive database with inheritance, entry points, call graphs
 - **Semantic Type Facts** - Parameters, state variables, locals, casts, and call receivers carry lightweight type facts so WQL can stay simple while call classification becomes more precise
+- **Semantic External-Boundary Facts** - Phase 8 indexes Solidity and Yul
+  calls, ETH sends, creates, and modifier-hosted boundaries as deterministic
+  `ExternalBoundaryFact` evidence. It records exact host scope, target
+  resolution, value provenance, result handling, direct state-effect order,
+  reentry class, entry reachability, and explicit unknowns without declaring a
+  vulnerability. `ExternalBoundaryFactsVersion` is `1.0.0`.
 - **C3 Linearization** - Proper Solidity inheritance resolution
 - **Function Identity** - `Function.Selector` stores canonical text such as
   `transfer(address,uint256)`; `Function.Signature` stores its four-byte
@@ -83,12 +89,13 @@ self-contained `audit.html`. See [Result folder layout](#result-folder-layout).
   `charOffset`/`charLength`. These are not LSP positions; LSP lines and
   characters are zero-based and commonly use UTF-16 code units.
 - **WQL Templates** - Powerful query language for security pattern matching, with load-time validation (regex, preset names, filter/match placement) so typos fail fast instead of producing silent zero-finding scans. Includes a source-scope `regex` matcher for rare raw-source predicates and contract-scope AST matching for same-contract local/inherited combination rules.
-- **Result Folder** - One opinionated folder per scan: bounded `README.md`, consolidated `audit.md`, always-on `results.sarif` + `run.log`, unchanged machine-readable `data/` (`manifest.json`, reusable `database.json`, findings/overview, always-on `diagnostics.json`, plus nav/explorer/xref data for the editor extension), and one collision-safe Markdown deep dive per main contract under `contracts/`. Opt-in fully offline `audit.html` with `--html`.
+- **Result Folder** - One opinionated folder per scan: bounded `README.md`, consolidated `audit.md`, always-on `results.sarif` + `run.log`, machine-readable `data/` (`manifest.json`, reusable `database.json`, findings/overview, always-on `diagnostics.json`, deterministic `interactions.json`, plus nav/explorer/xref data for the editor extension), and one collision-safe Markdown deep dive per main contract under `contracts/`. Opt-in fully offline `audit.html` with `--html`.
 - **Agent-ready deterministic evidence** - The scanner remains offline and
   model-independent. A future external AI Assistant can consume findings, the
   database, exact source locations, reachability, navigation, cross-references,
-  extraction bundles, and workflow artifacts without changing official scan
-  results.
+  extraction bundles, workflows, or bounded `QueryExternalBoundaries` pages
+  without changing official scan results. Core has no model transport, API key,
+  reviewer callback, or AI dependency.
 - **Per-Contract Deep Dives** - One Markdown file per main contract combines architecture, findings, exact external interactions, the state-change matrix, and collapsible entry workflows for a human or external AI auditor.
 - **Self-Provisioning Templates** - Downloads the latest [`w3goaudit-templates`](https://github.com/th13vn/w3goaudit-templates) release on first run (nuclei-style, no git clone), refreshable with `--update-templates`; embedded official pack is the always-available offline fallback. Extraction is size/file-count capped and installed with a rollback-safe staged directory swap. The GitHub zipball is TLS-authenticated but not checksum/signature verified.
 - **Reachability-Aware Findings** - Every finding can carry the full call chain from an externally-callable entry down to the function that hosts the dangerous statement: structured `reachability.steps[]` + `entryPoint` (auditor's fix-here pointer) + `primaryAst` in JSON, `relatedLocations` in SARIF, dotted-level trace block in Markdown / HTML, `↳ via …` continuation line on the `--verbose` console. Multi-site findings also carry `related[]`, and Markdown renders all matched sites with full function context.
@@ -174,6 +181,7 @@ human or AI auditor:
 │   ├── findings.json
 │   ├── overview.json
 │   ├── diagnostics.json    # analysis-quality diagnostics; [] when complete
+│   ├── interactions.json   # deterministic versioned external-boundary evidence
 │   ├── nav.json           # flat symbol/caller/interface-impl index (extension)
 │   ├── explorer.json      # per-main-contract model: constants, storage, entry/getter fns
 │   └── xref.json          # precise xref: declarations[] + references[] (go-to-def / find-refs)
@@ -193,13 +201,21 @@ symlink alias. This check occurs before `run.log` or any report file is created.
 Each contract report records exact source identity, linked findings,
 architecture and inheritance, state writers and reaching entries, exact
 external interactions, and a collapsible workflow for every entry function.
+Its External Interactions table contains at most 50 deterministic semantic
+rows, one per fact, and links to the unabridged `data/interactions.json`. A
+legacy cache is labeled and falls back to the weaker call-graph view.
 
 `data/manifest.json` distinguishes the detected `projectRoot` from the original
 `scanTarget` (`target` is the compatibility alias), separates declaration
 category counts, exposes `analysisComplete`/diagnostic counts, and indexes every
 emitted artifact. Finding/content ordering is deterministic; generated
 timestamps vary unless SDK callers inject a fixed report/bundle clock.
-The schema version 2.0.0 and all editor-facing data shapes remain unchanged.
+`files.data.interactions` discovers `data/interactions.json`. That artifact has
+no timestamp, keeps `interactions`/`limitations` as arrays, and reports
+`available: false` plus a rebuild limitation for a legacy database that lacks
+the fact capability. The output schema version 2.0.0 remains unchanged; the
+fact surface has its own `factsVersion: "1.0.0"`. Existing editor-facing
+shapes remain unchanged, so W3Solidity can ignore the additive manifest field.
 Canonical discovery uses `files.audit`, optional `files.auditHtml`, and
 `contracts[].report`; v0.5.x retains compatibility aliases to the same files.
 
@@ -323,6 +339,7 @@ import (
     "github.com/th13vn/w3goaudit/pkg/reader"
     "github.com/th13vn/w3goaudit/pkg/builder"
     "github.com/th13vn/w3goaudit/pkg/engine"
+    "github.com/th13vn/w3goaudit/pkg/types"
 )
 
 // Read sources
@@ -355,6 +372,17 @@ if err != nil {
     log.Fatal(err)
 }
 findings := e.Execute(tmpl)
+
+// Optional bounded Agent query over deterministic semantic evidence.
+page, err := db.QueryExternalBoundaries(types.ExternalBoundaryQuery{
+    ContractID: types.MakeContractID("/abs/project/contracts/Vault.sol", "Vault"),
+    Offset:     0,
+    Limit:      50, // required; maximum MaxExternalBoundaryQueryLimit == 200
+})
+if err != nil {
+    log.Fatal(err)
+}
+_ = page.Items
 ```
 
 For complete SDK documentation, see [Usage Guide](./docs/usage.md#sdk-usage).
@@ -397,7 +425,7 @@ w3goaudit/
 ├── pkg/
 │   ├── reader/             # File discovery and loading
 │   ├── logging/            # Immutable scan-local logger
-│   ├── builder/            # Database construction (7 phases incl. per-fn effects)
+│   ├── builder/            # Database construction (8 phases incl. effects + boundaries)
 │   ├── engine/             # WQL template execution
 │   ├── home/               # ~/.w3goaudit config + template home (release download)
 │   ├── types/              # Core data structures
@@ -423,7 +451,8 @@ Input → Reader → Builder → Database → Engine → Findings → Result-fol
 
 1. Discover `.sol` files
 2. Parse with solast-go
-3. Build database (inheritance, call graph, selectors, per-function effects)
+3. Build database (inheritance, call graph, selectors, per-function effects,
+   semantic external-boundary facts)
 4. Load WQL templates (home → embedded fallback)
 5. Execute queries
 6. Generate findings
@@ -442,6 +471,8 @@ Build phases:
 5. Build call graph
 6. Calculate entry points
 7. Analyze per-function effects (state writes, guards, access control)
+8. Build versioned external-boundary facts, WQL attributes, and exact entry
+   reachability for function and modifier hosts
 
 ### 3. Default Scan (Combined) Workflow
 
@@ -464,6 +495,8 @@ The contract database contains:
 - **Call Graph** - Internal/external call edges with line numbers
 - **Entry Points** - Public/external functions per main contract
 - **Main Contracts** - Deployable contracts ranked by inheritance depth
+- **Semantic Facts** - Type symbols, per-function effects, and versioned
+  external-boundary evidence with exact `ScopeID` identities
 
 ---
 
@@ -517,6 +550,7 @@ Test contracts are documented in:
 - C3 inheritance linearization
 - Recursive call graph building
 - Per-function effects analysis (state writes, guards, access control)
+- Versioned semantic external-boundary facts and bounded exact-ID Agent queries
 - WQL query language
 - Result-folder output: Markdown + SARIF + JSON data/ + per-entry workflows + state-change matrix
 - Self-provisioning template home (`~/.w3goaudit`) with release download + embedded fallback

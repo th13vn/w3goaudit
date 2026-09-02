@@ -241,11 +241,15 @@ summaries render the unknown count rather than silently hiding those records.
 ### interactions.go
 
 `BuildInteractionsJSON(db)` produces the timestamp-free, schema-`2.0.0`
-semantic boundary artifact. `factsVersion` is `1.0.0` only when the capability
+semantic boundary artifact written to `data/interactions.json` and indexed by
+`manifest.files.data.interactions`. `factsVersion` matches
+`ExternalBoundaryFactsVersion` (`1.0.0`) only when the capability
 is available; `interactions` and `limitations` are always arrays. The builder
 uses `Database.ExternalBoundarySnapshot`, so facts are normalized, sorted, and
 deep-copied. Analysis completeness and diagnostic counts mirror
-`data/diagnostics.json`.
+`data/diagnostics.json`. Function and modifier hosts are explicit through
+`ScopeID`/`ScopeKind`; legacy caches report `available: false` and require a
+source rebuild rather than reconstruction in the report layer.
 
 ### nav.go
 
@@ -716,6 +720,7 @@ A scan writes a **result folder** via `WriteBundle` (`bundle.go`):
 │   ├── findings.json      # BuildFindingsJSON
 │   ├── overview.json      # BuildOverviewJSON
 │   ├── diagnostics.json   # BuildDiagnosticsJSON (always; [] when complete)
+│   ├── interactions.json  # versioned semantic external-boundary facts
 │   ├── nav.json           # BuildNavJSON
 │   ├── xref.json          # BuildXrefJSON (precise xref: declarations + references)
 │   └── explorer.json      # BuildExplorerJSON

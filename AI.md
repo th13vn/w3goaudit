@@ -16,15 +16,15 @@ graph LR
     Types --> Engine[pkg/engine]
     Templates[templates/ WQL] --> Engine
     Engine --> Report[pkg/report]
-    Report --> Nav[data/nav.json + data/explorer.json + data/xref.json]
+    Report --> Evidence[data/interactions.json + nav/explorer/xref]
 ```
 
 Canonical pipeline: `Reader -> Builder -> Database -> Engine -> Report`. Source
 locations (line/col/byte, from solast-go) are threaded from the builder onto
 AST nodes and declarations all the way through to `Report`, which also derives
-the extension-facing `nav.json`/`explorer.json`/`xref.json` navigation
-artifacts from the finished `Database`/`Findings`, independent of the WQL
-template surface.
+the timestamp-free `interactions.json` semantic boundary index and the
+extension-facing `nav.json`/`explorer.json`/`xref.json` artifacts from the
+finished `Database`/`Findings`, independent of the WQL template surface.
 
 The scanner owns no model transport, credentials, timeout, or AI review
 artifact. A future external Assistant may consume deterministic database,
@@ -38,8 +38,8 @@ it does not mutate the scanner's official findings.
 | `cmd/w3goaudit/` | Cobra CLI: root scan, build, extract, update, completion, result-folder orchestration | `cmd/w3goaudit/AI.md` |
 | `pkg/reader/` | Discover/load `.sol` files, resolve imports/remappings, detect project/git info | `pkg/reader/AI.md` |
 | `pkg/logging/` | Immutable scan-local verbose logger with serialized writes | `pkg/logging/AI.md` |
-| `pkg/builder/` | Parse source into database, build simplified ASTs, C3 inheritance, call graph, selectors, effects | `pkg/builder/AI.md` |
-| `pkg/types/` | Core serialized data structures: database, contracts, functions, AST, call graph, semantic facts | `pkg/types/AI.md` |
+| `pkg/builder/` | Parse source into database, build simplified ASTs, C3 inheritance, call graph, selectors, effects, and Phase-8 external-boundary facts | `pkg/builder/AI.md` |
+| `pkg/types/` | Core serialized data structures: database, contracts, functions, AST, call graph, versioned semantic facts, and bounded Agent queries | `pkg/types/AI.md` |
 | `pkg/engine/` | WQL template loading, validation, execution, taint/reachability, finding construction | `pkg/engine/AI.md` |
 | `pkg/report/` | Consolidated Markdown/HTML, SARIF/JSON output, contract deep dives, state/workflow evidence, source excerpts | `pkg/report/AI.md` |
 | `pkg/home/` | `~/.w3goaudit` config/template-home management and release download | `pkg/home/AI.md` |
@@ -146,7 +146,19 @@ run-output scratch directory.
   runs before `run.log` or any report file is created. For `--db` scans, the
   persisted `scanTarget` is authoritative, with `projectRoot` as the legacy
   fallback.
-- A normal scan writes one result folder containing bounded `README.md`, consolidated `audit.md`, `results.sarif`, `run.log`, `data/` (with `manifest.json`, `database.json`, `findings.json`, `overview.json`, `diagnostics.json`, `nav.json`, `explorer.json`, and `xref.json`), and exactly one Markdown deep dive per main contract under `contracts/`. `--html` adds only `audit.html`; rescans remove the previous split human layout and write `manifest.json` last.
+- A normal scan writes one result folder containing bounded `README.md`, consolidated `audit.md`, `results.sarif`, `run.log`, `data/` (with `manifest.json`, `database.json`, `findings.json`, `overview.json`, `diagnostics.json`, `interactions.json`, `nav.json`, `explorer.json`, and `xref.json`), and exactly one Markdown deep dive per main contract under `contracts/`. `--html` adds only `audit.html`; rescans remove the previous split human layout and write `manifest.json` last.
+- Phase 8 builds protocol-neutral `ExternalBoundaryFact` evidence for Solidity
+  and Yul boundaries hosted by exact function or modifier scopes.
+  `ExternalBoundaryFactsVersion` is `1.0.0`; `ScopeID` is canonical, while
+  `FunctionID` is empty for modifier-hosted facts. Targets are exact or
+  explicitly unresolved, unknown evidence remains unknown, entry reachability
+  uses resolved call-graph edges only, and state ordering never falls back to
+  source-line order. This evidence is descriptive, not a vulnerability verdict.
+- `Database.QueryExternalBoundaries` is the Agent-facing API. It requires a
+  caller-supplied limit from 1 through `MaxExternalBoundaryQueryLimit` (200),
+  validates exact contract/scope/function/entry identities, returns
+  deterministic deep copies, and reports legacy caches through
+  `ErrExternalBoundaryFactsUnavailable` instead of guessing weaker facts.
 - CLI/report-owned artifact paths are reset before exclusive creation and are
   never followed through prepared symlinks, so rescanning an existing result
   folder cannot redirect `run.log`, human reports, or structured data outside
@@ -277,7 +289,17 @@ run-output scratch directory.
 - `data/manifest.json` distinguishes `projectRoot` from `scanTarget` (`target`
   is the compatibility alias), exposes `analysisComplete`/`diagnosticCounts`,
   counts contracts/interfaces/libraries/declarations separately, and indexes
-  every emitted data/HTML artifact.
+  every emitted data/HTML artifact. `files.data.interactions` always points to
+  `data/interactions.json`, including legacy-cache runs where that document
+  reports `available: false`; the output schema remains `2.0.0`.
+- The WQL bridge is additive and protocol-neutral. The exact boundary AST node
+  may expose `external_boundary_id`, `boundary_target_resolution`,
+  `boundary_receiver_control`, `boundary_value_control`,
+  `boundary_arguments_controlled`, `boundary_result_disposition`,
+  `boundary_result_checked`, `boundary_reentry_class`,
+  `boundary_has_state_before`, `boundary_has_state_after`, and
+  `boundary_reachable_from_entry`. Official templates are not changed merely
+  by adding these attributes.
 - A template `version:` constraint is intersected with the whole range the
   file's pragma permits, not compared to its first version triple, so
   `>=0.7.0 <0.9.0` satisfies `>=0.8.0`. Caret/tilde/comparator chains, `||`
