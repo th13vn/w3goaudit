@@ -228,76 +228,135 @@ func (db *Database) GetExternalBoundaryByID(id string) (*ExternalBoundaryFact, b
 
 // QueryExternalBoundaries performs a bounded exact-ID query over boundary facts.
 func (db *Database) QueryExternalBoundaries(query ExternalBoundaryQuery) (*ExternalBoundaryPage, error) {
-	if query.Limit < 1 || query.Limit > MaxExternalBoundaryQueryLimit {
-		return nil, fmt.Errorf("external-boundary query limit must be between 1 and %d", MaxExternalBoundaryQueryLimit)
+	filter, err := db.compileExternalBoundaryQuery(query)
+	if err != nil {
+		return nil, err
 	}
-	if query.Offset < 0 {
-		return nil, fmt.Errorf("external-boundary query offset must be non-negative")
-	}
-	var contract *Contract
-	if query.ContractID != "" {
-		contract = db.GetContractByID(query.ContractID)
-		if contract == nil {
-			return nil, fmt.Errorf("external-boundary contract not found: %s", query.ContractID)
-		}
-	}
-	var function *Function
-	if query.FunctionID != "" {
-		var ok bool
-		function, ok = db.GetFunctionByID(query.FunctionID)
-		if !ok {
-			return nil, fmt.Errorf("external-boundary function not found: %s", query.FunctionID)
-		}
-		if contract != nil && (function.SourceFile != contract.SourceFile || function.ContractName != contract.Name) {
-			return nil, fmt.Errorf("external-boundary function %s is not declared by contract %s", query.FunctionID, query.ContractID)
-		}
-	}
-	if query.ScopeID != "" {
-		scopeContractID, scopeKind, ok := db.externalBoundaryScope(query.ScopeID)
-		if !ok {
-			return nil, fmt.Errorf("external-boundary scope not found: %s", query.ScopeID)
-		}
-		if contract != nil && scopeContractID != contract.ID {
-			return nil, fmt.Errorf("external-boundary scope %s is not declared by contract %s", query.ScopeID, query.ContractID)
-		}
-		if function != nil && (scopeKind != ExternalBoundaryScopeFunction || query.ScopeID != query.FunctionID) {
-			return nil, fmt.Errorf("external-boundary scope %s does not match function %s", query.ScopeID, query.FunctionID)
-		}
-	}
-	if query.EntryFunctionID != "" && !db.isExactEntryFunctionID(query.EntryFunctionID) {
-		return nil, fmt.Errorf("external-boundary entry function not found: %s", query.EntryFunctionID)
-	}
-	kinds := make(map[string]bool, len(query.Kinds))
-	for _, kind := range query.Kinds {
-		if !IsExternalBoundaryKind(kind) {
-			return nil, fmt.Errorf("unsupported external-boundary kind: %s", kind)
-		}
-		kinds[kind] = true
-	}
-
 	facts, err := db.ExternalBoundarySnapshot()
 	if err != nil {
 		return nil, err
 	}
 	matches := make([]*ExternalBoundaryFact, 0, len(facts))
 	for _, fact := range facts {
-		if contract != nil && fact.ContractID != contract.ID {
-			continue
+		if filter.matches(fact) {
+			matches = append(matches, fact)
 		}
-		if function != nil && fact.FunctionID != query.FunctionID {
-			continue
-		}
-		if query.ScopeID != "" && fact.ScopeID != query.ScopeID {
-			continue
-		}
-		if query.EntryFunctionID != "" && !containsString(fact.ReachableFrom, query.EntryFunctionID) {
-			continue
-		}
-		if len(kinds) > 0 && !kinds[fact.Kind] {
-			continue
-		}
-		matches = append(matches, fact)
 	}
+	return externalBoundaryPage(matches, query), nil
+}
+
+type externalBoundaryFilter struct {
+	contractID      string
+	scopeID         string
+	functionID      string
+	entryFunctionID string
+	kinds           map[string]bool
+}
+
+func (db *Database) compileExternalBoundaryQuery(query ExternalBoundaryQuery) (externalBoundaryFilter, error) {
+	if query.Limit < 1 || query.Limit > MaxExternalBoundaryQueryLimit {
+		return externalBoundaryFilter{}, fmt.Errorf("external-boundary query limit must be between 1 and %d", MaxExternalBoundaryQueryLimit)
+	}
+	if query.Offset < 0 {
+		return externalBoundaryFilter{}, fmt.Errorf("external-boundary query offset must be non-negative")
+	}
+	contract, err := db.externalBoundaryQueryContract(query.ContractID)
+	if err != nil {
+		return externalBoundaryFilter{}, err
+	}
+	function, err := db.externalBoundaryQueryFunction(query.FunctionID, query.ContractID, contract)
+	if err != nil {
+		return externalBoundaryFilter{}, err
+	}
+	if err := db.validateExternalBoundaryQueryScope(query, contract, function); err != nil {
+		return externalBoundaryFilter{}, err
+	}
+	if query.EntryFunctionID != "" && !db.isExactEntryFunctionID(query.EntryFunctionID) {
+		return externalBoundaryFilter{}, fmt.Errorf("external-boundary entry function not found: %s", query.EntryFunctionID)
+	}
+	kinds, err := externalBoundaryQueryKinds(query.Kinds)
+	if err != nil {
+		return externalBoundaryFilter{}, err
+	}
+	return externalBoundaryFilter{
+		contractID:      query.ContractID,
+		scopeID:         query.ScopeID,
+		functionID:      query.FunctionID,
+		entryFunctionID: query.EntryFunctionID,
+		kinds:           kinds,
+	}, nil
+}
+
+func (db *Database) externalBoundaryQueryContract(contractID string) (*Contract, error) {
+	if contractID == "" {
+		return nil, nil
+	}
+	contract := db.GetContractByID(contractID)
+	if contract == nil {
+		return nil, fmt.Errorf("external-boundary contract not found: %s", contractID)
+	}
+	return contract, nil
+}
+
+func (db *Database) externalBoundaryQueryFunction(functionID, contractID string, contract *Contract) (*Function, error) {
+	if functionID == "" {
+		return nil, nil
+	}
+	function, ok := db.GetFunctionByID(functionID)
+	if !ok {
+		return nil, fmt.Errorf("external-boundary function not found: %s", functionID)
+	}
+	if contract != nil && (function.SourceFile != contract.SourceFile || function.ContractName != contract.Name) {
+		return nil, fmt.Errorf("external-boundary function %s is not declared by contract %s", functionID, contractID)
+	}
+	return function, nil
+}
+
+func (db *Database) validateExternalBoundaryQueryScope(query ExternalBoundaryQuery, contract *Contract, function *Function) error {
+	if query.ScopeID == "" {
+		return nil
+	}
+	scopeContractID, scopeKind, ok := db.externalBoundaryScope(query.ScopeID)
+	if !ok {
+		return fmt.Errorf("external-boundary scope not found: %s", query.ScopeID)
+	}
+	if contract != nil && scopeContractID != contract.ID {
+		return fmt.Errorf("external-boundary scope %s is not declared by contract %s", query.ScopeID, query.ContractID)
+	}
+	if function != nil && (scopeKind != ExternalBoundaryScopeFunction || query.ScopeID != query.FunctionID) {
+		return fmt.Errorf("external-boundary scope %s does not match function %s", query.ScopeID, query.FunctionID)
+	}
+	return nil
+}
+
+func externalBoundaryQueryKinds(values []string) (map[string]bool, error) {
+	kinds := make(map[string]bool, len(values))
+	for _, kind := range values {
+		if !IsExternalBoundaryKind(kind) {
+			return nil, fmt.Errorf("unsupported external-boundary kind: %s", kind)
+		}
+		kinds[kind] = true
+	}
+	return kinds, nil
+}
+
+func (filter externalBoundaryFilter) matches(fact *ExternalBoundaryFact) bool {
+	if filter.contractID != "" && fact.ContractID != filter.contractID {
+		return false
+	}
+	if filter.functionID != "" && fact.FunctionID != filter.functionID {
+		return false
+	}
+	if filter.scopeID != "" && fact.ScopeID != filter.scopeID {
+		return false
+	}
+	if filter.entryFunctionID != "" && !containsString(fact.ReachableFrom, filter.entryFunctionID) {
+		return false
+	}
+	return len(filter.kinds) == 0 || filter.kinds[fact.Kind]
+}
+
+func externalBoundaryPage(matches []*ExternalBoundaryFact, query ExternalBoundaryQuery) *ExternalBoundaryPage {
 	start := query.Offset
 	if start > len(matches) {
 		start = len(matches)
@@ -312,7 +371,7 @@ func (db *Database) QueryExternalBoundaries(query ExternalBoundaryQuery) (*Exter
 		Offset:    query.Offset,
 		Limit:     query.Limit,
 		Truncated: end < len(matches),
-	}, nil
+	}
 }
 
 func (db *Database) externalBoundaryScope(id string) (string, ExternalBoundaryScopeKind, bool) {

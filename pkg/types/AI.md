@@ -639,7 +639,10 @@ An entry identity must both resolve to an exact function and occur in a
 `ExternalBoundarySnapshot` return deep copies so callers cannot mutate the
 database. Missing or unsupported fact versions return
 `ErrExternalBoundaryFactsUnavailable` and require rebuilding the cache from
-source rather than silently inferring weaker facts.
+source rather than silently inferring weaker facts. Query compilation keeps
+bounds, exact-identity relationships, kind validation, filtering, and pagination
+separate so the public method remains auditable under the repository complexity
+gate.
 
 ### callgraph.go
 Call graph structures.
