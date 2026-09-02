@@ -1,6 +1,7 @@
 package report
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -112,5 +113,39 @@ func TestFormatAuditHTMLEmptyFindingsStillShowsCoverageLimits(t *testing.T) {
 		if !strings.Contains(out, want) {
 			t.Fatalf("empty audit HTML missing %q:\n%s", want, out)
 		}
+	}
+}
+
+func TestFormatAuditHTMLUsesSemanticInteractionCounts(t *testing.T) {
+	db := types.NewDatabase()
+	file := "/repo/Vault.sol"
+	contractID := types.MakeContractID(file, "Vault")
+	entryID := types.MakeFunctionID(file, "Vault", "withdraw()")
+	contract := &types.Contract{
+		ID: contractID, Name: "Vault", SourceFile: file, Kind: types.ContractKindContract,
+		Functions: []*types.Function{{Name: "withdraw", Selector: "withdraw()", ContractName: "Vault", SourceFile: file}},
+	}
+	db.AddContract(contract)
+	db.MainContracts[contractID] = &types.MainContractEntry{EntryFunctions: []string{entryID}}
+	db.Semantics.ExternalBoundaryVersion = types.ExternalBoundaryFactsVersion
+	for i := 0; i < 3; i++ {
+		db.Semantics.ExternalBoundaries = append(db.Semantics.ExternalBoundaries, &types.ExternalBoundaryFact{
+			ID: fmt.Sprintf("boundary-%d", i), ContractID: contractID, FunctionID: entryID, Kind: types.KindCallLowlevelCall, ReachableFrom: []string{entryID},
+		})
+	}
+	for i := 0; i < 5; i++ {
+		db.CallGraph.AddEdge(&types.CallEdge{From: entryID, To: fmt.Sprintf("raw-%d", i), Type: types.CallTypeLowLevelCall})
+	}
+	summary := &SummaryReport{
+		ProjectRoot: "/repo", Stats: &types.DatabaseStats{},
+		MainContracts: []*ContractSummary{{Name: "Vault", SourceFile: file, EntryFunctionCount: 1}},
+	}
+
+	got := FormatAuditHTML(ToolMeta{Name: "w3goaudit"}, summary, nil, db)
+	if !strings.Contains(got, "External boundaries") || strings.Count(got, "<td>3</td>") < 2 {
+		t.Fatalf("HTML did not use semantic boundary counts:\n%s", got)
+	}
+	if strings.Contains(got, "<td>5</td>") {
+		t.Fatalf("HTML leaked duplicate raw edge count:\n%s", got)
 	}
 }

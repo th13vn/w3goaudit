@@ -58,7 +58,8 @@ func renderContractSurfaceIndex(sb *strings.Builder, summary *SummaryReport, fin
 		sb.WriteString("_No main-contract report index is available._\n\n")
 		return
 	}
-	sb.WriteString("| Source | Contract | Version | Entries | Payable | Without detected access-control evidence | State vars | External interaction edges | Findings | Deep dive |\n")
+	interactions := newContractBoundaryIndex(db)
+	fmt.Fprintf(sb, "| Source | Contract | Version | Entries | Payable | Without detected access-control evidence | State vars | %s | Findings | Deep dive |\n", interactions.columnHeading())
 	sb.WriteString("|--------|----------|---------|---------|---------|------------------------------------------|------------|----------------------------|----------|-----------|\n")
 	for _, ref := range idx.refs {
 		mc := findContractSummaryByReport(summary, idx, ref.Report)
@@ -78,7 +79,7 @@ func renderContractSurfaceIndex(sb *strings.Builder, summary *SummaryReport, fin
 				}
 			}
 		}
-		external := contractExternalEdgeCount(db, mc)
+		external := interactions.count(mc)
 		fmt.Fprintf(sb, "| `%s` | `%s` | `%s` | %d | %d | %d | %d | %d | %d | [report](%s) |\n",
 			ref.Source, ref.Name, version, entries, payable, unprotected, states, external, ref.Findings, ref.Report)
 	}
@@ -92,7 +93,8 @@ func renderStateInteractionSummary(sb *strings.Builder, summary *SummaryReport, 
 		sb.WriteString("_No main contracts._\n\n")
 		return
 	}
-	sb.WriteString("| Contract | State variables | State writes recorded | External interaction edges | Detail |\n")
+	interactions := newContractBoundaryIndex(db)
+	fmt.Fprintf(sb, "| Contract | State variables | State writes recorded | %s | Detail |\n", interactions.columnHeading())
 	sb.WriteString("|----------|-----------------|-----------------------|----------------------------|--------|\n")
 	for _, ref := range idx.refs {
 		mc := findContractSummaryByReport(summary, idx, ref.Report)
@@ -115,7 +117,7 @@ func renderStateInteractionSummary(sb *strings.Builder, summary *SummaryReport, 
 				}
 			}
 		}
-		fmt.Fprintf(sb, "| `%s` | %d | %d | %d | [state and interactions](%s#state-changes) |\n", ref.Name, stateVars, writes, contractExternalEdgeCount(db, mc), ref.Report)
+		fmt.Fprintf(sb, "| `%s` | %d | %d | %d | [state and interactions](%s#state-changes) |\n", ref.Name, stateVars, writes, interactions.count(mc), ref.Report)
 	}
 	sb.WriteString("\n")
 }
@@ -126,6 +128,7 @@ func renderMachineArtifacts(sb *strings.Builder) {
 		{"results.sarif", "SARIF 2.1.0"}, {"data/manifest.json", "manifest"},
 		{"data/findings.json", "findings JSON"}, {"data/overview.json", "overview JSON"},
 		{"data/diagnostics.json", "diagnostics"}, {"data/database.json", "database"},
+		{"data/interactions.json", "external-boundary evidence"},
 		{"data/nav.json", "navigation"}, {"data/explorer.json", "explorer"}, {"data/xref.json", "cross references"},
 	} {
 		fmt.Fprintf(sb, "- [%s](%s)\n", item.label, item.path)

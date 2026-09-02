@@ -136,7 +136,8 @@ func renderAuditContractsHTML(sb *strings.Builder, summary *SummaryReport, findi
 		sb.WriteString(`<p>No main-contract report index is available.</p></section>`)
 		return
 	}
-	sb.WriteString(`<div class="table-wrap"><table><thead><tr><th>Source</th><th>Contract</th><th>Entries</th><th>State vars</th><th>External edges</th><th>Findings</th><th>Deep dive</th></tr></thead><tbody>`)
+	interactions := newContractBoundaryIndex(db)
+	fmt.Fprintf(sb, `<div class="table-wrap"><table><thead><tr><th>Source</th><th>Contract</th><th>Entries</th><th>State vars</th><th>%s</th><th>Findings</th><th>Deep dive</th></tr></thead><tbody>`, htmlEscape(interactions.columnHeading()))
 	for _, ref := range idx.refs {
 		mc := findContractSummaryByReport(summary, idx, ref.Report)
 		entries, states := 0, 0
@@ -144,7 +145,7 @@ func renderAuditContractsHTML(sb *strings.Builder, summary *SummaryReport, findi
 			entries, states = mc.EntryFunctionCount, mc.StateVariableCount
 		}
 		fmt.Fprintf(sb, `<tr><td><code>%s</code></td><td><code>%s</code></td><td>%d</td><td>%d</td><td>%d</td><td>%d</td><td><a href="%s">contract report</a></td></tr>`,
-			htmlEscape(ref.Source), htmlEscape(ref.Name), entries, states, contractExternalEdgeCount(db, mc), ref.Findings, htmlEscape(ref.Report))
+			htmlEscape(ref.Source), htmlEscape(ref.Name), entries, states, interactions.count(mc), ref.Findings, htmlEscape(ref.Report))
 	}
 	sb.WriteString(`</tbody></table></div></section>`)
 }
@@ -156,7 +157,8 @@ func renderAuditStateHTML(sb *strings.Builder, summary *SummaryReport, db *types
 		sb.WriteString(`<p>No main contracts.</p></section>`)
 		return
 	}
-	sb.WriteString(`<div class="table-wrap"><table><thead><tr><th>Contract</th><th>State variables</th><th>State writes recorded</th><th>External edges</th><th>Detail</th></tr></thead><tbody>`)
+	interactions := newContractBoundaryIndex(db)
+	fmt.Fprintf(sb, `<div class="table-wrap"><table><thead><tr><th>Contract</th><th>State variables</th><th>State writes recorded</th><th>%s</th><th>Detail</th></tr></thead><tbody>`, htmlEscape(interactions.columnHeading()))
 	for _, ref := range idx.refs {
 		mc := findContractSummaryByReport(summary, idx, ref.Report)
 		states, writes := 0, 0
@@ -179,7 +181,7 @@ func renderAuditStateHTML(sb *strings.Builder, summary *SummaryReport, db *types
 			}
 		}
 		fmt.Fprintf(sb, `<tr><td><code>%s</code></td><td>%d</td><td>%d</td><td>%d</td><td><a href="%s#state-changes">state and interactions</a></td></tr>`,
-			htmlEscape(ref.Name), states, writes, contractExternalEdgeCount(db, mc), htmlEscape(ref.Report))
+			htmlEscape(ref.Name), states, writes, interactions.count(mc), htmlEscape(ref.Report))
 	}
 	sb.WriteString(`</tbody></table></div></section>`)
 }

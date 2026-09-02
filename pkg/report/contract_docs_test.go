@@ -1,6 +1,7 @@
 package report
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -67,6 +68,105 @@ func TestContractInteractionRowsAreDeterministic(t *testing.T) {
 	rows := contractInteractionRows(db, mc)
 	if len(rows) != 2 || rows[0].Caller != types.MakeFunctionID(file, "C", "a()") || rows[1].Caller != types.MakeFunctionID(file, "C", "z()") {
 		t.Fatalf("interaction rows not sorted: %#v", rows)
+	}
+}
+
+func TestContractReportRendersSemanticInteractionEvidenceOncePerFact(t *testing.T) {
+	db := types.NewDatabase()
+	db.ProjectRoot = "/repo"
+	file := "/repo/src/Vault.sol"
+	contractID := types.MakeContractID(file, "Vault")
+	entryID := types.MakeFunctionID(file, "Vault", "withdraw(address,uint256)")
+	contract := &types.Contract{
+		ID: contractID, Name: "Vault", SourceFile: file, Kind: types.ContractKindContract,
+		Functions: []*types.Function{{Name: "withdraw", Selector: "withdraw(address,uint256)", ContractName: "Vault", SourceFile: file, Visibility: types.VisibilityExternal}},
+	}
+	db.AddContract(contract)
+	db.MainContracts[contractID] = &types.MainContractEntry{EntryFunctions: []string{entryID}, LinearizedBaseIDs: []string{contractID}}
+	db.Semantics.ExternalBoundaryVersion = types.ExternalBoundaryFactsVersion
+	db.Semantics.ExternalBoundaries = []*types.ExternalBoundaryFact{{
+		ID: "boundary-1", ContractID: contractID, FunctionID: entryID, Kind: types.KindCallLowlevelCall, CallType: types.CallTypeLowLevelCall,
+		Range:    types.SemanticSourceRange{File: file, StartLine: 12, StartCol: 9},
+		Target:   types.BoundaryTarget{Resolution: types.BoundaryTargetResolved, FunctionID: "/repo/src/Receiver.sol#Receiver.receiveFunds()"},
+		Receiver: &types.BoundaryValue{Role: types.BoundaryValueRoleReceiver, Index: -1, Control: types.BoundaryValueCallerControlled},
+		Value:    &types.BoundaryValue{Role: types.BoundaryValueRoleValue, Index: -1, Control: types.BoundaryValueStateDerived},
+		Arguments: []types.BoundaryValue{
+			{Role: types.BoundaryValueRoleArgument, Index: 0, Control: types.BoundaryValueCallerControlled},
+			{Role: types.BoundaryValueRoleArgument, Index: 1, Control: types.BoundaryValueFixed},
+		},
+		Result:        types.BoundaryResult{Availability: types.BoundaryResultYes, Disposition: types.BoundaryResultCaptured, DirectCheck: types.BoundaryResultYes, Targets: []types.BoundaryValue{}, CheckSites: []types.SemanticSourceRange{}},
+		ReentryClass:  types.BoundaryReentryPossible,
+		ReachableFrom: []string{entryID},
+		StateEffects: []types.BoundaryStateEffect{
+			{Relation: types.BoundaryStateBefore, Name: "debt"},
+			{Relation: types.BoundaryStateAfter, Name: "balance"},
+			{Relation: types.BoundaryStateAfter, Name: "nonce"},
+		},
+		Limitations: []string{},
+	}}
+	// Duplicate raw edges must not duplicate a semantic fact row.
+	for i := 0; i < 3; i++ {
+		db.CallGraph.AddEdge(&types.CallEdge{From: entryID, To: "unknown.call", Type: types.CallTypeLowLevelCall, Line: 12, Resolved: false})
+	}
+	mc := &ContractSummary{
+		Name: "Vault", SourceFile: file, EntryFunctionCount: 1,
+		EntryFunctions: []*FunctionSummary{{Name: "withdraw", Selector: "withdraw(address,uint256)"}},
+	}
+
+	got := FormatContractReportMarkdown(mc, nil, db, nil, "/repo", "../../", "contracts/src/Vault__Vault.md")
+	for _, want := range []string{
+		"../../data/interactions.json", "withdraw(address,uint256)", entryID, types.KindCallLowlevelCall,
+		"/repo/src/Receiver.sol#Receiver.receiveFunds()", "resolved", "receiver=caller_controlled",
+		"value=state_derived", "arguments=1 caller_controlled, 1 fixed", "captured / checked=yes",
+		"before=1, after=2", types.BoundaryReentryPossible, "src/Vault.sol:12:9",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("semantic interaction report missing %q:\n%s", want, got)
+		}
+	}
+	if strings.Count(got, "boundary-1") != 1 {
+		t.Fatalf("semantic fact rendered more than once:\n%s", got)
+	}
+}
+
+func TestContractReportBoundsSemanticInteractionRows(t *testing.T) {
+	db := types.NewDatabase()
+	file := "/repo/C.sol"
+	contractID := types.MakeContractID(file, "C")
+	contract := &types.Contract{ID: contractID, Name: "C", SourceFile: file, Kind: types.ContractKindContract}
+	db.AddContract(contract)
+	db.Semantics.ExternalBoundaryVersion = types.ExternalBoundaryFactsVersion
+	for i := 0; i < maxContractInteractionRows+3; i++ {
+		db.Semantics.ExternalBoundaries = append(db.Semantics.ExternalBoundaries, &types.ExternalBoundaryFact{
+			ID: fmt.Sprintf("boundary-%03d", i), ContractID: contractID, FunctionID: types.MakeFunctionID(file, "C", fmt.Sprintf("f%d()", i)),
+			Kind: types.KindCallLowlevelCall, Range: types.SemanticSourceRange{File: file, StartLine: i + 1},
+		})
+	}
+	mc := &ContractSummary{Name: "C", SourceFile: file}
+	got := FormatContractReportMarkdown(mc, nil, db, nil, "/repo", "../", "contracts/C__C.md")
+	if rows := strings.Count(got, "| `boundary-"); rows != maxContractInteractionRows {
+		t.Fatalf("rendered semantic rows = %d, want %d", rows, maxContractInteractionRows)
+	}
+	if !strings.Contains(got, "3 additional interaction(s) omitted") || !strings.Contains(got, "../data/interactions.json") {
+		t.Fatalf("bounded interaction notice missing:\n%s", got)
+	}
+}
+
+func TestContractReportUsesCallGraphInteractionFallbackForLegacyCache(t *testing.T) {
+	db := types.NewDatabase()
+	file := "/repo/C.sol"
+	entryID := types.MakeFunctionID(file, "C", "entry()")
+	contract := &types.Contract{ID: types.MakeContractID(file, "C"), Name: "C", SourceFile: file, Kind: types.ContractKindContract}
+	db.AddContract(contract)
+	db.MainContracts[contract.ID] = &types.MainContractEntry{EntryFunctions: []string{entryID}}
+	db.CallGraph.AddEdge(&types.CallEdge{From: entryID, To: "unknown.call", CalledName: "call", Type: types.CallTypeLowLevelCall, Line: 7, Resolved: false})
+	mc := &ContractSummary{Name: "C", SourceFile: file, EntryFunctions: []*FunctionSummary{{Name: "entry", Selector: "entry()"}}}
+
+	got := FormatContractReportMarkdown(mc, nil, db, nil, "/repo", "../", "contracts/C__C.md")
+	for _, want := range []string{"Rich external-boundary facts are unavailable", "call-graph fallback", "lowlevel_call", "unresolved", "../data/interactions.json"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("legacy interaction fallback missing %q:\n%s", want, got)
+		}
 	}
 }
 

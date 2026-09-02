@@ -94,6 +94,36 @@ func TestFormatAuditMarkdownKeepsOutOfRootContractIdentity(t *testing.T) {
 	}
 }
 
+func TestFormatAuditMarkdownUsesSemanticInteractionCounts(t *testing.T) {
+	db := types.NewDatabase()
+	file := "/repo/Vault.sol"
+	contractID := types.MakeContractID(file, "Vault")
+	entryID := types.MakeFunctionID(file, "Vault", "withdraw()")
+	db.AddContract(&types.Contract{ID: contractID, Name: "Vault", SourceFile: file, Kind: types.ContractKindContract})
+	db.MainContracts[contractID] = &types.MainContractEntry{EntryFunctions: []string{entryID}}
+	db.Semantics.ExternalBoundaryVersion = types.ExternalBoundaryFactsVersion
+	for i := 0; i < 2; i++ {
+		db.Semantics.ExternalBoundaries = append(db.Semantics.ExternalBoundaries, &types.ExternalBoundaryFact{
+			ID: fmt.Sprintf("boundary-%d", i), ContractID: contractID, FunctionID: entryID, Kind: types.KindCallLowlevelCall, ReachableFrom: []string{entryID},
+		})
+	}
+	for i := 0; i < 4; i++ {
+		db.CallGraph.AddEdge(&types.CallEdge{From: entryID, To: fmt.Sprintf("raw-%d", i), Type: types.CallTypeLowLevelCall})
+	}
+	summary := &SummaryReport{
+		ProjectRoot: "/repo", Stats: &types.DatabaseStats{},
+		MainContracts: []*ContractSummary{{Name: "Vault", SourceFile: file, EntryFunctionCount: 1}},
+	}
+
+	got := FormatAuditMarkdown(ToolMeta{Name: "w3goaudit"}, summary, nil, db)
+	if !strings.Contains(got, "External boundaries") || strings.Count(got, "| 2 |") < 2 {
+		t.Fatalf("project audit did not use semantic boundary counts:\n%s", got)
+	}
+	if strings.Contains(got, "| 4 |") {
+		t.Fatalf("project audit leaked duplicate raw edge count:\n%s", got)
+	}
+}
+
 func TestFindingAnchorsAreStableAndDistinct(t *testing.T) {
 	findings := []*engine.Finding{
 		{TemplateID: "A/B", Severity: "HIGH", Title: "one", Location: engine.Location{File: "/a.sol", Line: 1}},

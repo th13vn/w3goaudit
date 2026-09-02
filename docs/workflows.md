@@ -309,6 +309,14 @@ graph TD
 - one consolidated Markdown deep dive per main contract under `contracts/`;
   it combines findings, architecture, state matrix, exact external
   interactions, and every entry workflow in collapsible sections
+- when boundary facts are available, External Interactions renders at most 50
+  deterministic rows, one per fact, with entry/caller, target resolution, value
+  control, result/check handling, before/after direct state effects, reentry
+  class, and source location. The full evidence remains in
+  `data/interactions.json`. Legacy caches show an explicit call-graph fallback.
+- `audit.md` and `audit.html` count semantic boundary facts instead of duplicate
+  raw edges whenever the capability is available; legacy runs label and count
+  their edge fallback.
 
 **Output includes (across the artifacts):**
 - Severity grouping (CRITICAL → HIGH → MEDIUM → LOW → INFO)

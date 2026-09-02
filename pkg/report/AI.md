@@ -189,9 +189,16 @@ finding groups and direct navigation to `audit.md`.
 `FormatContractReportMarkdown(contract, findings, db, gitInfo, projectRoot,
 rootPrefix, reportPath)` renders one deep dive per main contract. It links compact
 finding rows to the shared audit anchors, reuses the existing architecture and
-state/workflow renderers, and adds a deterministic projection of exact call
-graph interactions reachable from recorded entry functions. Low-level and
-unresolved targets are labeled rather than treated as exact. Exact
+state/workflow renderers, and projects the versioned semantic boundary index.
+Facts are selected by exact direct contract ownership or exact intersection
+with the main contract's recorded entry IDs, so internal/library-hosted facts
+remain attributed to the entry that reaches them. The table emits one row per
+fact with target resolution, receiver/value/argument control, result/check,
+before/after direct-state counts, reentry class, and exact location. It is
+bounded at `maxContractInteractionRows` (50) and links to the full
+`data/interactions.json`. Legacy caches explicitly retain the old call-graph
+table as a weaker fallback. Low-level and unresolved targets are labeled rather
+than treated as exact. Exact
 `file#Contract` resolution is mandatory; unavailable database evidence is
 reported explicitly instead of falling back to a same-named contract.
 
