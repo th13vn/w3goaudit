@@ -1,6 +1,7 @@
 package types
 
 import (
+	"errors"
 	"fmt"
 	"sort"
 )
@@ -9,7 +10,7 @@ const AuthorizationFactsVersion = "1.0.0"
 
 const MaxAuthorizationQueryLimit = 200
 
-var ErrAuthorizationFactsUnavailable = fmt.Errorf("authorization facts unavailable; rebuild the database from source")
+var ErrAuthorizationFactsUnavailable = errors.New("authorization facts unavailable; rebuild the database from source")
 
 type AuthorizationVerdict string
 
@@ -136,7 +137,7 @@ func NormalizeAuthorizationFacts(facts []*AuthorizationFact) []*AuthorizationFac
 }
 
 func (db *Database) AuthorizationFactsSnapshot() ([]*AuthorizationFact, error) {
-	if db == nil || db.Semantics == nil || db.Semantics.AuthorizationFactsVersion == "" {
+	if db == nil || db.Semantics == nil || db.Semantics.AuthorizationFactsVersion != AuthorizationFactsVersion {
 		return nil, ErrAuthorizationFactsUnavailable
 	}
 	return NormalizeAuthorizationFacts(db.Semantics.AuthorizationFacts), nil
