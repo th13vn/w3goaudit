@@ -196,12 +196,32 @@ func callerSelfScopeGuard(expr *types.ASTNode, fn *types.Function, db *types.Dat
 	if expr.Kind == types.KindExprBinaryOp {
 		op := expr.GetAttributeString("operator")
 		if (op == "==" || op == "!=") && len(expr.Children) >= 2 {
-			return (containsCallerIdentity(expr.Children[0], fn, db) && !containsCallerIdentity(expr.Children[1], fn, db)) ||
-				(containsCallerIdentity(expr.Children[1], fn, db) && !containsCallerIdentity(expr.Children[0], fn, db))
+			if containsCallerIdentity(expr.Children[0], fn, db) {
+				return isCallerSelectedOperand(expr.Children[1])
+			}
+			if containsCallerIdentity(expr.Children[1], fn, db) {
+				return isCallerSelectedOperand(expr.Children[0])
+			}
 		}
 	}
 	for _, child := range expr.Children {
 		if callerSelfScopeGuard(child, fn, db) {
+			return true
+		}
+	}
+	return false
+}
+
+// isCallerSelectedOperand narrows self-scoping to a value selected by the caller.
+func isCallerSelectedOperand(node *types.ASTNode) bool {
+	if node == nil {
+		return false
+	}
+	if node.Kind == types.KindExprIdentifier {
+		return node.RefKind == "parameter" || node.RefKind == "local_var"
+	}
+	for _, child := range node.Children {
+		if isCallerSelectedOperand(child) {
 			return true
 		}
 	}
