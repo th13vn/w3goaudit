@@ -233,6 +233,28 @@ type ReachStep struct {
 	AuthReasons []string `json:"authReasons,omitempty"`
 }
 
+func (e *Engine) authorizationFor(fn *types.Function, contract *types.Contract) *types.AuthorizationFact {
+	if e == nil || e.db == nil || fn == nil {
+		return nil
+	}
+	owner := contract
+	if owner == nil && fn.SourceFile != "" {
+		owner = e.db.GetContractByID(types.MakeContractID(fn.SourceFile, fn.ContractName))
+	}
+	if owner == nil {
+		return nil
+	}
+	selector := fn.Selector
+	if selector == "" {
+		selector = fn.Name
+	}
+	if fn.IsConstructor {
+		selector = "constructor"
+	}
+	fact, _ := e.db.GetAuthorizationFactByID(types.MakeFunctionID(owner.SourceFile, owner.Name, selector))
+	return fact
+}
+
 // NodeRef identifies the AST node a rule matched on.
 type NodeRef struct {
 	Kind  string `json:"kind"`
@@ -1347,6 +1369,15 @@ func (e *Engine) enrichFindingFromTrace(f *Finding, trace *matchTrace, verifierF
 				step.Line = trace.Primary.StartLine
 			}
 			steps = append(steps, step)
+			var stepContract *types.Contract
+			if i < len(chainContracts) {
+				stepContract = chainContracts[i]
+			}
+			if fact := e.authorizationFor(fn, stepContract); fact != nil {
+				step.AuthVerdict = string(fact.Verdict)
+				step.AuthReasons = append([]string(nil), fact.Reasons...)
+				steps[len(steps)-1] = step
+			}
 		}
 		f.Reachability = &ReachabilityPath{Steps: steps}
 	}
@@ -1355,7 +1386,7 @@ func (e *Engine) enrichFindingFromTrace(f *Finding, trace *matchTrace, verifierF
 	// the walker started from). AuthVerdict left empty.
 	if f.Reachability != nil && len(f.Reachability.Steps) > 0 {
 		s := f.Reachability.Steps[0]
-		f.EntryPoint = &EntryRef{Contract: s.Contract, Function: s.Function}
+		f.EntryPoint = &EntryRef{Contract: s.Contract, Function: s.Function, AuthVerdict: s.AuthVerdict, AuthReasons: append([]string(nil), s.AuthReasons...)}
 	}
 }
 

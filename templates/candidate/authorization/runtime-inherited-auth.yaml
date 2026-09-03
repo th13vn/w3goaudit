@@ -1,0 +1,12 @@
+meta:
+  id: CANDIDATE-RUNTIME-INHERITED-AUTH
+  title: "Runtime inherited authorization evidence"
+  severity: INFO
+  confidence: HIGH
+  description: "Evidence-only candidate for virtual authorization dispatch."
+  recommendation: "Review the selected runtime implementation and exact guard evidence."
+query:
+  from: entry_function
+  where:
+    - block: function
+    - preset: access_controlled

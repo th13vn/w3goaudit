@@ -162,6 +162,10 @@ not part of that category; access control is the safe property.
 
 ---
 
+## Candidate Authorization Pack
+
+The staged authorization/runtime-inheritance candidates live under `candidate/authorization/`. They are not embedded in the official pack and must pass vulnerable, safe, wrong-principal, unresolved, source/cache, and deterministic-output gates before promotion.
+
 ## Template Structure
 
 ```yaml

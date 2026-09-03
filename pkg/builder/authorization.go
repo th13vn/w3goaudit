@@ -64,6 +64,9 @@ func authorizationFactForFunction(fn *types.Function, contract *types.Contract, 
 			fact.Reasons = append(fact.Reasons, "guard.proven")
 		}
 	}
+	// A function may carry all of its authorization in an applied modifier while
+	// its body is empty. Resolve the exact modifier body and preserve that evidence
+	// instead of treating the modifier name as proof.
 	for _, call := range fn.Calls {
 		if call == nil || call.CallType != types.CallTypeModifier {
 			continue
@@ -72,6 +75,27 @@ func authorizationFactForFunction(fn *types.Function, contract *types.Contract, 
 			fact.Verdict = types.AuthorizationUnknown
 			fact.Limitations = append(fact.Limitations, types.DiagnosticIdentity)
 			fact.Reasons = append(fact.Reasons, "modifier.unresolved")
+			continue
+		}
+		owner := db.GetContractByID(call.ResolvedContractID)
+		if owner == nil {
+			fact.Verdict = types.AuthorizationUnknown
+			fact.Limitations = append(fact.Limitations, types.DiagnosticIdentity)
+			continue
+		}
+		for _, mod := range owner.Modifiers {
+			if mod == nil || mod.Name != call.ResolvedFunction {
+				continue
+			}
+			if candidate := findAuthorizationEvidence(mod.AST, fn, db); candidate != nil {
+				candidate.evidence.GuardKind = "modifier"
+				fact.Evidence = append(fact.Evidence, candidate.evidence)
+				fact.Verdict = candidate.verdict
+				fact.PrincipalKind = candidate.evidence.PrincipalKind
+				fact.Principal = candidate.evidence.Principal
+				fact.Dominance = candidate.evidence.Dominance
+				fact.Reasons = append(fact.Reasons, "modifier.guard.proven")
+			}
 		}
 	}
 	if fact.Verdict == types.AuthorizationUnprotected && fn.IsEntrypoint() {

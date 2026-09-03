@@ -1,0 +1,12 @@
+meta:
+  id: CANDIDATE-EXPECTED-PRINCIPAL-CALLBACK
+  title: "Callback without proven expected principal"
+  severity: HIGH
+  confidence: MEDIUM
+  description: "Candidate callback detector requiring an exact expected-principal guard."
+  recommendation: "Compare msg.sender with the exact pool or manager principal before processing callback data."
+query:
+  from: entry_function
+  where:
+    - func_name: '(?i)^(uniswapV2Call|uniswapV3SwapCallback|uniswapV3FlashCallback|uniswapV3MintCallback)$'
+    - not: { preset: access_controlled }
