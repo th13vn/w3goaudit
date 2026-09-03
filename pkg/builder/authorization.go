@@ -58,6 +58,8 @@ func authorizationFactForFunction(fn *types.Function, contract *types.Contract, 
 		fact.InitializerEntry = true
 		fact.OneTimeMutex = fn.HasOneTimeInitGuardIn(db, contract)
 		fact.ConstructorDisable = constructorDisablesInitializers(contract)
+		fact.AtomicInitialization = initializerAtomicity(fn)
+		fact.ProxyLinkage = proxyLinkageStatus(contract)
 		switch {
 		case fact.ConstructorDisable:
 			fact.FirstCallTakeover = "not_applicable"
@@ -120,6 +122,45 @@ func authorizationFactForFunction(fn *types.Function, contract *types.Contract, 
 		fact.Reasons = append(fact.Reasons, "non_entry_scope")
 	}
 	return fact
+}
+
+func initializerAtomicity(fn *types.Function) string {
+	if fn == nil || fn.AST == nil {
+		return "unknown"
+	}
+	var firstWriteLine int
+	var guardLine int
+	walkAST(fn.AST, func(n *types.ASTNode) {
+		if n == nil {
+			return
+		}
+		if guardLine == 0 && (n.Kind == types.KindCheckRequire || n.Kind == types.KindCheckAssert || n.Kind == types.KindStmtIf) {
+			guardLine = n.StartLine
+		}
+		if firstWriteLine == 0 && n.Kind == types.KindStmtAssign && n.GetAttributeBool("is_state_var") {
+			firstWriteLine = n.StartLine
+		}
+	})
+	if guardLine == 0 || firstWriteLine == 0 {
+		return "unknown"
+	}
+	if firstWriteLine < guardLine {
+		return "before_guard"
+	}
+	return "after_guard"
+}
+
+func proxyLinkageStatus(contract *types.Contract) string {
+	if contract == nil {
+		return "unknown"
+	}
+	for _, base := range contract.BaseContracts {
+		lower := strings.ToLower(base)
+		if strings.Contains(lower, "proxy") || strings.Contains(lower, "uups") || strings.Contains(lower, "transparent") {
+			return "declared_proxy_base"
+		}
+	}
+	return "unknown"
 }
 
 type authorizationCandidate struct {

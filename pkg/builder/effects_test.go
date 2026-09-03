@@ -855,3 +855,31 @@ func roundTripEffectsDatabase(t *testing.T, db *types.Database) *types.Database 
 	}
 	return loaded
 }
+
+func TestAuthorizationLifecycleFactsDistinguishMutexAndTakeover(t *testing.T) {
+	db := buildFromSource(t, `pragma solidity ^0.8.20;
+contract Lifecycle {
+    bool initialized;
+    function initialize(address who) external {
+        require(!initialized);
+        initialized = true;
+    }
+    function setup() external {
+        initialized = true;
+    }
+}`)
+	id := types.MakeFunctionID("/tmp/T.sol", "Lifecycle", "initialize(address)")
+	fact, ok := db.GetAuthorizationFactByID(id)
+	if !ok {
+		t.Fatalf("missing lifecycle fact %q", id)
+	}
+	if !fact.InitializerEntry || !fact.OneTimeMutex {
+		t.Fatalf("lifecycle flags = %+v", fact)
+	}
+	if fact.FirstCallTakeover != "unknown" {
+		t.Fatalf("first-call takeover = %q, want unknown", fact.FirstCallTakeover)
+	}
+	if fact.AtomicInitialization != "after_guard" {
+		t.Fatalf("atomicity = %q, want after_guard", fact.AtomicInitialization)
+	}
+}

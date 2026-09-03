@@ -52,25 +52,30 @@ type AuthorizationEvidence struct {
 }
 
 type AuthorizationFact struct {
-	ID                 string                     `json:"id"`
-	ContractID         string                     `json:"contractId"`
-	ScopeID            string                     `json:"scopeId"`
-	ScopeKind          string                     `json:"scopeKind"`
-	FunctionID         string                     `json:"functionId,omitempty"`
-	RuntimeContractID  string                     `json:"runtimeContractId,omitempty"`
-	SelectedFunctionID string                     `json:"selectedFunctionId,omitempty"`
-	Evidence           []AuthorizationEvidence    `json:"evidence"`
-	Verdict            AuthorizationVerdict       `json:"verdict"`
-	PrincipalKind      AuthorizationPrincipalKind `json:"principalKind"`
-	Principal          string                     `json:"principal,omitempty"`
-	Dominance          AuthorizationDominance     `json:"dominance"`
-	Reasons            []string                   `json:"reasons"`
-	Limitations        []string                   `json:"limitations"`
-	InitializerEntry   bool                       `json:"initializerEntry,omitempty"`
-	OneTimeMutex       bool                       `json:"oneTimeMutex,omitempty"`
-	ConstructorDisable bool                       `json:"constructorDisable,omitempty"`
-	ProxyContext       string                     `json:"proxyContext,omitempty"`
-	FirstCallTakeover  string                     `json:"firstCallTakeover,omitempty"`
+	ID                      string                     `json:"id"`
+	ContractID              string                     `json:"contractId"`
+	ScopeID                 string                     `json:"scopeId"`
+	ScopeKind               string                     `json:"scopeKind"`
+	FunctionID              string                     `json:"functionId,omitempty"`
+	RuntimeContractID       string                     `json:"runtimeContractId,omitempty"`
+	SelectedFunctionID      string                     `json:"selectedFunctionId,omitempty"`
+	Evidence                []AuthorizationEvidence    `json:"evidence"`
+	Verdict                 AuthorizationVerdict       `json:"verdict"`
+	PrincipalKind           AuthorizationPrincipalKind `json:"principalKind"`
+	Principal               string                     `json:"principal,omitempty"`
+	ExpectedPrincipal       string                     `json:"expectedPrincipal,omitempty"`
+	ExpectedPrincipalRefIDs []string                   `json:"expectedPrincipalRefIds,omitempty"`
+	Dominance               AuthorizationDominance     `json:"dominance"`
+	Reasons                 []string                   `json:"reasons"`
+	Limitations             []string                   `json:"limitations"`
+	InitializerEntry        bool                       `json:"initializerEntry,omitempty"`
+	OneTimeMutex            bool                       `json:"oneTimeMutex,omitempty"`
+	ConstructorDisable      bool                       `json:"constructorDisable,omitempty"`
+	ProxyContext            string                     `json:"proxyContext,omitempty"`
+	FirstCallTakeover       string                     `json:"firstCallTakeover,omitempty"`
+	AtomicInitialization    string                     `json:"atomicInitialization,omitempty"`
+	ProxyImplementationID   string                     `json:"proxyImplementationId,omitempty"`
+	ProxyLinkage            string                     `json:"proxyLinkage,omitempty"`
 }
 
 type AuthorizationQuery struct {
@@ -104,6 +109,7 @@ func NormalizeAuthorizationFacts(facts []*AuthorizationFact) []*AuthorizationFac
 		}
 		c.Reasons = normalizedStrings(fact.Reasons)
 		c.Limitations = normalizedStrings(fact.Limitations)
+		c.ExpectedPrincipalRefIDs = normalizedStrings(fact.ExpectedPrincipalRefIDs)
 		if c.Evidence == nil {
 			c.Evidence = []AuthorizationEvidence{}
 		}
