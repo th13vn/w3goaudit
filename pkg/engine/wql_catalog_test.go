@@ -162,3 +162,11 @@ func TestAttrNameToIR_RuleFieldBackedNamesNotInMap(t *testing.T) {
 		}
 	}
 }
+
+func TestAuthorizationAttributeNamesAreCatalogued(t *testing.T) {
+	for _, name := range []string{"auth_verdict", "auth_principal", "auth_dominates", "runtime_contract", "auth_reason"} {
+		if got, ok := attrNameToIR(name); !ok || got != name {
+			t.Fatalf("attrNameToIR(%q) = %q, %v", name, got, ok)
+		}
+	}
+}

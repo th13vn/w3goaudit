@@ -153,6 +153,11 @@ var attrNameToIRTable = map[string]string{
 	"boundary_has_state_before":     "boundary_has_state_before",
 	"boundary_has_state_after":      "boundary_has_state_after",
 	"boundary_reachable_from_entry": "boundary_reachable_from_entry",
+	"auth_verdict":                  "auth_verdict",
+	"auth_principal":                "auth_principal",
+	"auth_dominates":                "auth_dominates",
+	"runtime_contract":              "runtime_contract",
+	"auth_reason":                   "auth_reason",
 }
 
 // attrNameToIR resolves a WQL attribute name (§7) to the IR node-attribute
