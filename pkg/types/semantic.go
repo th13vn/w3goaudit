@@ -223,6 +223,9 @@ type SemanticFacts struct {
 
 	ExternalBoundaryVersion string                  `json:"externalBoundaryVersion,omitempty"`
 	ExternalBoundaries      []*ExternalBoundaryFact `json:"externalBoundaries,omitempty"`
+
+	AuthorizationFactsVersion string               `json:"authorizationFactsVersion,omitempty"`
+	AuthorizationFacts        []*AuthorizationFact `json:"authorizationFacts,omitempty"`
 }
 
 // FunctionEffects captures what a single function does that an auditor needs to
@@ -267,6 +270,7 @@ func NewSemanticFacts() *SemanticFacts {
 		Symbols:            make(map[string]*SemanticSymbol),
 		FunctionEffects:    make(map[string]*FunctionEffects),
 		ExternalBoundaries: make([]*ExternalBoundaryFact, 0),
+		AuthorizationFacts: make([]*AuthorizationFact, 0),
 	}
 }
 

@@ -71,6 +71,36 @@ contract Vault {
 	}
 }
 
+func TestAuthorizationFactsCaptureRuntimeAndPrincipalEvidence(t *testing.T) {
+	db := buildFromSource(t, `pragma solidity ^0.8.20;
+contract AuthFacts {
+    address owner;
+    function withdraw() external {
+        require(msg.sender == owner, "owner");
+    }
+    function open() external {}
+}`)
+	if db.Semantics == nil || db.Semantics.AuthorizationFactsVersion != types.AuthorizationFactsVersion {
+		t.Fatalf("authorization facts version = %q", db.Semantics.AuthorizationFactsVersion)
+	}
+	ownerID := types.MakeFunctionID("/tmp/T.sol", "AuthFacts", "withdraw()")
+	fact, ok := db.GetAuthorizationFactByID(ownerID)
+	if !ok {
+		t.Fatalf("missing authorization fact %q", ownerID)
+	}
+	if fact.Verdict != types.AuthorizationProtected {
+		t.Fatalf("withdraw verdict = %q, want protected: %+v", fact.Verdict, fact)
+	}
+	if fact.PrincipalKind != types.PrincipalOwner {
+		t.Fatalf("withdraw principal = %q, want owner: %+v", fact.PrincipalKind, fact)
+	}
+	openID := types.MakeFunctionID("/tmp/T.sol", "AuthFacts", "open()")
+	open, ok := db.GetAuthorizationFactByID(openID)
+	if !ok || open.Verdict != types.AuthorizationUnprotected {
+		t.Fatalf("open fact = %+v, ok=%v, want unprotected", open, ok)
+	}
+}
+
 func TestEffectsDoNotTreatEveryModifierAsAccessControl(t *testing.T) {
 	db := buildFromSource(t, `// SPDX-License-Identifier: MIT
 pragma solidity ^0.8.0;
