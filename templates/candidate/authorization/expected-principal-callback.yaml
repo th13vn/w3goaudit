@@ -6,6 +6,7 @@ meta:
   description: "Candidate callback detector requiring an exact expected-principal guard."
   recommendation: "Compare msg.sender with the exact pool or manager principal before processing callback data."
 query:
+  select: function
   from: entry_function
   where:
     - func_name: '(?i)^(uniswapV2Call|uniswapV3SwapCallback|uniswapV3FlashCallback|uniswapV3MintCallback)$'

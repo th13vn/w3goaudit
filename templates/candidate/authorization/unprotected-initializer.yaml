@@ -6,6 +6,7 @@ meta:
   description: "Candidate detector using deterministic authorization/lifecycle facts."
   recommendation: "Prove atomic initialization and deployment ownership, or apply a one-time initializer guard and initialize atomically."
 query:
+  select: function
   from: entry_function
   where:
     - func_name: '(?i)^(initialize|initialise|init|setup)$'
