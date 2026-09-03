@@ -146,7 +146,7 @@ run-output scratch directory.
   runs before `run.log` or any report file is created. For `--db` scans, the
   persisted `scanTarget` is authoritative, with `projectRoot` as the legacy
   fallback.
-- A normal scan writes one result folder containing bounded `README.md`, consolidated `audit.md`, `results.sarif`, `run.log`, `data/` (with `manifest.json`, `database.json`, `findings.json`, `overview.json`, `diagnostics.json`, `interactions.json`, `nav.json`, `explorer.json`, and `xref.json`), and exactly one Markdown deep dive per main contract under `contracts/`. `--html` adds only `audit.html`; rescans remove the previous split human layout and write `manifest.json` last.
+- A normal scan writes one result folder containing bounded `README.md`, consolidated `audit.md`, `results.sarif`, `run.log`, `data/` (with `manifest.json`, `database.json`, `findings.json`, `overview.json`, `diagnostics.json`, `interactions.json`, `authorization.json`, `nav.json`, `explorer.json`, and `xref.json`), and exactly one Markdown deep dive per main contract under `contracts/`. `--html` adds only `audit.html`; rescans remove the previous split human layout and write `manifest.json` last.
 - Phase 8 builds protocol-neutral `ExternalBoundaryFact` evidence for Solidity
   and Yul boundaries hosted by exact function or modifier scopes.
   `ExternalBoundaryFactsVersion` is `1.0.0`; `ScopeID` is canonical, while
