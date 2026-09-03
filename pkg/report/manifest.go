@@ -52,14 +52,15 @@ type ManifestFiles struct {
 	FindingsHTML string `json:"findingsHtml,omitempty"`
 	AuditHTML    string `json:"auditHtml,omitempty"`
 	Data         struct {
-		Findings     string `json:"findings"`
-		Overview     string `json:"overview"`
-		Diagnostics  string `json:"diagnostics"`
-		Database     string `json:"database"`
-		Interactions string `json:"interactions"`
-		Nav          string `json:"nav,omitempty"`
-		Explorer     string `json:"explorer,omitempty"`
-		Xref         string `json:"xref,omitempty"`
+		Findings      string `json:"findings"`
+		Overview      string `json:"overview"`
+		Diagnostics   string `json:"diagnostics"`
+		Database      string `json:"database"`
+		Interactions  string `json:"interactions"`
+		Authorization string `json:"authorization,omitempty"`
+		Nav           string `json:"nav,omitempty"`
+		Explorer      string `json:"explorer,omitempty"`
+		Xref          string `json:"xref,omitempty"`
 	} `json:"data"`
 }
 
@@ -146,6 +147,7 @@ func BuildManifestAt(now time.Time, tool ToolMeta, summary *SummaryReport, findi
 	m.Files.Data.Diagnostics = "data/diagnostics.json"
 	m.Files.Data.Database = "data/database.json"
 	m.Files.Data.Interactions = "data/interactions.json"
+	m.Files.Data.Authorization = "data/authorization.json"
 	m.Files.Data.Nav = "data/nav.json"
 	m.Files.Data.Explorer = "data/explorer.json"
 	m.Files.Data.Xref = "data/xref.json"

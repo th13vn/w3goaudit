@@ -54,6 +54,20 @@ func authorizationFactForFunction(fn *types.Function, contract *types.Contract, 
 	if fn.IsConstructor {
 		fact.Reasons = append(fact.Reasons, "constructor.scope")
 	}
+	if fn.IsEntrypoint() && strings.HasPrefix(strings.ToLower(fn.Name), "init") || fn.IsEntrypoint() && strings.EqualFold(fn.Name, "setup") || fn.IsEntrypoint() && strings.EqualFold(fn.Name, "initialise") {
+		fact.InitializerEntry = true
+		fact.OneTimeMutex = fn.HasOneTimeInitGuardIn(db, contract)
+		fact.ConstructorDisable = constructorDisablesInitializers(contract)
+		switch {
+		case fact.ConstructorDisable:
+			fact.FirstCallTakeover = "not_applicable"
+		case fact.OneTimeMutex:
+			fact.FirstCallTakeover = "unknown"
+			fact.Limitations = append(fact.Limitations, "deployment.lifecycle.unresolved")
+		default:
+			fact.FirstCallTakeover = "possible"
+		}
+	}
 	if fn.AST != nil {
 		if authorization := findAuthorizationEvidence(fn.AST, fn, db); authorization != nil {
 			fact.Evidence = []types.AuthorizationEvidence{authorization.evidence}
@@ -159,7 +173,32 @@ func privilegedGuard(expr *types.ASTNode, fn *types.Function, db *types.Database
 	if expr == nil {
 		return false
 	}
-	return strings.Contains(astText(expr), "msg.sender") && fn.IsAccessControlledIn(db, nil)
+	text := strings.ToLower(astText(expr))
+	if !strings.Contains(text, "msg.sender") {
+		return false
+	}
+	return strings.Contains(text, "owner") || strings.Contains(text, "admin") || strings.Contains(text, "role") || strings.Contains(text, "operator") || strings.Contains(text, "address(") || strings.Contains(text, "0x")
+}
+
+func constructorDisablesInitializers(contract *types.Contract) bool {
+	if contract == nil {
+		return false
+	}
+	for _, fn := range contract.Functions {
+		if fn == nil || !fn.IsConstructor || fn.AST == nil {
+			continue
+		}
+		found := false
+		walkAST(fn.AST, func(n *types.ASTNode) {
+			if n != nil && strings.Contains(strings.ToLower(n.Name), "disableinitializers") {
+				found = true
+			}
+		})
+		if found {
+			return true
+		}
+	}
+	return false
 }
 
 func principalFromExpr(expr *types.ASTNode) types.AuthorizationPrincipalKind {
