@@ -54,7 +54,7 @@ func authorizationFactForFunction(fn *types.Function, contract *types.Contract, 
 	if fn.IsConstructor {
 		fact.Reasons = append(fact.Reasons, "constructor.scope")
 	}
-	if fn.IsEntrypoint() && strings.HasPrefix(strings.ToLower(fn.Name), "init") || fn.IsEntrypoint() && strings.EqualFold(fn.Name, "setup") || fn.IsEntrypoint() && strings.EqualFold(fn.Name, "initialise") {
+	if fn.IsEntrypoint() && isInitializerName(fn.Name) {
 		fact.InitializerEntry = true
 		fact.OneTimeMutex = fn.HasOneTimeInitGuardIn(db, contract)
 		fact.ConstructorDisable = constructorDisablesInitializers(contract)
@@ -142,7 +142,7 @@ func findAuthorizationEvidence(root *types.ASTNode, fn *types.Function, db *type
 		principal := types.PrincipalUnknown
 		if privilegedGuard(expr, fn, db) {
 			principal = principalFromExpr(expr)
-		} else if fn.ComparesCallerIdentity(db) {
+		} else if callerSelfScopeGuard(expr, fn, db) {
 			principal = types.PrincipalCallerSelfScope
 		} else {
 			return
@@ -151,7 +151,11 @@ func findAuthorizationEvidence(root *types.ASTNode, fn *types.Function, db *type
 		if !isUnconditionalGuard(n, root) {
 			dominance = types.AuthorizationPartial
 		}
-		found = &authorizationCandidate{evidence: types.AuthorizationEvidence{GuardKind: "inline", GuardExpression: astText(expr), GuardRange: semanticRange(n, fn), PrincipalKind: principal, Principal: astText(expr), Dominance: dominance}, verdict: types.AuthorizationProtected}
+		verdict := types.AuthorizationProtected
+		if dominance != types.AuthorizationDominates {
+			verdict = types.AuthorizationUnknown
+		}
+		found = &authorizationCandidate{evidence: types.AuthorizationEvidence{GuardKind: "inline", GuardExpression: astText(expr), GuardRange: semanticRange(n, fn), PrincipalKind: principal, Principal: astText(expr), Dominance: dominance}, verdict: verdict}
 		if principal == types.PrincipalCallerSelfScope {
 			found.verdict = types.AuthorizationSelfScoped
 		}
@@ -178,6 +182,48 @@ func privilegedGuard(expr *types.ASTNode, fn *types.Function, db *types.Database
 		return false
 	}
 	return strings.Contains(text, "owner") || strings.Contains(text, "admin") || strings.Contains(text, "role") || strings.Contains(text, "operator") || strings.Contains(text, "address(") || strings.Contains(text, "0x")
+}
+
+func isInitializerName(name string) bool {
+	name = strings.ToLower(name)
+	return name == "initialize" || name == "initialise" || name == "init" || name == "__init" || name == "setup"
+}
+
+func callerSelfScopeGuard(expr *types.ASTNode, fn *types.Function, db *types.Database) bool {
+	if expr == nil {
+		return false
+	}
+	if expr.Kind == types.KindExprBinaryOp {
+		op := expr.GetAttributeString("operator")
+		if (op == "==" || op == "!=") && len(expr.Children) >= 2 {
+			return (containsCallerIdentity(expr.Children[0], fn, db) && !containsCallerIdentity(expr.Children[1], fn, db)) ||
+				(containsCallerIdentity(expr.Children[1], fn, db) && !containsCallerIdentity(expr.Children[0], fn, db))
+		}
+	}
+	for _, child := range expr.Children {
+		if callerSelfScopeGuard(child, fn, db) {
+			return true
+		}
+	}
+	return false
+}
+
+func containsCallerIdentity(node *types.ASTNode, fn *types.Function, db *types.Database) bool {
+	if node == nil {
+		return false
+	}
+	if node.Kind == types.KindExprMemberAccess && node.GetAttributeString("parent") == "msg" && node.Name == "sender" {
+		return true
+	}
+	if node.Kind == types.KindExprIdentifier && fn != nil && strings.EqualFold(node.Name, "caller") {
+		return true
+	}
+	for _, child := range node.Children {
+		if containsCallerIdentity(child, fn, db) {
+			return true
+		}
+	}
+	return false
 }
 
 func constructorDisablesInitializers(contract *types.Contract) bool {
