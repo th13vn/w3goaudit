@@ -732,3 +732,7 @@ analysis.
 - **JSON serializable** - All types can be marshaled for caching
 - **Self-contained** - Each type has helper methods
 - **Call type granularity** - Distinguish between different call semantics
+
+### Authorization semantic facts (v1.0.0)
+
+`SemanticFacts.AuthorizationFactsVersion` and `AuthorizationFacts` provide a deterministic, exact-ID authorization layer. `Database.AuthorizationFactsSnapshot`, `GetAuthorizationFactByID`, and `QueryAuthorizationFacts` return deep copies, sort deterministically, cap queries at 200, and return `ErrAuthorizationFactsUnavailable` for legacy caches without the capability. Unknown verdicts remain explicit and must not be treated as a safe result.

@@ -753,3 +753,7 @@ Options metadata + reader diagnostics → Sources → Parse → AST Trees + Sema
 
 **Input:** `[]*types.SourceFile` from reader
 **Output:** `*types.Database` for engine
+
+### Authorization phase
+
+The build pipeline runs `analyzeAuthorization` after effects. It emits versioned, protocol-neutral function facts with exact contract/function IDs, guard evidence, principal kind, and fail-closed unresolved modifier limitations.

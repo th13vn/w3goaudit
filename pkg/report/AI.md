@@ -742,3 +742,7 @@ the `--json`/`--md`/`--format` selectors were removed.
 
 - **HTML**: Dark mode theme (Tokyo Night inspired), responsive layout, interactive tables/graphs. Findings HTML carries `lang="en"`, semantic `<main>`/`<section>`/`<article>`, ARIA labels on severity badges and locations, focus rings for keyboard navigation, and a skip-to-findings link for screen readers.
 - **Markdown**: GitHub-flavored markdown, semantic HTML for specialized layouts (collapsible details).
+
+### Authorization evidence
+
+Reachability steps and entry points may carry additive `authVerdict` and `authReasons` fields sourced from deterministic authorization facts.

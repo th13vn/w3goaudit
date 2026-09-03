@@ -1039,3 +1039,7 @@ Template → validateRulePlacement() → normalizeQueryBlock() → Engine → Sc
   has no model reviewer state, and `Execute` returns deterministic WQL findings
   directly while preserving primary, related-site, entry-point, and
   reachability evidence.
+
+### Authorization WQL bridge
+
+Authorization attributes (`auth_verdict`, `auth_principal`, `auth_dominates`, `runtime_contract`, `auth_reason`) are resolved from exact semantic facts when present. Missing or unknown facts fail closed.

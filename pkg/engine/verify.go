@@ -741,6 +741,12 @@ func (e *Engine) matchAtomic(node *types.ASTNode, r Rule) bool {
 	// Check attributes
 	if len(r.Attr) > 0 {
 		for key, expectedValue := range r.Attr {
+			if strings.HasPrefix(key, "auth_") || key == "runtime_contract" {
+				if !e.matchAuthorizationAttribute(node, key, expectedValue) {
+					return false
+				}
+				continue
+			}
 			if !e.matchAttributeValue(node, key, expectedValue) {
 				return false
 			}
@@ -784,6 +790,53 @@ func (e *Engine) matchAtomic(node *types.ASTNode, r Rule) bool {
 	}
 
 	return true
+}
+
+func (e *Engine) matchAuthorizationAttribute(node *types.ASTNode, key string, expected interface{}) bool {
+	if e == nil || e.db == nil || node == nil || e.currentFunction == nil {
+		return false
+	}
+	fact := e.authorizationFor(e.currentFunction, e.currentContract)
+	if fact == nil {
+		return false
+	}
+	var actual string
+	switch key {
+	case "auth_verdict":
+		actual = string(fact.Verdict)
+	case "auth_principal":
+		actual = string(fact.PrincipalKind)
+	case "auth_dominates":
+		actual = string(fact.Dominance)
+	case "runtime_contract":
+		actual = fact.RuntimeContractID
+	case "auth_reason":
+		for _, reason := range fact.Reasons {
+			if matchExpectedString(expected, reason) {
+				return true
+			}
+		}
+		return false
+	default:
+		return false
+	}
+	return matchExpectedString(expected, actual)
+}
+
+func matchExpectedString(expected interface{}, actual string) bool {
+	switch value := expected.(type) {
+	case string:
+		return MatchesRegex(value, actual)
+	case []string:
+		for _, item := range value {
+			if MatchesRegex(item, actual) {
+				return true
+			}
+		}
+		return false
+	default:
+		return false
+	}
 }
 
 // attrInCSV reports whether the node's named attribute equals one of the
