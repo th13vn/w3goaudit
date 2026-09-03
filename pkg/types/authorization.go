@@ -10,6 +10,8 @@ const AuthorizationFactsVersion = "1.0.0"
 
 const MaxAuthorizationQueryLimit = 200
 
+const AuthorizationLimitationCallerSelected = "authorization.binding.caller_selected"
+
 var ErrAuthorizationFactsUnavailable = errors.New("authorization facts unavailable; rebuild the database from source")
 
 type AuthorizationVerdict string

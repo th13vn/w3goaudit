@@ -232,11 +232,10 @@ graph TD
    callees; distinct pre-effect siblings are unordered. Exact callgraph edges
    include nested receiver/option helper calls once.
 6. **Perform taint analysis** for source tracking, including caller argument bindings when entrypoints invoke internal helpers — the call chain traversed becomes the finding's `Reachability` (entry → … → host of `PrimaryAST`)
-7. **Review AI-gated candidates** when the template has `ai.enabled: true`.
-   WQL remains the broad candidate generator; the injected reviewer confirms the
-   bug, its necessary trigger conditions, and the confidence threshold.
-   Negative, low-confidence, timeout, malformed-response, and reviewer-error
-   outcomes fail closed and remain available as review records.
+7. **Apply deterministic authorization/lifecycle filters** when a template uses
+   `auth_*`, `runtime_contract`, or initializer/proxy attributes. The builder
+   must have exact versioned facts; absent, unknown, unresolved, and ambiguous
+   evidence never satisfies a positive safety predicate.
 
 **Advanced features:**
 - **Recursive internal call tracing**: Engine follows entrypoint → helper call chains and maps caller argument taint onto callee parameters; the chain itself is preserved on the finding

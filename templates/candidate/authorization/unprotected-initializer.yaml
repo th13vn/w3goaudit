@@ -9,7 +9,9 @@ query:
   select: function
   from: entry_function
   where:
-    - func_name: '(?i)^(initialize|initialise|init|setup)$'
-    - has: { block: state_write }
-    - not: { preset: access_controlled }
-    - not: { preset: initializer_guarded }
+    - attr:
+        initializer_entry: true
+        first_call_takeover: '(possible|unknown)'
+    - not:
+        attr:
+          auth_verdict: protected

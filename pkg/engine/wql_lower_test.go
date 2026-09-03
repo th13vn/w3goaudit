@@ -3,6 +3,8 @@ package engine
 import (
 	"strings"
 	"testing"
+
+	"github.com/th13vn/w3goaudit/pkg/types"
 )
 
 // These tests assert lower()'s output field-for-field against the evaluator
@@ -325,6 +327,9 @@ func TestLower_BarePresetAssertion(t *testing.T) {
 	}
 	if tmpl.Query.Filter.Preset != "reentrancy_guarded" {
 		t.Errorf("Filter.Preset = %q, want %q", tmpl.Query.Filter.Preset, "reentrancy_guarded")
+	}
+	if tmpl.Query.Match.Kind != types.KindDeclFunction || tmpl.Query.Match.Contains != nil {
+		t.Fatalf("entry-function select must anchor the declaration root: %+v", tmpl.Query.Match)
 	}
 	// Bare preset assertion is a pure context (Filter) matcher — Match should
 	// carry no leftover AST content from it.

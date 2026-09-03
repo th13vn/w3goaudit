@@ -155,9 +155,17 @@ var attrNameToIRTable = map[string]string{
 	"boundary_reachable_from_entry": "boundary_reachable_from_entry",
 	"auth_verdict":                  "auth_verdict",
 	"auth_principal":                "auth_principal",
+	"auth_expected_principal":       "auth_expected_principal",
+	"auth_expected_principal_ref":   "auth_expected_principal_ref",
 	"auth_dominates":                "auth_dominates",
 	"runtime_contract":              "runtime_contract",
 	"auth_reason":                   "auth_reason",
+	"initializer_entry":             "initializer_entry",
+	"one_time_mutex":                "one_time_mutex",
+	"first_call_takeover":           "first_call_takeover",
+	"atomic_initialization":         "atomic_initialization",
+	"constructor_disable":           "constructor_disable",
+	"proxy_linkage":                 "proxy_linkage",
 }
 
 // attrNameToIR resolves a WQL attribute name (§7) to the IR node-attribute

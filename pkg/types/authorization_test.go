@@ -1,6 +1,9 @@
 package types
 
-import "testing"
+import (
+	"reflect"
+	"testing"
+)
 
 func TestAuthorizationFactsSnapshotIsDeterministicAndDetached(t *testing.T) {
 	db := NewDatabase()
@@ -47,5 +50,33 @@ func TestAuthorizationFactsLegacyCacheIsUnavailable(t *testing.T) {
 	db := NewDatabase()
 	if _, err := db.AuthorizationFactsSnapshot(); err != ErrAuthorizationFactsUnavailable {
 		t.Fatalf("err=%v, want unavailable", err)
+	}
+}
+
+func TestAuthorizationFactsSnapshotDeepCopiesNestedReferenceIDs(t *testing.T) {
+	db := NewDatabase()
+	db.Semantics.AuthorizationFactsVersion = AuthorizationFactsVersion
+	db.Semantics.AuthorizationFacts = []*AuthorizationFact{{
+		ID: "f", ExpectedPrincipalRefIDs: []string{"z", "a"},
+		Evidence: []AuthorizationEvidence{{RefIDs: []string{"e2", "e1"}}},
+	}}
+
+	first, err := db.AuthorizationFactsSnapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(first[0].ExpectedPrincipalRefIDs, []string{"a", "z"}) ||
+		!reflect.DeepEqual(first[0].Evidence[0].RefIDs, []string{"e1", "e2"}) {
+		t.Fatalf("nested IDs were not normalized: %+v", first[0])
+	}
+	first[0].ExpectedPrincipalRefIDs[0] = "mutated"
+	first[0].Evidence[0].RefIDs[0] = "mutated"
+
+	again, err := db.AuthorizationFactsSnapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again[0].ExpectedPrincipalRefIDs[0] == "mutated" || again[0].Evidence[0].RefIDs[0] == "mutated" {
+		t.Fatalf("snapshot aliases nested reference IDs: %+v", again[0])
 	}
 }

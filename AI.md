@@ -262,6 +262,11 @@ run-output scratch directory.
 - A WQL document contains exactly `meta` plus one `query`. Unknown top-level
   keys, including the removed `ai` key, fail strict decoding. Engine findings
   are produced only by deterministic template execution.
+- Authorization/runtime-inheritance facts are versioned at `1.0.0` and remain
+  protocol-neutral. Exact modifier/helper argument bindings distinguish fixed
+  principals from caller-selected operands; unresolved or ambiguous bindings
+  fail closed. WQL exposes authorization and initializer/proxy lifecycle
+  attributes, while official templates remain unchanged during candidate review.
 - Generated timestamps are the one intentional source of report-byte variance.
   `GeneratorOptions.Now` and `BundleOptions.Now` let SDK callers inject a fixed
   clock; a complete fixed-clock bundle is byte-stable.

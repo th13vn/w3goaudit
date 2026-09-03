@@ -756,4 +756,4 @@ Options metadata + reader diagnostics → Sources → Parse → AST Trees + Sema
 
 ### Authorization phase
 
-The build pipeline runs `analyzeAuthorization` after effects. It emits versioned, protocol-neutral function facts with exact contract/function IDs, guard evidence, principal kind, and fail-closed unresolved modifier limitations.
+The build pipeline runs `analyzeAuthorization` after effects. It emits versioned, protocol-neutral function facts with exact contract/function IDs, guard evidence, principal kind, lifecycle evidence, and fail-closed unresolved modifier/helper/runtime limitations. Modifier and helper arguments are bound only from exact persisted AST callsites: fixed state/literal operands can prove expected principals or roles, caller-selected operands remain unknown, and overload or arity ambiguity never guesses.

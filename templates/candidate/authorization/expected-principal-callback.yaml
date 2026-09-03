@@ -4,10 +4,15 @@ meta:
   severity: HIGH
   confidence: MEDIUM
   description: "Candidate callback detector requiring an exact expected-principal guard."
-  recommendation: "Compare msg.sender with the exact pool or manager principal before processing callback data."
+  recommendation: "Compare msg.sender with the exact external counterparty before processing callback data."
 query:
   select: function
   from: entry_function
   where:
     - func_name: '(?i)^(uniswapV2Call|uniswapV3SwapCallback|uniswapV3FlashCallback|uniswapV3MintCallback)$'
-    - not: { preset: access_controlled }
+    - not:
+        attr:
+          auth_verdict: protected
+          auth_principal: expected_external
+          auth_expected_principal: '(?i)^(pool|pair)$'
+          auth_dominates: dominates

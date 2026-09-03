@@ -91,8 +91,8 @@ contract AuthFacts {
 	if fact.Verdict != types.AuthorizationProtected {
 		t.Fatalf("withdraw verdict = %q, want protected: %+v", fact.Verdict, fact)
 	}
-	if fact.PrincipalKind != types.PrincipalOwner {
-		t.Fatalf("withdraw principal = %q, want owner: %+v", fact.PrincipalKind, fact)
+	if fact.PrincipalKind != types.PrincipalExpectedExternal {
+		t.Fatalf("withdraw principal = %q, want expected_external: %+v", fact.PrincipalKind, fact)
 	}
 	openID := types.MakeFunctionID("/tmp/T.sol", "AuthFacts", "open()")
 	open, ok := db.GetAuthorizationFactByID(openID)
@@ -881,5 +881,215 @@ contract Lifecycle {
 	}
 	if fact.AtomicInitialization != "after_guard" {
 		t.Fatalf("atomicity = %q, want after_guard", fact.AtomicInitialization)
+	}
+}
+
+func TestAuthorizationFactsCaptureStructuralExpectedPrincipalAndRefIDs(t *testing.T) {
+	db := buildFromSource(t, `pragma solidity ^0.8.20;
+contract ExternalPrincipal {
+    address counterparty;
+    function receiveResult(bytes calldata) external {
+        require(msg.sender == counterparty);
+    }
+}`)
+	id := types.MakeFunctionID("/tmp/T.sol", "ExternalPrincipal", "receiveResult(bytes)")
+	fact, ok := db.GetAuthorizationFactByID(id)
+	if !ok {
+		t.Fatalf("missing external-principal fact %q", id)
+	}
+	if fact.Verdict != types.AuthorizationProtected || fact.PrincipalKind != types.PrincipalExpectedExternal {
+		t.Fatalf("external-principal auth = %+v", fact)
+	}
+	wantRef := "/tmp/T.sol#ExternalPrincipal.counterparty"
+	if fact.ExpectedPrincipal != "counterparty" || len(fact.ExpectedPrincipalRefIDs) != 1 || fact.ExpectedPrincipalRefIDs[0] != wantRef {
+		t.Fatalf("expected principal evidence missing: %+v", fact)
+	}
+	if len(fact.Evidence) != 1 || fact.Evidence[0].GuardRange.StartLine == 0 ||
+		len(fact.Evidence[0].RefIDs) != 1 || fact.Evidence[0].RefIDs[0] != wantRef {
+		t.Fatalf("exact guard evidence missing: %+v", fact.Evidence)
+	}
+}
+
+func TestAuthorizationFactsResolveUniqueRuntimeOverride(t *testing.T) {
+	db := buildFromSource(t, `pragma solidity ^0.8.20;
+abstract contract Base {
+    function _authorize() internal virtual;
+    function upgrade() external { _authorize(); }
+}
+contract Derived is Base {
+    address owner;
+    modifier onlyOwner() { require(msg.sender == owner); _; }
+    function _authorize() internal override onlyOwner {}
+}`)
+	baseID := types.MakeFunctionID("/tmp/T.sol", "Base", "upgrade()")
+	fact, ok := db.GetAuthorizationFactByID(baseID)
+	if !ok {
+		t.Fatalf("missing runtime fact %q", baseID)
+	}
+	wantRuntime := "/tmp/T.sol#Derived"
+	wantSelected := types.MakeFunctionID("/tmp/T.sol", "Derived", "_authorize()")
+	if fact.SelectedFunctionID != wantSelected || fact.RuntimeContractID != wantRuntime ||
+		fact.Verdict != types.AuthorizationProtected || fact.Dominance != types.AuthorizationDominates {
+		t.Fatalf("runtime dispatch evidence incomplete: %+v", fact)
+	}
+	if len(fact.Evidence) != 1 || fact.Evidence[0].GuardKind != "virtual_override" {
+		t.Fatalf("runtime guard evidence = %+v", fact.Evidence)
+	}
+}
+
+func TestAuthorizationFactsFailClosedForAmbiguousRuntimeAlternatives(t *testing.T) {
+	db := buildFromSource(t, `pragma solidity ^0.8.20;
+abstract contract Base {
+    function _authorize() internal virtual;
+    function upgrade() external { _authorize(); }
+}
+contract First is Base {
+    address authority;
+    modifier gate() { require(msg.sender == authority); _; }
+    function _authorize() internal override gate {}
+}
+contract Second is Base {
+    function _authorize() internal override {}
+}`)
+	id := types.MakeFunctionID("/tmp/T.sol", "Base", "upgrade()")
+	fact, ok := db.GetAuthorizationFactByID(id)
+	if !ok {
+		t.Fatalf("missing ambiguous runtime fact %q", id)
+	}
+	if fact.Verdict != types.AuthorizationUnknown || fact.RuntimeContractID != "" || fact.SelectedFunctionID != "" {
+		t.Fatalf("ambiguous runtime must fail closed: %+v", fact)
+	}
+	if !containsString(fact.Reasons, "runtime.alternatives.ambiguous") ||
+		!containsString(fact.Limitations, types.DiagnosticIdentity) {
+		t.Fatalf("ambiguous runtime explanation missing: %+v", fact)
+	}
+}
+
+func TestAuthorizationFactsKeepSuperDispatchOnExactBase(t *testing.T) {
+	db := buildFromSource(t, `pragma solidity ^0.8.20;
+contract Base {
+    address authority;
+    function act() public virtual { require(msg.sender == authority); }
+}
+contract Derived is Base {
+    function act() public override { super.act(); }
+}`)
+	id := types.MakeFunctionID("/tmp/T.sol", "Derived", "act()")
+	fact, ok := db.GetAuthorizationFactByID(id)
+	if !ok {
+		t.Fatalf("missing super authorization fact %q", id)
+	}
+	wantSelected := types.MakeFunctionID("/tmp/T.sol", "Base", "act()")
+	if fact.Verdict != types.AuthorizationProtected || fact.SelectedFunctionID != wantSelected ||
+		fact.RuntimeContractID != "/tmp/T.sol#Derived" {
+		t.Fatalf("super dispatch evidence = %+v", fact)
+	}
+	if len(fact.Evidence) != 1 || fact.Evidence[0].GuardKind != "super" {
+		t.Fatalf("super guard evidence = %+v", fact.Evidence)
+	}
+}
+
+func TestAuthorizationRuntimeFixtureMatrix(t *testing.T) {
+	db := buildFixture(t, "../../test-data/security/authorization-runtime")
+	principalFile := fixtureAbs(t, "../../test-data/security/authorization-runtime/principals.sol")
+	runtimeFile := fixtureAbs(t, "../../test-data/security/authorization-runtime/runtime.sol")
+	lifecycleFile := fixtureAbs(t, "../../test-data/security/authorization-runtime/lifecycle.sol")
+
+	tests := []struct {
+		file, contract, selector      string
+		verdict                       types.AuthorizationVerdict
+		principal                     types.AuthorizationPrincipalKind
+		dominance                     types.AuthorizationDominance
+		runtimeContract, selectedFunc string
+		reason, limitation            string
+	}{
+		{principalFile, "PrincipalMatrix", "directOwner()", types.AuthorizationProtected, types.PrincipalExpectedExternal, types.AuthorizationDominates, "", "", "guard.proven", ""},
+		{principalFile, "PrincipalMatrix", "exactRole()", types.AuthorizationProtected, types.PrincipalRole, types.AuthorizationDominates, "", "", "guard.proven", ""},
+		{principalFile, "PrincipalMatrix", "fixedStatePrincipal()", types.AuthorizationProtected, types.PrincipalExpectedExternal, types.AuthorizationDominates, "", "", "guard.proven", ""},
+		{principalFile, "PrincipalMatrix", "immutablePrincipal()", types.AuthorizationProtected, types.PrincipalExpectedExternal, types.AuthorizationDominates, "", "", "guard.proven", ""},
+		{principalFile, "PrincipalMatrix", "literalPrincipal()", types.AuthorizationProtected, types.PrincipalFixedAddress, types.AuthorizationDominates, "", "", "guard.proven", ""},
+		{principalFile, "PrincipalMatrix", "callerSelfScope(address)", types.AuthorizationSelfScoped, types.PrincipalCallerSelfScope, types.AuthorizationDominates, "", "", "guard.proven", ""},
+		{principalFile, "PrincipalMatrix", "internalHelper()", types.AuthorizationProtected, types.PrincipalExpectedExternal, types.AuthorizationDominates, "", types.MakeFunctionID(principalFile, "PrincipalMatrix", "_checkOwner()"), "helper.guard.proven", ""},
+		{principalFile, "PrincipalMatrix", "appliedModifier()", types.AuthorizationProtected, types.PrincipalExpectedExternal, types.AuthorizationDominates, "", "", "modifier.guard.proven", ""},
+		{principalFile, "PrincipalMatrix", "wrongBranch(bool)", types.AuthorizationUnknown, types.PrincipalExpectedExternal, types.AuthorizationPartial, "", "", "guard.proven", ""},
+		{principalFile, "PrincipalMatrix", "guardAfterOperation()", types.AuthorizationUnknown, types.PrincipalExpectedExternal, types.AuthorizationAfterSite, "", "", "guard.proven", ""},
+		{principalFile, "PrincipalMatrix", "modifierAfterOperation()", types.AuthorizationUnknown, types.PrincipalExpectedExternal, types.AuthorizationAfterSite, "", "", "modifier.guard.proven", ""},
+		{principalFile, "PrincipalMatrix", "modifierFixedPrincipal()", types.AuthorizationProtected, types.PrincipalExpectedExternal, types.AuthorizationDominates, "", "", "modifier.guard.proven", ""},
+		{principalFile, "PrincipalMatrix", "modifierSelectedPrincipal(address)", types.AuthorizationSelfScoped, types.PrincipalCallerSelfScope, types.AuthorizationDominates, "", "", "modifier.guard.proven", ""},
+		{principalFile, "PrincipalMatrix", "modifierFixedRole()", types.AuthorizationProtected, types.PrincipalRole, types.AuthorizationDominates, "", "", "modifier.guard.proven", ""},
+		{principalFile, "PrincipalMatrix", "modifierSelectedRole(bytes32)", types.AuthorizationUnknown, types.PrincipalUnknown, types.AuthorizationUnknownDom, "", "", "modifier.binding.caller_selected", types.DiagnosticIdentity},
+		{principalFile, "PrincipalMatrix", "helperForwardedCaller()", types.AuthorizationProtected, types.PrincipalExpectedExternal, types.AuthorizationDominates, "", types.MakeFunctionID(principalFile, "PrincipalMatrix", "_checkPrincipal(address,address)"), "helper.guard.proven", ""},
+		{principalFile, "PrincipalMatrix", "helperFixedPrincipal()", types.AuthorizationProtected, types.PrincipalExpectedExternal, types.AuthorizationDominates, "", types.MakeFunctionID(principalFile, "PrincipalMatrix", "_checkSender(address)"), "helper.guard.proven", ""},
+		{principalFile, "PrincipalMatrix", "helperSelectedPrincipal(address)", types.AuthorizationSelfScoped, types.PrincipalCallerSelfScope, types.AuthorizationDominates, "", types.MakeFunctionID(principalFile, "PrincipalMatrix", "_checkPrincipal(address,address)"), "helper.guard.proven", ""},
+		{principalFile, "PrincipalMatrix", "helperFixedRole()", types.AuthorizationProtected, types.PrincipalRole, types.AuthorizationDominates, "", types.MakeFunctionID(principalFile, "PrincipalMatrix", "_checkRole(bytes32,address)"), "helper.guard.proven", ""},
+		{principalFile, "PrincipalMatrix", "helperSelectedRole(bytes32)", types.AuthorizationUnknown, types.PrincipalUnknown, types.AuthorizationUnknownDom, "", types.MakeFunctionID(principalFile, "PrincipalMatrix", "_checkRole(bytes32,address)"), "helper.binding.caller_selected", types.DiagnosticIdentity},
+		{principalFile, "PrincipalMatrix", "helperOverloadAmbiguous(uint256)", types.AuthorizationUnknown, types.PrincipalUnknown, types.AuthorizationUnknownDom, "", types.MakeFunctionID(principalFile, "PrincipalMatrix", "_ambiguous(uint256)"), "helper.binding.caller_selected", types.DiagnosticIdentity},
+		{principalFile, "PrincipalMatrix", "helperTrulyAmbiguous()", types.AuthorizationUnknown, types.PrincipalUnknown, types.AuthorizationUnknownDom, "", "", "helper.unresolved", types.DiagnosticIdentity},
+		{runtimeFile, "RuntimeBase", "upgrade()", types.AuthorizationProtected, types.PrincipalExpectedExternal, types.AuthorizationDominates, types.MakeContractID(runtimeFile, "RuntimeProtected"), types.MakeFunctionID(runtimeFile, "RuntimeProtected", "_authorize()"), "virtual_override.guard.proven", ""},
+		{runtimeFile, "SuperProtected", "act()", types.AuthorizationProtected, types.PrincipalExpectedExternal, types.AuthorizationDominates, types.MakeContractID(runtimeFile, "SuperProtected"), types.MakeFunctionID(runtimeFile, "SuperBase", "act()"), "super.guard.proven", ""},
+		{runtimeFile, "AmbiguousBase", "execute()", types.AuthorizationUnknown, types.PrincipalUnknown, types.AuthorizationUnknownDom, "", "", "runtime.alternatives.ambiguous", types.DiagnosticIdentity},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.contract+"."+tc.selector, func(t *testing.T) {
+			id := types.MakeFunctionID(tc.file, tc.contract, tc.selector)
+			fact, ok := db.GetAuthorizationFactByID(id)
+			if !ok {
+				t.Fatalf("missing fact %q", id)
+			}
+			if fact.Verdict != tc.verdict || fact.PrincipalKind != tc.principal || fact.Dominance != tc.dominance {
+				t.Fatalf("fact classification = %+v", fact)
+			}
+			if tc.runtimeContract != "" && fact.RuntimeContractID != tc.runtimeContract {
+				t.Fatalf("runtime contract = %q, want %q", fact.RuntimeContractID, tc.runtimeContract)
+			}
+			if fact.SelectedFunctionID != tc.selectedFunc {
+				t.Fatalf("selected function = %q, want %q", fact.SelectedFunctionID, tc.selectedFunc)
+			}
+			if tc.reason != "" && !containsString(fact.Reasons, tc.reason) {
+				t.Fatalf("reasons = %v, want %q", fact.Reasons, tc.reason)
+			}
+			if tc.limitation != "" && !containsString(fact.Limitations, tc.limitation) {
+				t.Fatalf("limitations = %v, want %q", fact.Limitations, tc.limitation)
+			}
+			if len(fact.Evidence) > 0 && fact.Evidence[0].GuardRange.File == "" {
+				t.Fatalf("guard range lost exact file: %+v", fact.Evidence[0])
+			}
+		})
+	}
+
+	mutex, _ := db.GetAuthorizationFactByID(types.MakeFunctionID(lifecycleFile, "MutexOnly", "initialize(address)"))
+	if mutex == nil || !mutex.OneTimeMutex || mutex.FirstCallTakeover != "unknown" || mutex.AtomicInitialization != "after_guard" {
+		t.Fatalf("mutex lifecycle = %+v", mutex)
+	}
+	takeover, _ := db.GetAuthorizationFactByID(types.MakeFunctionID(lifecycleFile, "FirstCallTakeover", "initialize(address)"))
+	if takeover == nil || takeover.FirstCallTakeover != "possible" {
+		t.Fatalf("takeover lifecycle = %+v", takeover)
+	}
+	disabled, _ := db.GetAuthorizationFactByID(types.MakeFunctionID(lifecycleFile, "DisabledImplementation", "initialize(address)"))
+	if disabled == nil || !disabled.ConstructorDisable || disabled.FirstCallTakeover != "unknown" || disabled.ProxyLinkage != "unknown" {
+		t.Fatalf("disabled implementation lifecycle = %+v", disabled)
+	}
+	proxyNamed, _ := db.GetAuthorizationFactByID(types.MakeFunctionID(lifecycleFile, "ProxyNamedOnly", "initialize(address)"))
+	if proxyNamed == nil || proxyNamed.ProxyLinkage != "unknown" {
+		t.Fatalf("name-only proxy linkage must stay unknown: %+v", proxyNamed)
+	}
+}
+
+func TestAuthorizationFactsPreserveSourceCacheParity(t *testing.T) {
+	db := buildFixture(t, "../../test-data/security/authorization-runtime")
+	want, err := db.AuthorizationFactsSnapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	loaded := roundTripEffectsDatabase(t, db)
+	got, err := loaded.AuthorizationFactsSnapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantJSON, _ := json.Marshal(want)
+	gotJSON, _ := json.Marshal(got)
+	if string(gotJSON) != string(wantJSON) {
+		t.Fatalf("authorization facts changed across cache round trip\nsource=%s\ncache=%s", wantJSON, gotJSON)
 	}
 }

@@ -1212,6 +1212,27 @@ func (db *Database) QueryExternalBoundaries(q types.ExternalBoundaryQuery) (*typ
 Every returned boundary fact is a deep copy. Mutating a result cannot change the
 database or a later query. The fact model keeps unknown analysis states and
 limitations explicit; absence of proof is never exposed as a safe verdict.
+
+#### Exact authorization and initializer lifecycle queries
+
+Authorization facts are versioned independently at `AuthorizationFactsVersion`
+`1.0.0` and are queried by exact function/scope identity. They expose the
+runtime contract, selected C3 implementation, guard/principal evidence,
+dominance, and fail-closed verdict. Initializer facts additionally expose
+`InitializerEntry`, `OneTimeMutex`, `FirstCallTakeover`,
+`AtomicInitialization`, `ConstructorDisable`, and `ProxyLinkage`. Older caches
+without the capability return `ErrAuthorizationFactsUnavailable`; callers must
+rebuild from source rather than infer safety. Query limits are caller-supplied
+and capped at `MaxAuthorizationQueryLimit` (200), and returned facts are
+deterministic deep copies.
+
+```go
+page, err := db.QueryAuthorizationFacts(types.AuthorizationQuery{
+    ContractID: "/abs/src/Impl.sol#Impl",
+    PrincipalKind: types.PrincipalExpectedExternal,
+    Limit: 50,
+})
+```
 Function-hosted facts populate both `ScopeID` and `FunctionID`. Modifier-hosted
 facts use `ScopeKind: modifier` and leave `FunctionID` empty, while
 `ReachableFrom` records the exact entry functions that apply or reach the

@@ -680,6 +680,15 @@ identity rule as engine taint, including recorded call metadata, exact MRO
 resolution, local aliases, forwarded arguments, owner comparisons, and getter
 resource checks.
 
+The builder's versioned authorization facts apply the same evidence policy to
+modifier and helper parameters. Each exact callsite argument is classified as a
+caller identity, fixed state/literal principal, role membership expression, or
+unknown. A caller-selected parameter never upgrades to protected; unresolved or
+ambiguous bindings remain `unknown` with an identity limitation. Initializer
+lifecycle fields are exposed to WQL through function filters, including
+`first_call_takeover`, `atomic_initialization`, `constructor_disable`, and
+`proxy_linkage`.
+
 **`ComparesCallerIdentity(databases ...*Database)` – caller self-scoping.** A caller identity compared
 (in a guard) against *any* operand, including item-ownership: `ownerOf(tokenId)
 == msg.sender`. Also interprocedural (same descent + forwarding). This is *not*

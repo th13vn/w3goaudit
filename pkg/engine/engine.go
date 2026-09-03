@@ -237,9 +237,13 @@ func (e *Engine) authorizationFor(fn *types.Function, contract *types.Contract) 
 	if e == nil || e.db == nil || fn == nil {
 		return nil
 	}
-	owner := contract
-	if owner == nil && fn.SourceFile != "" {
-		owner = e.db.GetContractByID(types.MakeContractID(fn.SourceFile, fn.ContractName))
+	// Authorization facts are keyed by the exact declaration function ID. The
+	// contract argument is the runtime/main-contract context for inherited entry
+	// functions, so using it first would look for Derived.inheritedSelector even
+	// when the actual fact is Base.inheritedSelector.
+	owner := e.db.GetContractByID(types.MakeContractID(fn.SourceFile, fn.ContractName))
+	if owner == nil {
+		owner = contract
 	}
 	if owner == nil {
 		return nil
@@ -1381,9 +1385,8 @@ func (e *Engine) enrichFindingFromTrace(f *Finding, trace *matchTrace, verifierF
 		}
 		f.Reachability = &ReachabilityPath{Steps: steps}
 	}
-	// EntryPoint: until the semantic access-control analyzer ships, the entry
-	// point is just step[0] of the chain (the externally-callable function
-	// the walker started from). AuthVerdict left empty.
+	// EntryPoint is step[0] of the chain (the externally-callable function
+	// the walker started from), enriched with its exact authorization fact.
 	if f.Reachability != nil && len(f.Reachability.Steps) > 0 {
 		s := f.Reachability.Steps[0]
 		f.EntryPoint = &EntryRef{Contract: s.Contract, Function: s.Function, AuthVerdict: s.AuthVerdict, AuthReasons: append([]string(nil), s.AuthReasons...)}

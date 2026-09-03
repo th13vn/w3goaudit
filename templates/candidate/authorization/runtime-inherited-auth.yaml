@@ -6,7 +6,10 @@ meta:
   description: "Evidence-only candidate for virtual authorization dispatch."
   recommendation: "Review the selected runtime implementation and exact guard evidence."
 query:
+  select: function
   from: entry_function
   where:
-    - block: function
-    - preset: access_controlled
+    - attr:
+        auth_verdict: protected
+        auth_dominates: dominates
+        auth_reason: '(virtual_override|super)\.guard\.proven'

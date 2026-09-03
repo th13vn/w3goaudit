@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/th13vn/w3goaudit/pkg/types"
 	"gopkg.in/yaml.v3"
 )
 
@@ -739,6 +740,12 @@ func buildMatch(scope Scope, selectKind string, astAgg *Rule) (*Rule, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Function scopes are already rooted at the selected declaration. Requiring
+	// a descendant decl.function can never match because nested declarations are
+	// not part of the simplified function AST. Anchor the declaration itself.
+	if selectKind == types.KindDeclFunction && (scope == ScopeEntrypoint || scope == ScopeFunction) {
+		return inner, nil
+	}
 	return &Rule{Contains: inner}, nil
 }
 
@@ -928,6 +935,7 @@ func lowerWrappedAttributes(val yaml.Node) (*Rule, *Rule, error) {
 		return nil, nil, fmt.Errorf("where.attr: matcher map must not be empty")
 	}
 	ast := &Rule{}
+	context := &Rule{}
 	for key, value := range raw {
 		irKey, ok := attrNameToIR(key)
 		if !ok {
@@ -940,9 +948,22 @@ func lowerWrappedAttributes(val yaml.Node) (*Rule, *Rule, error) {
 		if ast.Attr == nil {
 			ast.Attr = make(map[string]interface{})
 		}
-		ast.Attr[irKey] = decoded
+		if isAuthorizationAttribute(irKey) {
+			if context.Attr == nil {
+				context.Attr = make(map[string]interface{})
+			}
+			context.Attr[irKey] = decoded
+		} else {
+			ast.Attr[irKey] = decoded
+		}
 	}
-	return ast, nil, nil
+	if len(ast.Attr) == 0 {
+		ast = nil
+	}
+	if len(context.Attr) == 0 {
+		context = nil
+	}
+	return ast, context, nil
 }
 
 func lowerNestedRuleMatcher(key string, val yaml.Node) (*Rule, *Rule, error) {
@@ -1113,7 +1134,11 @@ func lowerDynamicMatcher(key string, val yaml.Node) (*Rule, *Rule, error) {
 		if err := val.Decode(&decoded); err != nil {
 			return nil, nil, fmt.Errorf("where.%s: %w", key, err)
 		}
-		return &Rule{Attr: map[string]interface{}{irKey: decoded}}, nil, nil
+		rule := &Rule{Attr: map[string]interface{}{irKey: decoded}}
+		if isAuthorizationAttribute(irKey) {
+			return nil, rule, nil
+		}
+		return rule, nil, nil
 	}
 	return nil, nil, fmt.Errorf("where: unknown matcher key %q", key)
 }

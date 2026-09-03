@@ -334,6 +334,17 @@ its body. A modifier name by itself is descriptive only and does not
 automatically imply access control; access-control presets require their own
 authorization proof.
 
+Authorization and initializer lifecycle facts can be used as function-level
+filters with `attr:`. Supported keys are `auth_verdict`, `auth_principal`,
+`auth_expected_principal`, `auth_expected_principal_ref`, `auth_dominates`,
+`runtime_contract`, `auth_reason`, `initializer_entry`,
+`one_time_mutex`, `first_call_takeover`, `atomic_initialization`,
+`constructor_disable`, and `proxy_linkage`. Boolean keys require `true` or
+`false`; string values are anchored regular expressions.
+`auth_expected_principal` matches the exact normalized guard operand text, while
+`auth_expected_principal_ref` matches one exact referenced declaration ID.
+Unknown or unavailable facts do not satisfy positive filters.
+
 ### Logic
 
 | Matcher | Meaning |
@@ -493,6 +504,24 @@ Resolved by `attrNameToIR` (`wql_catalog.go`). `name`, `visibility`,
 | `type_kind` | anchored regex on the type kind | `type_kind` |
 | `literal_kind` | `number`/`string`/`bool`/`hex` | `subtype` |
 | `is_state_var` | bool | `is_state_var` |
+
+**Authorization and lifecycle**
+
+| WQL attribute | Meaning | Evaluator IR key |
+|---|---|---|
+| `auth_verdict` | `protected`, `self_scoped`, `unprotected`, or `unknown` | `auth_verdict` |
+| `auth_principal` | Structural principal kind | `auth_principal` |
+| `auth_expected_principal` | Exact normalized guard operand expression | `auth_expected_principal` |
+| `auth_expected_principal_ref` | Exact referenced declaration ID | `auth_expected_principal_ref` |
+| `auth_dominates` | Guard dominance disposition | `auth_dominates` |
+| `runtime_contract` | Exact runtime contract ID selected by C3 dispatch | `runtime_contract` |
+| `auth_reason` | Anchored regex over an exact authorization reason | `auth_reason` |
+| `initializer_entry` | Boolean initializer entrypoint evidence | `initializer_entry` |
+| `one_time_mutex` | Boolean one-time initialization mutex evidence | `one_time_mutex` |
+| `first_call_takeover` | `possible` or `unknown` lifecycle state | `first_call_takeover` |
+| `atomic_initialization` | `before_guard`, `after_guard`, or `unknown` | `atomic_initialization` |
+| `constructor_disable` | Boolean constructor disable evidence | `constructor_disable` |
+| `proxy_linkage` | Conservative deployment linkage state | `proxy_linkage` |
 
 **Advanced**
 

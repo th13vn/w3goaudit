@@ -809,7 +809,7 @@ func presentRuleFields(r *Rule) []ruleField {
 	add(r.Left != nil, "left", classAST)
 	add(r.Right != nil, "right", classAST)
 	add(r.Receiver != nil, "receiver", classAST)
-	add(len(r.Attr) > 0, "attr", classAST)
+	add(len(r.Attr) > 0, "attr", attributeRuleClass(r.Attr))
 	add(r.Operator != "", "operator", classAST)
 	add(r.IsStateVar != nil, "is_state_var", classAST)
 	add(r.UncheckedVar, "unchecked_var", classAST)
@@ -828,6 +828,18 @@ func presentRuleFields(r *Rule) []ruleField {
 	add(r.Visibility != "", "visibility", classDual)
 	add(r.Mutability != "", "mutability", classDual)
 	return out
+}
+
+func attributeRuleClass(attrs map[string]interface{}) fieldClass {
+	if len(attrs) == 0 {
+		return classAST
+	}
+	for key := range attrs {
+		if !isAuthorizationAttribute(key) {
+			return classAST
+		}
+	}
+	return classDual
 }
 
 // checkRule recursively walks a rule tree. inMatch=true means we're inside
