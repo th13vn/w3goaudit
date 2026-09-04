@@ -57,3 +57,17 @@ func TestSemanticWrapperInitializerAndRuntimeLower(t *testing.T) {
 		}
 	}
 }
+
+func TestSemanticWrapperDoesNotAcceptASTPlacement(t *testing.T) {
+	raw := `meta: {id: FRIENDLY-PLACEMENT, severity: HIGH}
+query:
+  select: external_call
+  from: entry_function
+  where:
+    - has:
+        authorization:
+          protected: true`
+	if _, err := ParseTemplate(raw); err == nil {
+		t.Fatal("authorization wrapper inside has unexpectedly loaded")
+	}
+}

@@ -975,7 +975,27 @@ func lowerWrappedAttributes(val yaml.Node) (*Rule, *Rule, error) {
 	return ast, context, nil
 }
 
+func containsSemanticWrapper(node yaml.Node) bool {
+	if node.Kind == yaml.MappingNode {
+		for i := 0; i+1 < len(node.Content); i += 2 {
+			switch node.Content[i].Value {
+			case "authorization", "initializer", "runtime":
+				return true
+			}
+		}
+	}
+	for _, child := range node.Content {
+		if containsSemanticWrapper(*child) {
+			return true
+		}
+	}
+	return false
+}
+
 func lowerNestedRuleMatcher(key string, val yaml.Node) (*Rule, *Rule, error) {
+	if key != "guarded_by" && containsSemanticWrapper(val) {
+		return nil, nil, fmt.Errorf("where.%s: semantic wrappers are context-level; move authorization, initializer, or runtime outside AST traversal", key)
+	}
 	sub, err := lowerToRule(val)
 	if err != nil {
 		return nil, nil, err

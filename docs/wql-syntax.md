@@ -345,6 +345,39 @@ filters with `attr:`. Supported keys are `auth_verdict`, `auth_principal`,
 `auth_expected_principal_ref` matches one exact referenced declaration ID.
 Unknown or unavailable facts do not satisfy positive filters.
 
+### Friendly semantic wrappers
+
+For common authorization and lifecycle rules, prefer the readable wrappers
+below instead of raw `auth_*` attributes. A wrapper is a positive proof: the
+compiler implicitly requires full-path coverage before the sensitive operation.
+Authors do not write `dominates`; the expert-only `attr.auth_dominates` field
+remains available when inspecting partial or unknown evidence.
+
+```yaml
+where:
+  - not:
+      authorization:
+        expected_principal: [pool, pair]
+  - initializer:
+      entry: true
+      takeover: [possible, unknown]
+  - runtime:
+      authorization: protected
+      dispatch: [virtual, super]
+```
+
+Supported wrappers are `authorization`, `initializer`, and `runtime`. Fields
+inside one wrapper are ANDed; list values are OR alternatives. Use `not:` for
+negative conditions. Unknown, unresolved, ambiguous, partial, and after-site
+facts fail closed for positive wrappers. The raw form remains useful for exact
+declaration references, unusual protocol rules, and debugging:
+
+```yaml
+attr:
+  auth_verdict: protected
+  auth_expected_principal_ref: '.*#PoolHook\.pool$'
+```
+
 ### Logic
 
 | Matcher | Meaning |

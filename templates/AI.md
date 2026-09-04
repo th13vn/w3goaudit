@@ -168,6 +168,19 @@ The staged authorization/runtime-inheritance candidates live under `candidate/au
 
 ## Template Structure
 
+## Friendly semantic authoring
+
+Candidate rules should prefer the closed wrappers `authorization`,
+`initializer`, and `runtime` when expressing common security intent. For
+example, `authorization: {expected_principal: [pool, pair]}` means the caller
+must be proven to match one of those expected principals on every path to the
+sensitive operation. Full-path coverage is implicit, so do not add a
+`dominates` field. Use `not:` for missing or incorrect proof.
+
+The lower-level `attr` form remains the expert and Agent API for exact evidence
+such as declaration RefIDs, `auth_reason`, and `auth_dominates`. Unknown or
+unresolved facts never satisfy a positive wrapper.
+
 ```yaml
 meta:
   id: STRING
