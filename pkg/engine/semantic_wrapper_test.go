@@ -18,7 +18,7 @@ func TestSemanticWrapperAuthorizationLowersImplicitAllPathProof(t *testing.T) {
 	want := map[string]interface{}{
 		"auth_verdict":            "protected",
 		"auth_principal":          "expected_external",
-		"auth_expected_principal": "^(?:pool|pair)$",
+		"auth_expected_principal": "(?i)^(?:pool|pair)$",
 		"auth_dominates":          "dominates",
 	}
 	for key, value := range want {

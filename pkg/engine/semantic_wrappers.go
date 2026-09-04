@@ -48,7 +48,7 @@ func lowerAuthorizationWrapper(val yaml.Node) (*Rule, error) {
 			}
 			rule.Attr["auth_verdict"] = "protected"
 			rule.Attr["auth_principal"] = "expected_external"
-			rule.Attr["auth_expected_principal"] = "^(?:" + strings.Join(parts, "|") + ")$"
+			rule.Attr["auth_expected_principal"] = "(?i)^(?:" + strings.Join(parts, "|") + ")$"
 			rule.Attr["auth_dominates"] = "dominates"
 		case "dominates":
 			return nil, fmt.Errorf("where.authorization.dominates is not accepted: all-path coverage is implicit; remove this field")
