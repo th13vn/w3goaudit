@@ -11,8 +11,5 @@ query:
   where:
     - func_name: '(?i)^(uniswapV2Call|uniswapV3SwapCallback|uniswapV3FlashCallback|uniswapV3MintCallback)$'
     - not:
-        attr:
-          auth_verdict: protected
-          auth_principal: expected_external
-          auth_expected_principal: '(?i)^(pool|pair)$'
-          auth_dominates: dominates
+        authorization:
+          expected_principal: [pool, pair]

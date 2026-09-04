@@ -9,9 +9,9 @@ query:
   select: function
   from: entry_function
   where:
-    - attr:
-        initializer_entry: true
-        first_call_takeover: '(possible|unknown)'
+    - initializer:
+        entry: true
+        takeover: [possible, unknown]
     - not:
-        attr:
-          auth_verdict: protected
+        authorization:
+          protected: true

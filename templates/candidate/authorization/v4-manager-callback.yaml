@@ -11,8 +11,5 @@ query:
   where:
     - func_name: '(?i)^(before|after)(Initialize|AddLiquidity|RemoveLiquidity|Swap|Donate)$'
     - not:
-        attr:
-          auth_verdict: protected
-          auth_principal: expected_external
-          auth_expected_principal: '(?i)^manager$'
-          auth_dominates: dominates
+        authorization:
+          expected_principal: manager

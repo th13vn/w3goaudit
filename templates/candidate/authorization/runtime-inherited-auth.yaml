@@ -9,7 +9,6 @@ query:
   select: function
   from: entry_function
   where:
-    - attr:
-        auth_verdict: protected
-        auth_dominates: dominates
-        auth_reason: '(virtual_override|super)\.guard\.proven'
+    - runtime:
+        authorization: protected
+        dispatch: [virtual, super]
