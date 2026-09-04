@@ -1,7 +1,7 @@
 # Semantic wrapper template authoring
 
-Status: proposed design for review
-Date: 2026-09-03
+Status: approved design
+Date: 2026-09-04
 Scope: W3GoAudit WQL authoring UX
 
 ## 1. Problem
@@ -105,7 +105,6 @@ It cannot appear inside AST traversal matchers such as `has`, `in`, `left`,
 ```yaml
 authorization:
   expected_principal: [pool, pair]
-  dominates: true
 ```
 
 The fields below are the closed version-1 vocabulary. They are alternatives
@@ -125,12 +124,16 @@ Supported fields in version 1:
 | `self_scoped` | boolean | Require caller self-scoping, not privileged access | `auth_verdict: self_scoped` and `auth_principal: caller_self_scope` |
 | `expected_principal` | string or list of strings | Require an external expected principal expression | `auth_verdict: protected`, `auth_principal: expected_external`, anchored `auth_expected_principal` |
 | `role` | boolean | Require proven role membership | `auth_verdict: protected`, `auth_principal: role` |
-| `dominates` | boolean | Require the guard to dominate the sensitive operation | `auth_dominates: dominates` when true |
-
 `protected`, `self_scoped`, and `role` only accept `true` in version 1. A
 negative condition is expressed with WQL `not`, not by writing `false` inside
 the wrapper. This keeps the meaning of a wrapper as a positive proof and
 prevents accidental matches against `unknown`.
+
+Every positive `authorization` wrapper implicitly requires full-path coverage.
+The compiler always adds `auth_dominates: dominates`; authors do not write a
+control-flow term for the normal secure case. Raw `attr.auth_dominates` remains
+available to expert templates that intentionally inspect `partial`,
+`after_site`, or `unknown` evidence.
 
 Examples:
 
@@ -146,12 +149,10 @@ Examples:
 # Caller must be checked against pool or pair, before the operation
 - authorization:
     expected_principal: [pool, pair]
-    dominates: true
 
 # A role membership guard that applies before the operation
 - authorization:
     role: true
-    dominates: true
 ```
 
 ### 4.2 Initializer wrapper
@@ -228,9 +229,8 @@ Wrappers are positive proofs. They follow the existing WQL polarity rules:
 ```yaml
 # Report if the callback proof is absent, wrong, partial, or unknown
 - not:
-    authorization:
-      expected_principal: [pool, pair]
-      dominates: true
+  authorization:
+    expected_principal: [pool, pair]
 ```
 
 The compiler lowers this to one context `Rule.Not` whose attributes are
@@ -298,7 +298,6 @@ Example explanation:
 ```text
 Friendly predicate:
   authorization.expected_principal = [pool, pair]
-  authorization.dominates = true
 
 Compiled evidence:
   auth_verdict = protected
@@ -338,7 +337,6 @@ query:
     - not:
         authorization:
           expected_principal: [pool, pair]
-          dominates: true
 ```
 
 ### V4 manager callback
@@ -352,7 +350,6 @@ query:
     - not:
         authorization:
           expected_principal: manager
-          dominates: true
 ```
 
 ### Initializer takeover

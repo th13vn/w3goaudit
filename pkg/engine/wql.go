@@ -856,6 +856,15 @@ func lowerKeyValue(key string, val yaml.Node) (*Rule, *Rule, error) {
 		return lowerStringMatcher(key, val)
 	case "attr":
 		return lowerWrappedAttributes(val)
+	case "authorization":
+		r, err := lowerAuthorizationWrapper(val)
+		return nil, r, err
+	case "initializer":
+		r, err := lowerInitializerWrapper(val)
+		return nil, r, err
+	case "runtime":
+		r, err := lowerRuntimeWrapper(val)
+		return nil, r, err
 	case "left", "right", "statement_has", "has", "in", "guarded_by":
 		return lowerNestedRuleMatcher(key, val)
 	case "receiver":
