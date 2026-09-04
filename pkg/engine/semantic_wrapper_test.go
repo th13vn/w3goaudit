@@ -71,3 +71,46 @@ query:
 		t.Fatal("authorization wrapper inside has unexpectedly loaded")
 	}
 }
+
+func TestSemanticWrapperAuthorizationRejectsConflictingProofKinds(t *testing.T) {
+	raw := `meta: {id: FRIENDLY-CONFLICT, severity: HIGH}
+query:
+  select: function
+  from: entry_function
+  where:
+    - authorization:
+        protected: true
+        self_scoped: true`
+	_, err := ParseTemplate(raw)
+	if err == nil || !strings.Contains(err.Error(), "choose exactly one") {
+		t.Fatalf("err=%v, want conflicting proof diagnostic", err)
+	}
+}
+
+func TestSemanticWrapperAuthorizationRejectsNonStringPrincipal(t *testing.T) {
+	raw := `meta: {id: FRIENDLY-TYPE, severity: HIGH}
+query:
+  select: function
+  from: entry_function
+  where:
+    - authorization:
+        expected_principal: 123`
+	_, err := ParseTemplate(raw)
+	if err == nil || !strings.Contains(err.Error(), "string or a non-empty list of strings") {
+		t.Fatalf("err=%v, want string diagnostic", err)
+	}
+}
+
+func TestSemanticWrapperDoesNotAcceptGuardedByPlacement(t *testing.T) {
+	raw := `meta: {id: FRIENDLY-GUARDED-BY, severity: HIGH}
+query:
+  select: function
+  from: entry_function
+  where:
+    - guarded_by:
+        authorization:
+          protected: true`
+	if _, err := ParseTemplate(raw); err == nil {
+		t.Fatal("authorization wrapper inside guarded_by unexpectedly loaded")
+	}
+}

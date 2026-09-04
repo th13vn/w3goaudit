@@ -993,7 +993,7 @@ func containsSemanticWrapper(node yaml.Node) bool {
 }
 
 func lowerNestedRuleMatcher(key string, val yaml.Node) (*Rule, *Rule, error) {
-	if key != "guarded_by" && containsSemanticWrapper(val) {
+	if containsSemanticWrapper(val) {
 		return nil, nil, fmt.Errorf("where.%s: semantic wrappers are context-level; move authorization, initializer, or runtime outside AST traversal", key)
 	}
 	sub, err := lowerToRule(val)

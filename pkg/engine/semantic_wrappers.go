@@ -14,6 +14,15 @@ func lowerAuthorizationWrapper(val yaml.Node) (*Rule, error) {
 	if err != nil {
 		return nil, err
 	}
+	proofKinds := 0
+	for _, key := range []string{"protected", "self_scoped", "role", "expected_principal"} {
+		if _, ok := fields[key]; ok {
+			proofKinds++
+		}
+	}
+	if proofKinds > 1 {
+		return nil, fmt.Errorf("where.authorization: choose exactly one of protected, self_scoped, role, or expected_principal")
+	}
 	rule := &Rule{Attr: make(map[string]interface{})}
 	for key, node := range fields {
 		switch key {
@@ -173,6 +182,9 @@ func requireWrapperTrue(node yaml.Node, path string) error {
 
 func wrapperStringList(node yaml.Node, path string) ([]string, error) {
 	if node.Kind == yaml.ScalarNode {
+		if node.Tag != "!!str" {
+			return nil, fmt.Errorf("where.%s must be a string or a non-empty list of strings", path)
+		}
 		var v string
 		if err := node.Decode(&v); err != nil || strings.TrimSpace(v) == "" {
 			return nil, fmt.Errorf("where.%s must be a string or a non-empty list of strings", path)
