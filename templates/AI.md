@@ -164,22 +164,24 @@ not part of that category; access control is the safe property.
 
 ## Candidate Authorization Pack
 
-The staged authorization/runtime-inheritance candidates live under `candidate/authorization/`. They are not embedded in the official pack and must pass vulnerable, safe, wrong-principal, unresolved, source/cache, and deterministic-output gates before promotion. The initializer candidate consumes `initializer_entry` and `first_call_takeover` lifecycle facts, so mutex-only and constructor-disable cases remain explicit review candidates when proxy deployment linkage is unknown.
+The staged authorization candidates live under `candidate/authorization/`. They are not embedded in the official pack and must pass vulnerable, safe, wrong-principal, unresolved, source/cache, and deterministic-output gates before promotion. The runtime candidate was removed because inheritance and virtual dispatch are engine behavior, not WQL syntax. The initializer candidate reports only deterministic first-call takeover cases.
 
 ## Template Structure
 
-## Friendly semantic authoring
+## Semantic preset authoring
 
-Candidate rules should prefer the closed wrappers `authorization`,
-`initializer`, and `runtime` when expressing common security intent. For
-example, `authorization: {expected_principal: [pool, pair]}` means the caller
-must be proven to match one of those expected principals on every path to the
-sensitive operation. Full-path coverage is implicit, so do not add a
-`dominates` field. Use `not:` for missing or incorrect proof.
+Candidate rules use one coherent WQL surface. Parameterized presets express
+security intent directly: `preset.authorization` accepts `type: protected` or
+`type: self_sender`, and protected checks may list one or many principal
+alternatives (`owner`, `pair`, `pool`, and similar protocol vocabulary).
+Principal lists are normalized by trim, deduplication, and sorting. The explicit
+`principal: {regex: ...}` option is available for unusual names. Initializer
+takeover is selected with ordinary `func_name` plus
+`preset: {initializer: {takeover: possible}}`.
 
-The lower-level `attr` form remains the expert and Agent API for exact evidence
-such as declaration RefIDs, `auth_reason`, and `auth_dominates`. Unknown or
-unresolved facts never satisfy a positive wrapper.
+There is no `runtime:` syntax, no runtime candidate, and no public raw semantic
+attribute layer. Internal fact fields remain available in reports and SDK
+artifacts, while incomplete evidence never satisfies a positive preset.
 
 ```yaml
 meta:

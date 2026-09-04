@@ -9,17 +9,17 @@ import (
 	"github.com/th13vn/w3goaudit/pkg/types"
 )
 
-func TestAuthorizationAttributesWorkAsFunctionFilters(t *testing.T) {
+func TestAuthorizationPresetWorksAsFunctionFilter(t *testing.T) {
 	tmpl, err := ParseTemplate(`meta: {id: AUTH-FILTER, severity: HIGH}
 query:
   select: function
   from: entry_function
   where:
     - func_name: ^receiveResult$
-    - attr:
-        auth_verdict: protected
-        auth_principal: expected_external
-        auth_dominates: dominates`)
+    - preset:
+        authorization:
+          type: protected
+          principal: peer`)
 	if err != nil {
 		t.Fatalf("parse semantic filter: %v", err)
 	}
@@ -30,13 +30,13 @@ query:
 	}
 }
 
-func TestAuthorizationAttributesFailClosedForUnknownAndLegacyFacts(t *testing.T) {
+func TestAuthorizationPresetFailsClosedForUnknownAndLegacyFacts(t *testing.T) {
 	tmpl, err := ParseTemplate(`meta: {id: AUTH-FILTER, severity: HIGH}
 query:
   select: function
   from: entry_function
   where:
-    - attr: {auth_verdict: protected}`)
+    - preset: {authorization: {type: protected}}`)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -50,13 +50,13 @@ query:
 	}
 }
 
-func TestAuthorizationAttributesPreserveSourceCacheExecutionParity(t *testing.T) {
+func TestAuthorizationPresetPreservesSourceCacheExecutionParity(t *testing.T) {
 	tmpl, err := ParseTemplate(`meta: {id: AUTH-FILTER, severity: HIGH}
 query:
   select: function
   from: entry_function
   where:
-    - attr: {auth_principal: expected_external}`)
+    - preset: {authorization: {type: protected, principal: peer}}`)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -80,15 +80,16 @@ query:
 	}
 }
 
-func TestAuthorizationExpectedPrincipalAttributesMatchExactEvidence(t *testing.T) {
+func TestAuthorizationPresetMatchesExactPrincipalEvidence(t *testing.T) {
 	tmpl, err := ParseTemplate(`meta: {id: AUTH-EXPECTED, severity: HIGH}
 query:
   select: function
   from: entry_function
   where:
-    - attr:
-        auth_expected_principal: '^pool$'
-        auth_expected_principal_ref: '.*#ExternalPrincipal\.pool$'`)
+    - preset:
+        authorization:
+          type: protected
+          principal: pool`)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -99,23 +100,18 @@ query:
 	}
 }
 
-func TestInitializerLifecycleAttributesWorkAsFunctionFilters(t *testing.T) {
+func TestInitializerPresetWorksAsFunctionFilter(t *testing.T) {
 	tmpl, err := ParseTemplate(`meta: {id: LIFECYCLE-FILTER, severity: HIGH}
 query:
   select: function
   from: entry_function
   where:
-    - attr:
-        initializer_entry: true
-        one_time_mutex: true
-        first_call_takeover: unknown
-        atomic_initialization: after_guard
-        constructor_disable: false
-        proxy_linkage: unknown`)
+    - func_name: '^initialize$'
+    - preset: {initializer: {takeover: possible}}`)
 	if err != nil {
 		t.Fatal(err)
 	}
-	db := buildDBFromSource(t, `pragma solidity ^0.8.20; contract C { bool initialized; address owner; function initialize(address who) external { require(!initialized); initialized = true; owner = who; } }`).GetDatabase()
+	db := buildDBFromSource(t, `pragma solidity ^0.8.20; contract C { address owner; function initialize(address who) external { owner = who; } }`).GetDatabase()
 	findings := New(db).Execute(tmpl)
 	if len(findings) != 1 || findings[0].Location.Function != "initialize" {
 		t.Fatalf("lifecycle filter findings = %+v", findings)

@@ -334,49 +334,57 @@ its body. A modifier name by itself is descriptive only and does not
 automatically imply access control; access-control presets require their own
 authorization proof.
 
-Authorization and initializer lifecycle facts can be used as function-level
-filters with `attr:`. Supported keys are `auth_verdict`, `auth_principal`,
-`auth_expected_principal`, `auth_expected_principal_ref`, `auth_dominates`,
-`runtime_contract`, `auth_reason`, `initializer_entry`,
-`one_time_mutex`, `first_call_takeover`, `atomic_initialization`,
-`constructor_disable`, and `proxy_linkage`. Boolean keys require `true` or
-`false`; string values are anchored regular expressions.
-`auth_expected_principal` matches the exact normalized guard operand text, while
-`auth_expected_principal_ref` matches one exact referenced declaration ID.
-Unknown or unavailable facts do not satisfy positive filters.
+### Semantic presets
 
-### Friendly semantic wrappers
+Semantic checks use the same `preset:` matcher as the built-in scalar presets.
+Authorization and initializer presets are parameterized and are evaluated
+directly by the engine. They do not expose internal fact attributes.
 
-For common authorization and lifecycle rules, prefer the readable wrappers
-below instead of raw `auth_*` attributes. A wrapper is a positive proof: the
-compiler implicitly requires full-path coverage before the sensitive operation.
-Authors do not write `dominates`; the expert-only `attr.auth_dominates` field
-remains available when inspecting partial or unknown evidence.
+Use `protected` for a proven dominating guard. The optional `principal` is one
+literal or a list of OR alternatives. Literals are trimmed, deduplicated,
+sorted, and matched as complete values. Use the explicit `regex` option only
+when a literal is not sufficient. Use `self_sender` for a guard that binds the
+caller to the caller-selected resource.
 
 ```yaml
 where:
   - not:
-      authorization:
-        expected_principal: [pool, pair]
-  - initializer:
-      entry: true
-      takeover: [possible, unknown]
-  - runtime:
-      authorization: protected
-      dispatch: [virtual, super]
+      preset:
+        authorization:
+          type: protected
+          principal: [pool, pair, owner]
 ```
-
-Supported wrappers are `authorization`, `initializer`, and `runtime`. Fields
-inside one wrapper are ANDed; list values are OR alternatives. Use `not:` for
-negative conditions. Unknown, unresolved, ambiguous, partial, and after-site
-facts fail closed for positive wrappers. The raw form remains useful for exact
-declaration references, unusual protocol rules, and debugging:
 
 ```yaml
-attr:
-  auth_verdict: protected
-  auth_expected_principal_ref: '.*#PoolHook\.pool$'
+where:
+  - preset: {authorization: {type: self_sender}}
 ```
+
+```yaml
+where:
+  - preset:
+      authorization:
+        type: protected
+        principal: {regex: '(?i)^(pool|pair)$'}
+```
+
+Initializer takeover is intentionally narrow. Select entry functions with the
+ordinary `func_name` matcher, then require the initializer preset:
+
+```yaml
+where:
+  - func_name: '(?i)^(initialize|initialise|init|__init|setup)$'
+  - preset:
+      initializer:
+        takeover: possible
+```
+
+Inheritance, virtual dispatch, and `super` resolution happen automatically in
+the engine. There is no `runtime:` WQL syntax and no runtime candidate rule.
+Internal authorization and lifecycle facts may still appear in JSON reports for
+diagnostics, but they are not public matcher attributes. The only public
+initializer state is `takeover: possible`; incomplete evidence does not match a
+positive preset. Use `not:` for negative conditions.
 
 ### Logic
 
@@ -538,23 +546,22 @@ Resolved by `attrNameToIR` (`wql_catalog.go`). `name`, `visibility`,
 | `literal_kind` | `number`/`string`/`bool`/`hex` | `subtype` |
 | `is_state_var` | bool | `is_state_var` |
 
-**Authorization and lifecycle**
+**Semantic presets**
 
-| WQL attribute | Meaning | Evaluator IR key |
+Parameterized presets are represented directly in the evaluator IR. Internal
+authorization and lifecycle fact fields are report/SDK data, not WQL attribute
+names. The public forms are:
+
+| Preset | Options | Meaning |
 |---|---|---|
-| `auth_verdict` | `protected`, `self_scoped`, `unprotected`, or `unknown` | `auth_verdict` |
-| `auth_principal` | Structural principal kind | `auth_principal` |
-| `auth_expected_principal` | Exact normalized guard operand expression | `auth_expected_principal` |
-| `auth_expected_principal_ref` | Exact referenced declaration ID | `auth_expected_principal_ref` |
-| `auth_dominates` | Guard dominance disposition | `auth_dominates` |
-| `runtime_contract` | Exact runtime contract ID selected by C3 dispatch | `runtime_contract` |
-| `auth_reason` | Anchored regex over an exact authorization reason | `auth_reason` |
-| `initializer_entry` | Boolean initializer entrypoint evidence | `initializer_entry` |
-| `one_time_mutex` | Boolean one-time initialization mutex evidence | `one_time_mutex` |
-| `first_call_takeover` | `possible` or `unknown` lifecycle state | `first_call_takeover` |
-| `atomic_initialization` | `before_guard`, `after_guard`, or `unknown` | `atomic_initialization` |
-| `constructor_disable` | Boolean constructor disable evidence | `constructor_disable` |
-| `proxy_linkage` | Conservative deployment linkage state | `proxy_linkage` |
+| `authorization` | `type: protected`, optional `principal` | Proven dominating authorization for a fixed principal or principal kind |
+| `authorization` | `type: self_sender` | Proven caller self-scoping guard |
+| `initializer` | `takeover: possible` | Initializer entrypoint can be taken over by the first caller |
+
+Principal literals are complete-value matches. A mapping such as
+`principal: {regex: ...}` is the explicit regex escape hatch. Unknown, partial,
+after-site, unresolved, and ambiguous evidence never satisfies a positive
+preset.
 
 **Advanced**
 

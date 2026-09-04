@@ -1070,3 +1070,10 @@ deduplicated context-specific `super` edges after the normal build.
 ### Dependencies
 
 - Updated `github.com/th13vn/solast-go` from `v0.1.4` to `v0.1.6`.
+# Unreleased
+
+- Simplify semantic WQL authoring with direct parameterized authorization and
+  initializer presets. Remove public runtime syntax and the runtime candidate;
+  inheritance and virtual dispatch remain automatic engine behavior.
+- Normalize authorization principal literals by trimming, deduplicating, sorting,
+  and validating explicit regex options.

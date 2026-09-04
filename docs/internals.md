@@ -585,7 +585,8 @@ no deeper primary exists. Placement validation also recurses through
   non-mutating unary wrappers, returns, and simple assignments are allowlisted
   only when every sibling is structurally effect-free. Call ancestors,
   assignment-expression siblings, creation, increment/decrement, delete,
-  unknown wrappers, unstable operands, and signed subtraction fail closed.
+  unsupported semantic predicates, unstable operands, and signed subtraction
+  fail closed.
 
 ### 6.5 Taint matching
 
@@ -683,11 +684,12 @@ resource checks.
 The builder's versioned authorization facts apply the same evidence policy to
 modifier and helper parameters. Each exact callsite argument is classified as a
 caller identity, fixed state/literal principal, role membership expression, or
-unknown. A caller-selected parameter never upgrades to protected; unresolved or
-ambiguous bindings remain `unknown` with an identity limitation. Initializer
-lifecycle fields are exposed to WQL through function filters, including
-`first_call_takeover`, `atomic_initialization`, `constructor_disable`, and
-`proxy_linkage`.
+incomplete. A caller-selected parameter never upgrades to protected; unresolved
+or ambiguous bindings remain incomplete with an identity limitation. Initializer
+lifecycle fields remain internal evidence for reports and SDK consumers. Public
+templates use the parameterized `preset.authorization` and
+`preset.initializer` predicates instead; runtime dispatch is automatic and has
+no WQL form.
 
 **`ComparesCallerIdentity(databases ...*Database)` – caller self-scoping.** A caller identity compared
 (in a guard) against *any* operand, including item-ownership: `ownerOf(tokenId)

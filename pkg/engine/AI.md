@@ -536,7 +536,7 @@ query:
   enclosing sequential statement. It allowlists pure expression wrappers and
   simple return/assignment statements only when every sibling is structurally
   effect-free; call ancestors, assignment-expression siblings, creation,
-  increment/decrement, delete, unknown wrappers, reversed/unrelated
+  increment/decrement, delete, unsupported semantic predicates, reversed/unrelated
   inequalities, non-terminating branches, unstable operands, and signed
   subtraction fail closed. Implemented by `operandsGuardedBefore` and its
   expression/topology helpers in verify.go.
@@ -1042,4 +1042,12 @@ Template → validateRulePlacement() → normalizeQueryBlock() → Engine → Sc
 
 ### Authorization WQL bridge
 
-Authorization attributes (`auth_verdict`, `auth_principal`, `auth_expected_principal`, `auth_expected_principal_ref`, `auth_dominates`, `runtime_contract`, `auth_reason`) are resolved from exact semantic facts when present. `auth_expected_principal` is the exact normalized guard operand expression and `auth_expected_principal_ref` matches exact declaration RefIDs. Lifecycle attributes (`initializer_entry`, `one_time_mutex`, `first_call_takeover`, `atomic_initialization`, `constructor_disable`, and `proxy_linkage`) expose initializer/proxy evidence through the same function-level filter path. Boolean lifecycle fields require a YAML boolean; string lifecycle states use anchored regular expressions. Missing or unknown facts fail closed.
+Parameterized `preset.authorization` and `preset.initializer` predicates are
+resolved from exact semantic facts. `protected` requires a proven dominating
+guard and may constrain one or many normalized principal literals, or an
+explicit principal regex. `self_sender` requires proven caller self-scoping.
+`initializer.takeover: possible` requires a deterministic first-call takeover
+fact and is normally paired with `func_name`. Inheritance and virtual dispatch
+are handled automatically by the engine. Internal authorization/lifecycle fact
+fields remain report and SDK data, not public WQL attributes. Missing, partial,
+after-site, unresolved, and ambiguous evidence fail closed.
