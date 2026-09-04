@@ -1038,6 +1038,9 @@ func lowerListMatcher(key string, val yaml.Node) (*Rule, *Rule, error) {
 	if len(val.Content) == 0 {
 		return nil, nil, fmt.Errorf("where.%s: matcher list must not be empty", key)
 	}
+	if key == "sequence" && containsSemanticWrapper(val) {
+		return nil, nil, fmt.Errorf("where.sequence: semantic wrappers are context-level; move authorization, initializer, or runtime outside sequence")
+	}
 	branches, err := lowerRuleList(val)
 	if err != nil {
 		return nil, nil, err
@@ -1133,6 +1136,9 @@ func lowerPresetMatcher(val yaml.Node) (*Rule, *Rule, error) {
 
 func lowerDynamicMatcher(key string, val yaml.Node) (*Rule, *Rule, error) {
 	if strings.HasPrefix(key, argMatcherPrefix) {
+		if containsSemanticWrapper(val) {
+			return nil, nil, fmt.Errorf("where.%s: semantic wrappers are context-level; move authorization, initializer, or runtime outside call arguments", key)
+		}
 		rest := strings.TrimPrefix(key, argMatcherPrefix)
 		sub, err := lowerToRule(val)
 		if err != nil {
