@@ -865,12 +865,13 @@ func lowerKeyValue(key string, val yaml.Node) (*Rule, *Rule, error) {
 	case "left", "right", "statement_has", "has", "in", "guarded_by":
 		return lowerNestedRuleMatcher(key, val)
 	case "receiver":
-		// `receiver: {…}` constrains the call's DIRECT receiver; `receiver: true`
-		// remains the attribute marker carried by a receiver node itself.
-		if val.Kind == yaml.MappingNode {
-			return lowerNestedRuleMatcher(key, val)
+		// A receiver matcher always describes the call's direct receiver.
+		// Presence is expressed by the nested matcher itself; scalar boolean
+		// markers are ambiguous and are no longer part of public WQL.
+		if val.Kind != yaml.MappingNode {
+			return nil, nil, fmt.Errorf("where.receiver: use a nested matcher such as receiver: {tainted: parameter}")
 		}
-		return lowerDynamicMatcher(key, val)
+		return lowerNestedRuleMatcher(key, val)
 	case "unchecked_var":
 		return lowerUncheckedVar(val)
 	case "sequence", "any", "and":
@@ -931,7 +932,7 @@ func lowerStringMatcher(key string, val yaml.Node) (*Rule, *Rule, error) {
 
 func lowerWrappedAttributes(val yaml.Node) (*Rule, *Rule, error) {
 	// Wrapped attribute form used by the §11.B worked example:
-	// `attr: { has_value: true, ... }`. Each inner key resolves through
+	// `attr: { call_option: value, ... }`. Each inner key resolves through
 	// attrNameToIR exactly like a bare attribute key would.
 	var raw map[string]yaml.Node
 	if err := val.Decode(&raw); err != nil {
@@ -987,12 +988,11 @@ func lowerNestedRuleMatcher(key string, val yaml.Node) (*Rule, *Rule, error) {
 }
 
 func lowerUncheckedVar(val yaml.Node) (*Rule, *Rule, error) {
-	var v bool
-	if err := val.Decode(&v); err != nil {
-		return nil, nil, fmt.Errorf("where.unchecked_var: %w", err)
-	}
-	if !v {
-		return nil, nil, fmt.Errorf("where.unchecked_var: only true is meaningful")
+	// Presence is the complete predicate: `unchecked_var:`. Boolean values
+	// are rejected so authors cannot accidentally write a vacuous false flag
+	// or carry the old `unchecked_var: true` spelling forward.
+	if val.Tag != "!!null" {
+		return nil, nil, fmt.Errorf("where.unchecked_var: use presence syntax (`unchecked_var:`); boolean values are not supported")
 	}
 	return &Rule{UncheckedVar: true}, nil, nil
 }

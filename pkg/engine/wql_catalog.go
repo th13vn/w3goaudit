@@ -118,11 +118,9 @@ func blockKindToIR(wqlName string) (string, bool) {
 // is the correct "not an attr-map entry" signal, not an unknown-name error).
 var attrNameToIRTable = map[string]string{
 	// Core (§7)
-	"receiver":      "call_receiver", // bool marker on the receiver child of a member call
+	"receiver":      "call_receiver", // internal receiver-child marker; authoring uses receiver: {…}
 	"receiver_name": "receiver_name", // direct receiver child name copied onto the call node
 	"signature":     "called_signature",
-	"has_value":     "has_value",
-	"has_gas":       "has_gas",
 	"call_option":   "call_option", // "value" or "gas" marker on a call-option child (verify.go reads it alongside call_receiver)
 	"operator":      "operator",
 	"type":          "type",

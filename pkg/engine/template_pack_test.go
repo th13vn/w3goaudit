@@ -79,7 +79,7 @@ var forbiddenOfficialQueryKeys = map[string]bool{
 	"initializer_guarded": true, "auth_verdict": true,
 	"auth_principal": true, "auth_dominates": true,
 	"first_call_takeover": true, "constructor_disable": true,
-	"proxy_linkage": true, "has_value": true, "has_gas": true,
+	"proxy_linkage": true,
 	"unchecked_var": true,
 }
 

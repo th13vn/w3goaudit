@@ -165,9 +165,9 @@ query:
   select: function
   from: entry_function
   where:
-    - not: {preset: access_controlled}
+    - not: {preset: reentrancy_guarded}
 `); err != nil {
-		t.Fatalf("legacy scalar preset rejected: %v", err)
+		t.Fatalf("retained scalar preset rejected: %v", err)
 	}
 }
 

@@ -89,6 +89,33 @@ query:
 	}
 }
 
+func TestCanonicalMarkersUseNestedOptionsAndPresenceFlags(t *testing.T) {
+	raw := "meta: {id: CANONICAL-MARKERS, severity: HIGH}\nquery:\n  select: lowlevel_call\n  from: entry_function\n  where:\n    - receiver: {tainted: parameter}\n    - has: {call_option: value}\n    - unchecked_var:\n"
+	tmpl, err := ParseTemplate(raw)
+	if err != nil {
+		t.Fatalf("ParseTemplate: %v", err)
+	}
+	match := tmpl.Query.Match.Contains
+	if match == nil || match.Receiver == nil || match.Receiver.TaintedFrom != "parameter" {
+		t.Fatalf("match=%#v, want nested direct receiver matcher", match)
+	}
+	if match.Contains == nil || match.Contains.Attr["call_option"] != "value" {
+		t.Fatalf("contains=%#v, want call_option=value", match.Contains)
+	}
+	if !match.UncheckedVar {
+		t.Fatal("presence-only unchecked_var did not enable the predicate")
+	}
+}
+
+func TestCanonicalMarkersRejectBooleanPresenceValues(t *testing.T) {
+	for _, marker := range []string{"true", "false"} {
+		raw := "meta: {id: CANONICAL-MARKER-INVALID, severity: HIGH}\nquery:\n  select: binary\n  from: entry_function\n  where:\n    - unchecked_var: " + marker + "\n"
+		if _, err := ParseTemplate(raw); err == nil {
+			t.Fatalf("boolean marker unexpectedly loaded: %s", marker)
+		}
+	}
+}
+
 func TestWhereOnlyQueryDefaultsToEntryFunction(t *testing.T) {
 	tmpl, err := ParseTemplate(`meta: {id: WHERE-ONLY, severity: LOW}
 query:
@@ -545,7 +572,7 @@ query:
   select: binary
   from: entry_function
   where:
-    - unchecked_var: true
+    - unchecked_var:
 `
 
 func TestLower_UncheckedVar(t *testing.T) {
