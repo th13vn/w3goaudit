@@ -186,9 +186,11 @@ without mutating caller-owned rules or templates.
 All four exported direct evaluator entry points (`Verify`,
 `VerifyAtFunction`, `VerifyAtFunctionWithCallees`, and `VerifyAtContract`)
 deep-copy and normalize the supplied programmatic `Rule`, including deprecated
-compatibility aliases, before applying the same regex, kind, preset, taint
-source, visibility, mutability, and version validation used by loaded
-templates. Invalid values fail closed by returning `false`. Caller-owned
+spelling aliases for general fields, before applying the same regex, kind,
+preset, taint source, visibility, mutability, and version validation used by
+loaded templates. Semantic authorization and initializer facts are available
+only through the dedicated parameterized preset fields; `Rule.Attr` is an AST
+attribute matcher and has no hidden lifecycle or dispatch behavior. Invalid values fail closed by returning `false`. Caller-owned
 rules, nested rules, maps, and slices are not mutated, and recursive evaluation
 reuses the prepared copy rather than preparing it again at each node or callee.
 
@@ -1210,14 +1212,14 @@ func (db *Database) QueryExternalBoundaries(q types.ExternalBoundaryQuery) (*typ
 ```
 
 Every returned boundary fact is a deep copy. Mutating a result cannot change the
-database or a later query. The fact model keeps unknown analysis states and
+database or a later query. The fact model keeps incomplete analysis states and
 limitations explicit; absence of proof is never exposed as a safe verdict.
 
 #### Exact authorization and initializer lifecycle queries
 
 Authorization facts are versioned independently at `AuthorizationFactsVersion`
 `1.0.0` and are queried by exact function/scope identity. They expose the
-runtime contract, selected C3 implementation, guard/principal evidence,
+resolved implementation, guard/principal evidence,
 dominance, and fail-closed verdict. Initializer facts additionally expose
 `InitializerEntry`, `OneTimeMutex`, `FirstCallTakeover`,
 `AtomicInitialization`, `ConstructorDisable`, and `ProxyLinkage`. Older caches

@@ -68,7 +68,8 @@ Minimal available-artifact shape:
 
 The complete fact also contains its exact source range, target, optional
 receiver/value/gas evidence, result handling, reentry class, and direct
-host-scope state relations. Consumers must preserve explicit `unknown` values.
+host-scope state relations. Consumers should preserve incomplete evidence and
+its limitations rather than treating a missing field as proof of safety.
 
 The three editor-navigation documents share a `schemaVersion` field, currently
 `"2.0.0"` (`report.SchemaVersion`), the same version used by `overview.json` /

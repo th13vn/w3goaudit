@@ -267,7 +267,8 @@ run-output scratch directory.
   principals from caller-selected operands; unresolved or ambiguous bindings
   fail closed. WQL exposes only the direct parameterized authorization and
   initializer presets; lifecycle and dispatch details remain internal evidence
-  for reports and SDK consumers. Official templates remain unchanged during
+  for reports and SDK consumers. Programmatic `Rule.Attr` has no hidden semantic
+  interpretation. Official templates remain unchanged during
   candidate review.
 - Generated timestamps are the one intentional source of report-byte variance.
   `GeneratorOptions.Now` and `BundleOptions.Now` let SDK callers inject a fixed

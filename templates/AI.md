@@ -8,8 +8,8 @@ self-contained detector. The `official/` pack is embedded in the binary
 
 ## Template Language: WQL
 
-**A WQL document is `meta` plus one `query` block, with an optional top-level
-`ai` review policy.** All templates under
+**A WQL document is exactly `meta` plus one `query` block.** AI review belongs
+to an external Assistant workflow. All templates under
 `official/` and `test/` (this directory), plus every
 benchmark template under `../scripts/benchmark/templates/` (slither-inspired,
 decurity-semgrep-inspired, 4naly3er-inspired) — 120 templates total — are

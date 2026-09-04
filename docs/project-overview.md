@@ -713,7 +713,11 @@ function _processWithdraw() internal {
   and `asm.sstore`; storage mutations are not call nodes.
 - Presets are property-true checks: `access_controlled`, `caller_checked`, and
   `reentrancy_guarded`; ordinary `not:` expresses the property's absence.
-  Parameter-only provenance remains explicit as `tainted: parameter`.
+  Parameterized `preset.authorization` and `preset.initializer` express
+  principal protection, caller self-scoping, and deterministic first-call
+  takeover. Inheritance dispatch is automatic; raw authorization/lifecycle
+  attributes are not a WQL or programmatic evaluator surface. Parameter-only
+  provenance remains explicit as `tainted: parameter`.
 
 **Extract Subcommands (11 total)**
 - Canonical order widest→narrowest: `main`, `entry`, `inheritance`, `statevar`, `selector`, `involve`, `workflow`, `bundle`, `context`, `source`, `diff`

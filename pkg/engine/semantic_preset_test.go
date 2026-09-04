@@ -170,3 +170,11 @@ query:
 		t.Fatalf("legacy scalar preset rejected: %v", err)
 	}
 }
+
+func TestProgrammaticSemanticAttributesAreNotEvaluatorPredicates(t *testing.T) {
+	raw := Rule{Attr: map[string]interface{}{"auth_verdict": "protected"}}
+	fields := presentRuleFields(&raw)
+	if len(fields) != 1 || fields[0].name != "attr" || fields[0].class != classAST {
+		t.Fatalf("raw semantic attr fields=%+v, want ordinary AST attribute", fields)
+	}
+}

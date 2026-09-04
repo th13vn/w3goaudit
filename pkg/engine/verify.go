@@ -741,12 +741,6 @@ func (e *Engine) matchAtomic(node *types.ASTNode, r Rule) bool {
 	// Check attributes
 	if len(r.Attr) > 0 {
 		for key, expectedValue := range r.Attr {
-			if isAuthorizationAttribute(key) {
-				if !e.matchAuthorizationAttribute(node, key, expectedValue) {
-					return false
-				}
-				continue
-			}
 			if !e.matchAttributeValue(node, key, expectedValue) {
 				return false
 			}
@@ -790,94 +784,6 @@ func (e *Engine) matchAtomic(node *types.ASTNode, r Rule) bool {
 	}
 
 	return true
-}
-
-func (e *Engine) matchAuthorizationAttribute(node *types.ASTNode, key string, expected interface{}) bool {
-	if e == nil || e.db == nil || node == nil || e.currentFunction == nil {
-		return false
-	}
-	fact := e.authorizationFor(e.currentFunction, e.currentContract)
-	if fact == nil {
-		return false
-	}
-	var actual string
-	switch key {
-	case "auth_verdict":
-		actual = string(fact.Verdict)
-	case "auth_principal":
-		actual = string(fact.PrincipalKind)
-	case "auth_expected_principal":
-		actual = fact.ExpectedPrincipal
-	case "auth_expected_principal_ref":
-		for _, refID := range fact.ExpectedPrincipalRefIDs {
-			if matchExpectedString(expected, refID) {
-				return true
-			}
-		}
-		return false
-	case "auth_dominates":
-		actual = string(fact.Dominance)
-	case "runtime_contract":
-		actual = fact.RuntimeContractID
-	case "auth_reason":
-		for _, reason := range fact.Reasons {
-			if matchExpectedString(expected, reason) {
-				return true
-			}
-		}
-		return false
-	case "initializer_entry":
-		return matchExpectedBool(expected, fact.InitializerEntry)
-	case "one_time_mutex":
-		return matchExpectedBool(expected, fact.OneTimeMutex)
-	case "first_call_takeover":
-		actual = fact.FirstCallTakeover
-	case "atomic_initialization":
-		actual = fact.AtomicInitialization
-	case "constructor_disable":
-		return matchExpectedBool(expected, fact.ConstructorDisable)
-	case "proxy_linkage":
-		actual = fact.ProxyLinkage
-	default:
-		return false
-	}
-	return matchExpectedString(expected, actual)
-}
-
-// matchAuthorizationAttribute remains available for deprecated programmatic
-// Rule/JSON inputs. Public WQL must use parameterized presets instead.
-
-func isAuthorizationAttribute(key string) bool {
-	if strings.HasPrefix(key, "auth_") || key == "runtime_contract" {
-		return true
-	}
-	switch key {
-	case "initializer_entry", "one_time_mutex", "first_call_takeover", "atomic_initialization", "constructor_disable", "proxy_linkage":
-		return true
-	default:
-		return false
-	}
-}
-
-func matchExpectedString(expected interface{}, actual string) bool {
-	switch value := expected.(type) {
-	case string:
-		return matchAnchoredRegex(value, actual)
-	case []string:
-		for _, item := range value {
-			if matchAnchoredRegex(item, actual) {
-				return true
-			}
-		}
-		return false
-	default:
-		return false
-	}
-}
-
-func matchExpectedBool(expected interface{}, actual bool) bool {
-	want, ok := expected.(bool)
-	return ok && actual == want
 }
 
 // attrInCSV reports whether the node's named attribute equals one of the
@@ -1596,14 +1502,6 @@ func (e *Engine) verifyAtFunctionWithEnv(fn *types.Function, r Rule, contract *t
 	astRule.HasGuard = nil
 	astRule.HasParam = ""
 	astRule.Regex = ""
-	for key := range astRule.Attr {
-		if isAuthorizationAttribute(key) {
-			delete(astRule.Attr, key)
-		}
-	}
-	if len(astRule.Attr) == 0 {
-		astRule.Attr = nil
-	}
 	if r.Not != nil && r.Not.IsContextOnly() {
 		astRule.Not = nil
 	}
@@ -2118,11 +2016,6 @@ func (e *Engine) checkFunctionContext(fn *types.Function, contract *types.Contra
 	}
 	if r.Initializer != nil && !e.checkInitializerPreset(fn, contract, *r.Initializer) {
 		return false
-	}
-	for key, expected := range r.Attr {
-		if isAuthorizationAttribute(key) && !e.matchAuthorizationAttribute(fn.AST, key, expected) {
-			return false
-		}
 	}
 	if !hasNamedParameter(fn, r.HasParam) || !e.hasMatchingGuard(fn, contract, r.HasGuard) {
 		return false

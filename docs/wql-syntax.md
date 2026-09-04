@@ -32,8 +32,8 @@ design spec. Where the two ever disagree, the code wins.
 
 ## 1. Template Shape
 
-A WQL source document has `meta` and `query`, plus an optional top-level
-`ai` review contract.
+A WQL source document has exactly `meta` and `query`. AI review belongs to an
+external Assistant workflow, not to template syntax.
 `query` holds either one `select`/`from`/`where` query, or a one-level
 `and:`/`or:` composition of branch queries (see
 [Query Composition](#query-composition-and--or)). Unknown keys are rejected
@@ -709,28 +709,22 @@ target is arbitrary code execution and is reported by
 
 ### C. Unprotected initializer
 
-`templates/official/high/unprotected-initializer.yaml`
+The staged candidate uses the lifecycle preset directly:
 
 ```yaml
 query:
+  select: function
   from: entry_function
   where:
     - func_name: (?i)^(initialize|initialise|init|__init|setup)$
-    - not: { preset: access_controlled }
-    - not: { modifier: "(?i)(initializer|reinitializer)" }
-    - has: { block: state_write }
-    - not:
-        has:
-          block: guard
-          has:
-            block: identifier
-            name: ^_initializersDisabled$
+    - preset: { initializer: { takeover: possible } }
 ```
 
-No `select:` — the whole match is expressed in `where` against the
-`entry_function` scope root: a function named like an initializer, with no
-access control and no `initializer`/`reinitializer` modifier, that writes
-state and isn't gated behind an `_initializersDisabled()` guard.
+The name is an ordinary regex filter. The preset supplies the semantic claim:
+the exact entry function is an initializer and deterministic evidence says the
+first caller can take it over. Constructor disabling, one-time mutex, and
+incomplete deployment linkage are internal evidence and do not become public
+matcher fields.
 
 ### D. Arbitrary `transferFrom` — item-ownership vs. access control
 
