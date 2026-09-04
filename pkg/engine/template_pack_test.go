@@ -7,38 +7,199 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+
+	"gopkg.in/yaml.v3"
 )
+
+func TestOfficialPackUsesCanonicalVocabulary(t *testing.T) {
+	root := repoRoot(t)
+	forEachOfficialTemplate(t, filepath.Join(root, "templates", "official"), func(path string) {
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read %s: %v", path, err)
+		}
+		var doc yaml.Node
+		if err := yaml.Unmarshal(raw, &doc); err != nil {
+			t.Fatalf("parse %s: %v", path, err)
+		}
+		rootNode := documentMapping(doc.Content)
+		if rootNode == nil {
+			t.Fatalf("%s has no top-level mapping", path)
+		}
+		id := nestedScalar(rootNode, "meta", "id")
+		if retiredOfficialIDs[id] {
+			t.Errorf("%s uses retired official ID %q", path, id)
+		}
+		query := mappingValueNode(rootNode, "query")
+		if query == nil {
+			t.Fatalf("%s has no query", path)
+		}
+		for _, violation := range officialQueryVocabularyViolations(query) {
+			t.Errorf("%s: %s", path, violation)
+		}
+	})
+}
+
+func TestOfficialPackHasUniqueIDsAndStrictLoads(t *testing.T) {
+	root := repoRoot(t)
+	seen := map[string]string{}
+	count := 0
+	forEachOfficialTemplate(t, filepath.Join(root, "templates", "official"), func(path string) {
+		count++
+		tmpl, err := LoadTemplate(path)
+		if err != nil {
+			t.Fatalf("LoadTemplate(%s): %v", path, err)
+		}
+		if previous, ok := seen[tmpl.Meta.ID]; ok {
+			t.Errorf("duplicate official template ID %q in %s and %s", tmpl.Meta.ID, previous, path)
+		}
+		seen[tmpl.Meta.ID] = path
+	})
+	if count == 0 {
+		t.Fatal("official template directory contains no YAML files")
+	}
+	if count != len(seen) {
+		t.Fatalf("official template files = %d, unique IDs = %d", count, len(seen))
+	}
+}
+
+var retiredOfficialIDs = map[string]bool{
+	"HIGH-ERC721-CALLBACK-REENTRANCY":          true,
+	"HIGH-ERC777-CALLBACK-REENTRANCY":          true,
+	"HIGH-READONLY-REENTRANCY-BALANCER":        true,
+	"HIGH-READONLY-REENTRANCY-CURVE":           true,
+	"MEDIUM-STALE-ORACLE-DATA":                 true,
+	"MEDIUM-DEPRECATED-CHAINLINK-LATESTANSWER": true,
+	"MEDIUM-BOOLEAN-CST":                       true,
+}
+
+var forbiddenOfficialQueryKeys = map[string]bool{
+	"runtime": true, "runtime_contract": true,
+	"access_controlled": true, "caller_checked": true,
+	"initializer_guarded": true, "auth_verdict": true,
+	"auth_principal": true, "auth_dominates": true,
+	"first_call_takeover": true, "constructor_disable": true,
+	"proxy_linkage": true, "has_value": true, "has_gas": true,
+	"unchecked_var": true,
+}
+
+var forbiddenOfficialQueryValues = map[string]bool{
+	"unknown": true, "runtime": true, "runtime_contract": true,
+	"access_controlled": true, "caller_checked": true,
+	"initializer_guarded": true, "first_call_takeover": true,
+	"constructor_disable": true, "proxy_linkage": true,
+}
+
+func forEachOfficialTemplate(t *testing.T, root string, fn func(string)) {
+	t.Helper()
+	err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if entry.IsDir() || filepath.Ext(path) != ".yaml" {
+			return nil
+		}
+		fn(path)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walk %s: %v", root, err)
+	}
+}
+
+func documentMapping(content []*yaml.Node) *yaml.Node {
+	if len(content) == 0 || content[0] == nil || content[0].Kind != yaml.MappingNode {
+		return nil
+	}
+	return content[0]
+}
+
+func mappingValueNode(mapping *yaml.Node, key string) *yaml.Node {
+	if mapping == nil || mapping.Kind != yaml.MappingNode {
+		return nil
+	}
+	for i := 0; i+1 < len(mapping.Content); i += 2 {
+		if mapping.Content[i].Value == key {
+			return mapping.Content[i+1]
+		}
+	}
+	return nil
+}
+
+func nestedScalar(mapping *yaml.Node, parent, key string) string {
+	nested := mappingValueNode(mapping, parent)
+	value := mappingValueNode(nested, key)
+	if value == nil || value.Kind != yaml.ScalarNode {
+		return ""
+	}
+	return strings.TrimSpace(value.Value)
+}
+
+func officialQueryVocabularyViolations(node *yaml.Node) []string {
+	var violations []string
+	var walk func(*yaml.Node)
+	walk = func(current *yaml.Node) {
+		if current == nil {
+			return
+		}
+		if current.Kind == yaml.MappingNode {
+			for i := 0; i+1 < len(current.Content); i += 2 {
+				keyNode, valueNode := current.Content[i], current.Content[i+1]
+				key := strings.TrimSpace(keyNode.Value)
+				if forbiddenOfficialQueryKeys[key] {
+					violations = append(violations, "forbidden query key "+key)
+				}
+				if valueNode.Kind == yaml.ScalarNode && forbiddenOfficialQueryValues[strings.TrimSpace(valueNode.Value)] {
+					violations = append(violations, "forbidden query value "+strings.TrimSpace(valueNode.Value))
+				}
+				if key == "receiver" && valueNode.Kind == yaml.ScalarNode && strings.EqualFold(strings.TrimSpace(valueNode.Value), "true") {
+					violations = append(violations, "receiver must use a nested matcher")
+				}
+				walk(valueNode)
+			}
+			return
+		}
+		for _, child := range current.Content {
+			walk(child)
+		}
+	}
+	walk(node)
+	return violations
+}
 
 func TestRepositoryTemplatePackIsValidWQL(t *testing.T) {
 	root := repoRoot(t)
 	templateRoots := []struct {
-		path string
-		want int
+		path  string
+		want  int
+		fixed bool
 	}{
-		{path: "templates/official", want: 39},
-		{path: "templates/test", want: 5},
+		// The trusted official pack is intentionally migration-sized. Its
+		// inventory is derived from the filesystem so removing an unproven
+		// detector cannot leave a stale count assertion behind.
+		{path: "templates/official"},
+		{path: "templates/test", want: 5, fixed: true},
 	}
-	wantTotal := 44
 	// The benchmark template lane lives under the dev-only, git-ignored
 	// scripts/benchmark/ harness; only assert it when the harness is present.
 	if benchmarkHarnessAvailable(root) {
 		templateRoots = append(templateRoots, struct {
-			path string
-			want int
-		}{path: "scripts/benchmark/templates", want: 76})
-		wantTotal = 120
+			path  string
+			want  int
+			fixed bool
+		}{path: "scripts/benchmark/templates", want: 76, fixed: true})
 	}
 
 	total := 0
 	for _, templateRoot := range templateRoots {
 		count := validateRepositoryTemplateLane(t, root, templateRoot.path)
-		if count != templateRoot.want {
+		if templateRoot.fixed && count != templateRoot.want {
 			t.Errorf("repository template lane %s = %d, want %d", templateRoot.path, count, templateRoot.want)
 		}
 		total += count
 	}
-	if total != wantTotal {
-		t.Fatalf("repository template inventory = %d, want %d", total, wantTotal)
+	if total == 0 {
+		t.Fatal("repository template inventory is empty")
 	}
 }
 
