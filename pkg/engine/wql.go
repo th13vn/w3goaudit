@@ -857,14 +857,11 @@ func lowerKeyValue(key string, val yaml.Node) (*Rule, *Rule, error) {
 	case "attr":
 		return lowerWrappedAttributes(val)
 	case "authorization":
-		r, err := lowerAuthorizationWrapper(val)
-		return nil, r, err
+		return nil, nil, fmt.Errorf("where.authorization: legacy wrapper syntax is not supported; use preset: {authorization: ...}")
 	case "initializer":
-		r, err := lowerInitializerWrapper(val)
-		return nil, r, err
+		return nil, nil, fmt.Errorf("where.initializer: legacy wrapper syntax is not supported; use preset: {initializer: ...}")
 	case "runtime":
-		r, err := lowerRuntimeWrapper(val)
-		return nil, r, err
+		return nil, nil, fmt.Errorf("where.runtime: runtime syntax is not supported; inheritance dispatch is automatic")
 	case "left", "right", "statement_has", "has", "in", "guarded_by":
 		return lowerNestedRuleMatcher(key, val)
 	case "receiver":
@@ -975,27 +972,7 @@ func lowerWrappedAttributes(val yaml.Node) (*Rule, *Rule, error) {
 	return ast, context, nil
 }
 
-func containsSemanticWrapper(node yaml.Node) bool {
-	if node.Kind == yaml.MappingNode {
-		for i := 0; i+1 < len(node.Content); i += 2 {
-			switch node.Content[i].Value {
-			case "authorization", "initializer", "runtime":
-				return true
-			}
-		}
-	}
-	for _, child := range node.Content {
-		if containsSemanticWrapper(*child) {
-			return true
-		}
-	}
-	return false
-}
-
 func lowerNestedRuleMatcher(key string, val yaml.Node) (*Rule, *Rule, error) {
-	if containsSemanticWrapper(val) {
-		return nil, nil, fmt.Errorf("where.%s: semantic wrappers are context-level; move authorization, initializer, or runtime outside AST traversal", key)
-	}
 	sub, err := lowerToRule(val)
 	if err != nil {
 		return nil, nil, err
@@ -1037,9 +1014,6 @@ func lowerListMatcher(key string, val yaml.Node) (*Rule, *Rule, error) {
 	}
 	if len(val.Content) == 0 {
 		return nil, nil, fmt.Errorf("where.%s: matcher list must not be empty", key)
-	}
-	if key == "sequence" && containsSemanticWrapper(val) {
-		return nil, nil, fmt.Errorf("where.sequence: semantic wrappers are context-level; move authorization, initializer, or runtime outside sequence")
 	}
 	branches, err := lowerRuleList(val)
 	if err != nil {
@@ -1124,6 +1098,13 @@ func lowerNotMatcher(val yaml.Node) (*Rule, *Rule, error) {
 }
 
 func lowerPresetMatcher(val yaml.Node) (*Rule, *Rule, error) {
+	if val.Kind == yaml.MappingNode {
+		rule, err := lowerParameterizedPreset(val)
+		if err != nil {
+			return nil, nil, err
+		}
+		return nil, rule, nil
+	}
 	var preset string
 	if err := val.Decode(&preset); err != nil {
 		return nil, nil, fmt.Errorf("where.preset: %w", err)
@@ -1136,9 +1117,6 @@ func lowerPresetMatcher(val yaml.Node) (*Rule, *Rule, error) {
 
 func lowerDynamicMatcher(key string, val yaml.Node) (*Rule, *Rule, error) {
 	if strings.HasPrefix(key, argMatcherPrefix) {
-		if containsSemanticWrapper(val) {
-			return nil, nil, fmt.Errorf("where.%s: semantic wrappers are context-level; move authorization, initializer, or runtime outside call arguments", key)
-		}
 		rest := strings.TrimPrefix(key, argMatcherPrefix)
 		sub, err := lowerToRule(val)
 		if err != nil {
@@ -1348,6 +1326,23 @@ func mergeRuleInto(dst, src *Rule) error {
 		{"version", &dst.Version, src.Version},
 		{"preset", &dst.Preset, src.Preset},
 		{"has_param", &dst.HasParam, src.HasParam},
+	}
+	if src.Authorization != nil {
+		if dst.Authorization == nil {
+			auth := *src.Authorization
+			auth.Principals = append([]string(nil), src.Authorization.Principals...)
+			dst.Authorization = &auth
+		} else if !reflect.DeepEqual(*dst.Authorization, *src.Authorization) {
+			return fmt.Errorf("where: conflicting authorization preset")
+		}
+	}
+	if src.Initializer != nil {
+		if dst.Initializer == nil {
+			initializer := *src.Initializer
+			dst.Initializer = &initializer
+		} else if !reflect.DeepEqual(*dst.Initializer, *src.Initializer) {
+			return fmt.Errorf("where: conflicting initializer preset")
+		}
 	}
 	for _, f := range scalars {
 		if f.src == "" {

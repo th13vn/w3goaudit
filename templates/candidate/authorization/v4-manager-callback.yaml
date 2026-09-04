@@ -11,5 +11,7 @@ query:
   where:
     - func_name: '(?i)^(before|after)(Initialize|AddLiquidity|RemoveLiquidity|Swap|Donate)$'
     - not:
-        authorization:
-          expected_principal: manager
+        preset:
+          authorization:
+            type: protected
+            principal: manager

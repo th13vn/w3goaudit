@@ -163,35 +163,26 @@ func TestAttrNameToIR_RuleFieldBackedNamesNotInMap(t *testing.T) {
 	}
 }
 
-func TestAuthorizationAttributeNamesAreCatalogued(t *testing.T) {
+func TestSemanticAuthorizationFactsAreNotWQLAttributes(t *testing.T) {
 	for _, name := range []string{
 		"auth_verdict", "auth_principal", "auth_expected_principal", "auth_expected_principal_ref", "auth_dominates", "runtime_contract", "auth_reason",
 		"initializer_entry", "one_time_mutex", "first_call_takeover", "atomic_initialization",
 		"constructor_disable", "proxy_linkage",
 	} {
-		if got, ok := attrNameToIR(name); !ok || got != name {
-			t.Fatalf("attrNameToIR(%q) = %q, %v", name, got, ok)
+		if _, ok := attrNameToIR(name); ok {
+			t.Fatalf("attrNameToIR(%q) unexpectedly exposes internal semantic fact", name)
 		}
 	}
 }
 
-func TestLifecycleBooleanAttributesLowerAndMatch(t *testing.T) {
-	for _, name := range []string{"initializer_entry", "one_time_mutex", "constructor_disable"} {
-		tmpl, err := ParseTemplate(`meta: {id: LIFECYCLE-BOOL, severity: INFO}
+func TestLifecycleRawAttributesAreRejected(t *testing.T) {
+	_, err := ParseTemplate(`meta: {id: LIFECYCLE-RAW, severity: INFO}
 query:
   select: function
   from: entry_function
   where:
-    - attr: {` + name + `: true}`)
-		if err != nil {
-			t.Fatalf("%s: %v", name, err)
-		}
-		if tmpl.Query.Filter == nil {
-			t.Fatalf("%s query filter missing: %+v", name, tmpl)
-		}
-		filter := tmpl.Query.Filter
-		if filter == nil || filter.Attr[name] != true {
-			t.Fatalf("%s filter = %+v match=%+v", name, filter, tmpl.Query.Match)
-		}
+    - attr: {initializer_entry: true}`)
+	if err == nil {
+		t.Fatal("internal lifecycle attribute unexpectedly accepted as WQL")
 	}
 }

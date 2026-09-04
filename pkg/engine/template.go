@@ -212,6 +212,10 @@ type Rule struct {
 
 	// ========== PRESETS ==========
 	Preset string `json:"preset,omitempty"`
+	// Parameterized semantic presets are first-class evaluator predicates, not
+	// aliases for the generic Attr map.
+	Authorization *AuthorizationPreset `json:"authorization,omitempty"`
+	Initializer   *InitializerPreset   `json:"initializer,omitempty"`
 
 	// ========== LEFT/RIGHT MATCHING ==========
 	Left  *Rule `json:"left,omitempty"`
@@ -497,6 +501,15 @@ func (state *ruleCloneState) clone(rule *Rule, depth int, path string) (Rule, er
 	}
 	if cloned.ArgAny, err = state.clonePointer(rule.ArgAny, depth+1, path+".arg_any"); err != nil {
 		return Rule{}, err
+	}
+	if rule.Authorization != nil {
+		auth := *rule.Authorization
+		auth.Principals = append([]string(nil), rule.Authorization.Principals...)
+		cloned.Authorization = &auth
+	}
+	if rule.Initializer != nil {
+		initializer := *rule.Initializer
+		cloned.Initializer = &initializer
 	}
 	if cloned.Left, err = state.clonePointer(rule.Left, depth+1, path+".left"); err != nil {
 		return Rule{}, err
@@ -821,7 +834,7 @@ func presentRuleFields(r *Rule) []ruleField {
 	add(r.HasGuard != nil, "has_guard", classContext)
 	add(r.HasParam != "", "has_param", classContext)
 	add(r.Version != "", "version", classContext)
-	add(r.Preset != "", "preset", classContext)
+	add(r.Preset != "" || r.Authorization != nil || r.Initializer != nil, "preset", classContext)
 	// Dual — valid in both layers (precondition in filter:, attribute/scoped
 	// match in match:)
 	add(r.Regex != "", "regex", classDual)
@@ -1070,6 +1083,7 @@ func (r *Rule) IsEmpty() bool {
 		r.Regex == "" && r.SourceRegex == "" && r.ArgAny == nil &&
 		r.Extends == "" && r.Modifier == "" && len(r.Args) == 0 &&
 		r.TaintedFrom == "" && r.Version == "" && r.Preset == "" &&
+		r.Authorization == nil && r.Initializer == nil &&
 		r.Left == nil && r.Right == nil && r.Receiver == nil && r.HasParam == "" &&
 		r.FuncName == "" &&
 		r.HasGuard == nil && r.IsStateVar == nil &&
@@ -1233,6 +1247,22 @@ func validatePresets(r *Rule) error {
 	return walkRules(r, func(n *Rule) error {
 		if n.Preset != "" && !IsKnownPreset(n.Preset) {
 			return fmt.Errorf("unknown preset %q — known presets: %s", n.Preset, strings.Join(KnownPresetNames(), ", "))
+		}
+		if n.Authorization != nil {
+			if n.Authorization.Type != "protected" && n.Authorization.Type != "self_sender" {
+				return fmt.Errorf("unknown authorization type %q", n.Authorization.Type)
+			}
+			if n.Authorization.Type == "self_sender" && (len(n.Authorization.Principals) > 0 || n.Authorization.PrincipalRegex != "") {
+				return fmt.Errorf("self_sender does not accept a principal")
+			}
+			if n.Authorization.PrincipalRegex != "" {
+				if _, err := compileRegexCached(n.Authorization.PrincipalRegex); err != nil {
+					return fmt.Errorf("invalid authorization principal regex: %w", err)
+				}
+			}
+		}
+		if n.Initializer != nil && n.Initializer.Takeover != "possible" {
+			return fmt.Errorf("initializer takeover must be possible")
 		}
 		return nil
 	})

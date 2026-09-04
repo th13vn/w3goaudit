@@ -844,6 +844,9 @@ func (e *Engine) matchAuthorizationAttribute(node *types.ASTNode, key string, ex
 	return matchExpectedString(expected, actual)
 }
 
+// matchAuthorizationAttribute remains available for deprecated programmatic
+// Rule/JSON inputs. Public WQL must use parameterized presets instead.
+
 func isAuthorizationAttribute(key string) bool {
 	if strings.HasPrefix(key, "auth_") || key == "runtime_contract" {
 		return true
@@ -1546,6 +1549,12 @@ func (e *Engine) verifyAtFunctionWithEnv(fn *types.Function, r Rule, contract *t
 			return false
 		}
 	}
+	if r.Authorization != nil && !e.checkAuthorizationPreset(fn, contract, *r.Authorization) {
+		return false
+	}
+	if r.Initializer != nil && !e.checkInitializerPreset(fn, contract, *r.Initializer) {
+		return false
+	}
 
 	// Split rule into context and AST parts. Logical operators can carry either
 	// kind of predicate, so detect the actual leaves instead of treating all/any
@@ -1579,6 +1588,8 @@ func (e *Engine) verifyAtFunctionWithEnv(fn *types.Function, r Rule, contract *t
 	astRule.Extends = ""
 	astRule.Version = ""
 	astRule.Preset = ""
+	astRule.Authorization = nil
+	astRule.Initializer = nil
 	astRule.FuncName = ""
 	astRule.Visibility = ""
 	astRule.Mutability = ""
@@ -2102,6 +2113,12 @@ func (e *Engine) checkFunctionContext(fn *types.Function, contract *types.Contra
 	if r.Preset != "" && !e.checkPreset(fn, contract, r.Preset) {
 		return false
 	}
+	if r.Authorization != nil && !e.checkAuthorizationPreset(fn, contract, *r.Authorization) {
+		return false
+	}
+	if r.Initializer != nil && !e.checkInitializerPreset(fn, contract, *r.Initializer) {
+		return false
+	}
 	for key, expected := range r.Attr {
 		if isAuthorizationAttribute(key) && !e.matchAuthorizationAttribute(fn.AST, key, expected) {
 			return false
@@ -2505,6 +2522,47 @@ func parseVersionConstraint(constraint string) (string, string) {
 func (e *Engine) checkPreset(fn *types.Function, contract *types.Contract, preset string) bool {
 	// Will be implemented in presets.go
 	return checkBuiltinPreset(fn, contract, e, preset)
+}
+
+func (e *Engine) checkAuthorizationPreset(fn *types.Function, contract *types.Contract, preset AuthorizationPreset) bool {
+	if fn == nil || e == nil {
+		return false
+	}
+	fact := e.authorizationFor(fn, contract)
+	if fact == nil || fact.Dominance != types.AuthorizationDominates {
+		return false
+	}
+	switch preset.Type {
+	case "self_sender":
+		return fact.Verdict == types.AuthorizationSelfScoped && fact.PrincipalKind == types.PrincipalCallerSelfScope
+	case "protected":
+		if fact.Verdict != types.AuthorizationProtected || fact.PrincipalKind == types.PrincipalCallerSelfScope {
+			return false
+		}
+		if preset.PrincipalRegex != "" {
+			return matchAnchoredRegex(preset.PrincipalRegex, fact.ExpectedPrincipal)
+		}
+		if len(preset.Principals) == 0 {
+			return true
+		}
+		for _, principal := range preset.Principals {
+			if strings.EqualFold(strings.TrimSpace(principal), strings.TrimSpace(fact.ExpectedPrincipal)) {
+				return true
+			}
+			if strings.EqualFold(strings.TrimSpace(principal), string(fact.PrincipalKind)) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func (e *Engine) checkInitializerPreset(fn *types.Function, contract *types.Contract, preset InitializerPreset) bool {
+	if fn == nil || e == nil || preset.Takeover != "possible" {
+		return false
+	}
+	fact := e.authorizationFor(fn, contract)
+	return fact != nil && fact.InitializerEntry && fact.FirstCallTakeover == "possible"
 }
 
 // VerifyAtContract is the top-level entry point for contract-scope verification.

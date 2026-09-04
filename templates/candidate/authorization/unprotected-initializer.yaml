@@ -9,9 +9,6 @@ query:
   select: function
   from: entry_function
   where:
-    - initializer:
-        entry: true
-        takeover: [possible, unknown]
-    - not:
-        authorization:
-          protected: true
+    - preset:
+        initializer:
+          takeover: possible

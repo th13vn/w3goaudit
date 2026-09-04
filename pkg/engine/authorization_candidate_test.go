@@ -25,19 +25,12 @@ func TestCandidateAuthorizationPackExecutesSemanticContracts(t *testing.T) {
 	assertFindingSetContains(t, v4, []string{"V4CallbackCandidateMatrix.beforeSwap"})
 	assertFindingSetExcludes(t, v4, []string{"V4CallbackCandidateMatrix.afterSwap"})
 
-	runtimeDB := buildRepositoryFixtureDatabase(t, root, "test-data/security/authorization-runtime/runtime.sol")
-	runtime := executeRepositoryTemplate(t, root, runtimeDB, "templates/candidate/authorization/runtime-inherited-auth.yaml")
-	assertFindingSetContains(t, runtime, []string{"RuntimeBase.upgrade", "SuperProtected.act"})
-	assertFindingSetExcludes(t, runtime, []string{"AmbiguousBase.execute"})
-
 	lifecycleDB := buildRepositoryFixtureDatabase(t, root, "test-data/security/authorization-runtime/lifecycle.sol")
 	initializer := executeRepositoryTemplate(t, root, lifecycleDB, "templates/candidate/authorization/unprotected-initializer.yaml")
 	assertFindingSetContains(t, initializer, []string{
-		"MutexOnly.initialize",
 		"FirstCallTakeover.initialize",
-		"DisabledImplementation.initialize",
-		"ProxyNamedOnly.initialize",
 	})
+	assertFindingSetExcludes(t, initializer, []string{"MutexOnly.initialize", "DisabledImplementation.initialize", "ProxyNamedOnly.initialize"})
 }
 
 func TestCandidateAuthorizationPackPreservesSourceCacheExecutionParity(t *testing.T) {
@@ -47,7 +40,6 @@ func TestCandidateAuthorizationPackPreservesSourceCacheExecutionParity(t *testin
 	}{
 		{"test-data/security/authorization-runtime/callbacks.sol", "templates/candidate/authorization/expected-principal-callback.yaml"},
 		{"test-data/security/authorization-runtime/callbacks.sol", "templates/candidate/authorization/v4-manager-callback.yaml"},
-		{"test-data/security/authorization-runtime/runtime.sol", "templates/candidate/authorization/runtime-inherited-auth.yaml"},
 		{"test-data/security/authorization-runtime/lifecycle.sol", "templates/candidate/authorization/unprotected-initializer.yaml"},
 	} {
 		t.Run(filepath.Base(tc.template), func(t *testing.T) {
@@ -80,7 +72,7 @@ func TestCandidateAuthorizationPackStrictLoads(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load candidate authorization pack: %v", err)
 	}
-	if len(templates) != 4 {
-		t.Fatalf("candidate authorization templates = %d, want 4", len(templates))
+	if len(templates) != 3 {
+		t.Fatalf("candidate authorization templates = %d, want 3", len(templates))
 	}
 }

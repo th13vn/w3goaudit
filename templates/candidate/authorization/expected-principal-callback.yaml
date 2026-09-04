@@ -11,5 +11,7 @@ query:
   where:
     - func_name: '(?i)^(uniswapV2Call|uniswapV3SwapCallback|uniswapV3FlashCallback|uniswapV3MintCallback)$'
     - not:
-        authorization:
-          expected_principal: [pool, pair]
+        preset:
+          authorization:
+            type: protected
+            principal: [pool, pair]
