@@ -63,7 +63,67 @@ func TestOfficialPackHasUniqueIDsAndStrictLoads(t *testing.T) {
 	}
 }
 
+func TestOfficialPackInventoryIsMigrationSized(t *testing.T) {
+	root := repoRoot(t)
+	want := []string{
+		"CRITICAL-DELEGATECALL-USER-INPUT",
+		"CRITICAL-SELFDESTRUCT-UNPROTECTED",
+		"HIGH-ARBITRARY-LOW-LEVEL-CALL",
+		"HIGH-ENCODE-PACKED-COLLISION",
+		"HIGH-INCORRECT-EXP",
+		"HIGH-MSG-VALUE-IN-LOOP",
+		"HIGH-NO-SLIPPAGE-CHECK",
+		"HIGH-REENTRANCY-PATTERN",
+		"HIGH-UNCHECKED-ERC20-TRANSFER",
+		"HIGH-UNPROTECTED-INITIALIZER",
+		"HIGH-UNRESTRICTED-TRANSFEROWNERSHIP",
+		"HIGH-WEAK-PRNG",
+		"MEDIUM-BIDI-CHARACTERS",
+		"MEDIUM-DANGEROUS-STRICT-EQUALITY",
+		"MEDIUM-DIVIDE-BEFORE-MULTIPLY",
+		"MEDIUM-TX-ORIGIN-AUTH",
+		"MEDIUM-UNCHECKED-ARITHMETIC",
+		"MEDIUM-UNCHECKED-LOWLEVEL-CALL",
+		"MEDIUM-UNCHECKED-SEND",
+		"MEDIUM-VIEW-PURE-MODIFIES-STATE",
+	}
+	got := make(map[string]struct{}, len(want))
+	forEachOfficialTemplate(t, filepath.Join(root, "templates", "official"), func(path string) {
+		tmpl, err := LoadTemplate(path)
+		if err != nil {
+			t.Fatalf("LoadTemplate(%s): %v", path, err)
+		}
+		got[tmpl.Meta.ID] = struct{}{}
+	})
+	if len(got) != len(want) {
+		t.Fatalf("official template count = %d, want %d", len(got), len(want))
+	}
+	for _, id := range want {
+		if _, ok := got[id]; !ok {
+			t.Errorf("official pack missing canonical ID %q", id)
+		}
+	}
+}
+
 var retiredOfficialIDs = map[string]bool{
+	// Unsupported rework and merged-family IDs leave the trusted pack until
+	// generic semantic evidence is available. The migration deliberately
+	// prefers a smaller truthful pack over protocol-name or source-regex claims.
+	"HIGH-ARBITRARY-SEND-ETH":                  true,
+	"HIGH-ARBITRARY-TRANSFERFROM":              true,
+	"HIGH-DELEGATECALL-IN-LOOP":                true,
+	"HIGH-ECDSA-RECOVER-MALLEABLE":             true,
+	"HIGH-ERC20-PUBLIC-BURN":                   true,
+	"HIGH-ORACLE-PRICE-UPDATE-UNRESTRICTED":    true,
+	"HIGH-PROXY-STORAGE-COLLISION":             true,
+	"HIGH-REENTRANCY-BALANCE":                  true,
+	"HIGH-UNISWAP-CALLBACK-UNPROTECTED":        true,
+	"HIGH-UNISWAP-V4-HOOK-UNPROTECTED":         true,
+	"MEDIUM-ORACLE-CURVE-SPOT-PRICE":           true,
+	"MEDIUM-ORACLE-LP-SPOT-PRICE":              true,
+	"HIGH-CALLBACK-REENTRANCY":                 true,
+	"HIGH-READONLY-REENTRANCY":                 true,
+	"MEDIUM-ORACLE-ROUND-VALIDATION":           true,
 	"HIGH-ERC721-CALLBACK-REENTRANCY":          true,
 	"HIGH-ERC777-CALLBACK-REENTRANCY":          true,
 	"HIGH-READONLY-REENTRANCY-BALANCER":        true,
@@ -80,7 +140,6 @@ var forbiddenOfficialQueryKeys = map[string]bool{
 	"auth_principal": true, "auth_dominates": true,
 	"first_call_takeover": true, "constructor_disable": true,
 	"proxy_linkage": true,
-	"unchecked_var": true,
 }
 
 var forbiddenOfficialQueryValues = map[string]bool{
@@ -154,6 +213,12 @@ func officialQueryVocabularyViolations(node *yaml.Node) []string {
 				}
 				if key == "receiver" && valueNode.Kind == yaml.ScalarNode && strings.EqualFold(strings.TrimSpace(valueNode.Value), "true") {
 					violations = append(violations, "receiver must use a nested matcher")
+				}
+				if key == "unchecked_var" && valueNode.Kind == yaml.ScalarNode {
+					value := strings.TrimSpace(valueNode.Value)
+					if strings.EqualFold(value, "true") || strings.EqualFold(value, "false") {
+						violations = append(violations, "unchecked_var must be presence-only")
+					}
 				}
 				walk(valueNode)
 			}

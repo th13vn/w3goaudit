@@ -20,7 +20,10 @@ query:
   from: entry_function
   select: delegatecall
   where:
-    - not: { preset: access_controlled }
+    - not:
+        preset:
+          authorization:
+            type: protected
     # The DELEGATECALL's own target must be caller-controlled. `has:` would search
     # every descendant, so the receiver of a nested call in the encoded arguments
     # satisfied it — CrocSwapDex's

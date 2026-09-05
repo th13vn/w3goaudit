@@ -14,53 +14,6 @@ import (
 	"github.com/th13vn/w3goaudit/pkg/types"
 )
 
-func TestInterproceduralTaintForInternalTransferFrom(t *testing.T) {
-	root := repoRoot(t)
-	rdr := reader.New()
-	sources, err := rdr.Read(filepath.Join(root, "test-data/security/arbitrary-transferfrom.sol"))
-	if err != nil {
-		t.Fatalf("read sources: %v", err)
-	}
-	db, err := builder.New().Build(sources)
-	if err != nil {
-		t.Fatalf("build db: %v", err)
-	}
-	tmpl, err := LoadTemplate(filepath.Join(root, "templates/official/high/arbitrary-transferfrom.yaml"))
-	if err != nil {
-		t.Fatalf("load template: %v", err)
-	}
-
-	findings := New(db).Execute(tmpl)
-	got := make([]string, 0, len(findings))
-	for _, finding := range findings {
-		got = append(got, findingEntryLabel(finding))
-	}
-	sort.Strings(got)
-
-	want := []string{
-		"VulnerableAliasForward.depositFrom",
-		"VulnerableAliasReassignmentForward.depositFrom",
-		"VulnerableArrayElementForward.deposit",
-		"VulnerableBatchDeposit.batchDeposit",
-		"VulnerableConditionalForward.depositFrom",
-		"VulnerableDeposit.deposit",
-		"VulnerableInternalForward.depositFrom",
-		"VulnerableNestedForward.depositFrom",
-		"VulnerableNoAuth.withdrawFrom",
-		"VulnerableReturnHelperForward.depositFrom",
-		"VulnerableShadowedAliasForward.deposit",
-		"VulnerableStructForward.deposit",
-		"VulnerableStaking.stake",
-		"VulnerableStructArrayForward.depositBatch",
-		"VulnerableSwap.swap",
-		"VulnerableSwappedArgsForward.depositFrom",
-	}
-	sort.Strings(want)
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("unexpected findings:\n got: %v\nwant: %v", got, want)
-	}
-}
-
 func TestFindingLocationsUseExactFunctionIDSourceFile(t *testing.T) {
 	root := repoRoot(t)
 	rdr := reader.New()

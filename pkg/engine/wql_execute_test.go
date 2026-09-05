@@ -15,10 +15,11 @@ query:
   from: entry_function
   select: delegatecall
   where:
-    - not: {preset: access_controlled}
-    - has:
-        block: identifier
-        receiver: true
+    - not:
+        preset:
+          authorization:
+            type: protected
+    - receiver:
         tainted: parameter
 `
 

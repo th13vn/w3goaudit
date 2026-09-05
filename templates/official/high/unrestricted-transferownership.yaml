@@ -18,7 +18,10 @@ query:
   select: state_write
   where:
     - func_name: '^transferOwnership$'
-    - not: { preset: access_controlled }
+    - not:
+        preset:
+          authorization:
+            type: protected
     - left:
         name: '(?i)owner'
     - right:

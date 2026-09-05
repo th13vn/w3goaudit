@@ -15,13 +15,11 @@ meta:
     - https://swcregistry.io/docs/SWC-106
     - https://blog.openzeppelin.com/parity-wallet-hack-reloaded
 
-# `access_controlled` preset performs real access-control detection: auth-named
-# modifiers (validated against decoys), inline msg.sender/role guards, and
-# recursive internal auth helpers. This replaces the old modifier-name regex,
-# which both missed inline `require(msg.sender == owner)` guards (false
-# positive) and any auth modifier outside its hard-coded name list.
 query:
   from: entry_function
   select: selfdestruct
   where:
-    - not: { preset: access_controlled }
+    - not:
+        preset:
+          authorization:
+            type: protected

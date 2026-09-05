@@ -26,14 +26,14 @@ contract Sweeper {
 
     // Guarded by a caller-membership check: must NOT be reported.
     function guarded(address payable to, uint256 amount) external gated {
-        to.transfer(amount);
+        selfdestruct(payable(to));
     }
 }
 `
 }
 
-// findAccessMappingFindings scans one generated source with the shipped
-// arbitrary-send-eth detector and returns the flagged function names.
+// findAccessMappingFindings scans one generated source with the retained
+// arbitrary low-level-call detector and returns the flagged function names.
 func findAccessMappingFindings(t *testing.T, source string) []string {
 	t.Helper()
 	dir := t.TempDir()
@@ -49,7 +49,7 @@ func findAccessMappingFindings(t *testing.T, source string) []string {
 	if err != nil {
 		t.Fatalf("build db: %v", err)
 	}
-	tmpl, err := LoadTemplate(filepath.Join(repoRoot(t), "templates/official/high/arbitrary-send-eth.yaml"))
+	tmpl, err := LoadTemplate(filepath.Join(repoRoot(t), "templates/official/critical/selfdestruct-unprotected.yaml"))
 	if err != nil {
 		t.Fatalf("load template: %v", err)
 	}
@@ -115,7 +115,7 @@ pragma solidity ^0.8.20;
 
 contract Sweeper {
     function guarded(address payable to, uint256 amount) external {
-        to.transfer(amount);
+        selfdestruct(payable(to));
     }
 }
 `

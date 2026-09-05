@@ -77,4 +77,4 @@ query:
     # SafeERC20.safeDecreaseAllowance) or `require(b <= a); … a - b;`
     # (SafeMath.sub) — makes the unchecked op deliberate and safe, so it is
     # excluded. Arithmetic with no such preceding guard is still reported.
-    - unchecked_var: true
+    - unchecked_var:

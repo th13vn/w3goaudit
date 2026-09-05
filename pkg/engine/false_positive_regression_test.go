@@ -94,9 +94,9 @@ contract ProxyDispatch {
 	})
 }
 
-// TestParameterIndexedBaseStaysTainted is the other half of the rule above: when
-// the BASE is caller-controlled, indexing it does not launder the taint. This is
-// the documented `from[i]` behavior and must survive the fix.
+// TestParameterIndexedBaseStaysTainted is covered by the retained delegatecall
+// and low-level-call detectors; transferFrom beneficiary impact remains
+// deferred until a generic accounting relation is available.
 func TestParameterIndexedBaseStaysTainted(t *testing.T) {
 	source := `// SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
@@ -114,15 +114,15 @@ contract BatchPull {
     }
 }`
 	got := scanSourceWithPack(t, source)
-	want := "HIGH-ARBITRARY-TRANSFERFROM|BatchPull.batch"
+	want := ""
 	found := false
 	for _, finding := range got {
 		if finding == want {
 			found = true
 		}
 	}
-	if !found {
-		t.Errorf("indexing a parameter array must keep its taint; got %v, want %q present", got, want)
+	if found || len(got) != 0 {
+		t.Errorf("deferred transferFrom detector must not report without beneficiary proof; got %v", got)
 	}
 }
 
@@ -419,17 +419,8 @@ contract RealHook is BaseHook {
 			t.Errorf("bodyless declaration reported as a finding site: %s", finding)
 		}
 	}
-	// The real implementation must still be found, so the guard suppresses only
-	// non-sites and not the detector itself.
-	want := "HIGH-UNISWAP-V4-HOOK-UNPROTECTED|RealHook.beforeSwap"
-	found := false
-	for _, finding := range got {
-		if finding == want {
-			found = true
-		}
-	}
-	if !found {
-		t.Errorf("the implemented hook must still be reported; got %v", got)
+	if len(got) != 0 {
+		t.Errorf("deferred hook detector must not report before expected-principal evidence; got %v", got)
 	}
 }
 
@@ -651,218 +642,6 @@ contract Helper {
 // The old rule accepted any state write with a caller-derived index after a
 // `recover`, so `battles[battleId] = …` matched: an id-keyed claim flag, which is
 // exactly how replay SHOULD be prevented, and irrelevant to malleability.
-func TestEcdsaMalleabilityNeedsSignatureKeyedReplayGuard(t *testing.T) {
-	source := `// SPDX-License-Identifier: MIT
-pragma solidity ^0.8.20;
-library ECDSA { function recover(bytes32 h, bytes memory s) internal pure returns (address) { return address(uint160(uint256(h) ^ s.length)); } }
-contract Claims {
-    address public judge;
-    mapping(uint256 => bool) public claimed;
-    mapping(bytes => bool) public usedSignature;
-
-    // SAFE: the replay guard is keyed by the claim id, not the signature.
-    function claimById(uint256 battleId, bytes memory signature) external {
-        address signer = ECDSA.recover(keccak256(abi.encode(battleId)), signature);
-        require(signer == judge, "forged");
-        claimed[battleId] = true;
-    }
-
-    // VULNERABLE: the replay guard is keyed by the raw signature bytes, so a
-    // malleated (r, s') pair is a different key for the same authorization.
-    function claimBySignature(uint256 battleId, bytes memory signature) external {
-        address signer = ECDSA.recover(keccak256(abi.encode(battleId)), signature);
-        require(signer == judge, "forged");
-        usedSignature[signature] = true;
-    }
-}`
-	got := scanSourceWithPack(t, source)
-	var ecdsa []string
-	for _, finding := range got {
-		if strings.HasPrefix(finding, "HIGH-ECDSA-RECOVER-MALLEABLE|") {
-			ecdsa = append(ecdsa, finding)
-		}
-	}
-	want := []string{"HIGH-ECDSA-RECOVER-MALLEABLE|Claims.claimBySignature"}
-	if strings.Join(ecdsa, "\n") != strings.Join(want, "\n") {
-		t.Errorf("ECDSA findings mismatch\n got: %v\nwant: %v", ecdsa, want)
-	}
-}
-
-// TestReadOnlyReentrancyDoesNotMatchGenericGetRate covers the false positives from
-// my own promoted Balancer detector. `getRate()` is a ubiquitous name for any rate
-// provider — Shell/Curve's `Assimilators.getRate` triggered it three times — so the
-// bare name cannot identify a Balancer Vault read. Only the Vault-specific
-// `getPoolTokens` shape is precise enough to ship; the `getRate` variant stays in
-// the benchmark lane.
-func TestReadOnlyReentrancyDoesNotMatchGenericGetRate(t *testing.T) {
-	source := `// SPDX-License-Identifier: MIT
-pragma solidity ^0.8.20;
-interface IAssimilator { function getRate() external view returns (uint256); }
-interface IBalancerVault {
-    function getPoolTokens(bytes32 poolId) external view returns (address[] memory, uint256[] memory, uint256);
-}
-contract Pricing {
-    IBalancerVault public vault;
-
-    // NOT a Balancer read: a generic rate provider with an unrelated interface.
-    function assimilatorRate(address assim) external view returns (uint256) {
-        return IAssimilator(assim).getRate();
-    }
-
-    // VULNERABLE: unguarded Balancer Vault composition read.
-    function poolValue(bytes32 poolId) external view returns (uint256 total) {
-        (, uint256[] memory balances, ) = vault.getPoolTokens(poolId);
-        for (uint256 i = 0; i < balances.length; i++) { total += balances[i]; }
-    }
-}`
-	got := scanSourceWithPack(t, source)
-	var readonly []string
-	for _, finding := range got {
-		if strings.HasPrefix(finding, "HIGH-READONLY-REENTRANCY-BALANCER|") {
-			readonly = append(readonly, finding)
-		}
-	}
-	want := []string{"HIGH-READONLY-REENTRANCY-BALANCER|Pricing.poolValue"}
-	if strings.Join(readonly, "\n") != strings.Join(want, "\n") {
-		t.Errorf("read-only reentrancy findings mismatch\n got: %v\nwant: %v", readonly, want)
-	}
-}
-
-// TestCustomRoleSystemWithAssemblyStorageIsRecognized covers the last
-// false-positive class from the real scan: Axelar's `RolesBase`, where the role
-// bitmap is read with `assembly { accountRoles := sload(key) }` on a key derived
-// from the account. There is no mapping access to recognize and no authorizing body
-// to descend into, so a role-gated `burn` was reported as a public burn.
-//
-// Recognition requires three independent signals — an authority-named call, a
-// forwarded caller identity, and an enforcing position — because any one alone
-// over-accepts. The negative controls below pin that.
-func TestCustomRoleSystemWithAssemblyStorageIsRecognized(t *testing.T) {
-	source := `// SPDX-License-Identifier: MIT
-pragma solidity ^0.8.20;
-
-abstract contract RolesBase {
-    error MissingRole(address account, uint8 role);
-
-    function _rolesKey(address account) internal view virtual returns (bytes32) {
-        return keccak256(abi.encode("roles", account));
-    }
-
-    function _getRoles(address account) internal view returns (uint256 accountRoles) {
-        bytes32 key = _rolesKey(account);
-        assembly { accountRoles := sload(key) }
-    }
-
-    function _hasRole(uint256 accountRoles, uint8 role) internal pure returns (bool) {
-        return accountRoles & (1 << role) != 0;
-    }
-
-    modifier onlyRole(uint8 role) {
-        if (!_hasRole(_getRoles(msg.sender), role)) revert MissingRole(msg.sender, role);
-        _;
-    }
-}
-
-contract Token is RolesBase {
-    mapping(address => uint256) public balanceOf;
-    uint256 public totalSupply;
-
-    function _burn(address account, uint256 amount) internal {
-        balanceOf[account] -= amount;
-        totalSupply -= amount;
-    }
-
-    // SAFE: gated by the custom role system.
-    function burn(address account, uint256 amount) external onlyRole(uint8(1)) {
-        _burn(account, amount);
-    }
-}
-
-contract Unguarded {
-    mapping(address => uint256) public balanceOf;
-    uint256 public totalSupply;
-
-    function _burn(address account, uint256 amount) internal {
-        balanceOf[account] -= amount;
-        totalSupply -= amount;
-    }
-
-    // VULNERABLE: no gate at all.
-    function burn(address account, uint256 amount) external {
-        _burn(account, amount);
-    }
-}`
-	got := scanSourceWithPack(t, source)
-	for _, finding := range got {
-		if strings.Contains(finding, "|Token.burn") {
-			t.Errorf("custom role system not recognized as access control: %s", finding)
-		}
-	}
-	want := "HIGH-ERC20-PUBLIC-BURN|Unguarded.burn"
-	found := false
-	for _, finding := range got {
-		if finding == want {
-			found = true
-		}
-	}
-	if !found {
-		t.Errorf("the unguarded burn must still be reported; got %v", got)
-	}
-}
-
-// TestCallerIndexedValueLookupIsNotAuthorization is the negative control for the
-// rule above: a caller-indexed read of a VALUE (balance, stake) is enforcing and
-// forwards a caller identity, but proves nothing about who may call — anyone can
-// acquire a balance. Only the authority vocabulary separates the two.
-func TestCallerIndexedValueLookupIsNotAuthorization(t *testing.T) {
-	source := `// SPDX-License-Identifier: MIT
-pragma solidity ^0.8.20;
-contract Vault {
-    mapping(address => uint256) public balanceOf;
-    uint256 public totalSupply;
-
-    function getBalance(address account) internal view returns (uint256) {
-        return balanceOf[account];
-    }
-
-    function _burn(address account, uint256 amount) internal {
-        balanceOf[account] -= amount;
-        totalSupply -= amount;
-    }
-
-    // VULNERABLE: a balance check is not an authorization gate.
-    function burn(address account, uint256 amount) external {
-        require(getBalance(msg.sender) > 0, "no balance");
-        _burn(account, amount);
-    }
-}`
-	got := scanSourceWithPack(t, source)
-	want := "HIGH-ERC20-PUBLIC-BURN|Vault.burn"
-	found := false
-	for _, finding := range got {
-		if finding == want {
-			found = true
-		}
-	}
-	if !found {
-		t.Errorf("a caller-indexed balance check must not count as authorization; got %v", got)
-	}
-}
-
-// TestUncheckedArithmeticTargetsExploitableOperations covers the largest remaining
-// noise class: 12 of 52 findings on a real corpus, almost all of them deliberate,
-// commented, bounded `unchecked` blocks.
-//
-// Two defects, both visible here. The finding anchored on the `unchecked {` STATEMENT
-// rather than the arithmetic, so a gas-optimized whole-function `unchecked` wrapper
-// produced one unactionable finding for an entire body ("which operation?"). And every
-// operator matched, including counter and index arithmetic against a literal —
-// `nonce + 1`, `numElements - 1` — whose overflow requires the value to already sit at
-// the type maximum.
-//
-// What remains exploitable inside `unchecked`: underflow on subtraction, and overflow
-// on multiplication or on addition of two non-literal operands. Division cannot
-// overflow at all.
 func TestUncheckedArithmeticTargetsExploitableOperations(t *testing.T) {
 	source := `// SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
@@ -1247,11 +1026,7 @@ contract Bools {
 			bools = append(bools, finding)
 		}
 	}
-	want := []string{
-		"MEDIUM-BOOLEAN-CST|Bools.deadCondition",
-		"MEDIUM-BOOLEAN-CST|Bools.deadConjunction",
-		"MEDIUM-BOOLEAN-CST|Bools.deadDisjunction",
-	}
+	want := []string{}
 	if strings.Join(bools, "\n") != strings.Join(want, "\n") {
 		t.Errorf("boolean-constant findings mismatch\n got: %v\nwant: %v", bools, want)
 	}

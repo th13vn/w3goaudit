@@ -28,20 +28,15 @@ query:
     # Slither matches strictly on `initialize`; we also catch `init` / `setup`
     # because those are the popular variants in non-OZ proxies.
     - func_name: (?i)^(initialize|initialise|init|__init|setup)$
-    # access_controlled covers: no auth modifier, no inline msg.sender guard,
-    # no recursive auth in callees. The explicit `not:` below skips OZ-style
-    # initializer/reinitializer modifiers.
+    - preset:
+        initializer:
+          takeover: possible
+    # A first-call takeover is not a vulnerability when the entrypoint is
+    # independently restricted to a trusted principal.
     - not:
-        preset: access_controlled
-    # A one-time-init guard proven from the body: an enforcing check on a state flag
-    # that the function also sets. This covers OpenZeppelin's `initializer` modifier
-    # (whose body is exactly that mutex) plus every other spelling —
-    # `if (initialized) revert;` (Euler) and
-    # `if (_isInitialized()) revert; _initialize();` (Axelar), both of which were
-    # previously reported because only the OZ modifier name and a guard literally
-    # naming `_initializersDisabled` were recognized.
-    - not:
-        preset: initializer_guarded
+        preset:
+          authorization:
+            type: protected
     - not:
         modifier: "(?i)(initializer|reinitializer)"
     # Require at least one state write — otherwise it's a pure helper named

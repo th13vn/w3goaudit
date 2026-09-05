@@ -10,12 +10,13 @@ import (
 	"github.com/th13vn/w3goaudit/pkg/reader"
 )
 
-// TestPromotedDetectorsDiscriminateVulnerableFromSafe runs each detector promoted
-// from the benchmark lane into the shipped `official/` pack against its own
-// fixture, and asserts the exact set of flagged sites.
+// TestPromotedDetectorsDiscriminateVulnerableFromSafe runs retained promoted
+// detectors in the shipped `official/` pack. Reworked or deferred mechanisms
+// are intentionally validated in their benchmark/candidate lanes until generic
+// semantic evidence is strong enough for official promotion.
 //
-// Both halves matter. The `want` list proves the detector still fires after
-// promotion (the benchmark lane exercised it against a different corpus), and the
+// Both halves matter. The `want` list proves each retained detector still fires
+// after promotion, and the
 // `Safe_*` naming convention lets the assertion double as a false-positive gate:
 // a promoted detector that fires on a deliberate safe control fails here rather
 // than quietly degrading the pack's precision.
@@ -26,84 +27,12 @@ func TestPromotedDetectorsDiscriminateVulnerableFromSafe(t *testing.T) {
 		want     []string
 	}{
 		{
-			template: "templates/official/high/readonly-reentrancy-curve.yaml",
-			fixture:  "test-data/security/readonly-reentrancy.sol",
-			want:     []string{"Vulnerable_CurveReadOnlyReentrancy.lpPrice"},
-		},
-		{
-			// Only the Vault-specific getPoolTokens shape ships; the generic
-			// `getRate` variant was dropped because that name identifies any rate
-			// provider (see the template's meta).
-			template: "templates/official/high/readonly-reentrancy-balancer.yaml",
-			fixture:  "test-data/security/readonly-reentrancy.sol",
-			want:     []string{"Vulnerable_BalancerReadOnlyReentrancy.poolValue"},
-		},
-		{
 			template: "templates/official/high/no-slippage-check.yaml",
 			fixture:  "test-data/security/amm-integration.sol",
 			want: []string{
 				"Vulnerable_NoSlippageCheck.swapEth",
 				"Vulnerable_NoSlippageCheck.swapTokens",
 			},
-		},
-		{
-			template: "templates/official/high/uniswap-callback-unprotected.yaml",
-			fixture:  "test-data/security/amm-integration.sol",
-			want: []string{
-				"Vulnerable_UniswapCallbackUnprotected.uniswapV2Call",
-				"Vulnerable_UniswapCallbackUnprotected.uniswapV3SwapCallback",
-			},
-		},
-		{
-			template: "templates/official/high/uniswap-v4-hook-unprotected.yaml",
-			fixture:  "test-data/security/amm-integration.sol",
-			want: []string{
-				"Vulnerable_UniswapV4HookUnprotected.afterAddLiquidity",
-				"Vulnerable_UniswapV4HookUnprotected.beforeSwap",
-			},
-		},
-		{
-			template: "templates/official/high/oracle-price-update-unrestricted.yaml",
-			fixture:  "test-data/security/oracle-pricing.sol",
-			want: []string{
-				"Vulnerable_OraclePriceUpdateUnrestricted.setAssetPrice",
-				"Vulnerable_OraclePriceUpdateUnrestricted.updateOracleTimestamp",
-			},
-		},
-		{
-			template: "templates/official/high/erc20-public-burn.yaml",
-			fixture:  "test-data/security/token-callback-reentrancy.sol",
-			want:     []string{"Vulnerable_ERC20PublicBurn.burn"},
-		},
-		{
-			template: "templates/official/high/erc721-callback-reentrancy.yaml",
-			fixture:  "test-data/security/token-callback-reentrancy.sol",
-			want:     []string{"Vulnerable_ERC721CallbackReentrancy.mint"},
-		},
-		{
-			template: "templates/official/high/erc777-callback-reentrancy.yaml",
-			fixture:  "test-data/security/token-callback-reentrancy.sol",
-			want:     []string{"Vulnerable_ERC777CallbackReentrancy.deposit"},
-		},
-		{
-			template: "templates/official/medium/stale-oracle-data.yaml",
-			fixture:  "test-data/security/oracle-pricing.sol",
-			want:     []string{"Vulnerable_StaleOracleData.price"},
-		},
-		{
-			template: "templates/official/medium/deprecated-chainlink-latestanswer.yaml",
-			fixture:  "test-data/security/oracle-pricing.sol",
-			want:     []string{"Vulnerable_DeprecatedChainlinkLatestAnswer.price"},
-		},
-		{
-			template: "templates/official/medium/oracle-lp-spot-price.yaml",
-			fixture:  "test-data/security/oracle-pricing.sol",
-			want:     []string{"Vulnerable_OracleLpSpotPrice.getLpPrice"},
-		},
-		{
-			template: "templates/official/medium/oracle-curve-spot-price.yaml",
-			fixture:  "test-data/security/oracle-pricing.sol",
-			want:     []string{"Vulnerable_OracleCurveSpotPrice.price"},
 		},
 	}
 

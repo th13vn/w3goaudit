@@ -103,43 +103,6 @@ func TestRepositoryUserControlledTemplatesMatchCallerIdentity(t *testing.T) {
 	}
 }
 
-func TestRetainedParameterTemplatesRejectCallerIdentity(t *testing.T) {
-	root := repoRoot(t)
-	db := buildRepositoryFixtureDatabase(t, root, "test-data/security/user-controlled-caller-identity.sol")
-
-	cases := []struct {
-		name                 string
-		templatePath         string
-		parameter            string
-		additionalParameters []string
-		caller               string
-	}{
-		{
-			name:         "transferFrom from account",
-			templatePath: "templates/official/high/arbitrary-transferfrom.yaml",
-			parameter:    "RetainedParameterTransferFrom.pullParameter",
-			additionalParameters: []string{
-				"RetainedParameterTransferFrom.pullParameterNamedMsgSender",
-			},
-			caller: "RetainedParameterTransferFrom.pullCallerIdentity",
-		},
-		{
-			name:         "ETH recipient",
-			templatePath: "templates/official/high/arbitrary-send-eth.yaml",
-			parameter:    "RetainedParameterSendETH.sendParameter",
-			caller:       "RetainedParameterSendETH.sendCallerIdentity",
-		},
-	}
-
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			got := executeRepositoryTemplate(t, root, db, tc.templatePath)
-			assertFindingSetContains(t, got, append([]string{tc.parameter}, tc.additionalParameters...))
-			assertFindingSetExcludes(t, got, []string{tc.caller})
-		})
-	}
-}
-
 func TestRepositoryCallerIdentityAccessControlUsesExactMsgSenderHelper(t *testing.T) {
 	root := repoRoot(t)
 	db := buildRepositoryFixtureDatabase(t, root, "test-data/security/user-controlled-caller-identity.sol")

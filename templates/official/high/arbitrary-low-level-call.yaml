@@ -18,7 +18,10 @@ query:
   from: entry_function
   select: lowlevel_call
   where:
-    - not: { preset: access_controlled }
+    - not:
+        preset:
+          authorization:
+            type: protected
 
     # The CALL's own target must be caller-controlled — not the receiver of some
     # nested call inside the calldata expression.
