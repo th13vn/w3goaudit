@@ -638,7 +638,11 @@ Guarded modifier parameters are bound to persisted call-site argument ASTs, so
 `onlyRole(isOperator[msg.sender])` is recognized while
 `onlyOwner(amount)` plus `require(amount > 0)` is rejected. Internal helpers
 likewise require an exact resolved contract ID and full selector before their
-body is followed. Direct function guards use the same whole-condition proof.
+body is followed. Generic success checks such as `require(ok)` are not
+authorization barriers, so ordinary wrappers do not block taint analysis.
+When an exact helper name is overloaded, unresolved binding remains fail-closed
+even if the selected body is not itself authorization-shaped. Direct function
+guards use the same whole-condition proof.
 
 Authorization proof is whole-condition, polarity-aware, and
 enforcement-positive. `require(auth)` and `assert(auth)` require truth, while

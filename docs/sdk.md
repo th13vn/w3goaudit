@@ -1227,6 +1227,9 @@ without the capability return `ErrAuthorizationFactsUnavailable`; callers must
 rebuild from source rather than infer safety. Query limits are caller-supplied
 and capped at `MaxAuthorizationQueryLimit` (200), and returned facts are
 deterministic deep copies.
+Generic enforced conditions are not automatically authorization evidence:
+`require(ok)` after a low-level call remains an ordinary success check. Exact
+overload ambiguity remains unavailable rather than being guessed.
 
 ```go
 page, err := db.QueryAuthorizationFacts(types.AuthorizationQuery{

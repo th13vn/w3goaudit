@@ -71,6 +71,21 @@ contract Vault {
 	}
 }
 
+func TestAuthorizationHelperIgnoresLowLevelCallSuccessCheck(t *testing.T) {
+	db := buildFromSource(t, `pragma solidity ^0.8.20;
+contract Wrapper {
+    function open(address target, bytes calldata data) external { _call(target, data); }
+    function _call(address target, bytes calldata data) internal { (bool ok,) = target.call(data); require(ok); }
+}`)
+	fact, ok := db.GetAuthorizationFactByID(types.MakeFunctionID("/tmp/T.sol", "Wrapper", "open(address,bytes)"))
+	if !ok {
+		t.Fatal("missing authorization fact")
+	}
+	if fact.Verdict != types.AuthorizationUnprotected {
+		t.Fatalf("low-level success check classified as authorization: %+v", fact)
+	}
+}
+
 func TestAuthorizationFactsCaptureRuntimeAndPrincipalEvidence(t *testing.T) {
 	db := buildFromSource(t, `pragma solidity ^0.8.20;
 contract AuthFacts {

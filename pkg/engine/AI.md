@@ -1041,3 +1041,8 @@ fields remain report and SDK data, not public WQL attributes. Missing, partial,
 after-site, unresolved, and ambiguous evidence fail closed. `Rule.Attr` remains
 an ordinary AST-attribute matcher only; it has no hidden authorization,
 lifecycle, or runtime interpretation for programmatic callers.
+Builder authorization evidence deliberately ignores generic success checks such
+as `require(ok)`: they do not authorize a caller. Ambiguous overloaded helpers
+remain unavailable to positive authorization predicates even when their body is
+not authorization-shaped, while ordinary unguarded wrappers remain unprotected
+for taint and reachability analysis.

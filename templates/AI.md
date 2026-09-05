@@ -62,6 +62,11 @@ deduplicated, sorted, and matched as complete values. Use `self_sender` when a
 caller may act only on its own resource. Express a required safety property as
 an ordinary positive preset and its absence with `not:`.
 
+The engine does not treat a generic success check such as `require(ok)` as
+authorization. This keeps ordinary wrappers traversable for taint analysis; an
+ambiguous overloaded helper remains unavailable to positive authorization
+predicates instead of being guessed.
+
 Initializer takeover is intentionally one small public predicate:
 
 ```yaml

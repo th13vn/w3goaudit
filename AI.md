@@ -265,8 +265,11 @@ run-output scratch directory.
 - Authorization/runtime-inheritance facts are versioned at `1.0.0` and remain
   protocol-neutral. Exact modifier/helper argument bindings distinguish fixed
   principals from caller-selected operands; unresolved or ambiguous bindings
-  fail closed. WQL exposes only the direct parameterized authorization and
-  initializer presets; lifecycle and dispatch details remain internal evidence
+  fail closed. Generic success checks such as `require(ok)` are not authorization
+  barriers, while ambiguous overloaded helpers remain fail-closed even when
+  their body is not authorization-shaped. WQL exposes only the direct
+  parameterized authorization and initializer presets; lifecycle and dispatch
+  details remain internal evidence
   for reports and SDK consumers. Programmatic `Rule.Attr` has no hidden semantic
   interpretation. Official templates remain unchanged during
   candidate review.

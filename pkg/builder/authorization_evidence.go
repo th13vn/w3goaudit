@@ -138,7 +138,7 @@ func analyzeAuthorizationTargetWithBindings(fn *types.Function, runtime *types.C
 			// the caller's result explicitly unprotected so entrypoint detectors
 			// can continue through wrappers such as settle(...). Helpers that do
 			// contain an authorization guard remain fail-closed below.
-			if !hasAuthorizationGuard(callee.AST) {
+			if !hasAuthorizationGuard(callee, db, calleeBindings) && !authorizationCalleeOverloaded(callee, db) {
 				continue
 			}
 			result := unknownAuthorizationResult(kind + ".binding." + bindingReason)
@@ -158,7 +158,7 @@ func analyzeAuthorizationTargetWithBindings(fn *types.Function, runtime *types.C
 			unknown = &copy
 			continue
 		}
-		if authorizationBindingsContainCallerSelected(calleeBindings) && hasAuthorizationGuard(callee.AST) {
+		if authorizationBindingsContainCallerSelected(calleeBindings) && (hasAuthorizationGuard(callee, db, calleeBindings) || authorizationCalleeOverloaded(callee, db)) {
 			result = unknownAuthorizationBindingResult(kind + ".binding.caller_selected")
 			result.selectedFunctionID = authorizationFunctionID(callee, nil)
 			unknown = &result
@@ -193,18 +193,75 @@ func authorizationCallNameSuggestsGuard(name string) bool {
 // ambiguous after binding a caller-selected principal or role. The former must
 // remain explicitly unprotected so entrypoint-level detectors can follow the
 // tainted value through the helper; the latter must fail closed.
-func hasAuthorizationGuard(root *types.ASTNode) bool {
-	if root == nil {
+func hasAuthorizationGuard(fn *types.Function, db *types.Database, bindings authorizationBindings) bool {
+	if fn == nil || fn.AST == nil {
 		return false
 	}
 	found := false
-	walkAST(root, func(node *types.ASTNode) {
+	walkAST(fn.AST, func(node *types.ASTNode) {
 		if found || node == nil {
 			return
 		}
-		_, _, found = enforcedAuthorizationCondition(node)
+		expr, _, enforced := enforcedAuthorizationCondition(node)
+		if !enforced || expr == nil {
+			return
+		}
+		found = authorizationExpressionLooksLikeGuard(expr, fn, db, bindings)
 	})
 	return found
+}
+
+// authorizationExpressionLooksLikeGuard distinguishes access-control-shaped
+// conditions from ordinary business checks. A generic require(ok) proves only
+// external-call success, not caller authorization. Role mappings and caller
+// identity comparisons remain authorization-shaped even when parameter binding
+// is incomplete, so ambiguous helpers still fail closed.
+func authorizationExpressionLooksLikeGuard(expr *types.ASTNode, fn *types.Function, db *types.Database, bindings authorizationBindings) bool {
+	if expr == nil {
+		return false
+	}
+	if binding, ok := bindings.lookup(expr); ok && binding.authorizes {
+		return true
+	}
+	if containsExactCallerIdentity(expr) {
+		return true
+	}
+	if expr.Kind == types.KindExprIndexAccess {
+		base, keys := flattenAuthorizationIndex(expr)
+		if base != nil && base.RefKind == "state_var" && types.IsAccessControlName(base.Name) {
+			for _, key := range keys {
+				if isExactCallerIdentity(key) {
+					return true
+				}
+				if binding, ok := bindings.lookup(key); ok && binding.kind == types.PrincipalCallerSelfScope {
+					return true
+				}
+			}
+		}
+	}
+	for _, child := range expr.Children {
+		if authorizationExpressionLooksLikeGuard(child, fn, db, bindings) {
+			return true
+		}
+	}
+	return false
+}
+
+func authorizationCalleeOverloaded(fn *types.Function, db *types.Database) bool {
+	if fn == nil || db == nil || fn.Name == "" {
+		return false
+	}
+	owner := db.GetContractByID(types.MakeContractID(fn.SourceFile, fn.ContractName))
+	if owner == nil {
+		return false
+	}
+	count := 0
+	for _, candidate := range owner.Functions {
+		if candidate != nil && candidate.Name == fn.Name {
+			count++
+		}
+	}
+	return count > 1
 }
 
 func authorizationFromModifier(call *types.FunctionCall, invokingFn *types.Function, runtime *types.Contract, db *types.Database, callerBindings authorizationBindings, visiting map[string]bool) authorizationResult {

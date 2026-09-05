@@ -130,7 +130,9 @@ The builder constructs a comprehensive database through **8 phases**:
   - **Guard facts** — `require`/`assert`/`revert` conditions and `if`/ternary
     branch conditions
   - **Auth facts** — modifiers, inline `msg.sender` checks, `tx.origin` use,
-    controlled vs unprotected
+    controlled vs unprotected. Generic success checks such as `require(ok)` do
+    not become authorization barriers, so ordinary helper wrappers remain
+    traversable for taint analysis; ambiguous overloads stay fail-closed.
 - These facts feed the per-contract state-change matrix and the per-entry
   workflow files written in Phase 5 (report generation)
 - **Code:** [effects.go](../pkg/builder/effects.go)

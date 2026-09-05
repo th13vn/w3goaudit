@@ -6,6 +6,11 @@ All notable changes to w3goaudit are documented here. This project adheres to
 
 ## Unreleased
 
+- Hardened authorization evidence for official detectors: generic low-level-call
+  success checks no longer block taint traversal, while ambiguous overloaded
+  helpers remain fail-closed. Added a regression for struct-field delegatecall
+  targets forwarded through an internal helper.
+
 ### Changed: evidence-first official template migration
 
 - The embedded official pack is now a filesystem-derived inventory of 20

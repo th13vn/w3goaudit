@@ -719,7 +719,9 @@ function _processWithdraw() internal {
   principal protection, caller self-scoping, and deterministic first-call
   takeover. Inheritance dispatch is automatic; raw authorization/lifecycle
   attributes are not a WQL or programmatic evaluator surface. Parameter-only
-  provenance remains explicit as `tainted: parameter`.
+  provenance remains explicit as `tainted: parameter`. Generic success checks
+  such as `require(ok)` do not become authorization barriers, so ordinary
+  wrappers remain traversable; ambiguous overloaded helpers remain fail-closed.
 
 **Extract Subcommands (11 total)**
 - Canonical order widest→narrowest: `main`, `entry`, `inheritance`, `statevar`, `selector`, `involve`, `workflow`, `bundle`, `context`, `source`, `diff`
