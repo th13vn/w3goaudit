@@ -1,9 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-// Fixtures for HIGH-ORACLE-PRICE-UPDATE-UNRESTRICTED, MEDIUM-STALE-ORACLE-DATA,
-// MEDIUM-DEPRECATED-CHAINLINK-LATESTANSWER, MEDIUM-ORACLE-LP-SPOT-PRICE and
-// MEDIUM-ORACLE-CURVE-SPOT-PRICE.
+// Deferred oracle and pricing fixtures. Protocol-specific variants remain
+// useful while generic tuple, freshness, and price-use evidence is developed.
 
 interface IAggregator {
     function latestRoundData()

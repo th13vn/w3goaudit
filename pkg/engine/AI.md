@@ -9,7 +9,7 @@ Executes WQL templates against the contract database to find security vulnerabil
 **A WQL document is meta plus one query: block.** The block holds
 `select`/`from`/`where` or a one-level `and:`/`or:` query
 composition; see [`docs/wql-syntax.md`](../../docs/wql-syntax.md) for the
-full language reference. All 120 official/benchmark/feature-test templates in
+full language reference. The repository currently contains 20 official templates plus benchmark and feature-test templates in
 this repo use it.
 
 Authoritative documentation tests also pin the canonical v0.5 human-report
@@ -544,12 +544,11 @@ query:
 - **Source:** `regex` as a scope-aware raw-text predicate
 - **Traversal:** `contains`, `inside`, `receiver`
   - `receiver:` with a nested rule matches the call's **direct** tagged receiver
-    child and nothing else. `has: {receiver: true, …}` searches every descendant, so
+    child and nothing else. Descendant search can match a nested call receiver, so
     the receiver of a NESTED call in the arguments satisfied it — CrocSwapDex's
     `proxyPaths_[CONST].delegatecall(abi.encodeWithSignature(…, curve.pullPriceTick(), …))`
-    was reported CRITICAL because `curve` is caller-derived. The scalar
-    `receiver: true` remains the attribute marker on a receiver node itself;
-    lowering dispatches on the YAML node kind. Implemented by
+    was reported CRITICAL because `curve` is caller-derived. Lowering dispatches
+    on the nested receiver matcher. Implemented by
     `matchDirectReceiver` in verify.go.
 - **Filter (function-level preconditions):**
   - `modifier` — regex match on function modifiers
@@ -840,24 +839,13 @@ Built-in preset checks for common patterns.
 - `IsKnownPreset(name)` - Used by template load to reject typos
 
 **Built-in presets:**
-- `access_controlled` — `Function.IsAccessControlled(db)`. True when the
-  function has privileged access control through owner/admin/role modifiers,
-  auth helpers, or caller-vs-storage / caller-vs-hardcoded-address guards.
-- `caller_checked` — `IsAccessControlled(db) ||
-  Function.ComparesCallerIdentity(db)`. True when the function is privileged
-  or self-scopes the caller, including item-ownership checks such as
-  `ownerOf(tokenId) == msg.sender` and forwarded equivalents.
-- `reentrancy_guarded` — true when an applied modifier's BODY proves a mutex.
-- `initializer_guarded` — `Function.HasOneTimeInitGuardIn(db, contract)`. True when
-  an enforcing check reads a state flag that the function, a resolved internal
-  helper, or a sibling in the same contract (a constructor, a
-  `_disableInitializers()`) sets. Replaces the previous name-specific carve-outs,
-  which knew only the OpenZeppelin `initializer` modifier and a guard literally
-  naming `_initializersDisabled`. The flag may live in an explicit storage slot
-  written by inline assembly — `collectStateWriteTargets` counts `asm.sstore(SLOT, …)`
-  as a write to `SLOT`, so Axelar's `sload(INITIALIZED_SLOT)` /
-  `sstore(INITIALIZED_SLOT, true)` split across `_isInitialized()` / `_initialize()`
-  proves the mutex. Matching only `stmt.assign` saw the read and missed the write.
+- `preset.authorization.type: protected` — exact privileged authorization evidence,
+  including normalized principal alternatives and automatic inheritance dispatch.
+- `preset.authorization.type: self_sender` — caller self-scoping evidence, kept
+  distinct from privileged authorization.
+- `preset: reentrancy_guarded` — an applied modifier body proves a mutex.
+- `preset.initializer.takeover: possible` — first-call takeover evidence. Mutex,
+  constructor, proxy, deployment, and atomicity details remain internal facts.
 
 Every preset returns true when its named safety property is present. Express
 the vulnerable absence with normal negation:
@@ -874,10 +862,10 @@ known presets, and the runtime fallback returns `false`.
 
 **Available Presets:**
 
-#### access_controlled
-Returns true when privileged access control is present. Body-based: modifier and
-helper NAMES are descriptive only, and must resolve to a body that actually
-proves caller authorization.
+#### authorization
+Use `type: protected` for a contract-fixed principal and `type: self_sender` for
+caller-owned resource scoping. Inheritance, C3, virtual dispatch, and `super`
+dispatch are automatic engine behavior.
 
 One name vocabulary is used, and only for the **storage authority** operand:
 `types.accessControlNameRegex` decides whether a caller-membership read such as
@@ -899,14 +887,11 @@ Checks in order:
 3. AST check: `msg.sender`/`tx.origin`/`_msgSender()` compared against owner/admin patterns
 4. Recursive check: walks internal/inherited/self/super call chain into base contracts
 
-#### caller_checked
-Returns true when the function has either privileged access control or a
-caller self-scoping check. It includes binding a
-sensitive argument to `msg.sender` (`require(from == msg.sender)`) or
-restricting the caller to a resource they own (`ownerOf(tokenId) == msg.sender`,
-including the interprocedural forwarded `_withdraw(msg.sender,…)` form). Use for
-detectors where self-scoping is a valid mitigation, such as arbitrary
-`transferFrom` and arbitrary-send-eth.
+#### initializer
+Use `takeover: possible` after narrowing the entry function with an ordinary
+`func_name` regex. The preset owns first-call lifecycle evidence; internal mutex,
+constructor-disable, proxy-linkage, deployment-authority, and atomicity fields are
+not public matcher attributes.
 
 #### reentrancy_guarded
 Returns true when the function has a reentrancy guard.

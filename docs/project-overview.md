@@ -167,7 +167,7 @@ w3goaudit/
 │   └── types/              # Core data structures (see above)
 │
 ├── templates/              # WQL detection templates (embed.go embeds official/)
-│   ├── official/           # 25 curated WQL detectors, embedded as the default
+│   ├── official/           # 20 curated WQL detectors, embedded as the default
 │   └── test/               # 5 WQL engine feature-exercise templates
 ├── scripts/benchmark/      # Benchmark harness (local CLI; Docker for multi-tool)
 │   ├── compose.yaml        # Multi-tool comparison host entry point
@@ -302,7 +302,7 @@ alter the scanner's official finding set.
 
 **Capabilities:**
 - Load YAML templates as **WQL** (`meta` plus `query:` — `select`/`from`/
-  `where` or a query-level `and:`/`or:` composition; all 120 official,
+  `where` or a query-level `and:`/`or:` composition; all 20 official,
   benchmark, and feature-test templates use it). Unknown keys at any level
   are rejected by the strict parser. `TemplateDoc.lower()`
   (`pkg/engine/wql.go`) compiles the document into evaluator `Rule` IR
@@ -711,8 +711,10 @@ function _processWithdraw() internal {
   external_call, state_write/state_read, selfdestruct. `state_write` includes
   assignments, storage-array `push`/`pop`, state-targeted `delete`/`++`/`--`,
   and `asm.sstore`; storage mutations are not call nodes.
-- Presets are property-true checks: `access_controlled`, `caller_checked`, and
-  `reentrancy_guarded`; ordinary `not:` expresses the property's absence.
+- Presets are direct semantic checks: `preset.authorization` accepts `protected`
+  or `self_sender`, and `preset.initializer` accepts `takeover: possible`.
+  `reentrancy_guarded` remains the general guard property, and ordinary `not:`
+  expresses a property's absence.
   Parameterized `preset.authorization` and `preset.initializer` express
   principal protection, caller self-scoping, and deterministic first-call
   takeover. Inheritance dispatch is automatic; raw authorization/lifecycle

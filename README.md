@@ -44,7 +44,7 @@ Example console output:
 ```
 ▶ Reading sources: ./contracts/
 ▶ Building database: 74 files, 164 contracts, 1203 functions
-▶ Scanning: 25 templates (~/.w3goaudit/templates)
+▶ Scanning: 20 official templates (~/.w3goaudit/templates)
 ▶ Writing report: ./contracts-audit
 
 81 findings: 65 HIGH, 16 MEDIUM · scanned 74 contracts in 51ms
@@ -411,8 +411,8 @@ query:
 
 This is **WQL** (W3GoAudit Query Language). A WQL document is meta plus one query: block.
 That block contains `select`/`from`/`where`, or a query-level
-`and:`/`or:` composition. All 120 repository templates (39 official, 5
-feature-test, and 76 benchmark) use it; see the
+`and:`/`or:` composition. The repository currently contains 20 official, 5
+feature-test, and 76 benchmark templates; see the
 [WQL Syntax Guide](./docs/wql-syntax.md) for the full language reference.
 
 ---

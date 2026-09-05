@@ -164,10 +164,10 @@ dot-notation `ASTNode` kinds (see §6.2 for the full list). Key decisions:
   so `incorrect-exp` can tell `10 ^ 18` (decimal, likely `**` typo) from
   `x ^ 0xFF` (intentional bitmask).
 - **Call metadata as tagged children:** the receiver of a member call gets a
-  child with `call_receiver: true`; `{value:}`/`{gas:}`/`{salt:}` set
-  `has_value`/`has_gas`/`has_salt` and attach the value expression as a
-  `call_option` child. The engine's positional `args:` matcher skips these
-  metadata children. (Powers `arbitrary-send-eth`'s `attr: {has_value: true}`.)
+  tagged receiver child; call options attach their expressions as `call_option`
+  children. The engine's positional `args:` matcher skips these metadata
+  children. Presence and nested matchers are preferred over authored Boolean
+  values; retired protocol-specific transfer detectors are not official.
 - **Member access** stores the base identifier as the `parent` attribute
   (`msg` for `msg.sender`) so `tx.origin` vs `msg.sender` are distinguishable.
 - **Coverage fixes** baked in: `unchecked { }`, do/while bodies, and the *success*
@@ -712,15 +712,16 @@ Two precision sub-decisions live here:
   getter `ownerOf(tokenId)` is **not** mistaken for a cast and collapsed to
   `tokenId`.
 
-**Presets** (`presets.go`) expose property-true checks:
-- `access_controlled` = `IsAccessControlled`
-- `caller_checked` = `IsAccessControlled || ComparesCallerIdentity` (self-scoping
-  is a valid mitigation for `arbitrary-transferfrom` and `arbitrary-send-eth`)
-- `reentrancy_guarded` = `HasReentrancyGuard` — an applied modifier's **body**
-  proves a mutex (checks and writes one common state variable before `_;`)
-- `initializer_guarded` = `HasOneTimeInitGuardIn` — the same mutex minus the `_;`
-  boundary: an enforcing check READS a flag that the function, a resolved internal
-  callee, or a sibling in the contract WRITES
+**Presets** (`presets.go`) expose direct semantic checks:
+- `preset.authorization.type: protected` uses exact `IsAccessControlled` evidence.
+  Principal alternatives are normalized before comparison.
+- `preset.authorization.type: self_sender` uses `ComparesCallerIdentity` and
+  models caller self-scoping separately from privileged authorization.
+- `preset: reentrancy_guarded` uses `HasReentrancyGuard`, proven from an applied
+  modifier body.
+- `preset.initializer.takeover: possible` uses first-call takeover evidence from
+  `HasOneTimeInitGuardIn` and related lifecycle facts. Mutex, constructor, proxy,
+  deployment, and atomicity details remain internal evidence.
 Vulnerability detectors use ordinary `not:` when the property must be absent.
 Unknown preset names are rejected at load (`IsKnownPreset`).
 

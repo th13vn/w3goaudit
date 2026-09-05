@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-// Fixtures for HIGH-READONLY-REENTRANCY-CURVE and
-// HIGH-READONLY-REENTRANCY-BALANCER.
+// Deferred read-only reentrancy fixtures. The protocol-specific variants remain
+// useful for future generic unsettled-phase evidence.
 
 interface ICurvePool {
     function get_virtual_price() external view returns (uint256);

@@ -252,9 +252,9 @@ run-output scratch directory.
   `stateMapping[userIndex]` stays state-provenance.
 - `reentrancy_guarded` is proven from an applied modifier's body (check a state
   variable and write it before `_;`), with name matching only as a fallback for an
-  unresolvable body. `access_controlled` dispatches `virtual` internal calls through
-  the runtime contract's MRO so an abstract auth hook resolves to the deploying
-  contract's override; `super` calls keep their statically resolved base target.
+  unresolvable body. `preset.authorization` uses exact authorization evidence;
+  virtual internal calls are dispatched through the deploying contract MRO
+  automatically, and `super` calls keep their statically resolved base target.
 - Entry-function resolution gives each signature to the most-derived declaration
   before filtering by entrypoint status, so an inherited interface stub can never
   substitute for a `view`/`pure` override.
@@ -389,9 +389,10 @@ Compatibility/exactness repair notes:
 - `Finding.Location` is still the primary anchor; `Finding.Related` is for the
   complete contributing context.
 - Public templates use WQL (`query:` with `select`/`from`/`where`, or a
-  query-level `and:`/`or:` composition) with intuitive-polarity presets
-  (`access_controlled`, `caller_checked`, `reentrancy_guarded`) that are direct
-  evaluator property checks; normal `not:` expresses a property's absence.
+  query-level `and:`/`or:` composition) with direct semantic presets.
+  `preset.authorization` accepts `protected` or `self_sender`, while
+  `preset.initializer` accepts `takeover: possible`; normal `not:` expresses a
+  property's absence.
   `tainted: user_controlled` matches parameter or caller-identity taint, while
   the narrower explicit sources remain available. Caller identity is limited
   to `msg.sender`, `tx.origin`, and an exact zero-argument internal
@@ -402,8 +403,8 @@ Compatibility/exactness repair notes:
   is available, a missing helper or nonzero overload disproves the identity.
   Same-named identifiers, state/local/parameter
   names, external/self calls, unresolved calls, and nonzero overloads retain
-  their ordinary provenance. All 120 official
-  + benchmark + feature-test templates use it. `select` is an optional
+  their ordinary provenance. The repository currently contains 20 official plus
+  benchmark and feature-test templates. `select` is an optional
   scalar; a fully specified sequence supplies its own anchor, and every
   positive-polarity sequence nested under a select-less matcher must guarantee
   positive actionable evidence in its first step.

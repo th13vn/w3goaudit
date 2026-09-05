@@ -372,14 +372,14 @@ library extensions.
 modifier map on a low-level call is no longer dropped at parse time
 (ast_builder.go:582). For each named option:
 
-- `has_value: true` attribute set when `{value: ...}` is present; the
+- `has_value` presence fact is set when `{value: ...}` is present; the
   expression for the ETH amount is attached as a child node tagged
   `call_option=value` so taint analysis can reach it.
-- `has_gas: true` attribute set when `{gas: ...}` is present.
-- `has_salt: true` attribute set when `{salt: ...}` is present (CREATE2).
+- `has_gas` presence fact is set when `{gas: ...}` is present.
+- `has_salt` presence fact is set when `{salt: ...}` is present (CREATE2).
 
-Templates use this via `attr: has_value: true` to discriminate ETH-bearing
-low-level calls from plain function-routing calls. See [`templates/official/high/arbitrary-send-eth.yaml`](../../templates/official/high/arbitrary-send-eth.yaml) for usage.
+Call-option facts are consumed through semantic groups and nested matchers. The
+retired arbitrary-send detector is not part of the official pack.
 
 **Call receiver preservation:** member-call receivers are attached as tagged
 children with `attr.call_receiver = true`, e.g. `target` in
@@ -476,7 +476,7 @@ in `ReachableFrom`.
 - This lets templates distinguish a constant *condition* (`if (true)`) from a
   boolean literal living in the branch body (`if (c) return true;`), which the
   recursive `contains` operator cannot do on its own. Used by
-  `templates/official/medium/boolean-cst.yaml`.
+  the deferred Boolean-constant fixture.
 
 **Literal Subtype (`subtype`):**
 - `buildLiteral()` tags each `expr.literal` with `subtype`: `number`, `string`,

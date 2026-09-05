@@ -2,7 +2,7 @@
 pragma solidity ^0.8.20;
 
 // Fixtures for SEC-DEST-001 (unprotected selfdestruct). The detector uses the
-// canonical access_controlled property check, so it must flag the truly
+// canonical protected authorization preset, so it must flag the truly
 // unprotected case and NOT flag functions guarded by a modifier or an inline
 // msg.sender check.
 

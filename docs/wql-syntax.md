@@ -2,8 +2,8 @@
 
 Complete reference for writing security templates using the W3GoAudit Query
 Language (WQL). A WQL document is meta plus one query: block. The block contains
-`select`/`from`/`where` or a query-level composition. All 120
-repository templates (39 official, 5 feature-test, and 76 benchmark) use this
+`select`/`from`/`where` or a query-level composition. The repository currently
+contains 20 official, 5 feature-test, and 76 benchmark templates using this
 syntax.
 
 This reference is accurate to the **implementation** —
@@ -62,7 +62,10 @@ query:
   from: entry_function      # WHERE to search (a scope)
   where:                    # list of matchers, implicit AND
     - arg.0: { tainted: user_controlled }
-    - not: { preset: access_controlled }
+    - not:
+        preset:
+          authorization:
+            type: protected
 ```
 
 `meta.id` and `meta.severity` are required at load time;
@@ -80,9 +83,9 @@ branch `label:`. Omitted optional fields keep their documented defaults.
 
 A simple where-only query may consist of `where` alone. An actionable
 where-only query defaults to the `entry_function` scope when both `select` and
-`from` are omitted. A context-only `where`, such as a lone
-`preset: access_controlled`, is rejected because it supplies no AST anchor for
-a finding. Omitting all three of `select`, `from`, and `where` is also invalid.
+`from` are omitted. A context-only `where`, such as a lone authorization
+preset, is rejected because it supplies no AST anchor for a finding. Omitting
+all three of `select`, `from`, and `where` is also invalid.
 
 ---
 
@@ -117,10 +120,17 @@ query:
   from: entry_function        # shared default scope
   or:
     - select: selfdestruct
-      where: [ not: { preset: access_controlled } ]
+      where:
+        - not:
+            preset:
+              authorization:
+                type: protected
     - select: delegatecall
       where:
-        - not: { preset: access_controlled }
+        - not:
+            preset:
+              authorization:
+                type: protected
         - arg.0: { tainted: parameter }   # branch-specific constraint
 ```
 
@@ -303,7 +313,7 @@ a finding, such as access control or an initializer modifier.
 | `block: <kind>` | Node is of the given block kind (§5). |
 | `name: <regex>` | Identifier / call / function name matches (unanchored regex). |
 | `<attribute>: <value>` | A semantic attribute (§6) — bare key form, e.g. `visibility: public,external`. |
-| `preset: <name>` | A named property (§7), e.g. `preset: access_controlled`. |
+| `preset: <name>` | A direct property or parameterized semantic preset, such as `preset: {authorization: {type: protected}}`. |
 | `regex: <pattern>` | Raw-text match, **line-scoped to the enclosing selected block** (falls back to function → contract → file when a node has no range). |
 | `tainted: <source>` | Value traces to `parameter`\|`state_var`\|`local_var`\|`sender`\|`user_controlled` (§8). |
 
@@ -320,11 +330,11 @@ a finding, such as access control or an initializer modifier.
 | `left: <matcher>` | Left operand of a binary/assignment/member-access node matches. |
 | `right: <matcher>` | Right operand matches. |
 | `statement_has: <matcher>` | AST sub-rule matched against the node's nearest enclosing statement (narrower than `in:`, wider than `has:`) — e.g. "no other bitwise operator in this same statement". Context-only fields such as `preset:` are rejected inside it. |
-| `unchecked_var: true` | On an arithmetic `binary` or `assign` node, true when no structurally pure preceding guard in the same function bounds every operand with an ordering comparison. The complete condition and all additional `require`/`assert` arguments must be effect-free. |
+| `unchecked_var:` | Presence-only marker on an arithmetic `binary` or `assign` node when no structurally pure preceding guard in the same function bounds every operand. The complete condition and all additional `require`/`assert` arguments must be effect-free. |
 | `modifier: <regex>` | Function has a modifier whose name matches. |
 | `base: <regex>` | Contract-scope: the contract (or an ancestor in its inheritance chain) matches. |
 | `func_name: <regex>` | Function name matches (function-level precondition, independent of the AST node's own `name:`). |
-| `receiver: {rule}` | Matches the sub-rule against the call's **direct** receiver only (`token` in `token.call(data)`). Use this instead of `has: {receiver: true, …}`, which searches every descendant and is satisfied by the receiver of a nested call in the arguments. The scalar `receiver: true` remains the attribute marker on a receiver node. |
+| `receiver: {rule}` | Matches the sub-rule against the call's **direct** receiver only (`token` in `token.call(data)`). Use this instead of searching descendants, which can match a nested call receiver inside arguments. |
 | `version: <constraint>` | Solidity pragma version constraint, e.g. `">=0.8.0"`. Evaluated against the whole **range** the file's pragma permits, not against one version: `>=0.7.0 <0.9.0` satisfies `>=0.8.0` because it can compile on 0.8.x. Caret, tilde, comparator chains, `||` alternatives, and partial versions (`^0.8`, `0.8`) are all understood; a pragma or constraint that cannot be parsed skips the check rather than excluding the file. |
 | `has_param: <name>` | Function has a parameter with this name. |
 
@@ -594,24 +604,26 @@ rules are not mutated, and recursive evaluation reuses the prepared copy.
 
 ## 7. Presets
 
-Preset names are direct evaluator values. Each preset returns true when its
-named safety property is present, so presets read naturally either asserted or
-negated. There is no polarity translation or alias registry.
+Presets are direct semantic checks. `preset.authorization` accepts
+`type: protected` or `type: self_sender`; `protected` may include one or more
+principal alternatives. `preset.initializer` accepts only
+`takeover: possible`. The general `reentrancy_guarded` property remains
+available for guard detection. There is no runtime syntax, alias registry, or
+authored unknown value.
 
 | Preset (property = true) | Property | Vulnerable expression |
 |---|---|---|
-| `access_controlled` | Privileged access control is present — owner/admin/role modifier, an internal auth-helper call, or a `msg.sender`/`tx.origin` guard against a hardcoded/storage owner, checked recursively through internal/inherited calls. | `not: { preset: access_controlled }` |
-| `caller_checked` | Either the function is access-controlled, OR it self-scopes the caller — binds a sensitive argument to `msg.sender` (`require(from == msg.sender)`), including the **item-ownership** form `ownerOf(tokenId) == msg.sender` (and its interprocedural forwarded equivalents). | `not: { preset: caller_checked }` |
+| `preset.authorization: {type: protected}` | A protected principal check is proven through exact modifier, helper, storage, role, and inheritance evidence. | `not: {preset: {authorization: {type: protected}}}` |
+| `preset.authorization: {type: self_sender}` | The caller is constrained to their own resource or forwarded caller identity. | `not: {preset: {authorization: {type: self_sender}}}` |
+| `preset.initializer: {takeover: possible}` | First-call takeover evidence is present for the selected initializer entry. | `preset: {initializer: {takeover: possible}}` |
+| `preset: reentrancy_guarded` | An applied modifier body proves a reentrancy mutex. | `not: {preset: reentrancy_guarded}` |
 | `reentrancy_guarded` | A reentrancy-guard modifier (`nonReentrant`/`lock`/`mutex`/etc.) is present. | `not: { preset: reentrancy_guarded }` |
 
-**Item-ownership vs. access control:** `caller_checked` deliberately keeps
-these distinct. `ownerOf(tokenId) == msg.sender` satisfies `caller_checked`
-(the caller can only act on a resource they own — a valid mitigation for
-detectors like arbitrary `transferFrom`/arbitrary-send-ETH) but does **not**
-satisfy `access_controlled` (it is not privileged/role-based access control).
-Pick `access_controlled` when only a privileged role should be allowed to
-call at all; pick `caller_checked` when self-scoping the caller to their own
-resource is an acceptable mitigation.
+`protected` and `self_sender` are intentionally distinct. Use `protected` when
+only a contract-fixed principal such as `owner`, `pair`, or `pool` may call.
+Use `self_sender` when any caller may act only on that caller's own resource.
+Principal lists are normalized and matched as complete values; use an explicit
+principal regex only as an escape hatch.
 
 Presets compose anywhere in `where`, including under `any:`/`not:`.
 
@@ -653,9 +665,7 @@ nested under `arg.N:` or `has:`:
 ```
 
 ```yaml
-- has:
-    block: identifier
-    receiver: true
+- receiver:
     tainted: parameter
 ```
 
@@ -673,9 +683,11 @@ query:
   from: entry_function
   select: delegatecall
   where:
-    - not: { preset: access_controlled }
-    - has:
-        receiver: true
+    - not:
+        preset:
+          authorization:
+            type: protected
+    - receiver:
         tainted: user_controlled
 ```
 
@@ -726,22 +738,26 @@ first caller can take it over. Constructor disabling, one-time mutex, and
 incomplete deployment linkage are internal evidence and do not become public
 matcher fields.
 
-### D. Arbitrary `transferFrom` — item-ownership vs. access control
+### D. Caller self-scoping
 
-`templates/official/high/arbitrary-transferfrom.yaml`
+Caller self-scoping is available to future detectors through the authorization
+preset. The retired protocol-specific `transferFrom` detector is not in the
+trusted official pack.
 
 ```yaml
 query:
   from: entry_function
   select: external_call
   where:
-    - not: { preset: caller_checked }
+    - not:
+        preset:
+          authorization:
+            type: self_sender
     - name: ^transferFrom$
     - arg.0: { tainted: parameter }
 ```
 
 Uses `arg.0:` to require the `from` argument be parameter-tainted, and
-`caller_checked` (not `access_controlled`) so that `require(from ==
-msg.sender)` is correctly treated as a valid mitigation here.
+`self_sender` is used when `require(from == msg.sender)` is a valid mitigation.
 
 ---

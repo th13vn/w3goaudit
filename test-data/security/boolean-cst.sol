@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.0;
 
-// Canonical fixture for MEDIUM-BOOLEAN-CST (Boolean Constant Misuse).
+// Deferred parser and matcher fixture for Boolean constant misuse.
 //
 // Functions in VulnerableBooleanCst SHOULD be flagged (genuine misuse).
 // Functions in SafeBooleanUsage SHOULD NOT be flagged — they cover the exact

@@ -6,6 +6,25 @@ All notable changes to w3goaudit are documented here. This project adheres to
 
 ## Unreleased
 
+### Changed: evidence-first official template migration
+
+- The embedded official pack is now a filesystem-derived inventory of 20
+  evidence-backed detectors. Retired protocol-specific callback, read-only
+  reentrancy, oracle, storage, cryptographic, and accounting rules are deferred
+  until generic semantic evidence can prove their mechanisms; they are not
+  replaced with weak name or source-regex rules.
+- Retained templates use direct `preset.authorization` values (`protected` or
+  `self_sender`) and `preset.initializer: {takeover: possible}`. Principal
+  alternatives are normalized, and initializer lifecycle details remain internal
+  evidence. Inheritance, virtual dispatch, and `super` dispatch are automatic.
+- Runtime syntax, candidate templates, authored unknown values, raw semantic
+  compatibility keys, and Boolean presence markers are not part of the official
+  authoring surface. Presence-only markers and structured options are used
+  instead.
+- This is an unreleased local pack-major migration. The output schema remains
+  `2.0.0`; sibling template publication, tags, pushes, and releases are separate
+  owner actions.
+
 ### Added: deterministic semantic external-boundary evidence
 
 - Builder Phase 8 now records versioned `ExternalBoundaryFact` evidence for

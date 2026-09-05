@@ -165,8 +165,8 @@ directory loader and backs the binary's embedded default pack
 (`github.com/th13vn/w3goaudit/templates`.`Official`). `ParseTemplate` is the
 inline equivalent of `LoadTemplate` for SDK consumers that hold YAML in memory.
 
-> **WQL:** A WQL document is meta plus one query: block. All 120
-> official/benchmark/feature-test templates shipped in this repo use that block
+> **WQL:** A WQL document is meta plus one query: block. The repository currently
+> contains 20 official templates plus benchmark and feature-test templates using that block
 > to hold `select`/`from`/`where` or a query-level `and:`/`or:` composition (see
 > [`docs/wql-syntax.md`](./wql-syntax.md)). `LoadTemplate`, `LoadTemplates`,
 > `LoadTemplatesFromFS`, and `ParseTemplate` accept this schema only; unknown
@@ -2150,7 +2150,10 @@ query:
   select: outgoing_call
   from: entry_function
   where:
-    - not: {preset: access_controlled}
+    - not:
+        preset:
+          authorization:
+            type: protected
 `)
 if err != nil {
     return err

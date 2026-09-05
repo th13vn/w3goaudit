@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-// Fixtures for HIGH-ERC20-PUBLIC-BURN, HIGH-ERC721-CALLBACK-REENTRANCY and
-// HIGH-ERC777-CALLBACK-REENTRANCY.
+// Deferred callback and accounting fixtures. Protocol-specific variants remain
+// useful while generic callback evidence is developed.
 
 interface IERC777Recipient {
     function tokensReceived(address operator, address from, address to, uint256 amount) external;
