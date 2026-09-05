@@ -1287,11 +1287,28 @@ func mergeNotInto(dst *Rule, src *Rule) {
 // directly the first time — a second independent `any:` group is wrapped
 // into an All branch instead of concatenated, since concatenating two OR
 // groups is NOT equivalent to ANDing them.
-func mergeRuleInto(dst, src *Rule) error {
-	if src == nil {
-		return nil
+func mergeRuleSemanticPresets(dst, src *Rule) error {
+	if src.Authorization != nil {
+		if dst.Authorization == nil {
+			auth := *src.Authorization
+			auth.Principals = append([]string(nil), src.Authorization.Principals...)
+			dst.Authorization = &auth
+		} else if !reflect.DeepEqual(*dst.Authorization, *src.Authorization) {
+			return fmt.Errorf("where: conflicting authorization preset")
+		}
 	}
+	if src.Initializer != nil {
+		if dst.Initializer == nil {
+			initializer := *src.Initializer
+			dst.Initializer = &initializer
+		} else if !reflect.DeepEqual(*dst.Initializer, *src.Initializer) {
+			return fmt.Errorf("where: conflicting initializer preset")
+		}
+	}
+	return nil
+}
 
+func mergeRuleScalars(dst, src *Rule) error {
 	type scalarField struct {
 		name string
 		dst  *string
@@ -1313,23 +1330,6 @@ func mergeRuleInto(dst, src *Rule) error {
 		{"preset", &dst.Preset, src.Preset},
 		{"has_param", &dst.HasParam, src.HasParam},
 	}
-	if src.Authorization != nil {
-		if dst.Authorization == nil {
-			auth := *src.Authorization
-			auth.Principals = append([]string(nil), src.Authorization.Principals...)
-			dst.Authorization = &auth
-		} else if !reflect.DeepEqual(*dst.Authorization, *src.Authorization) {
-			return fmt.Errorf("where: conflicting authorization preset")
-		}
-	}
-	if src.Initializer != nil {
-		if dst.Initializer == nil {
-			initializer := *src.Initializer
-			dst.Initializer = &initializer
-		} else if !reflect.DeepEqual(*dst.Initializer, *src.Initializer) {
-			return fmt.Errorf("where: conflicting initializer preset")
-		}
-	}
 	for _, f := range scalars {
 		if f.src == "" {
 			continue
@@ -1340,6 +1340,10 @@ func mergeRuleInto(dst, src *Rule) error {
 			return fmt.Errorf("where: conflicting %s: %q vs %q — to require both constraints on the same node, wrap them in and: branches (and: [{%s: %q}, {%s: %q}]) or combine them into one pattern", f.name, *f.dst, f.src, f.name, *f.dst, f.name, f.src)
 		}
 	}
+	return nil
+}
+
+func mergeRuleAttributes(dst, src *Rule) error {
 
 	if src.UncheckedVar {
 		dst.UncheckedVar = true
@@ -1365,7 +1369,10 @@ func mergeRuleInto(dst, src *Rule) error {
 		}
 		dst.Attr[k] = v
 	}
+	return nil
+}
 
+func mergeRuleArguments(dst, src *Rule) error {
 	for idx, r := range src.Args {
 		rCopy := r
 		if dst.Args == nil {
@@ -1380,7 +1387,10 @@ func mergeRuleInto(dst, src *Rule) error {
 			dst.Args[idx] = rCopy
 		}
 	}
+	return nil
+}
 
+func mergeRuleRelations(dst, src *Rule) error {
 	mergePtr := func(dstPtr **Rule, srcPtr *Rule) error {
 		if srcPtr == nil {
 			return nil
@@ -1432,6 +1442,29 @@ func mergeRuleInto(dst, src *Rule) error {
 			dst.All = append(dst.All, Rule{Any: src.Any})
 		}
 	}
-
 	return nil
+}
+
+// mergeRuleInto merges src's fields into dst (both non-nil aggregators; src
+// may be nil, in which case this is a no-op). It implements Task A3 step 5
+// ("merge all where matchers' ast/ctx parts") and is also used by
+// lowerToRule to combine a nested matcher's exploded key/value pairs into one
+// Rule.
+func mergeRuleInto(dst, src *Rule) error {
+	if src == nil {
+		return nil
+	}
+	if err := mergeRuleSemanticPresets(dst, src); err != nil {
+		return err
+	}
+	if err := mergeRuleScalars(dst, src); err != nil {
+		return err
+	}
+	if err := mergeRuleAttributes(dst, src); err != nil {
+		return err
+	}
+	if err := mergeRuleArguments(dst, src); err != nil {
+		return err
+	}
+	return mergeRuleRelations(dst, src)
 }
