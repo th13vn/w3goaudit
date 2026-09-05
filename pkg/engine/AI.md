@@ -1047,8 +1047,11 @@ resolved from exact semantic facts. `protected` requires a proven dominating
 guard and may constrain one or many normalized principal literals, or an
 explicit principal regex. `self_sender` requires proven caller self-scoping.
 `initializer.takeover: possible` requires a deterministic first-call takeover
-fact and is normally paired with `func_name`. Inheritance and virtual dispatch
-are handled automatically by the engine. Internal authorization/lifecycle fact
+fact and is normally paired with `func_name`. A proven protected principal
+clears this lifecycle predicate; incomplete authorization does not, because the
+initializer predicate specifically answers whether an arbitrary first caller can
+acquire initialization state. Inheritance and virtual dispatch are handled
+automatically by the engine. Internal authorization/lifecycle fact
 fields remain report and SDK data, not public WQL attributes. Missing, partial,
 after-site, unresolved, and ambiguous evidence fail closed. `Rule.Attr` remains
 an ordinary AST-attribute matcher only; it has no hidden authorization,

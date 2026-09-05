@@ -235,6 +235,86 @@ contract EffectsPolarity {
 	}
 }
 
+func TestAuthorizationOrRequiresAuthorizationBranches(t *testing.T) {
+	db := buildFromSource(t, `// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.0;
+contract OrAuthorization {
+    address admin;
+    mapping(address => bool) isOperator;
+    mapping(address => uint256) balances;
+    uint256 value;
+
+    function protectedOrRole() external {
+        require(msg.sender == admin || isOperator[msg.sender]);
+        value = 1;
+    }
+
+    function protectedOrBalance() external {
+        require(msg.sender == admin || balances[msg.sender] > 0);
+        value = 2;
+    }
+}`)
+	for _, tc := range []struct {
+		selector string
+		want     types.AuthorizationVerdict
+	}{
+		{selector: "protectedOrRole()", want: types.AuthorizationProtected},
+		{selector: "protectedOrBalance()", want: types.AuthorizationUnprotected},
+	} {
+		contract := db.GetContractByName("OrAuthorization")
+		fn := functionBySelector(contract, tc.selector)
+		if fn == nil {
+			t.Fatalf("missing function %s", tc.selector)
+		}
+		fact, ok := db.GetAuthorizationFactByID(types.MakeFunctionID(contract.SourceFile, contract.Name, fn.Selector))
+		if !ok {
+			t.Fatalf("missing authorization fact for %s", tc.selector)
+		}
+		if fact.Verdict != tc.want {
+			t.Fatalf("%s verdict = %q, want %q: %+v", tc.selector, fact.Verdict, tc.want, fact)
+		}
+	}
+}
+
+func TestUnresolvedAuthorizationFallbackIgnoresBusinessValidators(t *testing.T) {
+	db := buildFromSource(t, `// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.0;
+contract UnresolvedHelpers {
+    uint256 value;
+    function businessValidation(uint256 amount) external {
+        validateAmount(amount);
+        value = amount;
+    }
+    function missingGuard() external {
+        checkOwner();
+        value = 1;
+    }
+}`)
+	if got := effectsOf(db, "UnresolvedHelpers", "businessValidation(uint256)"); got == nil || got.Auth.Controlled {
+		t.Fatalf("unresolved business validator became authorization: %+v", got)
+	}
+	contract := db.GetContractByName("UnresolvedHelpers")
+	if contract == nil {
+		t.Fatal("missing UnresolvedHelpers contract")
+	}
+	for _, tc := range []struct {
+		selector string
+		want     types.AuthorizationVerdict
+	}{
+		{"businessValidation(uint256)", types.AuthorizationUnprotected},
+		{"missingGuard()", types.AuthorizationUnknown},
+	} {
+		fn := functionBySelector(contract, tc.selector)
+		if fn == nil {
+			t.Fatalf("missing function %s", tc.selector)
+		}
+		fact, ok := db.GetAuthorizationFactByID(types.MakeFunctionID(contract.SourceFile, contract.Name, fn.Selector))
+		if !ok || fact.Verdict != tc.want {
+			t.Fatalf("%s authorization = %+v, want %q", tc.selector, fact, tc.want)
+		}
+	}
+}
+
 func TestEffectsRecognizeExactRoleGates(t *testing.T) {
 	db := buildFromSource(t, `// SPDX-License-Identifier: MIT
 pragma solidity ^0.8.0;

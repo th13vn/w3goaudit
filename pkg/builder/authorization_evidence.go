@@ -112,6 +112,15 @@ func analyzeAuthorizationTargetWithBindings(fn *types.Function, runtime *types.C
 		}
 		callee, kind := resolveAuthorizationCallee(call, runtime, db)
 		if callee == nil {
+			// Function-call metadata also records custom-error constructors and
+			// ordinary internal helpers. An unresolved call is an authorization
+			// blocker only when its name plausibly denotes a guard. Ignore
+			// unrelated business/error calls so lifecycle and callback analysis do
+			// not become unknown merely because a revert payload has no function
+			// declaration in the database.
+			if !authorizationCallNameSuggestsGuard(call.Target) {
+				continue
+			}
 			result := unknownAuthorizationResult("helper.unresolved")
 			unknown = &result
 			continue
@@ -124,6 +133,14 @@ func analyzeAuthorizationTargetWithBindings(fn *types.Function, runtime *types.C
 		}
 		calleeBindings, bindingReason := bindAuthorizationFunctionParameters(callee, solidityAuthorizationArgs(callNode), fn, db, bindings)
 		if bindingReason != "" {
+			// An unguarded helper does not become an authorization barrier just
+			// because its ordinary business arguments cannot be classified. Keep
+			// the caller's result explicitly unprotected so entrypoint detectors
+			// can continue through wrappers such as settle(...). Helpers that do
+			// contain an authorization guard remain fail-closed below.
+			if !hasAuthorizationGuard(callee.AST) {
+				continue
+			}
 			result := unknownAuthorizationResult(kind + ".binding." + bindingReason)
 			result.selectedFunctionID = authorizationFunctionID(callee, nil)
 			unknown = &result
@@ -141,7 +158,7 @@ func analyzeAuthorizationTargetWithBindings(fn *types.Function, runtime *types.C
 			unknown = &copy
 			continue
 		}
-		if authorizationBindingsContainCallerSelected(calleeBindings) {
+		if authorizationBindingsContainCallerSelected(calleeBindings) && hasAuthorizationGuard(callee.AST) {
 			result = unknownAuthorizationBindingResult(kind + ".binding.caller_selected")
 			result.selectedFunctionID = authorizationFunctionID(callee, nil)
 			unknown = &result
@@ -151,6 +168,43 @@ func analyzeAuthorizationTargetWithBindings(fn *types.Function, runtime *types.C
 		return *unknown
 	}
 	return authorizationResult{verdict: types.AuthorizationUnprotected}
+}
+
+func authorizationCallNameSuggestsGuard(name string) bool {
+	name = strings.ToLower(strings.TrimSpace(name))
+	if name == "" {
+		return false
+	}
+	// Unresolved business helpers must not turn an otherwise unprotected
+	// function into an unavailable authorization fact. Keep the fallback
+	// vocabulary focused on principal/guard nouns; broad verbs such as
+	// `check`, `validate`, and `verify` also describe ordinary balance, input,
+	// and signature helpers and therefore are not sufficient on their own.
+	for _, token := range []string{"auth", "owner", "admin", "role", "access", "permission", "principal", "sender", "caller", "guard", "enforce", "require"} {
+		if strings.Contains(name, token) {
+			return true
+		}
+	}
+	return false
+}
+
+// hasAuthorizationGuard distinguishes an unguarded helper that merely forwards
+// a caller-selected value from an authorization helper whose proof became
+// ambiguous after binding a caller-selected principal or role. The former must
+// remain explicitly unprotected so entrypoint-level detectors can follow the
+// tainted value through the helper; the latter must fail closed.
+func hasAuthorizationGuard(root *types.ASTNode) bool {
+	if root == nil {
+		return false
+	}
+	found := false
+	walkAST(root, func(node *types.ASTNode) {
+		if found || node == nil {
+			return
+		}
+		_, _, found = enforcedAuthorizationCondition(node)
+	})
+	return found
 }
 
 func authorizationFromModifier(call *types.FunctionCall, invokingFn *types.Function, runtime *types.Contract, db *types.Database, callerBindings authorizationBindings, visiting map[string]bool) authorizationResult {
@@ -437,6 +491,26 @@ func authorizationCandidateForExpression(expr *types.ASTNode, wantTrue bool, gua
 	}
 	if expr.Kind == types.KindExprBinaryOp && len(expr.Children) >= 2 {
 		op := expr.GetAttributeString("operator")
+		if op == "||" && wantTrue {
+			// An OR guard is only an authorization proof when every branch is
+			// independently authorization-bearing. A privileged principal OR a
+			// caller-controlled value (for example balances[msg.sender] > 0)
+			// must not be treated as access control merely because one branch is
+			// valid. Keep the conservative verdict when either branch is partial
+			// or unavailable.
+			left := authorizationCandidateForExpression(expr.Children[0], true, guard, root, fn, db, bindings)
+			right := authorizationCandidateForExpression(expr.Children[1], true, guard, root, fn, db, bindings)
+			if left == nil || right == nil {
+				return nil
+			}
+			if left.verdict == types.AuthorizationProtected && right.verdict == types.AuthorizationProtected {
+				return left
+			}
+			if left.verdict == types.AuthorizationSelfScoped && right.verdict == types.AuthorizationSelfScoped {
+				return left
+			}
+			return &authorizationCandidate{node: guard, verdict: types.AuthorizationUnknown, evidence: left.evidence}
+		}
 		if op == "&&" && wantTrue {
 			if left := authorizationCandidateForExpression(expr.Children[0], true, guard, root, fn, db, bindings); left != nil {
 				return left
@@ -520,6 +594,9 @@ func authorizationRoleRefs(expr *types.ASTNode, fn *types.Function, db *types.Da
 	}
 	base, keys := flattenAuthorizationIndex(expr)
 	if base == nil || base.RefKind != "state_var" || len(keys) == 0 {
+		return nil, false
+	}
+	if !types.IsAccessControlName(base.Name) {
 		return nil, false
 	}
 	callerKeys := 0

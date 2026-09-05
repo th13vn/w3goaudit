@@ -2024,12 +2024,57 @@ func (e *Engine) checkFunctionContext(fn *types.Function, contract *types.Contra
 		return false
 	}
 
-	// Handle NOT — negate context conditions inside.
+	// Handle NOT — negate context conditions inside. Semantic predicates are
+	// evidence based, so an unavailable or ambiguous authorization fact must
+	// not be inverted into proof that the function is unprotected.
 	if r.Not != nil && ruleHasContextFields(*r.Not) {
+		if r.Not.Authorization != nil {
+			fact, available := e.authorizationPresetFact(fn, contract)
+			if !available {
+				return false
+			}
+			authorizationMatches := e.authorizationPresetMatchesFact(fact, *r.Not.Authorization)
+			remaining := *r.Not
+			remaining.Authorization = nil
+			if remaining.IsEmpty() {
+				return !authorizationMatches
+			}
+			return !authorizationMatches || !e.checkFunctionContext(fn, contract, remaining)
+		}
+		if !e.authorizationEvidenceAvailable(fn, contract, *r.Not) {
+			return false
+		}
 		return !e.checkFunctionContext(fn, contract, *r.Not)
 	}
 
 	return true
+}
+
+func (e *Engine) authorizationPresetMatchesFact(fact *types.AuthorizationFact, preset AuthorizationPreset) bool {
+	if fact == nil || (fact.Verdict != types.AuthorizationUnprotected && fact.Dominance != types.AuthorizationDominates) {
+		return false
+	}
+	switch preset.Type {
+	case "self_sender":
+		return fact.Verdict == types.AuthorizationSelfScoped && fact.PrincipalKind == types.PrincipalCallerSelfScope
+	case "protected":
+		if fact.Verdict != types.AuthorizationProtected || fact.PrincipalKind == types.PrincipalCallerSelfScope {
+			return false
+		}
+		if preset.PrincipalRegex != "" {
+			return matchAnchoredRegex(preset.PrincipalRegex, fact.ExpectedPrincipal)
+		}
+		if len(preset.Principals) == 0 {
+			return true
+		}
+		for _, principal := range preset.Principals {
+			if strings.EqualFold(strings.TrimSpace(principal), strings.TrimSpace(fact.ExpectedPrincipal)) ||
+				strings.EqualFold(strings.TrimSpace(principal), string(fact.PrincipalKind)) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func matchesRegexValue(pattern string, values []string) bool {
@@ -2418,36 +2463,61 @@ func (e *Engine) checkPreset(fn *types.Function, contract *types.Contract, prese
 }
 
 func (e *Engine) checkAuthorizationPreset(fn *types.Function, contract *types.Contract, preset AuthorizationPreset) bool {
-	if fn == nil || e == nil {
+	fact, available := e.authorizationPresetFact(fn, contract)
+	if !available {
 		return false
+	}
+	return e.authorizationPresetMatchesFact(fact, preset)
+}
+
+// authorizationPresetFact returns only evidence that is complete enough for a
+// semantic authorization predicate. Positive protected/self_sender checks
+// require a dominating proof. An explicit unprotected verdict is itself a
+// complete negative proof even though it has no dominating guard.
+func (e *Engine) authorizationPresetFact(fn *types.Function, contract *types.Contract) (*types.AuthorizationFact, bool) {
+	if fn == nil || e == nil {
+		return nil, false
 	}
 	fact := e.authorizationFor(fn, contract)
-	if fact == nil || fact.Dominance != types.AuthorizationDominates {
-		return false
+	if fact == nil {
+		return nil, false
 	}
-	switch preset.Type {
-	case "self_sender":
-		return fact.Verdict == types.AuthorizationSelfScoped && fact.PrincipalKind == types.PrincipalCallerSelfScope
-	case "protected":
-		if fact.Verdict != types.AuthorizationProtected || fact.PrincipalKind == types.PrincipalCallerSelfScope {
+	if fact.Verdict == types.AuthorizationUnprotected {
+		return fact, true
+	}
+	if fact.Dominance != types.AuthorizationDominates {
+		return nil, false
+	}
+	if fact.Verdict != types.AuthorizationProtected && fact.Verdict != types.AuthorizationSelfScoped {
+		return nil, false
+	}
+	return fact, true
+}
+
+// authorizationEvidenceAvailable reports whether every authorization preset
+// nested in a context rule has complete evidence. This keeps a negated
+// predicate fail closed: unavailable or ambiguous facts must not be inverted
+// into proof of an unprotected function.
+func (e *Engine) authorizationEvidenceAvailable(fn *types.Function, contract *types.Contract, r Rule) bool {
+	if r.Authorization != nil {
+		if _, ok := e.authorizationPresetFact(fn, contract); !ok {
 			return false
 		}
-		if preset.PrincipalRegex != "" {
-			return matchAnchoredRegex(preset.PrincipalRegex, fact.ExpectedPrincipal)
-		}
-		if len(preset.Principals) == 0 {
-			return true
-		}
-		for _, principal := range preset.Principals {
-			if strings.EqualFold(strings.TrimSpace(principal), strings.TrimSpace(fact.ExpectedPrincipal)) {
-				return true
-			}
-			if strings.EqualFold(strings.TrimSpace(principal), string(fact.PrincipalKind)) {
-				return true
-			}
+	}
+	for _, child := range r.All {
+		if !e.authorizationEvidenceAvailable(fn, contract, child) {
+			return false
 		}
 	}
-	return false
+	for _, child := range r.Any {
+		if !e.authorizationEvidenceAvailable(fn, contract, child) {
+			return false
+		}
+	}
+	if r.Not != nil && !e.authorizationEvidenceAvailable(fn, contract, *r.Not) {
+		return false
+	}
+	return true
 }
 
 func (e *Engine) checkInitializerPreset(fn *types.Function, contract *types.Contract, preset InitializerPreset) bool {
@@ -2455,7 +2525,14 @@ func (e *Engine) checkInitializerPreset(fn *types.Function, contract *types.Cont
 		return false
 	}
 	fact := e.authorizationFor(fn, contract)
-	return fact != nil && fact.InitializerEntry && fact.FirstCallTakeover == "possible"
+	if fact == nil || !fact.InitializerEntry || fact.FirstCallTakeover != "possible" {
+		return false
+	}
+	// A proven privileged entry cannot be front-run by an arbitrary caller.
+	// Unknown or incomplete authorization must not hide a lifecycle finding: the
+	// initializer predicate answers the first-call takeover question, while the
+	// authorization preset remains the explicit gate for ordinary detectors.
+	return fact.Verdict != types.AuthorizationProtected
 }
 
 // VerifyAtContract is the top-level entry point for contract-scope verification.

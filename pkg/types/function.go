@@ -42,6 +42,7 @@ var accessControlNameRegex = regexp.MustCompile(`(?i)(` + strings.Join([]string{
 	"auth", "authori[sz]ed", "permission", "role", "access",
 	// Allowlists (note: NOT blacklist/denylist — that check is inverted).
 	"allow", "whitelist", "safelist",
+	"member",
 	// Named privileged operator roles.
 	"operator", "manager", "controller", "guardian", "keeper", "moderator",
 	"maintainer", "strategist", "executor", "relayer", "sequencer",
@@ -1825,6 +1826,14 @@ func isForwardedCallerIdentity(arg *ASTNode, root *ASTNode, fn *Function, db *Da
 
 func isAccessControlName(name string) bool {
 	return name != "" && accessControlNameRegex.MatchString(name)
+}
+
+// IsAccessControlName reports whether a storage or helper name uses the
+// closed authority vocabulary. Builders use this shared predicate so a
+// caller-membership mapping cannot silently widen into balances or denylist
+// state merely because it is indexed by msg.sender.
+func IsAccessControlName(name string) bool {
+	return isAccessControlName(name)
 }
 
 // elementaryTypeCastRegex matches Solidity built-in type names usable as a

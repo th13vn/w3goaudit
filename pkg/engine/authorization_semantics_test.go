@@ -50,6 +50,38 @@ query:
 	}
 }
 
+func TestNegatedAuthorizationPresetFailsClosedWhenFactsUnavailable(t *testing.T) {
+	tmpl, err := ParseTemplate("meta: {id: AUTH-NEGATED, severity: HIGH}\nquery:\n  select: function\n  from: entry_function\n  where:\n    - not:\n        preset:\n          authorization:\n            type: protected")
+	if err != nil {
+		t.Fatal(err)
+	}
+	db := buildDBFromSource(t, "pragma solidity ^0.8.20; contract C { function run(address payable to) external { to.transfer(1); } }").GetDatabase()
+	db.Semantics.AuthorizationFactsVersion = ""
+	if findings := New(db).Execute(tmpl); len(findings) != 0 {
+		t.Fatalf("negated authorization treated unavailable facts as unprotected: %+v", findings)
+	}
+}
+
+func TestNegatedAuthorizationPresetComposesWithOtherContextPredicates(t *testing.T) {
+	tmpl, err := ParseTemplate(`meta: {id: AUTH-NEGATED-COMPOSED, severity: HIGH}
+query:
+  select: function
+  from: entry_function
+  where:
+    - not:
+        preset:
+          authorization:
+            type: protected
+        visibility: external`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	db := buildDBFromSource(t, "pragma solidity ^0.8.20; contract C { function run() external {} }").GetDatabase()
+	if findings := New(db).Execute(tmpl); len(findings) != 1 {
+		t.Fatalf("not(protected and external) findings = %d, want 1: %+v", len(findings), findings)
+	}
+}
+
 func TestAuthorizationPresetPreservesSourceCacheExecutionParity(t *testing.T) {
 	tmpl, err := ParseTemplate(`meta: {id: AUTH-FILTER, severity: HIGH}
 query:
