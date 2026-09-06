@@ -117,7 +117,7 @@ func SetVerboseWriter(w io.Writer)  // Set custom verbose output writer
 ```
 
 **What It Does:**
-- Parse Solidity files (8-phase process)
+- Parse Solidity files through the ordered build phases
 - Build AST trees
 - Calculate function selectors
 - Resolve inheritance (C3 linearization)
@@ -265,10 +265,21 @@ type TypeInfo struct {
 }
 
 type SemanticFacts struct {
-    Symbols                 map[string]*SemanticSymbol
-    FunctionEffects         map[string]*FunctionEffects
-    ExternalBoundaryVersion string
-    ExternalBoundaries      []*ExternalBoundaryFact
+    Symbols                   map[string]*SemanticSymbol
+    FunctionEffects           map[string]*FunctionEffects
+    TransactionContextVersion string
+    TransactionContextFacts   []*TransactionContextFact
+    AuthorizationFactsVersion string
+    AuthorizationFacts        []*AuthorizationFact
+    ExternalBoundaryVersion   string
+    ExternalBoundaries        []*ExternalBoundaryFact
+}
+
+type TransactionContextFact struct {
+    ID, ContractID, ScopeID, FunctionID string
+    Source, Use, Repeatability          string
+    SourceRange, EffectRange            SemanticSourceRange
+    LoopPath, ResolvedCalleeID          string
 }
 
 type ExternalBoundaryFact struct {
@@ -856,7 +867,7 @@ b := builder.New()
 func (b *Builder) Build(sources []*types.SourceFile) (*types.Database, error)
 ```
 
-Builds a complete database from source files through 8 phases.
+Builds a complete database from source files through the ordered phases.
 
 **Parameters:**
 - `sources` ([]*types.SourceFile) - Source files from reader
@@ -1244,6 +1255,43 @@ facts use `ScopeKind: modifier` and leave `FunctionID` empty, while
 modifier. Schema-2.0.0 caches with only `FunctionID` normalize additively to a
 function `ScopeID`; caches with no fact capability remain unavailable and must
 be rebuilt from source.
+
+#### Transaction-context evidence snapshot
+
+Transaction-context facts are positive evidence that transaction-level
+`msg.value` reaches a persistent state write, an ETH-bearing call-value
+position, or an exact stateful helper inside a loop.
+`TransactionContextFactsVersion` is `1.0.0`. `Source` is currently
+`msg_value`; `Use` is `state_write`, `call_value`, or
+`stateful_internal_call`; `Repeatability` is `possible` or
+`single_iteration`. The source/effect ranges and optional exact callee identity
+let an SDK consumer inspect what was proved without treating the fact itself as
+a vulnerability verdict.
+
+```go
+facts, err := db.TransactionContextFactsSnapshot()
+if err != nil {
+    if errors.Is(err, types.ErrTransactionContextFactsUnavailable) {
+        // The cache predates this fact capability. Rebuild from source.
+    }
+    return err
+}
+for _, fact := range facts {
+    if fact.Source == types.TransactionContextSourceMsgValue &&
+        fact.Repeatability == types.TransactionContextRepeatabilityPossible {
+        fmt.Printf("%s %s L%d\n", fact.ScopeID, fact.Use, fact.EffectRange.StartLine)
+    }
+}
+```
+
+`TransactionContextFactsSnapshot` returns a normalized, sorted, deduplicated
+deep copy. Merely observing `msg.value` does not create a fact. The builder
+supports a direct source or one bounded local alias in the same loop, and exact
+stateful internal, inherited, `self`, and `super` helper dispatch. Observational
+uses, uncertain aliases, ordinary external calldata, unresolved helpers,
+statically unreachable loops, and unsupported loop shapes emit no positive
+fact. A legacy cache returns `ErrTransactionContextFactsUnavailable`; it is not
+silently reinterpreted as an empty current analysis.
 
 #### GetStats
 

@@ -6,6 +6,16 @@ All notable changes to w3goaudit are documented here. This project adheres to
 
 ## Unreleased
 
+- `HIGH-MSG-VALUE-IN-LOOP` now requires versioned transaction-context evidence
+  instead of every textual `msg.value` reference. Builder Phase 7.25 proves an
+  exact `msg.value` flow to a persistent state write, ETH-bearing call value, or
+  exact stateful helper under a loop that may repeat. Events, conditions,
+  local/return-only uses, normal external calldata, uncertain aliases, unresolved
+  helpers, single-iteration loops, and unsupported loop shapes fail closed.
+  `TransactionContextFactsVersion` is `1.0.0`; source/cache facts and findings
+  are deterministic, the output schema remains `2.0.0`, and no CLI syntax was
+  added.
+
 - Completed a mechanical readability pass over the 20-template official pack:
   metadata is now sentence-case and mechanism-focused, implementation-history
   comments were reduced to matcher rationale, redundant query spacing was removed,

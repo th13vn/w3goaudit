@@ -37,7 +37,12 @@ standalone compatibility formatters rather than the removed split bundle.
   Positive transaction-context facts use the ordinary attributes
   `transaction_context_source`, `transaction_context_use`, and
   `transaction_context_repeatability`; they are not a preset or a
-  detector-specific evaluator path.
+  detector-specific evaluator path. The builder projects them only onto the
+  exact source and effect nodes. A template that reports a loop selects the loop
+  structurally and requires descendant `has` evidence. Source `msg_value`, uses
+  `state_write|call_value|stateful_internal_call`, and repeatability
+  `possible|single_iteration` are the complete positive v1 vocabulary; missing
+  evidence does not match.
 - **Single strict loader:** `LoadTemplate`/`ParseTemplate`/
   `LoadTemplatesFromFS` all route through `parseTemplateDocument`. Unknown
   keys at every level (document, query, branch) are rejected by

@@ -16,7 +16,7 @@ graph LR
     Types --> Engine[pkg/engine]
     Templates[templates/ WQL] --> Engine
     Engine --> Report[pkg/report]
-    Report --> Evidence[data/interactions.json + nav/explorer/xref]
+    Report --> Evidence[data/interactions.json + database semantic facts + nav/explorer/xref]
 ```
 
 Canonical pipeline: `Reader -> Builder -> Database -> Engine -> Report`. Source
@@ -24,7 +24,9 @@ locations (line/col/byte, from solast-go) are threaded from the builder onto
 AST nodes and declarations all the way through to `Report`, which also derives
 the timestamp-free `interactions.json` semantic boundary index and the
 extension-facing `nav.json`/`explorer.json`/`xref.json` artifacts from the
-finished `Database`/`Findings`, independent of the WQL template surface.
+finished `Database`/`Findings`. Versioned authorization and transaction-context
+facts remain part of `data/database.json`; selected positive facts are projected
+onto exact AST nodes for ordinary WQL matching.
 
 The scanner owns no model transport, credentials, timeout, or AI review
 artifact. A future external Assistant may consume deterministic database,
@@ -38,7 +40,7 @@ it does not mutate the scanner's official findings.
 | `cmd/w3goaudit/` | Cobra CLI: root scan, build, extract, update, completion, result-folder orchestration | `cmd/w3goaudit/AI.md` |
 | `pkg/reader/` | Discover/load `.sol` files, resolve imports/remappings, detect project/git info | `pkg/reader/AI.md` |
 | `pkg/logging/` | Immutable scan-local verbose logger with serialized writes | `pkg/logging/AI.md` |
-| `pkg/builder/` | Parse source into database, build simplified ASTs, C3 inheritance, call graph, selectors, effects, and Phase-8 external-boundary facts | `pkg/builder/AI.md` |
+| `pkg/builder/` | Parse source into database, build simplified ASTs, C3 inheritance, call graph, selectors, effects, transaction-context facts, authorization facts, and Phase-8 external-boundary facts | `pkg/builder/AI.md` |
 | `pkg/types/` | Core serialized data structures: database, contracts, functions, AST, call graph, versioned semantic facts, and bounded Agent queries | `pkg/types/AI.md` |
 | `pkg/engine/` | WQL template loading, validation, execution, taint/reachability, finding construction | `pkg/engine/AI.md` |
 | `pkg/report/` | Consolidated Markdown/HTML, SARIF/JSON output, contract deep dives, state/workflow evidence, source excerpts | `pkg/report/AI.md` |
@@ -159,6 +161,16 @@ run-output scratch directory.
   validates exact contract/scope/function/entry identities, returns
   deterministic deep copies, and reports legacy caches through
   `ErrExternalBoundaryFactsUnavailable` instead of guessing weaker facts.
+- Phase 7.25 builds positive `TransactionContextFact` evidence for exact
+  transaction-level `msg.value` flows inside loops.
+  `TransactionContextFactsVersion` is `1.0.0`. Supported effects are
+  `state_write`, `call_value`, and `stateful_internal_call`; repeatability is
+  either `possible` or `single_iteration`. The source and effect AST nodes carry
+  the ordinary WQL attributes, while the loop remains only the structural
+  finding anchor. Observational uses, uncertain aliases, unresolved helpers,
+  unsupported loop shapes, and legacy caches do not synthesize positive
+  evidence. `TransactionContextFactsSnapshot` returns normalized deep copies or
+  `ErrTransactionContextFactsUnavailable`.
 - CLI/report-owned artifact paths are reset before exclusive creation and are
   never followed through prepared symlinks, so rescanning an existing result
   folder cannot redirect `run.log`, human reports, or structured data outside

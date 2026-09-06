@@ -15,7 +15,7 @@ Main orchestrator for the ordered build process.
 - `Builder` struct
 - `New()` - Create a builder using deprecated package-global verbose logging
 - `NewWithOptions(Options{Logger, ProjectRoot, ScanTarget, Diagnostics})` - Create a scan-local builder with durable scan metadata and reader diagnostics; a nil logger is disabled
-- `Build(sources)` - Main entry point (8 phases)
+- `Build(sources)` - Main entry point for the ordered build phases
 - `GetDatabase()` - Get built database
 
 **Build Phases:**
@@ -418,6 +418,29 @@ are stored in `Database.Semantics.Symbols` and mirrored onto AST attributes:
 - `receiver_type_is_address` on primitive-address receivers
 
 Unknown or complex expressions keep the previous heuristic behavior.
+
+### transaction_context.go
+
+Phase 7.25 builds `TransactionContextFactsVersion` `1.0.0` evidence after the
+call graph and function effects are available. It emits a fact only when an exact
+transaction-level `msg.value` source reaches a persistent state write, an
+ETH-bearing call value, or an exact stateful internal/inherited/`self`/`super`
+helper inside an enclosing loop. Recursive helper statefulness follows only
+resolved traversable edges.
+
+The pass supports direct arithmetic-preserving expressions and one local alias
+whose assignment and use share the same loop. Branch-assigned or reassigned
+aliases, unresolved call returns, mapping-key-only use, normal external calldata,
+events, conditions, locals, returns, pure/unresolved helpers, statically false
+loops, and unsupported loop shapes emit no positive fact. Repeatability is
+`possible` if any enclosing loop may execute more than once, otherwise
+`single_iteration` when every enclosing loop is proven at most once.
+
+Only the exact source and effect AST nodes receive
+`transaction_context_source`, `transaction_context_use`, and
+`transaction_context_repeatability`. Loop nodes remain structural anchors. Facts
+are normalized by exact stable ID before serialization; legacy databases without
+the version remain unavailable rather than being backfilled from syntax.
 
 ### external_boundaries.go
 

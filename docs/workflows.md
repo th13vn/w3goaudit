@@ -67,7 +67,7 @@ graph LR
 #### Phase 2: Database Building
 **Component:** [`pkg/builder`](../pkg/builder)
 
-The builder constructs a comprehensive database through **8 phases**:
+The builder constructs a comprehensive database through ordered phases:
 
 **Phase 1: Parse Files**
 - Parse each `.sol` file using [solast-go](https://github.com/th13vn/solast-go)
@@ -137,6 +137,29 @@ The builder constructs a comprehensive database through **8 phases**:
   workflow files written in Phase 5 (report generation)
 - **Code:** [effects.go](../pkg/builder/effects.go)
 
+**Phase 7.25: Build Transaction-Context Facts**
+- Build `TransactionContextFactsVersion` `1.0.0` positive evidence for exact
+  transaction-level `msg.value` flows inside loops
+- Distinguish persistent `state_write`, ETH `call_value`, and exact
+  `stateful_internal_call` uses
+- Classify supported loops as `possible` or `single_iteration`; statically
+  unreachable and unsupported loop shapes emit no fact
+- Follow a direct source or one bounded local alias in the same loop, plus exact
+  internal, inherited, `self`, and `super` helpers that write state
+- Project `transaction_context_source`, `transaction_context_use`, and
+  `transaction_context_repeatability` onto the exact source and effect nodes;
+  keep the loop as a structural anchor
+- Observational uses, uncertain aliases, ordinary external calldata, and
+  unresolved helpers fail closed
+- **Code:** [transaction_context.go](../pkg/builder/transaction_context.go)
+
+**Phase 7.5: Build Authorization Facts**
+- Build the versioned authorization and initializer lifecycle evidence consumed
+  by the small `preset.authorization` and `preset.initializer` surfaces
+- Use the already dispatched inheritance/call graph; there is no runtime WQL
+  syntax
+- **Code:** [authorization.go](../pkg/builder/authorization.go)
+
 **Phase 8: Build External-Boundary Facts**
 - Walk exact function and modifier scopes in deterministic order
 - Build `ExternalBoundaryFactsVersion` `1.0.0` records with exact `ScopeID`,
@@ -159,7 +182,9 @@ graph TD
     E --> F[Phase 5: Build Call Graph]
     F --> G[Phase 6: Calculate Entry Points]
     G --> G2[Phase 7: Per-Function Effects]
-    G2 --> G3[Phase 8: External-Boundary Facts]
+    G2 --> G25[Phase 7.25: Transaction Context]
+    G25 --> G5[Phase 7.5: Authorization]
+    G5 --> G3[Phase 8: External-Boundary Facts]
     G3 --> H[Complete Database]
 ```
 
@@ -239,6 +264,9 @@ graph TD
    exact versioned facts; incomplete, unresolved, partial, and ambiguous
    evidence never satisfies a positive safety predicate. Inheritance and
    virtual dispatch are resolved automatically and are not WQL syntax.
+8. **Match positive transaction-context attributes** as ordinary AST
+   attributes. A loop detector must keep `select: loop` as its report anchor and
+   use descendant `has` evidence; merely referencing `msg.value` is insufficient.
 
 **Advanced features:**
 - **Recursive internal call tracing**: Engine follows entrypoint → helper call chains and maps caller argument taint onto callee parameters; the chain itself is preserved on the finding
@@ -359,7 +387,7 @@ graph TD
 graph LR
     A[Input Path] --> B[Reader]
     B --> C[Source Files]
-    C --> D[Builder: 8 Phases]
+    C --> D[Builder: Ordered Phases]
     D --> E[Database]
     E --> F[JSON Export]
 ```
@@ -721,7 +749,7 @@ w3goaudit ./contracts/ \
 **What happens:**
 
 1. **Reader** discovers all `.sol` files in `./contracts/`
-2. **Builder** parses files and builds the database (8 phases, including
+2. **Builder** parses files and builds the database (ordered phases, including
    per-function effects and semantic external-boundary evidence)
 3. **Engine** loads `reentrancy-pattern.yaml` template
 4. **Engine** iterates entry functions (scope: entrypoint)

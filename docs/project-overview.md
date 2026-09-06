@@ -116,7 +116,7 @@ w3goaudit/
 │   │   └── git.go          # Git repository detection and URL building
 │   │
 │   ├── builder/            # Database construction
-│   │   ├── builder.go      # 8-phase build orchestration
+│   │   ├── builder.go      # Ordered build orchestration
 │   │   ├── contract.go     # Contract extraction from AST
 │   │   ├── ast_builder.go  # Function AST tree building
 │   │   ├── location.go     # Unicode columns / UTF-8 byte-range index
@@ -125,6 +125,8 @@ w3goaudit/
 │   │   ├── inheritance.go  # C3 linearization
 │   │   ├── callgraph.go    # Call graph construction
 │   │   ├── effects.go      # Phase 7: per-function effects (writes/guards/auth)
+│   │   ├── transaction_context.go # Phase 7.25: proven msg.value loop effects
+│   │   ├── authorization.go # Phase 7.5: auth and initializer evidence
 │   │   └── external_boundaries.go # Phase 8: semantic boundary evidence
 │   │
 │   ├── engine/             # Template execution
@@ -266,6 +268,21 @@ w3goaudit/
    unprotected). These feed the State Changes and Entry-Point Workflows
    sections of each consolidated contract report.
    Implementation: [pkg/builder/effects.go](../pkg/builder/effects.go)
+   - **Phase 7.25, Transaction-Context Facts:** Record only proven transaction-level
+   `msg.value` flows inside loops. Positive uses are persistent state writes,
+   ETH-bearing call values, and exactly resolved stateful helpers. Repeatability
+   is `possible` or `single_iteration`. Exact source/effect nodes receive ordinary
+   WQL attributes while the loop stays the structural report anchor. Direct
+   sources and one bounded local alias are supported; observational uses,
+   uncertain aliases, ordinary external calldata, unresolved helpers, and
+   unsupported loop shapes fail closed. `TransactionContextFactsVersion` is
+   `1.0.0`. Implementation:
+   [pkg/builder/transaction_context.go](../pkg/builder/transaction_context.go)
+   - **Phase 7.5, Authorization Facts:** Build versioned authorization and initializer
+   lifecycle evidence after inheritance and call dispatch are already resolved.
+   Templates use the direct authorization/initializer presets; runtime dispatch
+   is not an authoring surface. Implementation:
+   [pkg/builder/authorization.go](../pkg/builder/authorization.go)
 8. **Build External-Boundary Facts** - Walk function and modifier ASTs in exact
    scope-ID order. Emit `ExternalBoundaryFact` records with `ScopeID`,
    `ScopeKind`, target/value/result/state/reentry evidence, exact entry
@@ -401,6 +418,13 @@ type ExternalBoundaryFact struct {
     FunctionID              string // empty for modifier hosts
     ReachableFrom           []string // exact entry function IDs
     // target, values, result, state effects, reentry, locations, limitations
+}
+
+type TransactionContextFact struct {
+    ID, ContractID, ScopeID, FunctionID string
+    Source, Use, Repeatability          string
+    SourceRange, EffectRange            SemanticSourceRange
+    LoopPath, ResolvedCalleeID          string
 }
 
 // Contract - Single contract/interface/library
@@ -686,6 +710,7 @@ function _processWithdraw() internal {
 - Function selector calculation
 - Call graph construction
 - Entry point identification
+- Positive transaction-context evidence for repeatable `msg.value` effects
 - Semantic external-boundary discovery and exact entry reachability
 
 **WQL Query Language**

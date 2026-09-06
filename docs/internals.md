@@ -49,7 +49,7 @@ integrated engine with a user-extensible query language.
      ▼                                                                │
 ┌─────────┐   ┌──────────┐   ┌──────────┐   ┌──────────┐   ┌──────────┐
 │ reader  │──▶│ builder  │──▶│ Database │──▶│  engine  │──▶│  report  │
-│ discover│   │ 8 phases │   │ (types)  │   │ WQL exec │   │ workspace│
+│ discover│   │ ordered  │   │ (types)  │   │ WQL exec │   │ workspace│
 │ +imports│   │          │   │          │   │ +findings│   │ md/json/ │
 └─────────┘   └──────────┘   └──────────┘   └──────────┘   │ sarif/html│
                                   ▲              ▲          └──────────┘
@@ -118,9 +118,9 @@ remappings**:
 
 ---
 
-## 4. Layer 2 — `pkg/builder`: The 8 Build Phases
+## 4. Layer 2: `pkg/builder` Ordered Build Phases
 
-`Builder.Build(sources)` runs eight phases in order; each populates part of the
+`Builder.Build(sources)` runs ordered phases; each populates part of the
 Database. Parsing is tolerant — one broken file is logged and skipped, never
 aborts the build (an audit target with one bad file should still yield findings).
 
@@ -133,9 +133,13 @@ aborts the build (an audit target with one bad file should still yield findings)
 | **5. Call graph** | `buildCallGraph` + `ResolveSuperAcrossLeaves` | `db.CallGraph.Edges`, `Function.Calls`, `Modifier.Calls` |
 | **6. Entry points** | `db.CalculateMainContracts` | `db.MainContracts` (deployable contracts + resolved entry functions) |
 | **7. Effects** | `analyzeEffects` | `db.Semantics.FunctionEffects` (state writes, guards, auth) |
+| **7.25. Transaction context** | `buildTransactionContextFacts` | versioned positive `msg.value` effect facts and exact-node WQL attributes |
+| **7.5. Authorization** | `analyzeAuthorization` | versioned authorization and initializer lifecycle facts |
 | **8. External boundaries** | `buildExternalBoundaries` | versioned `db.Semantics.ExternalBoundaries`, exact entry reachability, fact-backed WQL attributes |
 
-Phase 8 is intentionally after entry and effect analysis because each boundary
+Phase 7.25 is intentionally after effects and the call graph because it must
+distinguish stateful exact helpers from observational calls. Phase 8 is after
+entry and effect analysis because each boundary
 fact relates one exact host occurrence to recorded entry reachability and direct
 state effects.
 
@@ -288,9 +292,38 @@ Result safety templates use `boundary_result_disposition` together with
 `boundary_result_checked`. A discarded result with `checked: no`, or a captured
 result with `checked: no`, is evidence for an unchecked-result detector. Checked,
 returned, consumed, no-result, unavailable, and ambiguous boundaries do not
- satisfy that positive predicate. The evaluator does not infer safety from a
- generic assignment, and public templates never author the internal `unknown`
- value.
+satisfy that positive predicate. The evaluator does not infer safety from a
+generic assignment, and public templates never author the internal `unknown`
+value.
+
+Phase 7.25 builds `SemanticFacts.TransactionContextFacts` before authorization
+and external-boundary facts. `TransactionContextFactsVersion` is `1.0.0`. A fact
+connects an exact transaction-level `msg.value` occurrence to one exact effect
+inside an enclosing loop. The positive use vocabulary is deliberately small:
+`state_write`, `call_value`, and `stateful_internal_call`. Repeatability is
+`possible` when any enclosing supported loop may execute more than once, or
+`single_iteration` when every enclosing loop is proven at most once. A repeatable
+outer loop therefore dominates a single-iteration inner loop. Statically false
+loops emit no fact.
+
+The first version follows direct arithmetic-preserving source expressions and
+one local alias assigned and consumed within the same loop. Exact internal,
+inherited, `self`, and `super` helpers count only when the resolved callee or a
+transitive resolved helper writes state. Events, conditions, mapping-key-only
+uses, locals, returns, normal external calldata, pure or unresolved helpers,
+unresolved call returns, branch merges, reassignments, and unsupported loop
+shapes fail closed. This boundary is intentional: observing `msg.value` is not
+the same as proving repeated accounting or transfer.
+
+Only the source and effect AST nodes receive
+`transaction_context_source`, `transaction_context_use`, and
+`transaction_context_repeatability`. The loop stays a structural anchor. The
+official rule selects `loop`, requires a payable entry function, and uses a
+descendant `has` predicate for source `msg_value`, one of the three positive
+uses, and repeatability `possible`. Facts are normalized by exact ID and survive
+database JSON round trips. A cache without the `1.0.0` capability returns
+`ErrTransactionContextFactsUnavailable`; consumers must rebuild from source
+instead of reconstructing weaker evidence.
 
 ---
 

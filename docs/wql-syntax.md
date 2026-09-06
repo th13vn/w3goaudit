@@ -399,7 +399,7 @@ where:
 ```
 
 Inheritance, virtual dispatch, and `super` resolution happen automatically in
-the engine. There is no `runtime:` WQL syntax and no runtime candidate rule.
+the engine. There is no `runtime:` WQL syntax.
 Internal authorization and lifecycle facts may still appear in JSON reports for
 diagnostics, but they are not public matcher attributes. The only public
 initializer state is `takeover: possible`; incomplete evidence does not match a
@@ -597,6 +597,15 @@ preset.
 | `receiver_type_is_address` | bool | `receiver_type_is_address` |
 | `boundary_result_disposition` | anchored result handling value: `discarded`, `captured`, `returned`, `condition`, or `consumed` | `boundary_result_disposition` |
 | `boundary_result_checked` | anchored direct-check value: `yes` or `no`; incomplete internal evidence does not match a positive value | `boundary_result_checked` |
+| `transaction_context_source` | anchored transaction-level source; currently `msg_value` | `transaction_context_source` |
+| `transaction_context_use` | anchored proven effect: `state_write`, `call_value`, or `stateful_internal_call` | `transaction_context_use` |
+| `transaction_context_repeatability` | anchored loop proof: `possible` or `single_iteration` | `transaction_context_repeatability` |
+
+Transaction-context attributes are projected only onto the exact `msg.value`
+source node and the exact effect node. The enclosing loop is not annotated as an
+effect. Select it as the report anchor and use `has:` to require a descendant
+positive fact. Missing, unresolved, or unsupported evidence simply does not
+produce these attributes.
 
 String-valued attributes and `signature` are **anchored** regex (must match
 the whole value); `name`/`regex`/`func_name`/`modifier`/`base` are
@@ -732,7 +741,7 @@ target is arbitrary code execution and is reported by
 
 ### C. Unprotected initializer
 
-The staged candidate uses the lifecycle preset directly:
+The official detector uses the lifecycle preset directly:
 
 ```yaml
 query:
@@ -770,5 +779,33 @@ query:
 
 Uses `arg.0:` to require the `from` argument be parameter-tainted, and
 `self_sender` is used when `require(from == msg.sender)` is a valid mitigation.
+
+### E. Repeated transaction-level `msg.value` effect
+
+`templates/official/high/msg-value-in-loop.yaml` keeps the loop as the finding
+anchor, but reports it only when a descendant carries a proven repeatable effect:
+
+```yaml
+query:
+  from: entry_function
+  select: loop
+  where:
+    - and:
+        - mutability: payable
+    - has:
+        attr:
+          transaction_context_source: ^msg_value$
+          transaction_context_use: ^(state_write|call_value|stateful_internal_call)$
+          transaction_context_repeatability: ^possible$
+```
+
+This is stronger than finding the text `msg.value` below a loop. The builder
+must prove that the transaction-level value reaches persistent state, an
+ETH-bearing call-value position, or an exactly resolved stateful internal,
+inherited, `self`, or `super` helper. A direct source or one local alias inside
+the same loop is supported. Events, conditions, local-only or return-only uses,
+ordinary external calldata, uncertain aliases, unresolved helpers,
+single-iteration loops, statically unreachable loops, and unsupported loop
+shapes do not satisfy the positive predicate.
 
 ---

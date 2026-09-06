@@ -567,6 +567,13 @@ type ExternalBoundaryFact struct {
     // target, value, result, state, reachability, and limitation evidence
 }
 
+type TransactionContextFact struct {
+    ID, ContractID, ScopeID, FunctionID string
+    Source, Use, Repeatability          string
+    SourceRange, EffectRange            SemanticSourceRange
+    LoopPath, ResolvedCalleeID          string
+}
+
 // Per-function analysis facts (builder Phase 7), consumed by the report layer.
 type FunctionEffects struct {
     StateWrites []StateWrite // state vars written directly
@@ -760,3 +767,7 @@ loop may execute more than once and `single_iteration` only when every enclosing
 loop is proven at-most-once. A direct source or one bounded local alias may be
 used; branch merges, reassignment, unresolved returns, ordinary external
 calldata, observational uses, and unsupported loop shapes fail closed.
+Attributes are projected only onto the exact source and effect AST nodes, never
+onto the loop. The loop path is durable structural evidence. A repeatable outer
+loop overrides a single-iteration inner loop, while statically false loops emit
+no fact.

@@ -176,6 +176,9 @@ local-only, return-only, normal external calldata, pure/unresolved helper,
 single-iteration, statically unreachable, branch-merged, reassigned-alias, and
 unsupported loop cases remain outside the detector. There is no authored
 negative or `unknown` value: missing positive evidence fails closed.
+`TransactionContextFactsVersion` is `1.0.0`; the same facts survive database
+cache round trips. A legacy cache has no capability and must be rebuilt from
+source instead of falling back to the former textual-reference behavior.
 
 ## Validation workflow
 

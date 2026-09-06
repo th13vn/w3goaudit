@@ -69,6 +69,12 @@ self-contained `audit.html`. See [Result folder layout](#result-folder-layout).
 - **AST Parsing** - Parse Solidity using [solast-go](https://github.com/th13vn/solast-go)
 - **Contract Database** - Comprehensive database with inheritance, entry points, call graphs
 - **Semantic Type Facts** - Parameters, state variables, locals, casts, and call receivers carry lightweight type facts so WQL can stay simple while call classification becomes more precise
+- **Semantic Transaction-Context Facts** - Phase 7.25 records only proven
+  transaction-level `msg.value` effects inside loops. It distinguishes persistent
+  state writes, ETH-bearing call values, and exact stateful helper calls, then
+  classifies the enclosing loop as `possible` or `single_iteration`. Merely
+  reading `msg.value` in an event, condition, local, return, or ordinary external
+  argument is not enough. `TransactionContextFactsVersion` is `1.0.0`.
 - **Semantic External-Boundary Facts** - Phase 8 indexes Solidity and Yul
   calls, ETH sends, creates, and modifier-hosted boundaries as deterministic
   `ExternalBoundaryFact` evidence. It records exact host scope, target
@@ -98,7 +104,8 @@ self-contained `audit.html`. See [Result folder layout](#result-folder-layout).
 - **Agent-ready deterministic evidence** - The scanner remains offline and
   model-independent. A future external AI Assistant can consume findings, the
   database, exact source locations, reachability, navigation, cross-references,
-  extraction bundles, workflows, or bounded `QueryExternalBoundaries` pages
+  extraction bundles, workflows, normalized `TransactionContextFactsSnapshot`
+  evidence, or bounded `QueryExternalBoundaries` pages
   without changing official scan results. Core has no model transport, API key,
   reviewer callback, or AI dependency.
 - **Per-Contract Deep Dives** - One Markdown file per main contract combines architecture, findings, exact external interactions, the state-change matrix, and collapsible entry workflows for a human or external AI auditor.
@@ -388,6 +395,14 @@ if err != nil {
     log.Fatal(err)
 }
 _ = page.Items
+
+// Positive transaction-context facts are deterministic deep copies. An older
+// database cache returns types.ErrTransactionContextFactsUnavailable.
+transactionFacts, err := db.TransactionContextFactsSnapshot()
+if err != nil {
+    log.Fatal(err)
+}
+_ = transactionFacts
 ```
 
 For complete SDK documentation, see [Usage Guide](./docs/usage.md#sdk-usage).
@@ -420,9 +435,9 @@ That block contains `select`/`from`/`where`, or a query-level
 feature-test, and 76 benchmark templates; see the
 [WQL Syntax Guide](./docs/wql-syntax.md) for the full language reference.
 Official detectors use complete, mechanism-focused metadata and readable
-sentence-case titles. The current maintenance pass only normalizes wording,
-comments, and layout while preserving detector IDs and matcher semantics;
-semantic merges and new detectors are separate evidence-backed changes.
+sentence-case titles. Detector changes require vulnerable and safe fixtures,
+source/cache parity, and a competitive benchmark. Semantic attributes stay
+ordinary WQL predicates rather than introducing detector-specific syntax.
 
 ---
 
@@ -434,7 +449,7 @@ w3goaudit/
 ├── pkg/
 │   ├── reader/             # File discovery and loading
 │   ├── logging/            # Immutable scan-local logger
-│   ├── builder/            # Database construction (8 phases incl. effects + boundaries)
+│   ├── builder/            # Ordered database construction and semantic facts
 │   ├── engine/             # WQL template execution
 │   ├── home/               # ~/.w3goaudit config + template home (release download)
 │   ├── types/              # Core data structures
@@ -460,8 +475,9 @@ Input → Reader → Builder → Database → Engine → Findings → Result-fol
 
 1. Discover `.sol` files
 2. Parse with solast-go
-3. Build database (inheritance, call graph, selectors, per-function effects,
-   semantic external-boundary facts)
+3. Build database (inheritance, dispatched call graph, selectors, per-function
+   effects, transaction-context facts, authorization facts, and semantic
+   external-boundary facts)
 4. Load WQL templates (home → embedded fallback)
 5. Execute queries
 6. Generate findings
@@ -480,6 +496,12 @@ Build phases:
 5. Build call graph
 6. Calculate entry points
 7. Analyze per-function effects (state writes, guards, access control)
+   - **Phase 7.25:** Build versioned transaction-context facts and project
+     positive `msg.value` source/use/repeatability attributes onto exact
+     source/effect nodes.
+   - **Phase 7.5:** Build versioned authorization and initializer lifecycle
+     facts. Inheritance dispatch is already resolved by the engine and is not
+     WQL syntax.
 8. Build versioned external-boundary facts, WQL attributes, and exact entry
    reachability for function and modifier hosts
 
@@ -504,8 +526,9 @@ The contract database contains:
 - **Call Graph** - Internal/external call edges with line numbers
 - **Entry Points** - Public/external functions per main contract
 - **Main Contracts** - Deployable contracts ranked by inheritance depth
-- **Semantic Facts** - Type symbols, per-function effects, and versioned
-  external-boundary evidence with exact `ScopeID` identities
+- **Semantic Facts** - Type symbols, per-function effects, versioned
+  transaction-context and authorization evidence, and external-boundary evidence
+  with exact identities
 
 ---
 
@@ -559,6 +582,7 @@ Test contracts are documented in:
 - C3 inheritance linearization
 - Recursive call graph building
 - Per-function effects analysis (state writes, guards, access control)
+- Versioned transaction-context facts for proven repeated `msg.value` effects
 - Versioned semantic external-boundary facts and bounded exact-ID Agent queries
 - WQL query language
 - Result-folder output: Markdown + SARIF + JSON data/ + per-entry workflows + state-change matrix
