@@ -284,6 +284,14 @@ WQL bridge: `external_boundary_id`, `boundary_target_resolution`,
 `boundary_reachable_from_entry`. These are data attributes, not protocol
 presets or detector-specific engine behavior.
 
+Result safety templates use `boundary_result_disposition` together with
+`boundary_result_checked`. A discarded result with `checked: no`, or a captured
+result with `checked: no`, is evidence for an unchecked-result detector. Checked,
+returned, consumed, no-result, unavailable, and ambiguous boundaries do not
+ satisfy that positive predicate. The evaluator does not infer safety from a
+ generic assignment, and public templates never author the internal `unknown`
+ value.
+
 ---
 
 ## 5. Layer 3 — `pkg/types`: Core Data Structures

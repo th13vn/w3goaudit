@@ -117,7 +117,7 @@ semantic compatibility aliases. Unknown matcher values are rejected at load.
 | `HIGH-MSG-VALUE-IN-LOOP` | HIGH | `high/msg-value-in-loop.yaml` | Payable entry reuses transaction-level `msg.value` in a loop. |
 | `HIGH-NO-SLIPPAGE-CHECK` | HIGH | `high/no-slippage-check.yaml` | Router swap uses an unbounded minimum-output value. |
 | `HIGH-REENTRANCY-PATTERN` | HIGH | `high/reentrancy-pattern.yaml` | ETH-bearing or raw call precedes a state write without a proven guard. |
-| `HIGH-UNCHECKED-ERC20-TRANSFER` | HIGH | `high/unchecked-erc20-transfer.yaml` | ERC20 transfer return value is discarded. |
+| `HIGH-UNCHECKED-ERC20-TRANSFER` | HIGH | `high/unchecked-erc20-transfer.yaml` | ERC20 transfer result is discarded or captured without a proven check. |
 | `HIGH-UNPROTECTED-INITIALIZER` | HIGH | `high/unprotected-initializer.yaml` | Named initializer can be taken over on its first call. |
 | `HIGH-UNRESTRICTED-TRANSFEROWNERSHIP` | HIGH | `high/unrestricted-transferownership.yaml` | Owner-like state is written from caller input without protection. |
 | `HIGH-WEAK-PRNG` | HIGH | `high/weak-prng.yaml` | Block context is reduced into a pseudo-random choice. |
@@ -126,14 +126,34 @@ semantic compatibility aliases. Unknown matcher values are rejected at load.
 | `MEDIUM-DIVIDE-BEFORE-MULTIPLY` | MEDIUM | `medium/divide-before-multiply.yaml` | A division is the left operand of a multiplication. |
 | `MEDIUM-TX-ORIGIN-AUTH` | MEDIUM | `medium/tx-origin-auth.yaml` | `tx.origin` participates in an authentication guard. |
 | `MEDIUM-UNCHECKED-ARITHMETIC` | MEDIUM | `medium/unchecked-arithmetic.yaml` | Exploit-relevant arithmetic appears in an unchecked state-mutating path. |
-| `MEDIUM-UNCHECKED-LOWLEVEL-CALL` | MEDIUM | `medium/unchecked-lowlevel-call.yaml` | Low-level call result is discarded. |
-| `MEDIUM-UNCHECKED-SEND` | MEDIUM | `medium/unchecked-send.yaml` | `send` result is discarded. |
+| `MEDIUM-UNCHECKED-LOWLEVEL-CALL` | MEDIUM | `medium/unchecked-lowlevel-call.yaml` | Low-level call result is discarded or captured without a proven check. |
+| `MEDIUM-UNCHECKED-SEND` | MEDIUM | `medium/unchecked-send.yaml` | `send` result is discarded or captured without a proven check. |
 | `MEDIUM-VIEW-PURE-MODIFIES-STATE` | MEDIUM | `medium/view-pure-modifies-state.yaml` | View or pure code writes state, including assembly `sstore`. |
 
 Unsupported protocol-specific or weakly evidenced mechanisms are deliberately
 not represented in this trusted inventory. Their fixtures may remain useful
 for engine regression and benchmark work, but the official pack reports only
 mechanisms that can be proven generically.
+
+### External result handling
+
+The three unchecked-result detectors use the existing semantic boundary bridge,
+not statement-shape exclusions. The positive predicate is: result disposition is
+`discarded` or `captured`, and `boundary_result_checked` is `no`. An assignment is
+therefore not a safety proof. Direct conditions, later checks, returned values,
+consumed values, no-result operations, and unavailable or ambiguous evidence are
+outside these detectors. Unknown semantic facts remain internal and fail closed;
+templates do not author an `unknown` matcher.
+
+```yaml
+- any:
+    - and:
+        - boundary_result_disposition: ^discarded$
+        - boundary_result_checked: ^no$
+    - and:
+        - boundary_result_disposition: ^captured$
+        - boundary_result_checked: ^no$
+```
 
 ## Validation workflow
 

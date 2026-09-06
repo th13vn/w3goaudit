@@ -717,7 +717,10 @@ WQL rule verification logic (THE CORE).
   `boundary_reachable_from_entry`. These are derived from
   `ExternalBoundaryFactsVersion` `1.0.0`; they do not embed detector IDs,
   protocol names, or AI behavior in the evaluator. Unknown evidence remains an
-  explicit value rather than being interpreted as safe.
+  internal fact value and is never interpreted as safe or authored as a public
+  template matcher. Unchecked-result templates accept only `discarded` or
+  `captured` with `boundary_result_checked: no`; assignment shape alone is not
+  evidence of handling.
 - `matchArgs()` - Validate function call arguments
   - Skips metadata children tagged `call_receiver` or `call_option`, so `args.0`
     stays the first Solidity argument even though receivers and call options are

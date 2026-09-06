@@ -75,6 +75,11 @@ self-contained `audit.html`. See [Result folder layout](#result-folder-layout).
   resolution, value provenance, result handling, direct state-effect order,
   reentry class, entry reachability, and explicit unknowns without declaring a
   vulnerability. `ExternalBoundaryFactsVersion` is `1.0.0`.
+- **Semantic unchecked-result checks** - The ERC20 transfer, low-level-call, and
+  `send` detectors use proven result disposition and direct-check evidence. They
+  report discarded or captured-but-unchecked results, rather than treating an
+  assignment or generic statement shape as proof of safety; incomplete evidence
+  fails closed.
 - **C3 Linearization** - Proper Solidity inheritance resolution
 - **Function Identity** - `Function.Selector` stores canonical text such as
   `transfer(address,uint256)`; `Function.Signature` stores its four-byte

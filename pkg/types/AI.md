@@ -611,6 +611,12 @@ to empty containers but never invents the missing capability version, keeping
 legacy queries explicitly unavailable. Serialized AST attributes and sorted
 `ReachableFrom` exact entry IDs survive cache round trips.
 
+`BoundaryResult.Disposition` distinguishes `discarded`, `captured`, `returned`,
+`condition`, and `consumed`; `BoundaryResult.DirectCheck` records `yes`, `no`,
+or internal `unknown`. Consumers that need to prove an unchecked result should
+accept only `discarded` or `captured` with `DirectCheck: no`, and must not treat
+missing or unknown evidence as safe or vulnerable.
+
 `ScopeID` is canonical for both supported hosts: an exact function ID with
 `ScopeKind: function`, or `MakeModifierID(file, contract, name)` with
 `ScopeKind: modifier`. `FunctionID` remains populated for function-hosted facts

@@ -31,7 +31,10 @@ Main orchestrator for the 8-phase build process.
    and populate versioned,
    protocol-neutral `ExternalBoundaryFact` records. The initial phase records
    stable fact identity, exact or explicitly unresolved target metadata,
-   receiver/value/gas/argument provenance, and fact-backed WQL attributes.
+   receiver/value/gas/argument provenance, result disposition/direct-check
+   evidence, and fact-backed WQL attributes. A captured result is not proof of
+   safety unless a later guard over that result is proven; unavailable evidence
+   remains unknown for consumers that require fail-closed behavior.
 
 Phase 2 visits functions and modifiers in a total order keyed by exact owning
 source/contract before source position and name. This keeps serialized data-flow

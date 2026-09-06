@@ -12,6 +12,12 @@ All notable changes to w3goaudit are documented here. This project adheres to
   and deterministic source/cache parity is covered by regression tests. This pass
   does not add detectors or perform semantic merges.
 
+- The three unchecked-result detectors now consume existing external-boundary
+  result facts. They report discarded and captured-but-unchecked ERC20,
+  low-level-call, and `send` results, while checked, returned, consumed,
+  unavailable, and ambiguous evidence remains fail-closed. Detector IDs and the
+  output schema are unchanged.
+
 - Hardened authorization evidence for official detectors: generic low-level-call
   success checks no longer block taint traversal, while ambiguous overloaded
   helpers remain fail-closed. Added a regression for struct-field delegatecall

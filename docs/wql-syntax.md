@@ -595,6 +595,8 @@ preset.
 | `receiver_type` | resolved receiver type | `receiver_type` |
 | `receiver_type_kind` | resolved receiver type kind | `receiver_type_kind` |
 | `receiver_type_is_address` | bool | `receiver_type_is_address` |
+| `boundary_result_disposition` | anchored result handling value: `discarded`, `captured`, `returned`, `condition`, or `consumed` | `boundary_result_disposition` |
+| `boundary_result_checked` | anchored direct-check value: `yes` or `no`; incomplete internal evidence does not match a positive value | `boundary_result_checked` |
 
 String-valued attributes and `signature` are **anchored** regex (must match
 the whole value); `name`/`regex`/`func_name`/`modifier`/`base` are
