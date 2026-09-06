@@ -315,7 +315,9 @@ transitive resolved helper writes state. Events, conditions, mapping-key-only
 uses, locals, returns, normal external calldata, pure or unresolved helpers,
 unresolved call returns, `if`/ternary/`try` branch merges, reassignments, and
 unsupported loop shapes fail closed. This boundary is intentional: observing
-`msg.value` is not the same as proving repeated accounting or transfer.
+`msg.value` is not the same as proving repeated accounting or transfer. An alias
+assigned in an inner loop cannot flow to an effect after that loop because the
+assignment may execute zero times.
 
 The exact value positions of Yul `sstore`, `call`, `create`, and `create2` are
 also supported when they resolve through the same bounded Solidity local alias;

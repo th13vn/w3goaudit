@@ -154,8 +154,8 @@ The builder constructs a comprehensive database through ordered phases:
   `transaction_context_repeatability` onto the exact source and effect nodes;
   keep the loop as a structural anchor
 - Observational uses, conditional/tuple provenance, `if`/ternary/`try` branch
-  merges, uncertain aliases, ordinary external calldata, and unresolved helpers
-  fail closed
+  merges, inner-loop-exit aliases, uncertain aliases, ordinary external
+  calldata, and unresolved helpers fail closed
 - **Code:** [transaction_context.go](../pkg/builder/transaction_context.go)
 
 **Phase 7.5: Build Authorization Facts**

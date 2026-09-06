@@ -1291,8 +1291,9 @@ stateful internal, inherited, `self`, and `super` helper dispatch. Exact Yul
 value positions for `sstore`, `call`, `create`, and `create2` use the same
 bounded proof; other operands do not qualify. Observational uses, conditional or
 tuple provenance, `if`/ternary/`try` branch merges, uncertain aliases, ordinary
-external calldata, unresolved helpers, statically unreachable loops, and
-unsupported loop shapes emit no positive fact. A legacy cache returns
+external calldata, inner-loop-exit aliases, unresolved helpers, statically
+unreachable loops, and unsupported loop shapes emit no positive fact. A legacy
+cache returns
 `ErrTransactionContextFactsUnavailable`; it is not silently reinterpreted as an
 empty current analysis.
 Canonical literal `for` loops with adjacent exclusive or equal inclusive bounds

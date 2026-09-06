@@ -12,8 +12,8 @@ All notable changes to w3goaudit are documented here. This project adheres to
   exact stateful helper under a loop that may repeat. Events, conditions,
   local/return-only uses, normal external calldata, uncertain aliases, unresolved
   helpers, conditional/tuple provenance, `if`/ternary/`try` branch merges,
-  single-iteration loops, and unsupported loop shapes fail closed. Exact Yul
-  value positions for `sstore`, `call`,
+  inner-loop-exit aliases, single-iteration loops, and unsupported loop shapes
+  fail closed. Exact Yul value positions for `sstore`, `call`,
   `create`, and `create2` use the same bounded proof. Canonical literal
   increasing/decreasing loops recognize adjacent exclusive and equal inclusive
   one-iteration bounds rather than only `i = 0; i < 1; i++`.

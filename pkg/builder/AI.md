@@ -438,7 +438,8 @@ aliases, conditional or tuple-valued expressions, unresolved call returns,
 mapping-key-only use, normal external calldata, events, conditions, locals,
 returns, pure/unresolved helpers, statically false loops, and unsupported loop
 shapes emit no positive fact. Branch ancestors include `if`, ternary, and
-`try`/`catch`. Repeatability is
+`try`/`catch`; an alias assigned in an inner loop cannot flow to an effect after
+that loop because the assignment may never execute. Repeatability is
 `possible` if any enclosing loop may execute more than once, otherwise
 `single_iteration` when every enclosing loop is proven at most once.
 Canonical literal `for` proofs support adjacent exclusive bounds, equal

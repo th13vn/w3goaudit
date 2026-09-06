@@ -63,6 +63,7 @@ func TestBuildTransactionContextFactsSuppressesObservationalAndUnresolvedUses(t 
 		"ternaryDirect(address[],bool)",
 		"tupleAlias(address[])",
 		"tryAlias(address[],IContextSink)",
+		"nestedLoopAlias(address[])",
 		"assemblySstoreKeyOnly(address[])",
 		"assemblyCallTargetOnly(address[])",
 		"assemblyCreateOffsetOnly(address[])",

@@ -437,15 +437,17 @@ func transactionContextRepeatability(effect *types.ASTNode) (string, []*types.AS
 }
 
 func transactionContextSharesLoop(source, effect *types.ASTNode) bool {
+	shared := false
 	for current := source; current != nil; current = current.Parent {
 		if current.Kind != types.KindStmtLoop {
 			continue
 		}
-		if nodeIsWithin(effect, current) {
-			return true
+		if !nodeIsWithin(effect, current) {
+			return false
 		}
+		shared = true
 	}
-	return false
+	return shared
 }
 
 func transactionContextLoopStaticallyFalse(loop *types.ASTNode) bool {

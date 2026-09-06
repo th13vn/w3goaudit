@@ -170,8 +170,8 @@ run-output scratch directory.
   finding anchor. Exact Yul value positions for `sstore`, `call`, `create`, and
   `create2` use the same bounded alias proof. Observational uses, conditional or
   tuple provenance, `if`/ternary/`try` branch merges, uncertain aliases,
-  unresolved helpers, unsupported loop shapes, and legacy caches do not
-  synthesize positive evidence. Canonical
+  inner-loop-exit aliases, unresolved helpers, unsupported loop shapes, and
+  legacy caches do not synthesize positive evidence. Canonical
   literal increasing/decreasing loops prove `single_iteration` only from
   adjacent exclusive or equal inclusive bounds.
   `TransactionContextFactsSnapshot` returns normalized deep copies or

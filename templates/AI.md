@@ -177,7 +177,8 @@ bounded local-alias proof; key, target, offset, and salt operands do not qualify
 Event, condition, local-only, return-only, normal external calldata,
 pure/unresolved helper, single-iteration, statically unreachable,
 conditional/tuple, `if`/ternary/`try` branch-merged, reassigned-alias, and
-unsupported loop cases remain outside the detector. There is no authored
+inner-loop-exit alias cases remain outside the detector, as do unsupported loop
+cases. There is no authored
 negative or `unknown` value: missing positive evidence fails closed.
 Canonical literal `for` loops with adjacent exclusive or equal inclusive bounds
 in the matching `++`/`--` direction are classified as `single_iteration`.

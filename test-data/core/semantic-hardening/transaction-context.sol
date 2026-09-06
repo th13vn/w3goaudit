@@ -104,6 +104,16 @@ contract TransactionContextMatrix is TransactionContextBase {
         }
     }
 
+    function nestedLoopAlias(address[] calldata users) external payable {
+        for (uint256 i = 0; i < users.length; i++) {
+            uint256 amount;
+            for (uint256 j = 0; j < users.length; j++) {
+                amount = msg.value;
+            }
+            shares[users[i]] += amount;
+        }
+    }
+
     function unresolvedReturnAlias(address[] calldata users) external payable {
         for (uint256 i = 0; i < users.length; i++) {
             uint256 amount = _observe(msg.value);
