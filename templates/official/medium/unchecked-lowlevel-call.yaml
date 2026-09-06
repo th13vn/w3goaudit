@@ -19,18 +19,18 @@ meta:
     - https://github.com/crytic/slither/wiki/Detector-Documentation#unchecked-low-level-calls
     - https://swcregistry.io/docs/SWC-104
 
-# If the call is the RHS of an assign (`(bool ok, ) = to.call(...)`) the
-# return is captured; downstream guard analysis is out of scope. If it
-# is inside require/assert/if/return, it's also considered handled.
+# The semantic boundary facts distinguish a standalone discarded result from a
+# captured result that has no proven later check. Returned, directly conditioned,
+# consumed, unavailable, and ambiguous results are intentionally outside this
+# detector.
 query:
   from: function
   select: lowlevel_call
   where:
-    - not:
-        in:
-          any:
-            - block: require
-            - block: assert
-            - block: if
-            - block: assign
-            - block: return
+    - any:
+        - and:
+            - boundary_result_disposition: ^discarded$
+            - boundary_result_checked: ^no$
+        - and:
+            - boundary_result_disposition: ^captured$
+            - boundary_result_checked: ^no$

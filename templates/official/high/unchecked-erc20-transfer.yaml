@@ -18,22 +18,18 @@ meta:
     - https://docs.soliditylang.org/en/latest/security-considerations.html#use-the-checks-effects-interactions-pattern
 
 # Match external ERC20 transfer calls. Built-in ETH transfer has a separate AST
-# kind, so selecting `external_call` excludes it.
+# kind, so selecting `external_call` excludes it. The semantic result facts
+# report only discarded results or captured results without a proven check; an
+# assignment alone is not a safety proof.
 query:
   from: entry_function
   select: external_call
   where:
     - name: ^(transfer|transferFrom)$
-    # The return is consumed if the call sits inside any of these:
-    #   - require / assert : `require(token.transfer(...), ...)`
-    #   - if                : `if (!token.transferFrom(...)) revert();`
-    #   - assign            : `bool ok = token.transfer(...);`
-    #   - return            : `return token.transfer(...);`
-    - not:
-        in:
-          any:
-            - block: require
-            - block: assert
-            - block: if
-            - block: assign
-            - block: return
+    - any:
+        - and:
+            - boundary_result_disposition: ^discarded$
+            - boundary_result_checked: ^no$
+        - and:
+            - boundary_result_disposition: ^captured$
+            - boundary_result_checked: ^no$

@@ -21,18 +21,18 @@ meta:
 # `eth_transfer` is the semantic group for transfer, send, and low-level ETH
 # calls. The exact name narrows it to `.send(...)`.
 #
-# Calls inside a guard, branch, assignment, or return are treated as handled;
-# checking a captured variable is outside this detector's scope.
+# The semantic boundary facts distinguish a discarded result from a result that
+# is directly checked, returned, or consumed by another statement. A captured
+# result is reportable only when no later check is proven.
 query:
   from: function
   select: eth_transfer
   where:
     - name: ^send$
-    - not:
-        in:
-          any:
-            - block: require
-            - block: assert
-            - block: if
-            - block: assign
-            - block: return
+    - any:
+        - and:
+            - boundary_result_disposition: ^discarded$
+            - boundary_result_checked: ^no$
+        - and:
+            - boundary_result_disposition: ^captured$
+            - boundary_result_checked: ^no$

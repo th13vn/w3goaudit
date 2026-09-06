@@ -71,6 +71,7 @@ func TestUncheckedResultDetectorsUseSemanticResultFacts(t *testing.T) {
 				"ExternalBoundaryMatrix.constructor",
 				"ExternalBoundaryMatrix.stateBefore",
 				"ExternalBoundaryMatrix.stateAfter",
+				"ExternalBoundaryMatrix.incompatible",
 			},
 			exclude: []string{"ExternalBoundaryMatrix.capturedChecked", "ExternalBoundaryMatrix.returned"},
 		},
