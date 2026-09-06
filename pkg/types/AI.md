@@ -555,6 +555,8 @@ type SemanticFacts struct {
     FunctionEffects map[string]*FunctionEffects  // function ID -> effects
     ExternalBoundaryVersion string               // empty for legacy caches
     ExternalBoundaries []*ExternalBoundaryFact   // sorted protocol-neutral evidence
+    TransactionContextVersion string              // empty for legacy caches
+    TransactionContextFacts []*TransactionContextFact // sorted positive msg.value evidence
 }
 
 type ExternalBoundaryFact struct {
@@ -752,3 +754,9 @@ an enclosing loop. `NormalizeTransactionContextFacts` deep-copies, sorts, and
 deduplicates exact fact IDs. `Database.TransactionContextFactsSnapshot` returns
 `ErrTransactionContextFactsUnavailable` for legacy caches rather than inventing
 weaker evidence. Public values intentionally exclude an authored unknown state.
+The builder emits only `msg_value`, `state_write`, `call_value`, and
+`stateful_internal_call` facts. Repeatability is `possible` when any enclosing
+loop may execute more than once and `single_iteration` only when every enclosing
+loop is proven at-most-once. A direct source or one bounded local alias may be
+used; branch merges, reassignment, unresolved returns, ordinary external
+calldata, observational uses, and unsupported loop shapes fail closed.

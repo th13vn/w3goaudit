@@ -2,12 +2,14 @@
 
 ## Purpose
 
-Parses Solidity AST and builds a comprehensive contract database through 8 phases.
+Parses Solidity AST and builds a comprehensive contract database through the
+ordered parse, semantic, graph, effect, transaction-context, authorization, and
+external-boundary passes.
 
 ## Key Files
 
 ### builder.go
-Main orchestrator for the 8-phase build process.
+Main orchestrator for the ordered build process.
 
 **Exports:**
 - `Builder` struct
@@ -26,6 +28,17 @@ Main orchestrator for the 8-phase build process.
 7. **Analyze Effects** (`effects.go`) - Walk each function's AST to record
    per-function `FunctionEffects` (state writes, require/assert/revert + branch
    guards, access control) into `Database.Semantics.FunctionEffects`.
+7.25. **Build Transaction-Context Facts** (`transaction_context.go`) - Record
+     only positive, exact `msg.value` flows that reach a persistent state write,
+     an ETH-bearing value position, or a resolved stateful internal/inherited/
+     `self`/`super` helper. The pass requires an enclosing loop, aggregates all
+     enclosing loops for repeatability, and fails closed for unresolved helpers,
+     observational uses, branch-merged or reassigned aliases, ordinary external
+     calldata, and statically unreachable loops. Facts are normalized into the
+     versioned `SemanticFacts.TransactionContextFacts` slice and the same three
+     attributes are projected onto the exact source and effect nodes. Loop nodes
+     remain ordinary structural anchors, so WQL combines `select: loop` with a
+     descendant `has`/`attr` predicate instead of treating a loop as the effect.
 8. **Build External-Boundary Facts** (`external_boundaries.go`) - Walk exact
    function and modifier ASTs in deterministic scope-ID and child-index order
    and populate versioned,

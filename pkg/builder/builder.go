@@ -142,6 +142,11 @@ func (b *Builder) Build(sources []*types.SourceFile) (*types.Database, error) {
 	b.analyzeEffects()
 	b.logf("Phase 7 complete")
 
+	// Phase 7.25: exact positive transaction-context accounting facts.
+	b.logf("Phase 7.25: Building transaction-context facts")
+	b.buildTransactionContextFacts()
+	b.logf("Phase 7.25 complete")
+
 	// Phase 7.5: deterministic authorization/runtime-inheritance facts.
 	b.logf("Phase 7.5: Building authorization facts")
 	b.analyzeAuthorization()
