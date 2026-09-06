@@ -742,3 +742,13 @@ analysis.
 ### Authorization semantic facts (v1.0.0)
 
 `SemanticFacts.AuthorizationFactsVersion` and `AuthorizationFacts` provide a deterministic, exact-ID authorization layer. `Database.AuthorizationFactsSnapshot`, `GetAuthorizationFactByID`, and `QueryAuthorizationFacts` return deep copies, sort deterministically, cap queries at 200, and return `ErrAuthorizationFactsUnavailable` for legacy caches without the capability. Incomplete verdicts remain explicit and must not be treated as a safe result. Lifecycle fields (`InitializerEntry`, `OneTimeMutex`, `FirstCallTakeover`, `AtomicInitialization`, `ConstructorDisable`, and `ProxyLinkage`) are internal report/SDK evidence; public WQL exposes only the deterministic initializer takeover preset.
+
+### Transaction-context semantic facts (v1.0.0)
+
+`SemanticFacts.TransactionContextVersion` and `TransactionContextFacts` store
+positive, exact-source evidence that transaction-level `msg.value` reaches a
+persistent state write, ETH call value, or exact stateful internal helper from
+an enclosing loop. `NormalizeTransactionContextFacts` deep-copies, sorts, and
+deduplicates exact fact IDs. `Database.TransactionContextFactsSnapshot` returns
+`ErrTransactionContextFactsUnavailable` for legacy caches rather than inventing
+weaker evidence. Public values intentionally exclude an authored unknown state.

@@ -566,6 +566,9 @@ func loadFromJSON(path string, logger *logging.Logger, legacy bool) (*Database, 
 		if db.Semantics.AuthorizationFacts == nil {
 			db.Semantics.AuthorizationFacts = make([]*AuthorizationFact, 0)
 		}
+		if db.Semantics.TransactionContextFacts == nil {
+			db.Semantics.TransactionContextFacts = make([]*TransactionContextFact, 0)
+		}
 	}
 	if db.Diagnostics == nil {
 		db.Diagnostics = make([]Diagnostic, 0)

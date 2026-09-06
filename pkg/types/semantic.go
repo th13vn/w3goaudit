@@ -226,6 +226,9 @@ type SemanticFacts struct {
 
 	AuthorizationFactsVersion string               `json:"authorizationFactsVersion,omitempty"`
 	AuthorizationFacts        []*AuthorizationFact `json:"authorizationFacts,omitempty"`
+
+	TransactionContextVersion string                    `json:"transactionContextVersion,omitempty"`
+	TransactionContextFacts   []*TransactionContextFact `json:"transactionContextFacts,omitempty"`
 }
 
 // FunctionEffects captures what a single function does that an auditor needs to
@@ -267,10 +270,11 @@ type AuthInfo struct {
 // NewSemanticFacts creates an empty semantic index.
 func NewSemanticFacts() *SemanticFacts {
 	return &SemanticFacts{
-		Symbols:            make(map[string]*SemanticSymbol),
-		FunctionEffects:    make(map[string]*FunctionEffects),
-		ExternalBoundaries: make([]*ExternalBoundaryFact, 0),
-		AuthorizationFacts: make([]*AuthorizationFact, 0),
+		Symbols:                 make(map[string]*SemanticSymbol),
+		FunctionEffects:         make(map[string]*FunctionEffects),
+		ExternalBoundaries:      make([]*ExternalBoundaryFact, 0),
+		AuthorizationFacts:      make([]*AuthorizationFact, 0),
+		TransactionContextFacts: make([]*TransactionContextFact, 0),
 	}
 }
 
