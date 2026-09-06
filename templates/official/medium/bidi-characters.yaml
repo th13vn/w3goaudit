@@ -1,6 +1,6 @@
 meta:
   id: MEDIUM-BIDI-CHARACTERS
-  title: "Unicode Bidirectional Control Characters in Source (Trojan Source)"
+  title: "Unicode bidirectional control characters in source (Trojan Source)"
   severity: MEDIUM
   confidence: HIGH
   description: >

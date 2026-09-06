@@ -1,6 +1,6 @@
 meta:
   id: HIGH-UNCHECKED-ERC20-TRANSFER
-  title: "Unchecked ERC20 transfer / transferFrom Return Value"
+  title: "Unchecked ERC20 transfer or transferFrom return value"
   severity: HIGH
   confidence: MEDIUM
   description: >
@@ -17,10 +17,8 @@ meta:
     - https://github.com/crytic/slither/wiki/Detector-Documentation#unchecked-transfer
     - https://docs.soliditylang.org/en/latest/security-considerations.html#use-the-checks-effects-interactions-pattern
 
-# As of P0-1 (ast_builder.go:603) the parser disambiguates ETH .transfer(amt)
-# (1 arg → call.builtin.transfer, always reverts on failure — no check
-# needed) from ERC20 .transfer(to, amt) (2 args → call.external). So we
-# match only call.external (`external_call`) here.
+# Match external ERC20 transfer calls. Built-in ETH transfer has a separate AST
+# kind, so selecting `external_call` excludes it.
 query:
   from: entry_function
   select: external_call

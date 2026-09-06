@@ -1,6 +1,6 @@
 meta:
   id: HIGH-MSG-VALUE-IN-LOOP
-  title: "msg.value Used Inside a Loop"
+  title: "msg.value used inside a loop"
   severity: HIGH
   confidence: MEDIUM
   description: >
@@ -16,11 +16,8 @@ meta:
     - https://github.com/crytic/slither/wiki/Detector-Documentation#msg-value-inside-a-loop
     - https://forum.openzeppelin.com/t/poc-multicall-with-msg-value-reuses-eth/14467
 
-# Only payable entries can receive ETH — non-payable functions cannot exhibit
-# this bug because msg.value is always 0. Restricting here cuts the FP surface
-# dramatically. `mutability: payable` is wrapped in `and:` so it routes to the
-# function-level precondition (see delegatecall-in-loop.yaml for why bare
-# `mutability:` at the top of `where` would be wrong here).
+# Restrict this detector to payable entries because non-payable functions have
+# msg.value == 0. `and:` routes mutability to the function-level precondition.
 #
 # `parent: ^msg$` checks the member-access parent expression directly.
 query:

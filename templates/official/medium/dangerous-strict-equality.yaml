@@ -1,6 +1,6 @@
 meta:
   id: MEDIUM-DANGEROUS-STRICT-EQUALITY
-  title: "Dangerous Strict Equality on Externally-Influenced Balance"
+  title: "Dangerous strict equality on externally influenced balance"
   severity: MEDIUM
   confidence: HIGH
   description: >
@@ -20,10 +20,9 @@ meta:
     - https://github.com/crytic/slither/wiki/Detector-Documentation#dangerous-strict-equalities
     - https://swcregistry.io/docs/SWC-132
 
-# An `==` or `!=` whose subtree contains a balance-like read. We use the
-# binary_op operator AND a descendant member_access / balanceOf call so
-# that side-of-comparison doesn't matter — `bal == 100e18` and
-# `100e18 == bal` both fire.
+# Match strict equality whose expression contains a balance-like read; the side
+# of the comparison does not matter. Timestamp/number checks additionally require
+# caller influence so same-block cache comparisons against stored state are safe.
 query:
   from: function
   select: binary
@@ -32,16 +31,8 @@ query:
     - any:
         - has: { block: member, name: ^balance$ }
         - has: { block: external_call, name: ^balanceOf$ }
-        # Raw `block.number == X` (snapshot-locking abuse) and
-        # `block.timestamp == X` (a real anti-pattern in vesting contracts) — but
-        # only when the other side is CALLER-influenced.
-        #
-        # `storedTimestamp == block.timestamp` is the same-block cache
-        # short-circuit (`if (reserve.lastUpdateTimestamp == block.timestamp)
-        # return cachedIndex;`, Aave's shape). The stored value is written by the
-        # contract itself, so the comparison detects sameness rather than handing
-        # anyone a lever, and all three real occurrences carried an explicit
-        # `// slither-disable-next-line incorrect-equality`.
+        # Timestamp/number comparisons are relevant only when the other operand
+        # is caller-influenced; stored cache timestamps are not attacker-controlled.
         - and:
             - has: { block: member, name: ^(timestamp|number)$ }
             - any:

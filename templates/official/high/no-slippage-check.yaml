@@ -1,6 +1,6 @@
 meta:
   id: HIGH-NO-SLIPPAGE-CHECK
-  title: "AMM Swap With No Slippage Bound (amountOutMin = 0)"
+  title: "AMM swap with no slippage bound (amountOutMin = 0)"
   severity: HIGH
   confidence: MEDIUM
   description: >

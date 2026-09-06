@@ -1,6 +1,6 @@
 meta:
   id: MEDIUM-VIEW-PURE-MODIFIES-STATE
-  title: "view/pure Function Modifies State"
+  title: "view/pure function modifies state"
   severity: MEDIUM
   confidence: HIGH
   description: >
@@ -22,13 +22,8 @@ meta:
     - https://github.com/crytic/slither/wiki/Detector-Documentation#constant-functions-changing-the-state
     - https://docs.soliditylang.org/en/latest/contracts.html#view-functions
 
-# `state_write` is the semantic group for both `stmt.assign` (with
-# is_state_var=true) and `asm.sstore` — covers both the high-level
-# "x = ...;" pattern AND the assembly bypass pattern, which is the
-# interesting (and silently dangerous) one.
-#
-# `mutability: view,pure` is wrapped in `and:` so it routes to the
-# function-level precondition layer (see delegatecall-in-loop.yaml).
+# `state_write` covers both high-level state assignments and assembly `sstore`.
+# `and:` routes `mutability: view,pure` to the function-level precondition.
 query:
   from: function
   select: state_write

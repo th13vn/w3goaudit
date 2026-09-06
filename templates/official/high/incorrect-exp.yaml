@@ -1,6 +1,6 @@
 meta:
   id: HIGH-INCORRECT-EXP
-  title: "Suspicious Use of ^ (Bitwise XOR, Likely Meant **)"
+  title: "Suspicious use of ^ (bitwise XOR, likely meant **)"
   severity: HIGH
   confidence: MEDIUM
   description: >

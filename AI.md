@@ -271,8 +271,9 @@ run-output scratch directory.
   parameterized authorization and initializer presets; lifecycle and dispatch
   details remain internal evidence
   for reports and SDK consumers. Programmatic `Rule.Attr` has no hidden semantic
-  interpretation. Official templates remain unchanged during
-  candidate review.
+  interpretation. Official templates are maintained as one simple, explicit
+  authoring surface; mechanical cleanup preserves detector semantics, while
+  semantic merges and new detectors require separate evidence gates.
 - Generated timestamps are the one intentional source of report-byte variance.
   `GeneratorOptions.Now` and `BundleOptions.Now` let SDK callers inject a fixed
   clock; a complete fixed-clock bundle is byte-stable.

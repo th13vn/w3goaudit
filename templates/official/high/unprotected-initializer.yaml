@@ -1,6 +1,6 @@
 meta:
   id: HIGH-UNPROTECTED-INITIALIZER
-  title: "Unprotected Initializer (Anyone Can Become Owner)"
+  title: "Unprotected initializer (anyone can become owner)"
   severity: HIGH
   confidence: HIGH
   description: >
@@ -23,10 +23,7 @@ query:
   from: entry_function
 
   where:
-    # Match common initializer names. Anchored so we don't fire on functions
-    # like `initializeUser()` which often have legitimately weaker auth.
-    # Slither matches strictly on `initialize`; we also catch `init` / `setup`
-    # because those are the popular variants in non-OZ proxies.
+    # Match common initializer names while excluding similarly named helpers.
     - func_name: (?i)^(initialize|initialise|init|__init|setup)$
     - preset:
         initializer:

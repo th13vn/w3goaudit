@@ -1,6 +1,6 @@
 meta:
   id: MEDIUM-DIVIDE-BEFORE-MULTIPLY
-  title: "Division Before Multiplication (Precision Loss)"
+  title: "Division before multiplication (precision loss)"
   severity: MEDIUM
   confidence: HIGH
   description: >
@@ -24,11 +24,8 @@ query:
   select: binary
 
   where:
-    # Precise structural pattern: a multiply whose LEFT operand is a divide.
-    # The slither-inspired draft used `sequence: [/, *]`, which scans
-    # descendants in any order and FPs on `a = b/c; ...; d = e*f` (two
-    # unrelated expressions). `left:` directly walks children[0], which is
-    # the canonical AST shape for this bug.
+    # Match a multiplication whose left operand is a division. Direct child
+    # matching preserves operand order and avoids unrelated expressions.
     - operator: "\\*"
     - left:
         block: binary

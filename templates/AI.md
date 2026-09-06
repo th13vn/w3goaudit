@@ -13,6 +13,14 @@ authored `unknown` value. Inheritance, C3 linearization, virtual dispatch, and
 `super` dispatch are engine behavior. Missing, unresolved, ambiguous, or
 incomplete positive semantic evidence fails closed.
 
+Official detector metadata follows one readable style: sentence-case titles,
+mechanism-focused descriptions, actionable recommendations, and stable references.
+Comments in official YAML explain only a non-obvious matcher boundary or semantic
+scope; implementation history and benchmark anecdotes belong in tests or reports,
+not in production detector files. The mechanical-cleanup pass preserves every ID,
+severity, confidence, query scope, and matcher meaning. Semantic merges and new
+detectors require a separate evidence-backed change.
+
 ## Pack precedence
 
 The CLI resolves templates in this order:

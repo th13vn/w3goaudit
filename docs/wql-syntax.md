@@ -68,8 +68,17 @@ query:
             type: protected
 ```
 
-`meta.id` and `meta.severity` are required at load time;
-`severity` must be one of `CRITICAL`/`HIGH`/`MEDIUM`/`LOW`/`INFO`.
+`meta.id`, `meta.title`, `meta.severity`, `meta.confidence`, `meta.description`,
+and `meta.recommendation` are required for official detectors. The generic loader
+requires only `id` and `severity` for compatibility with small SDK/test templates;
+official-pack contracts enforce complete finding metadata. `severity` must be one of
+`CRITICAL`/`HIGH`/`MEDIUM`/`LOW`/`INFO`.
+
+Keep official metadata concise and mechanism-focused. Use sentence-case titles,
+describe the condition the query actually proves, and give a practical mitigation.
+Comments should explain a matcher boundary or scope decision, not preserve
+implementation history. Mechanical cleanup may normalize wording and layout, but
+does not change detector IDs, severities, scopes, or matcher semantics.
 
 The loader is strict: a template without `query:`, with unknown keys at any
 level, or with a YAML merge key (`<<`) anywhere in the document is rejected at

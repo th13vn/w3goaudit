@@ -1,6 +1,6 @@
 meta:
   id: MEDIUM-UNCHECKED-LOWLEVEL-CALL
-  title: "Unchecked Low-Level Call Return Value"
+  title: "Unchecked low-level call return value"
   severity: MEDIUM
   confidence: MEDIUM
   description: >

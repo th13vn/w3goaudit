@@ -1,6 +1,6 @@
 meta:
   id: HIGH-ARBITRARY-LOW-LEVEL-CALL
-  title: "Arbitrary Low-Level Call (User-Controlled Target and Calldata)"
+  title: "Arbitrary low-level call (user-controlled target and calldata)"
   severity: HIGH
   confidence: MEDIUM
   description: >
@@ -23,16 +23,13 @@ query:
           authorization:
             type: protected
 
-    # The CALL's own target must be caller-controlled — not the receiver of some
-    # nested call inside the calldata expression.
+    # Match the call's own target, not a receiver nested inside calldata.
     - receiver:
         tainted: user_controlled
 
-    # The caller must control which FUNCTION is invoked, which is what makes this a
-    # confused deputy. Contract-built calldata with a pinned selector
-    # (`abi.encodeWithSelector(IERC20.transferFrom.selector, …)` — Uniswap's
-    # TransferHelper) lets the caller choose only the arguments, so it is an ordinary
-    # token transfer and was previously reported in four separate projects.
+    # Require caller control over the function selector as well as the target.
+    # Contract-built calldata with a pinned selector lets the caller choose only
+    # arguments, so it is not an arbitrary dispatcher.
     - arg.0:
         any:
           # The caller supplies the whole calldata blob.
@@ -40,7 +37,7 @@ query:
             not:
               block: external_call
               name: ^(encodeWithSelector|encodeWithSignature|encodeCall|encodePacked)$
-          # The contract builds the calldata, but the caller picks the selector.
+          # The contract builds calldata, but the caller picks the selector.
           - block: external_call
             name: ^(encodeWithSelector|encodeWithSignature|encodeCall|encodePacked)$
             arg.0: { tainted: user_controlled }

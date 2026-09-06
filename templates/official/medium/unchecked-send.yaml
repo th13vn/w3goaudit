@@ -1,6 +1,6 @@
 meta:
   id: MEDIUM-UNCHECKED-SEND
-  title: "Unchecked send() Return Value"
+  title: "Unchecked send() return value"
   severity: MEDIUM
   confidence: HIGH
   description: >
@@ -18,15 +18,11 @@ meta:
     - https://github.com/crytic/slither/wiki/Detector-Documentation#unchecked-send
     - https://swcregistry.io/docs/SWC-104
 
-# `call.builtin.send` has no dedicated WQL block-kind alias — only the broader
-# `eth_transfer` semantic group (transfer/send/lowlevel .call/asm.call). Since
-# only `.send(...)` calls carry the node name "send" among that group,
-# `select: eth_transfer` + `name: ^send$` narrows to exactly the same nodes.
+# `eth_transfer` is the semantic group for transfer, send, and low-level ETH
+# calls. The exact name narrows it to `.send(...)`.
 #
-# If the call is inside a guard, branch, assign, or return, the return
-# value is presumed handled. `stmt.assign` covers
-# `bool ok = to.send(amt);` — checking of `ok` is left to a downstream
-# rule and is not in scope here.
+# Calls inside a guard, branch, assignment, or return are treated as handled;
+# checking a captured variable is outside this detector's scope.
 query:
   from: function
   select: eth_transfer

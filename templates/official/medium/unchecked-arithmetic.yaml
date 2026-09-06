@@ -1,6 +1,6 @@
 meta:
   id: MEDIUM-UNCHECKED-ARITHMETIC
-  title: Arithmetic in Unchecked Block (Potential Overflow)
+  title: Arithmetic in unchecked block (potential overflow)
   severity: MEDIUM
   confidence: MEDIUM
   description: >
@@ -25,22 +25,15 @@ meta:
 
 query:
   from: function
-  # Anchor on the ARITHMETIC, not the enclosing block. A gas-optimized
-  # whole-function `unchecked { … }` wrapper (CrocSwap, Solady) otherwise produced
-  # one unactionable finding for an entire body — the auditor could not see which
-  # operation was at risk.
+  # Anchor on the arithmetic operation so the report identifies the risky
+  # expression rather than the enclosing unchecked block.
   select: binary
 
   where:
     - version: ">=0.8.0"
-    # Overflow only damages persistent state in state-mutating functions.
-    # pure/view library math (SafeMath/Math/Strings) computes bounded local
-    # values and cannot corrupt accounting, so exclude it here. Note: this is
-    # the in-template control; a genuinely vendored dependency tree (lib/,
-    # node_modules/, src/@openzeppelin/) is better excluded by scan scope.
-    # Wrapped in `and:` (single item) so the bare `mutability:` — a dual
-    # field with no AST-only sibling — routes to the filter/context layer
-    # (a function precondition) instead of the match/AST layer.
+    # Restrict the detector to state-mutating functions; pure/view arithmetic
+    # cannot corrupt persistent accounting. `and:` routes mutability to the
+    # function-level precondition.
     - and:
         - mutability: "payable,nonpayable"
 
@@ -49,32 +42,20 @@ query:
     - in:
         block: unchecked
 
-    # Only operations that are actually an exploit primitive. Division cannot
-    # overflow, so `/` is excluded entirely.
+    # Division cannot overflow, so only exploit-relevant arithmetic is included.
     - any:
-        # Multiplication and subtraction overflow/underflow even against a constant
-        # operand, so both shapes stay in scope.
+        # Multiplication and subtraction can wrap even with a constant operand.
         - operator: "[*]"
         - operator: "[-]"
-        # Addition only when an operand is CALLER-CONTROLLED. Wrapping
-        # `balances[user] + amount` is a real primitive when `amount` is an
-        # unbounded parameter — the attacker picks `2^256 - balance` — but a counter
-        # or nonce incremented from storage (`nonceLookup[k] + 1`,
-        # `numElements + 1`) can never be driven to the type maximum, and those made
-        # up the bulk of the noise on real code (EVC, `Set.insert`).
+        # Addition is included only when an operand is caller-controlled; routine
+        # counter and nonce increments are not useful attacker-controlled wraps.
         - and:
             - operator: "[+]"
-            # An OPERAND must be caller-controlled — `left:`/`right:`, not `has:`,
-            # which would descend into a mapping KEY and make `nonceLookup[key] + 1`
-            # look attacker-influenced because the caller picked the slot.
+            # Check an operand directly. A descendant search could mistake a
+            # caller-controlled mapping key for a caller-controlled sum operand.
             - any:
                 - left: { tainted: user_controlled }
                 - right: { tainted: user_controlled }
 
-    # Only flag arithmetic whose operands were NOT bounded by a preceding
-    # guard. A range check that references every operand — e.g.
-    # `require(oldAllowance >= value); … oldAllowance - value;` (OpenZeppelin
-    # SafeERC20.safeDecreaseAllowance) or `require(b <= a); … a - b;`
-    # (SafeMath.sub) — makes the unchecked op deliberate and safe, so it is
-    # excluded. Arithmetic with no such preceding guard is still reported.
+    # Exclude operations whose operands are bounded by a preceding guard.
     - unchecked_var:

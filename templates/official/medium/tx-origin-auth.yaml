@@ -1,6 +1,6 @@
 meta:
   id: MEDIUM-TX-ORIGIN-AUTH
-  title: tx.origin Used for Authentication
+  title: tx.origin used for authentication
   severity: MEDIUM
   confidence: HIGH
   description: >
@@ -16,16 +16,8 @@ meta:
     - https://swcregistry.io/docs/SWC-115
     - https://docs.soliditylang.org/en/latest/security-considerations.html#tx-origin
 
-# Whitelist the legitimate anti-contract idiom `require(msg.sender ==
-# tx.origin)` / `tx.origin == msg.sender`, which asserts the caller is an EOA
-# rather than authenticating. Slither excludes the same form. `not: {regex:}`
-# here is function-source-scoped and routes to the context/filter layer via
-# ruleIsContextOnly.
-#
-# `tx.origin` inside ANY guard or branch (require / assert / revert /
-# if / conditional) — all are auth-shaped uses. The previous version
-# only matched `stmt.if`, missing the very common `require(tx.origin ==
-# owner, ...)` form (the single most-popular tx.origin auth pattern).
+# Exclude the legitimate EOA check `msg.sender == tx.origin`; it is not used
+# as authentication. Match tx.origin inside any guard or conditional branch.
 query:
   from: function
   select: member

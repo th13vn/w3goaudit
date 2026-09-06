@@ -1,6 +1,6 @@
 meta:
   id: HIGH-ENCODE-PACKED-COLLISION
-  title: "Hash Collision via abi.encodePacked with Multiple Dynamic Arguments"
+  title: "Hash collision via abi.encodePacked with multiple dynamic arguments"
   severity: HIGH
   confidence: MEDIUM
   description: >
@@ -22,14 +22,13 @@ query:
   from: function
 
   where:
-    # Function-scope preconditions (routed to the filter/context layer): a bare
-    # dual field (visibility/regex) nested inside `and:` with no AST-only
-    # sibling classifies as context-only and becomes a shared precondition.
+    # Visibility and regex narrow the function scope; `any:` below supplies the
+    # AST evidence for the two supported encodePacked/hash shapes.
     - and:
         - visibility: public,external
         - regex: '(?s)function\s+\w+\([^)]*(?:bytes|string|address\[\]|uint256\[\])\s+\w+[^)]*(?:bytes|string|address\[\]|uint256\[\])\s+\w+'
-    # No single AST anchor kind (two heterogeneous shapes), so `select:` is
-    # omitted and the whole match lives in this `any:`.
+    # The two shapes have different AST anchors, so the query intentionally omits
+    # `select:` and anchors each alternative explicitly.
     - any:
         - has:
             block: internal_call
