@@ -34,6 +34,10 @@ standalone compatibility formatters rather than the removed split bundle.
   and `attrNameToIR` (§7 attribute aliases → node-attribute keys). Preset names
   are already canonical evaluator values and are validated directly against
   `BuiltinPresets` during lowering and finalization.
+  Positive transaction-context facts use the ordinary attributes
+  `transaction_context_source`, `transaction_context_use`, and
+  `transaction_context_repeatability`; they are not a preset or a
+  detector-specific evaluator path.
 - **Single strict loader:** `LoadTemplate`/`ParseTemplate`/
   `LoadTemplatesFromFS` all route through `parseTemplateDocument`. Unknown
   keys at every level (document, query, branch) are rejected by

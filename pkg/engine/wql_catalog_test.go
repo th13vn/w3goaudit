@@ -133,6 +133,9 @@ func TestAttrNameToIR(t *testing.T) {
 		{"boundary_has_state_before", "boundary_has_state_before", true},
 		{"boundary_has_state_after", "boundary_has_state_after", true},
 		{"boundary_reachable_from_entry", "boundary_reachable_from_entry", true},
+		{"transaction_context_source", "transaction_context_source", true},
+		{"transaction_context_use", "transaction_context_use", true},
+		{"transaction_context_repeatability", "transaction_context_repeatability", true},
 
 		// Unknown.
 		{"not-a-real-attr", "", false},

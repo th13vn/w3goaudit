@@ -114,7 +114,7 @@ semantic compatibility aliases. Unknown matcher values are rejected at load.
 | `HIGH-ARBITRARY-LOW-LEVEL-CALL` | HIGH | `high/arbitrary-low-level-call.yaml` | Unprotected low-level call with caller-controlled target and calldata. |
 | `HIGH-ENCODE-PACKED-COLLISION` | HIGH | `high/encode-packed-collision.yaml` | Multiple caller-controlled dynamic values are packed before hashing. |
 | `HIGH-INCORRECT-EXP` | HIGH | `high/incorrect-exp.yaml` | Simple-value `^` expression likely mistaken for exponentiation. |
-| `HIGH-MSG-VALUE-IN-LOOP` | HIGH | `high/msg-value-in-loop.yaml` | Payable entry reuses transaction-level `msg.value` in a loop. |
+| `HIGH-MSG-VALUE-IN-LOOP` | HIGH | `high/msg-value-in-loop.yaml` | Payable entry repeats a proven `msg.value` state write, ETH-bearing call, or exact stateful helper. |
 | `HIGH-NO-SLIPPAGE-CHECK` | HIGH | `high/no-slippage-check.yaml` | Router swap uses an unbounded minimum-output value. |
 | `HIGH-REENTRANCY-PATTERN` | HIGH | `high/reentrancy-pattern.yaml` | ETH-bearing or raw call precedes a state write without a proven guard. |
 | `HIGH-UNCHECKED-ERC20-TRANSFER` | HIGH | `high/unchecked-erc20-transfer.yaml` | ERC20 transfer result is discarded or captured without a proven check. |
@@ -154,6 +154,28 @@ templates do not author an `unknown` matcher.
         - boundary_result_disposition: ^captured$
         - boundary_result_checked: ^no$
 ```
+
+### Transaction-context accounting
+
+`HIGH-MSG-VALUE-IN-LOOP` no longer reports every textual `msg.value` reference.
+It selects a loop structurally, then requires a descendant source/effect node
+with all three positive attributes:
+
+```yaml
+- has:
+    attr:
+      transaction_context_source: ^msg_value$
+      transaction_context_use: ^(state_write|call_value|stateful_internal_call)$
+      transaction_context_repeatability: ^possible$
+```
+
+The builder proves these attributes from exact AST and call-graph evidence. A
+direct state write, storage mutation, ETH call-value position, or resolved
+stateful internal/inherited/`self`/`super` helper can match. Event, condition,
+local-only, return-only, normal external calldata, pure/unresolved helper,
+single-iteration, statically unreachable, branch-merged, reassigned-alias, and
+unsupported loop cases remain outside the detector. There is no authored
+negative or `unknown` value: missing positive evidence fails closed.
 
 ## Validation workflow
 

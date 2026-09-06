@@ -1,25 +1,23 @@
 meta:
   id: HIGH-MSG-VALUE-IN-LOOP
-  title: "msg.value used inside a loop"
+  title: "msg.value effect repeats inside a loop"
   severity: HIGH
   confidence: MEDIUM
   description: >
-    `msg.value` is referenced inside a loop body. `msg.value` is a transaction-
-    level constant — it does NOT decrement as the loop iterates. Per-iteration
-    accounting (`balances[users[i]] += msg.value`) therefore double-counts the
-    same ETH N times. In payable multicalls this allows a caller to mint N×
-    the actual ETH sent. Equivalent to Slither's msg-value-loop detector.
+    Transaction-level `msg.value` reaches a persistent state write, an ETH-
+    bearing call, or an exact stateful helper inside a loop that may execute
+    more than once. `msg.value` does not decrement as the loop iterates, so the
+    same value can be accounted for or transferred repeatedly.
   recommendation: >
     Pass an explicit `amounts[]` array alongside `users[]` and require
-    `sum(amounts) == msg.value`. Never re-use `msg.value` inside a loop.
+    `sum(amounts) == msg.value`. Ensure each iteration consumes a distinct
+    amount instead of reusing the full transaction value.
   references:
     - https://github.com/crytic/slither/wiki/Detector-Documentation#msg-value-inside-a-loop
     - https://forum.openzeppelin.com/t/poc-multicall-with-msg-value-reuses-eth/14467
 
-# Restrict this detector to payable entries because non-payable functions have
-# msg.value == 0. `and:` routes mutability to the function-level precondition.
-#
-# `parent: ^msg$` checks the member-access parent expression directly.
+# The loop stays a structural report anchor. Positive semantic attributes live
+# on the exact source and effect nodes below it.
 query:
   from: entry_function
   select: loop
@@ -27,6 +25,7 @@ query:
     - and:
         - mutability: payable
     - has:
-        block: member
-        name: ^value$
-        parent: ^msg$
+        attr:
+          transaction_context_source: ^msg_value$
+          transaction_context_use: ^(state_write|call_value|stateful_internal_call)$
+          transaction_context_repeatability: ^possible$
