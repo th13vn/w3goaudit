@@ -74,8 +74,8 @@ All notable changes to w3goaudit are documented here. This project adheres to
 - Core remains offline, deterministic, and independent of models, credentials,
   providers, callbacks, or AI triage. External Assistants consume evidence but
   cannot modify official scanner findings.
-- The official rule pack is unchanged. This entry describes unreleased local
-  work only and does not claim a tag, push, publication, or release.
+- The official rule pack changes described above are unreleased local work only;
+  this entry does not claim a tag, push, publication, or release.
 
 ## v0.5.0 - 2026-09-01
 
