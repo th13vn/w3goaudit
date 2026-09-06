@@ -162,3 +162,25 @@ contract ExternalBoundaryMatrix {
         value;
     }
 }
+
+interface IERC20ResultMatrix {
+    function transfer(address to, uint256 amount) external returns (bool);
+}
+
+contract ERC20ResultMatrix {
+    IERC20ResultMatrix token;
+    uint256 public total;
+
+    function transferDiscarded(address to, uint256 amount) external {
+        token.transfer(to, amount);
+    }
+
+    function transferCapturedUnchecked(address to, uint256 amount) external {
+        bool ok = token.transfer(to, amount);
+        total = ok ? 1 : 0;
+    }
+
+    function transferChecked(address to, uint256 amount) external {
+        require(token.transfer(to, amount), "transfer failed");
+    }
+}
