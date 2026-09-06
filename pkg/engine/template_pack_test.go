@@ -63,6 +63,76 @@ func TestOfficialPackHasUniqueIDsAndStrictLoads(t *testing.T) {
 	}
 }
 
+func TestOfficialPackHasCompleteMetadataAndReportableAnchors(t *testing.T) {
+	root := repoRoot(t)
+	count := 0
+	forEachOfficialTemplate(t, filepath.Join(root, "templates", "official"), func(path string) {
+		count++
+		tmpl, err := LoadTemplate(path)
+		if err != nil {
+			t.Fatalf("LoadTemplate(%s): %v", path, err)
+		}
+		meta := tmpl.Meta
+		for field, value := range map[string]string{
+			"meta.id":             meta.ID,
+			"meta.title":          meta.Title,
+			"meta.severity":       meta.Severity,
+			"meta.confidence":     meta.Confidence,
+			"meta.description":    meta.Description,
+			"meta.recommendation": meta.Recommendation,
+		} {
+			if strings.TrimSpace(value) == "" {
+				t.Errorf("%s has empty %s", path, field)
+			}
+		}
+
+		blocks := []*QueryBlock{&tmpl.Query}
+		for i := range tmpl.Queries {
+			blocks = append(blocks, &tmpl.Queries[i])
+		}
+		for blockIndex, query := range blocks {
+			if err := validateScope(query.Scope); err != nil {
+				t.Errorf("%s query block %d: %v", path, blockIndex+1, err)
+				continue
+			}
+			if query.Scope == ScopeSource {
+				if strings.TrimSpace(query.Match.Regex) == "" {
+					t.Errorf("%s query block %d: source scope must have a top-level regex anchor", path, blockIndex+1)
+				}
+				continue
+			}
+			if !ruleGuaranteesReportableAnchor(query.Match) {
+				t.Errorf("%s query block %d: match has no positive reportable anchor", path, blockIndex+1)
+			}
+			if !ruleGuaranteesTraceableASTEvidence(query.Match) {
+				t.Errorf("%s query block %d: match has no traceable AST evidence", path, blockIndex+1)
+			}
+		}
+	})
+	if count == 0 {
+		t.Fatal("official template directory contains no YAML files")
+	}
+}
+
+func TestOfficialPackUsesPresenceOnlyMarkersWithoutAuthoredBooleans(t *testing.T) {
+	root := repoRoot(t)
+	forEachOfficialTemplate(t, filepath.Join(root, "templates", "official"), func(path string) {
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read %s: %v", path, err)
+		}
+		var doc yaml.Node
+		if err := yaml.Unmarshal(raw, &doc); err != nil {
+			t.Fatalf("parse %s: %v", path, err)
+		}
+		for _, violation := range officialQueryVocabularyViolations(documentMapping(doc.Content)) {
+			if strings.Contains(violation, "presence-only") {
+				t.Errorf("%s: %s", path, violation)
+			}
+		}
+	})
+}
+
 func TestOfficialPackInventoryIsMigrationSized(t *testing.T) {
 	root := repoRoot(t)
 	want := []string{

@@ -10,7 +10,11 @@ Executes WQL templates against the contract database to find security vulnerabil
 `select`/`from`/`where` or a one-level `and:`/`or:` query
 composition; see [`docs/wql-syntax.md`](../../docs/wql-syntax.md) for the
 full language reference. The repository currently contains 20 official templates plus benchmark and feature-test templates in
-this repo use it.
+this repo that use it. The migrated official pack is intentionally frozen during mechanical
+cleanup: inventory tests derive files from `templates/official`, require complete finding
+metadata, validate each query scope, and prove a positive reportable anchor (or a top-level
+regex for `from: source`). These contracts protect readability and report provenance without
+changing detector identities or matcher semantics.
 
 Authoritative documentation tests also pin the canonical v0.5 human-report
 relationship: bounded `README.md` landing page, consolidated `audit.md`, and
@@ -924,6 +928,11 @@ selector.
   statement-scoped matching, args, taint, and golden
   evaluator behavior.
 - `validation_test.go`, `public_yaml_test.go`, `template_pack_test.go` — WQL
+  and official-pack contract tests. The official-pack tests enforce unique IDs, canonical
+  vocabulary, complete metadata (`id`, `title`, `severity`, `confidence`, `description`,
+  `recommendation`), valid scopes, reportable anchors, and presence-only marker syntax. Keep
+  these checks filesystem-derived so a future evidence-backed removal cannot leave stale
+  inventory assertions.
   acceptance, unknown-key rejection through both loader and public SDK
   boundaries, evaluator-IR JSON compatibility, value/regex/version validation,
   embedded-FS loading, canonical active-vocabulary checks, and the exact
