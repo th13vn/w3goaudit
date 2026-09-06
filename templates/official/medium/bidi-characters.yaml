@@ -23,7 +23,6 @@ meta:
 
 query:
   from: source
-
   where:
     # LRE, RLE, LRO, RLO, LRI, RLI, FSI, PDF, PDI.
     - regex: '[\x{202A}\x{202B}\x{202D}\x{202E}\x{2066}\x{2067}\x{2068}\x{202C}\x{2069}]'

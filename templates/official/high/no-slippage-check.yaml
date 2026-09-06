@@ -22,7 +22,6 @@ meta:
 
 query:
   from: entry_function
-
   where:
     - any:
         # ETH-in swaps take amountOutMin as argument 0.

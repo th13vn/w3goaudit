@@ -22,7 +22,6 @@ meta:
 query:
   from: function
   select: binary
-
   where:
     # Match a multiplication whose left operand is a division. Direct child
     # matching preserves operand order and avoids unrelated expressions.

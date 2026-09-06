@@ -21,7 +21,6 @@ meta:
 
 query:
   from: entry_function
-
   where:
     # Match common initializer names while excluding similarly named helpers.
     - func_name: (?i)^(initialize|initialise|init|__init|setup)$

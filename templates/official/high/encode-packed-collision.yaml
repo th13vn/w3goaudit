@@ -20,7 +20,6 @@ meta:
 
 query:
   from: function
-
   where:
     # Visibility and regex narrow the function scope; `any:` below supplies the
     # AST evidence for the two supported encodePacked/hash shapes.

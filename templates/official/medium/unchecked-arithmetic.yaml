@@ -28,7 +28,6 @@ query:
   # Anchor on the arithmetic operation so the report identifies the risky
   # expression rather than the enclosing unchecked block.
   select: binary
-
   where:
     - version: ">=0.8.0"
     # Restrict the detector to state-mutating functions; pure/view arithmetic

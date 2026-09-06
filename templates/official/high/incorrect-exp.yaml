@@ -26,7 +26,6 @@ meta:
 query:
   from: function
   select: binary
-
   where:
     # Flag `^` only when it looks like exponentiation, not bit manipulation:
     #   1. both operands are simple values — an identifier or a DECIMAL number
