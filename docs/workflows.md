@@ -146,11 +146,13 @@ The builder constructs a comprehensive database through ordered phases:
   unreachable and unsupported loop shapes emit no fact
 - Follow a direct source or one bounded local alias in the same loop, plus exact
   internal, inherited, `self`, and `super` helpers that write state
+- Recognize only the exact value position of Yul `sstore`, `call`, `create`, and
+  `create2`; key, target, offset, and salt operands do not qualify
 - Project `transaction_context_source`, `transaction_context_use`, and
   `transaction_context_repeatability` onto the exact source and effect nodes;
   keep the loop as a structural anchor
-- Observational uses, uncertain aliases, ordinary external calldata, and
-  unresolved helpers fail closed
+- Observational uses, conditional/tuple provenance, uncertain aliases, ordinary
+  external calldata, and unresolved helpers fail closed
 - **Code:** [transaction_context.go](../pkg/builder/transaction_context.go)
 
 **Phase 7.5: Build Authorization Facts**

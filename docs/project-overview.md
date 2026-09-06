@@ -273,10 +273,11 @@ w3goaudit/
    ETH-bearing call values, and exactly resolved stateful helpers. Repeatability
    is `possible` or `single_iteration`. Exact source/effect nodes receive ordinary
    WQL attributes while the loop stays the structural report anchor. Direct
-   sources and one bounded local alias are supported; observational uses,
-   uncertain aliases, ordinary external calldata, unresolved helpers, and
-   unsupported loop shapes fail closed. `TransactionContextFactsVersion` is
-   `1.0.0`. Implementation:
+   sources and one bounded local alias are supported, including exact Yul value
+   positions for `sstore`, `call`, `create`, and `create2`; observational uses,
+   conditional/tuple provenance, uncertain aliases, ordinary external calldata,
+   unresolved helpers, and unsupported loop shapes fail closed.
+   `TransactionContextFactsVersion` is `1.0.0`. Implementation:
    [pkg/builder/transaction_context.go](../pkg/builder/transaction_context.go)
    - **Phase 7.5, Authorization Facts:** Build versioned authorization and initializer
    lifecycle evidence after inheritance and call dispatch are already resolved.

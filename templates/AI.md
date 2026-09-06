@@ -171,10 +171,13 @@ with all three positive attributes:
 
 The builder proves these attributes from exact AST and call-graph evidence. A
 direct state write, storage mutation, ETH call-value position, or resolved
-stateful internal/inherited/`self`/`super` helper can match. Event, condition,
-local-only, return-only, normal external calldata, pure/unresolved helper,
-single-iteration, statically unreachable, branch-merged, reassigned-alias, and
-unsupported loop cases remain outside the detector. There is no authored
+stateful internal/inherited/`self`/`super` helper can match. Exact Yul `sstore`,
+`call`, `create`, and `create2` value positions are supported through the same
+bounded local-alias proof; key, target, offset, and salt operands do not qualify.
+Event, condition, local-only, return-only, normal external calldata,
+pure/unresolved helper, single-iteration, statically unreachable,
+conditional/tuple, branch-merged, reassigned-alias, and unsupported loop cases
+remain outside the detector. There is no authored
 negative or `unknown` value: missing positive evidence fails closed.
 `TransactionContextFactsVersion` is `1.0.0`; the same facts survive database
 cache round trips. A legacy cache has no capability and must be rebuilt from

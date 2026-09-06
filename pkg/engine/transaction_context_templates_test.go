@@ -18,6 +18,10 @@ func TestMsgValueInLoopUsesProvenTransactionContextEffects(t *testing.T) {
 
 	want := sortedStrings([]string{
 		"TransactionContextMatrix.arithmetic",
+		"TransactionContextMatrix.assemblyCallValue",
+		"TransactionContextMatrix.assemblyCreate2Value",
+		"TransactionContextMatrix.assemblyCreateValue",
+		"TransactionContextMatrix.assemblyStateWrite",
 		"TransactionContextMatrix.callValue",
 		"TransactionContextMatrix.directState",
 		"TransactionContextMatrix.inheritedHelper",

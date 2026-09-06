@@ -1287,11 +1287,14 @@ for _, fact := range facts {
 `TransactionContextFactsSnapshot` returns a normalized, sorted, deduplicated
 deep copy. Merely observing `msg.value` does not create a fact. The builder
 supports a direct source or one bounded local alias in the same loop, and exact
-stateful internal, inherited, `self`, and `super` helper dispatch. Observational
-uses, uncertain aliases, ordinary external calldata, unresolved helpers,
-statically unreachable loops, and unsupported loop shapes emit no positive
-fact. A legacy cache returns `ErrTransactionContextFactsUnavailable`; it is not
-silently reinterpreted as an empty current analysis.
+stateful internal, inherited, `self`, and `super` helper dispatch. Exact Yul
+value positions for `sstore`, `call`, `create`, and `create2` use the same
+bounded proof; other operands do not qualify. Observational uses, conditional or
+tuple provenance, uncertain aliases, ordinary external calldata, unresolved
+helpers, statically unreachable loops, and unsupported loop shapes emit no
+positive fact. A legacy cache returns
+`ErrTransactionContextFactsUnavailable`; it is not silently reinterpreted as an
+empty current analysis.
 
 #### GetStats
 

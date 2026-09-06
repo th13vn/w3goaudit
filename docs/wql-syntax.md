@@ -803,8 +803,10 @@ This is stronger than finding the text `msg.value` below a loop. The builder
 must prove that the transaction-level value reaches persistent state, an
 ETH-bearing call-value position, or an exactly resolved stateful internal,
 inherited, `self`, or `super` helper. A direct source or one local alias inside
-the same loop is supported. Events, conditions, local-only or return-only uses,
-ordinary external calldata, uncertain aliases, unresolved helpers,
+the same loop is supported, including exact Yul `sstore`, `call`, `create`, and
+`create2` value positions; key, target, offset, and salt operands do not qualify.
+Events, conditions, local-only or return-only uses, ordinary external calldata,
+conditional/tuple provenance, uncertain aliases, unresolved helpers,
 single-iteration loops, statically unreachable loops, and unsupported loop
 shapes do not satisfy the positive predicate.
 

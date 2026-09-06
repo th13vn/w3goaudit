@@ -41,8 +41,10 @@ standalone compatibility formatters rather than the removed split bundle.
   exact source and effect nodes. A template that reports a loop selects the loop
   structurally and requires descendant `has` evidence. Source `msg_value`, uses
   `state_write|call_value|stateful_internal_call`, and repeatability
-  `possible|single_iteration` are the complete positive v1 vocabulary; missing
-  evidence does not match.
+  `possible|single_iteration` are the complete positive v1 vocabulary. Exact
+  Yul value positions for `sstore`, `call`, `create`, and `create2` use the same
+  attributes; other operands, conditional/tuple provenance, and missing evidence
+  do not match.
 - **Single strict loader:** `LoadTemplate`/`ParseTemplate`/
   `LoadTemplatesFromFS` all route through `parseTemplateDocument`. Unknown
   keys at every level (document, query, branch) are rejected by

@@ -214,6 +214,24 @@ func (b *Builder) transactionContextEffectSource(fn *types.Function, effect *typ
 				return source, types.TransactionContextUseStateWrite, ""
 			}
 		}
+	case types.KindAsmSstore:
+		if len(effect.Children) >= 2 {
+			if source := transactionContextExpressionSource(effect.Children[1], aliases); source.node != nil {
+				return source, types.TransactionContextUseStateWrite, ""
+			}
+		}
+	case types.KindAsmCall:
+		if len(effect.Children) >= 3 {
+			if source := transactionContextExpressionSource(effect.Children[2], aliases); source.node != nil {
+				return source, types.TransactionContextUseCallValue, ""
+			}
+		}
+	case types.KindAsmCreate, types.KindAsmCreate2:
+		if len(effect.Children) >= 1 {
+			if source := transactionContextExpressionSource(effect.Children[0], aliases); source.node != nil {
+				return source, types.TransactionContextUseCallValue, ""
+			}
+		}
 	case types.KindCallLowlevelCall, types.KindCallExternal, types.KindCallCreate, types.KindCallBuiltinTransfer, types.KindCallBuiltinSend:
 		if source := transactionContextCallValueSource(effect, aliases); source.node != nil {
 			return source, types.TransactionContextUseCallValue, ""
@@ -259,7 +277,13 @@ func transactionContextExpressionSource(expr *types.ASTNode, aliases map[string]
 }
 
 func transactionContextOpaqueExpression(node *types.ASTNode) bool {
-	if node == nil || !strings.HasPrefix(node.Kind, "call.") {
+	if node == nil {
+		return false
+	}
+	if node.Kind == types.KindExprConditional || node.Kind == types.KindExprTuple {
+		return true
+	}
+	if !strings.HasPrefix(node.Kind, "call.") {
 		return false
 	}
 	return node.GetAttributeString("type_source") != "type_cast" && node.RefKind != "type"

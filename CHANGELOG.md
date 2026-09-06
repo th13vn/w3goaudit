@@ -11,7 +11,9 @@ All notable changes to w3goaudit are documented here. This project adheres to
   exact `msg.value` flow to a persistent state write, ETH-bearing call value, or
   exact stateful helper under a loop that may repeat. Events, conditions,
   local/return-only uses, normal external calldata, uncertain aliases, unresolved
-  helpers, single-iteration loops, and unsupported loop shapes fail closed.
+  helpers, conditional/tuple provenance, single-iteration loops, and unsupported
+  loop shapes fail closed. Exact Yul value positions for `sstore`, `call`,
+  `create`, and `create2` use the same bounded proof.
   `TransactionContextFactsVersion` is `1.0.0`; source/cache facts and findings
   are deterministic, the output schema remains `2.0.0`, and no CLI syntax was
   added.

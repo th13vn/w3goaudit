@@ -427,12 +427,17 @@ transaction-level `msg.value` source reaches a persistent state write, an
 ETH-bearing call value, or an exact stateful internal/inherited/`self`/`super`
 helper inside an enclosing loop. Recursive helper statefulness follows only
 resolved traversable edges.
+Exact Yul positions are included for the second `sstore` operand, the third
+`call` operand, and the first operand of `create`/`create2`; key, target, offset,
+and salt operands do not qualify. Other assembly operations and assembly loop
+shapes stay outside the first version.
 
 The pass supports direct arithmetic-preserving expressions and one local alias
 whose assignment and use share the same loop. Branch-assigned or reassigned
-aliases, unresolved call returns, mapping-key-only use, normal external calldata,
-events, conditions, locals, returns, pure/unresolved helpers, statically false
-loops, and unsupported loop shapes emit no positive fact. Repeatability is
+aliases, conditional or tuple-valued expressions, unresolved call returns,
+mapping-key-only use, normal external calldata, events, conditions, locals,
+returns, pure/unresolved helpers, statically false loops, and unsupported loop
+shapes emit no positive fact. Repeatability is
 `possible` if any enclosing loop may execute more than once, otherwise
 `single_iteration` when every enclosing loop is proven at most once.
 

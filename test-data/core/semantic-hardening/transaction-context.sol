@@ -74,6 +74,26 @@ contract TransactionContextMatrix is TransactionContextBase {
         }
     }
 
+    function ternaryAlias(address[] calldata users, bool enabled) external payable {
+        for (uint256 i = 0; i < users.length; i++) {
+            uint256 amount = enabled ? msg.value : 0;
+            shares[users[i]] += amount;
+        }
+    }
+
+    function ternaryDirect(address[] calldata users, bool enabled) external payable {
+        for (uint256 i = 0; i < users.length; i++) {
+            shares[users[i]] += enabled ? msg.value : 0;
+        }
+    }
+
+    function tupleAlias(address[] calldata users) external payable {
+        for (uint256 i = 0; i < users.length; i++) {
+            (uint256 amount, uint256 ignored) = (msg.value, 0);
+            shares[users[i]] += amount;
+        }
+    }
+
     function unresolvedReturnAlias(address[] calldata users) external payable {
         for (uint256 i = 0; i < users.length; i++) {
             uint256 amount = _observe(msg.value);
@@ -102,6 +122,80 @@ contract TransactionContextMatrix is TransactionContextBase {
     function sendValue(address payable[] calldata users) external payable {
         for (uint256 i = 0; i < users.length; i++) {
             users[i].send(msg.value);
+        }
+    }
+
+    function assemblyStateWrite(address[] calldata users) external payable {
+        for (uint256 i = 0; i < users.length; i++) {
+            uint256 amount = msg.value;
+            assembly {
+                sstore(0, amount)
+            }
+        }
+    }
+
+    function assemblyCallValue(address payable[] calldata users) external payable {
+        for (uint256 i = 0; i < users.length; i++) {
+            uint256 amount = msg.value;
+            address target = users[i];
+            assembly {
+                let ok := call(gas(), target, amount, 0, 0, 0, 0)
+                if iszero(ok) { revert(0, 0) }
+            }
+        }
+    }
+
+    function assemblyCreateValue(address[] calldata users) external payable {
+        for (uint256 i = 0; i < users.length; i++) {
+            uint256 amount = msg.value;
+            assembly {
+                let deployed := create(amount, 0, 0)
+            }
+        }
+    }
+
+    function assemblyCreate2Value(address[] calldata users) external payable {
+        for (uint256 i = 0; i < users.length; i++) {
+            uint256 amount = msg.value;
+            assembly {
+                let deployed := create2(amount, 0, 0, i)
+            }
+        }
+    }
+
+    function assemblySstoreKeyOnly(address[] calldata users) external payable {
+        for (uint256 i = 0; i < users.length; i++) {
+            uint256 amount = msg.value;
+            assembly {
+                sstore(amount, 0)
+            }
+        }
+    }
+
+    function assemblyCallTargetOnly(address[] calldata users) external payable {
+        for (uint256 i = 0; i < users.length; i++) {
+            uint256 amount = msg.value;
+            assembly {
+                let ok := call(gas(), amount, 0, 0, 0, 0, 0)
+            }
+        }
+    }
+
+    function assemblyCreateOffsetOnly(address[] calldata users) external payable {
+        for (uint256 i = 0; i < users.length; i++) {
+            uint256 amount = msg.value;
+            assembly {
+                let deployed := create(0, amount, 0)
+            }
+        }
+    }
+
+    function assemblyCreate2SaltOnly(address[] calldata users) external payable {
+        for (uint256 i = 0; i < users.length; i++) {
+            uint256 amount = msg.value;
+            assembly {
+                let deployed := create2(0, 0, 0, amount)
+            }
         }
     }
 

@@ -315,6 +315,11 @@ unresolved call returns, branch merges, reassignments, and unsupported loop
 shapes fail closed. This boundary is intentional: observing `msg.value` is not
 the same as proving repeated accounting or transfer.
 
+The exact value positions of Yul `sstore`, `call`, `create`, and `create2` are
+also supported when they resolve through the same bounded Solidity local alias;
+key, target, offset, and salt operands do not qualify, and assembly loop shapes
+remain unsupported.
+
 Only the source and effect AST nodes receive
 `transaction_context_source`, `transaction_context_use`, and
 `transaction_context_repeatability`. The loop stays a structural anchor. The

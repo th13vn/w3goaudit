@@ -30,6 +30,10 @@ func TestBuildTransactionContextFactsClassifiesEffectMatrix(t *testing.T) {
 	assertTransactionFact(t, db, "pushValue(address[])", types.TransactionContextUseStateWrite, types.TransactionContextRepeatabilityPossible)
 	assertTransactionFact(t, db, "transferValue(address[])", types.TransactionContextUseCallValue, types.TransactionContextRepeatabilityPossible)
 	assertTransactionFact(t, db, "sendValue(address[])", types.TransactionContextUseCallValue, types.TransactionContextRepeatabilityPossible)
+	assertTransactionFact(t, db, "assemblyStateWrite(address[])", types.TransactionContextUseStateWrite, types.TransactionContextRepeatabilityPossible)
+	assertTransactionFact(t, db, "assemblyCallValue(address[])", types.TransactionContextUseCallValue, types.TransactionContextRepeatabilityPossible)
+	assertTransactionFact(t, db, "assemblyCreateValue(address[])", types.TransactionContextUseCallValue, types.TransactionContextRepeatabilityPossible)
+	assertTransactionFact(t, db, "assemblyCreate2Value(address[])", types.TransactionContextUseCallValue, types.TransactionContextRepeatabilityPossible)
 	for _, selector := range []string{
 		"inheritedHelper(address[])",
 		"superHelper(address[])",
@@ -55,6 +59,13 @@ func TestBuildTransactionContextFactsSuppressesObservationalAndUnresolvedUses(t 
 		"externalCalldata(address[],IContextSink)",
 		"reassignedAlias(address[])",
 		"branchAlias(address[],bool)",
+		"ternaryAlias(address[],bool)",
+		"ternaryDirect(address[],bool)",
+		"tupleAlias(address[])",
+		"assemblySstoreKeyOnly(address[])",
+		"assemblyCallTargetOnly(address[])",
+		"assemblyCreateOffsetOnly(address[])",
+		"assemblyCreate2SaltOnly(address[])",
 		"unresolvedReturnAlias(address[])",
 		"whileFalse(address)",
 		"falseFor(address)",

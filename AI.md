@@ -167,9 +167,11 @@ run-output scratch directory.
   `state_write`, `call_value`, and `stateful_internal_call`; repeatability is
   either `possible` or `single_iteration`. The source and effect AST nodes carry
   the ordinary WQL attributes, while the loop remains only the structural
-  finding anchor. Observational uses, uncertain aliases, unresolved helpers,
-  unsupported loop shapes, and legacy caches do not synthesize positive
-  evidence. `TransactionContextFactsSnapshot` returns normalized deep copies or
+  finding anchor. Exact Yul value positions for `sstore`, `call`, `create`, and
+  `create2` use the same bounded alias proof. Observational uses, conditional or
+  tuple provenance, uncertain aliases, unresolved helpers, unsupported loop
+  shapes, and legacy caches do not synthesize positive evidence.
+  `TransactionContextFactsSnapshot` returns normalized deep copies or
   `ErrTransactionContextFactsUnavailable`.
 - CLI/report-owned artifact paths are reset before exclusive creation and are
   never followed through prepared symlinks, so rescanning an existing result
