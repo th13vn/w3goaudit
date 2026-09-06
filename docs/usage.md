@@ -293,7 +293,7 @@ w3goaudit ./contracts/ -v
 ```
 ▶ Reading sources: ./contracts/
 ▶ Building database: 5 files, 8 contracts, 45 functions
-▶ Scanning: 25 templates (~/.w3goaudit/templates)
+▶ Scanning: 20 official templates (~/.w3goaudit/templates)
 ▶ Writing report: ./contracts-audit
 
 2 findings: 2 HIGH · scanned 3 contracts in 131ms
@@ -1016,7 +1016,8 @@ official pack (always available, offline fallback).
 
 On first run, if `~/.w3goaudit/templates/` is empty, w3goaudit downloads the
 `zipball` of the latest release of `th13vn/w3goaudit-templates`
-(https://github.com/th13vn/w3goaudit-templates — release `v2.0.0`, 25 templates),
+(https://github.com/th13vn/w3goaudit-templates — release `v2.0.0+`, released pack
+inventory may differ from the embedded 20-template fallback),
 extracts the `.yaml`/`.yml`/`.md` files into the home, and records the tag in
 `templates/.version`. If the download fails (offline, repo/release unreachable),
 it falls back to the embedded pack — no hard failure, just a notice.

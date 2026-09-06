@@ -6,6 +6,12 @@ All notable changes to w3goaudit are documented here. This project adheres to
 
 ## Unreleased
 
+- Completed a mechanical readability pass over the 20-template official pack:
+  metadata is now sentence-case and mechanism-focused, implementation-history
+  comments were reduced to matcher rationale, redundant query spacing was removed,
+  and deterministic source/cache parity is covered by regression tests. This pass
+  does not add detectors or perform semantic merges.
+
 - Hardened authorization evidence for official detectors: generic low-level-call
   success checks no longer block taint traversal, while ambiguous overloaded
   helpers remain fail-closed. Added a regression for struct-field delegatecall

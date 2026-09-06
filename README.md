@@ -414,6 +414,10 @@ That block contains `select`/`from`/`where`, or a query-level
 `and:`/`or:` composition. The repository currently contains 20 official, 5
 feature-test, and 76 benchmark templates; see the
 [WQL Syntax Guide](./docs/wql-syntax.md) for the full language reference.
+Official detectors use complete, mechanism-focused metadata and readable
+sentence-case titles. The current maintenance pass only normalizes wording,
+comments, and layout while preserving detector IDs and matcher semantics;
+semantic merges and new detectors are separate evidence-backed changes.
 
 ---
 

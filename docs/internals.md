@@ -860,9 +860,11 @@ only when exactly one matching object is present in that contract's exact MRO.
 **Template precedence** (`pkg/home`): `--template` > `~/.w3goaudit/templates/`
 (downloaded from `th13vn/w3goaudit-templates` on first run) > the embedded
 `official/` pack (`templates/embed.go`). The retained lanes are
-`templates/official/` (25 distributable detectors), `templates/test/` (5 engine
+`templates/official/` (20 distributable detectors), `templates/test/` (5 engine
 feature templates), and `scripts/benchmark/templates/` (76 competitive detector
-ports), all WQL.
+ports), all WQL. The official count is filesystem-derived and the trusted pack is
+intentionally smaller than historical releases until deferred mechanisms have
+generic semantic evidence.
 
 ---
 
