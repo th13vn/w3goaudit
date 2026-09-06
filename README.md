@@ -76,7 +76,10 @@ self-contained `audit.html`. See [Result folder layout](#result-folder-layout).
   reading `msg.value` in an event, condition, local, return, or ordinary external
   argument is not enough. Exact Yul value positions for `sstore`, `call`,
   `create`, and `create2` use the same bounded proof. Conditional and tuple
-  provenance fail closed. `TransactionContextFactsVersion` is `1.0.0`.
+  provenance and `if`/ternary/`try` branch merges fail closed. Canonical literal
+  increasing/decreasing loops prove one iteration from adjacent exclusive or
+  equal inclusive bounds.
+  `TransactionContextFactsVersion` is `1.0.0`.
 - **Semantic External-Boundary Facts** - Phase 8 indexes Solidity and Yul
   calls, ETH sends, creates, and modifier-hosted boundaries as deterministic
   `ExternalBoundaryFact` evidence. It records exact host scope, target

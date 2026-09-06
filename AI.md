@@ -169,8 +169,11 @@ run-output scratch directory.
   the ordinary WQL attributes, while the loop remains only the structural
   finding anchor. Exact Yul value positions for `sstore`, `call`, `create`, and
   `create2` use the same bounded alias proof. Observational uses, conditional or
-  tuple provenance, uncertain aliases, unresolved helpers, unsupported loop
-  shapes, and legacy caches do not synthesize positive evidence.
+  tuple provenance, `if`/ternary/`try` branch merges, uncertain aliases,
+  unresolved helpers, unsupported loop shapes, and legacy caches do not
+  synthesize positive evidence. Canonical
+  literal increasing/decreasing loops prove `single_iteration` only from
+  adjacent exclusive or equal inclusive bounds.
   `TransactionContextFactsSnapshot` returns normalized deep copies or
   `ErrTransactionContextFactsUnavailable`.
 - CLI/report-owned artifact paths are reset before exclusive creation and are

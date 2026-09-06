@@ -43,8 +43,8 @@ standalone compatibility formatters rather than the removed split bundle.
   `state_write|call_value|stateful_internal_call`, and repeatability
   `possible|single_iteration` are the complete positive v1 vocabulary. Exact
   Yul value positions for `sstore`, `call`, `create`, and `create2` use the same
-  attributes; other operands, conditional/tuple provenance, and missing evidence
-  do not match.
+  attributes; other operands, conditional/tuple provenance, branch-merged
+  aliases, and missing evidence do not match.
 - **Single strict loader:** `LoadTemplate`/`ParseTemplate`/
   `LoadTemplatesFromFS` all route through `parseTemplateDocument`. Unknown
   keys at every level (document, query, branch) are rejected by

@@ -437,9 +437,13 @@ whose assignment and use share the same loop. Branch-assigned or reassigned
 aliases, conditional or tuple-valued expressions, unresolved call returns,
 mapping-key-only use, normal external calldata, events, conditions, locals,
 returns, pure/unresolved helpers, statically false loops, and unsupported loop
-shapes emit no positive fact. Repeatability is
+shapes emit no positive fact. Branch ancestors include `if`, ternary, and
+`try`/`catch`. Repeatability is
 `possible` if any enclosing loop may execute more than once, otherwise
 `single_iteration` when every enclosing loop is proven at most once.
+Canonical literal `for` proofs support adjacent exclusive bounds, equal
+inclusive bounds, and matching `++`/`--` direction. Statically unreachable
+literal bounds emit no fact.
 
 Only the exact source and effect AST nodes receive
 `transaction_context_source`, `transaction_context_use`, and

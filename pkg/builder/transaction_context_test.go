@@ -62,6 +62,7 @@ func TestBuildTransactionContextFactsSuppressesObservationalAndUnresolvedUses(t 
 		"ternaryAlias(address[],bool)",
 		"ternaryDirect(address[],bool)",
 		"tupleAlias(address[])",
+		"tryAlias(address[],IContextSink)",
 		"assemblySstoreKeyOnly(address[])",
 		"assemblyCallTargetOnly(address[])",
 		"assemblyCreateOffsetOnly(address[])",
@@ -91,8 +92,14 @@ func TestBuildTransactionContextFactsKeepDistinctEffectsFromOneAlias(t *testing.
 func TestBuildTransactionContextFactsClassifiesLoopRepeatability(t *testing.T) {
 	db := buildFixture(t, transactionContextFixture)
 	assertTransactionFact(t, db, "oneIteration(address)", types.TransactionContextUseStateWrite, types.TransactionContextRepeatabilitySingleIteration)
+	assertTransactionFact(t, db, "oneIterationOffset(address)", types.TransactionContextUseStateWrite, types.TransactionContextRepeatabilitySingleIteration)
+	assertTransactionFact(t, db, "oneIterationInclusive(address)", types.TransactionContextUseStateWrite, types.TransactionContextRepeatabilitySingleIteration)
+	assertTransactionFact(t, db, "oneIterationDescending(address)", types.TransactionContextUseStateWrite, types.TransactionContextRepeatabilitySingleIteration)
 	assertTransactionFact(t, db, "doOnce(address)", types.TransactionContextUseStateWrite, types.TransactionContextRepeatabilitySingleIteration)
 	assertTransactionFact(t, db, "nested(address[])", types.TransactionContextUseStateWrite, types.TransactionContextRepeatabilityPossible)
+	if facts := transactionFactsForSelector(t, db, "zeroIterationDescending(address)"); len(facts) != 0 {
+		t.Fatalf("zeroIterationDescending facts = %+v, want no fact for unreachable loop", facts)
+	}
 	if facts := transactionFactsForSelector(t, db, "missingIncrement(address)"); len(facts) != 0 {
 		t.Fatalf("missingIncrement facts = %+v, want no fact for unsupported loop shape", facts)
 	}

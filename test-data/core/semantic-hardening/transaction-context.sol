@@ -94,6 +94,16 @@ contract TransactionContextMatrix is TransactionContextBase {
         }
     }
 
+    function tryAlias(address[] calldata users, IContextSink sink) external payable {
+        for (uint256 i = 0; i < users.length; i++) {
+            uint256 amount;
+            try sink.credit(0) {
+                amount = msg.value;
+            } catch {}
+            shares[users[i]] += amount;
+        }
+    }
+
     function unresolvedReturnAlias(address[] calldata users) external payable {
         for (uint256 i = 0; i < users.length; i++) {
             uint256 amount = _observe(msg.value);
@@ -227,6 +237,30 @@ contract TransactionContextMatrix is TransactionContextBase {
 
     function oneIteration(address user) external payable {
         for (uint256 i = 0; i < 1; i++) {
+            shares[user] += msg.value;
+        }
+    }
+
+    function oneIterationOffset(address user) external payable {
+        for (uint256 i = 5; i < 6; i++) {
+            shares[user] += msg.value;
+        }
+    }
+
+    function oneIterationInclusive(address user) external payable {
+        for (uint256 i = 0; i <= 0; i++) {
+            shares[user] += msg.value;
+        }
+    }
+
+    function oneIterationDescending(address user) external payable {
+        for (uint256 i = 1; i > 0; i--) {
+            shares[user] += msg.value;
+        }
+    }
+
+    function zeroIterationDescending(address user) external payable {
+        for (uint256 i = 0; i > 0; i--) {
             shares[user] += msg.value;
         }
     }

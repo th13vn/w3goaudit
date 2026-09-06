@@ -806,8 +806,11 @@ inherited, `self`, or `super` helper. A direct source or one local alias inside
 the same loop is supported, including exact Yul `sstore`, `call`, `create`, and
 `create2` value positions; key, target, offset, and salt operands do not qualify.
 Events, conditions, local-only or return-only uses, ordinary external calldata,
-conditional/tuple provenance, uncertain aliases, unresolved helpers,
-single-iteration loops, statically unreachable loops, and unsupported loop
-shapes do not satisfy the positive predicate.
+conditional/tuple provenance, `if`/ternary/`try` branch merges, uncertain
+aliases, unresolved helpers, single-iteration loops, statically unreachable
+loops, and unsupported loop shapes do not satisfy the positive predicate.
+Single-iteration classification covers canonical literal `for` loops with
+adjacent exclusive or equal inclusive bounds in the matching `++`/`--`
+direction, plus `do ... while (false)`.
 
 ---

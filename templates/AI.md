@@ -176,9 +176,11 @@ stateful internal/inherited/`self`/`super` helper can match. Exact Yul `sstore`,
 bounded local-alias proof; key, target, offset, and salt operands do not qualify.
 Event, condition, local-only, return-only, normal external calldata,
 pure/unresolved helper, single-iteration, statically unreachable,
-conditional/tuple, branch-merged, reassigned-alias, and unsupported loop cases
-remain outside the detector. There is no authored
+conditional/tuple, `if`/ternary/`try` branch-merged, reassigned-alias, and
+unsupported loop cases remain outside the detector. There is no authored
 negative or `unknown` value: missing positive evidence fails closed.
+Canonical literal `for` loops with adjacent exclusive or equal inclusive bounds
+in the matching `++`/`--` direction are classified as `single_iteration`.
 `TransactionContextFactsVersion` is `1.0.0`; the same facts survive database
 cache round trips. A legacy cache has no capability and must be rebuilt from
 source instead of falling back to the former textual-reference behavior.

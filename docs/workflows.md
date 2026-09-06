@@ -143,7 +143,9 @@ The builder constructs a comprehensive database through ordered phases:
 - Distinguish persistent `state_write`, ETH `call_value`, and exact
   `stateful_internal_call` uses
 - Classify supported loops as `possible` or `single_iteration`; statically
-  unreachable and unsupported loop shapes emit no fact
+  unreachable and unsupported loop shapes emit no fact. Canonical literal
+  increasing and decreasing loops prove one iteration from adjacent exclusive
+  bounds or equal inclusive bounds
 - Follow a direct source or one bounded local alias in the same loop, plus exact
   internal, inherited, `self`, and `super` helpers that write state
 - Recognize only the exact value position of Yul `sstore`, `call`, `create`, and
@@ -151,8 +153,9 @@ The builder constructs a comprehensive database through ordered phases:
 - Project `transaction_context_source`, `transaction_context_use`, and
   `transaction_context_repeatability` onto the exact source and effect nodes;
   keep the loop as a structural anchor
-- Observational uses, conditional/tuple provenance, uncertain aliases, ordinary
-  external calldata, and unresolved helpers fail closed
+- Observational uses, conditional/tuple provenance, `if`/ternary/`try` branch
+  merges, uncertain aliases, ordinary external calldata, and unresolved helpers
+  fail closed
 - **Code:** [transaction_context.go](../pkg/builder/transaction_context.go)
 
 **Phase 7.5: Build Authorization Facts**

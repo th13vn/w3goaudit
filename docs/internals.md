@@ -304,16 +304,18 @@ inside an enclosing loop. The positive use vocabulary is deliberately small:
 `possible` when any enclosing supported loop may execute more than once, or
 `single_iteration` when every enclosing loop is proven at most once. A repeatable
 outer loop therefore dominates a single-iteration inner loop. Statically false
-loops emit no fact.
+loops emit no fact. Canonical literal `for` proofs recognize adjacent exclusive
+bounds and equal inclusive bounds in the matching increment or decrement
+direction; they are not limited to the spelling `i = 0; i < 1; i++`.
 
 The first version follows direct arithmetic-preserving source expressions and
 one local alias assigned and consumed within the same loop. Exact internal,
 inherited, `self`, and `super` helpers count only when the resolved callee or a
 transitive resolved helper writes state. Events, conditions, mapping-key-only
 uses, locals, returns, normal external calldata, pure or unresolved helpers,
-unresolved call returns, branch merges, reassignments, and unsupported loop
-shapes fail closed. This boundary is intentional: observing `msg.value` is not
-the same as proving repeated accounting or transfer.
+unresolved call returns, `if`/ternary/`try` branch merges, reassignments, and
+unsupported loop shapes fail closed. This boundary is intentional: observing
+`msg.value` is not the same as proving repeated accounting or transfer.
 
 The exact value positions of Yul `sstore`, `call`, `create`, and `create2` are
 also supported when they resolve through the same bounded Solidity local alias;

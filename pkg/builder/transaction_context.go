@@ -128,7 +128,7 @@ func transactionContextAliases(paths []transactionContextNodePath) map[string]tr
 			aliases[lhs.RefID] = transactionContextAlias{
 				source:     transactionContextSource{node: source, path: transactionContextPathForNode(paths, source)},
 				assignment: node,
-				valid:      !transactionContextHasAncestorKind(node, types.KindStmtIf),
+				valid:      !transactionContextHasBranchAncestor(node),
 			}
 		} else {
 			aliases[lhs.RefID] = transactionContextAlias{valid: false}
@@ -339,9 +339,9 @@ func transactionContextAliasPrecedesUse(alias transactionContextAlias, use *type
 	return alias.assignment.StartLine > 0 && useAnchor.StartLine > 0 && alias.assignment.StartLine <= useAnchor.StartLine
 }
 
-func transactionContextHasAncestorKind(node *types.ASTNode, kind string) bool {
+func transactionContextHasBranchAncestor(node *types.ASTNode) bool {
 	for current := node.Parent; current != nil; current = current.Parent {
-		if current.Kind == kind {
+		if current.Kind == types.KindStmtIf || current.Kind == types.KindStmtTryCatch || current.Kind == types.KindExprConditional {
 			return true
 		}
 	}
@@ -468,6 +468,10 @@ func transactionContextLoopStaticallyFalse(loop *types.ASTNode) bool {
 					return initial >= bound
 				case "<=":
 					return initial > bound
+				case ">":
+					return initial <= bound
+				case ">=":
+					return initial < bound
 				}
 			}
 		}
@@ -534,7 +538,26 @@ func transactionContextCanonicalSingleIterationFor(initialization, condition, po
 	}
 	initial, initialOK := transactionContextLiteralInteger(initialization.Children[len(initialization.Children)-1])
 	bound, boundOK := transactionContextLiteralInteger(condition.Children[1])
-	return initialOK && boundOK && initial == 0 && bound == 1 && condition.GetAttributeString("operator") == "<" && post.GetAttributeString("operator") == "++"
+	if !initialOK || !boundOK {
+		return false
+	}
+	switch post.GetAttributeString("operator") {
+	case "++":
+		switch condition.GetAttributeString("operator") {
+		case "<":
+			return initial < bound && initial+1 == bound
+		case "<=":
+			return initial == bound
+		}
+	case "--":
+		switch condition.GetAttributeString("operator") {
+		case ">":
+			return initial > bound && bound+1 == initial
+		case ">=":
+			return initial == bound
+		}
+	}
+	return false
 }
 
 func transactionContextLiteralInteger(node *types.ASTNode) (int64, bool) {

@@ -1290,11 +1290,14 @@ supports a direct source or one bounded local alias in the same loop, and exact
 stateful internal, inherited, `self`, and `super` helper dispatch. Exact Yul
 value positions for `sstore`, `call`, `create`, and `create2` use the same
 bounded proof; other operands do not qualify. Observational uses, conditional or
-tuple provenance, uncertain aliases, ordinary external calldata, unresolved
-helpers, statically unreachable loops, and unsupported loop shapes emit no
-positive fact. A legacy cache returns
+tuple provenance, `if`/ternary/`try` branch merges, uncertain aliases, ordinary
+external calldata, unresolved helpers, statically unreachable loops, and
+unsupported loop shapes emit no positive fact. A legacy cache returns
 `ErrTransactionContextFactsUnavailable`; it is not silently reinterpreted as an
 empty current analysis.
+Canonical literal `for` loops with adjacent exclusive or equal inclusive bounds
+in the matching increment/decrement direction are `single_iteration`; a
+repeatable outer loop still makes a nested effect `possible`.
 
 #### GetStats
 
