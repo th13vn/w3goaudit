@@ -4,12 +4,12 @@ meta:
   severity: MEDIUM
   confidence: HIGH
   description: >
-    A call to `addr.send(amount)` is made but the boolean return value is
-    discarded. Unlike `.transfer()`, `.send()` does NOT revert on failure —
-    it returns `false`. Ignoring that return value means a failed transfer is
-    silently absorbed: caller state (balances, nonces, claim flags) may have
-    already been updated, leaving funds stranded. Equivalent to Slither's
-    unchecked-send detector.
+    A call to `addr.send(amount)` is made but its boolean return value is
+    discarded or captured without a proven check. Unlike `.transfer()`, `.send()`
+    does NOT revert on failure — it returns `false`. Ignoring that return value
+    means a failed transfer is silently absorbed: caller state (balances, nonces,
+    claim flags) may have already been updated, leaving funds stranded.
+    Equivalent to Slither's unchecked-send detector.
   recommendation: >
     Prefer `.call{value: amt}("")` with `require(success, ...)`, or wrap:
     `require(addr.send(amount), "send failed")`. Better: use a pull-payment

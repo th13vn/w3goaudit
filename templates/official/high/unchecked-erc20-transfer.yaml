@@ -4,10 +4,11 @@ meta:
   severity: HIGH
   confidence: MEDIUM
   description: >
-    A call to ERC20 `transfer(...)` or `transferFrom(...)` is made but the
-    boolean return value is discarded. Non-reverting ERC20s (USDT, BNB, ZRX,
-    early OZ) signal failure by returning `false`, so a discarded return value
-    silently passes failure upstream and corrupts internal accounting.
+    A call to ERC20 `transfer(...)` or `transferFrom(...)` is made but its
+    boolean return value is discarded or captured without a proven check.
+    Non-reverting ERC20s (USDT, BNB, ZRX, early OZ) signal failure by returning
+    `false`, so an unchecked result silently passes failure upstream and corrupts
+    internal accounting.
     Equivalent to Slither's unchecked-transfer detector.
   recommendation: >
     Use OpenZeppelin's `SafeERC20.safeTransfer` / `safeTransferFrom`, which
