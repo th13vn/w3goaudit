@@ -6,6 +6,15 @@ All notable changes to w3goaudit are documented here. This project adheres to
 
 ## Unreleased
 
+No changes yet.
+
+## v0.6.0 - 2026-09-07
+
+Deterministic semantic-evidence release. The core remains offline and
+model-independent, the output schema remains `2.0.0`, and the embedded official
+pack is reset to 20 evidence-backed detectors. This release ships with template
+pack `v3.0.0`; that pack requires W3GoAudit `v0.6.0` or newer.
+
 - `HIGH-MSG-VALUE-IN-LOOP` now requires versioned transaction-context evidence
   instead of every textual `msg.value` reference. Builder Phase 7.25 proves an
   exact `msg.value` flow to a persistent state write, ETH-bearing call value, or
@@ -53,9 +62,9 @@ All notable changes to w3goaudit are documented here. This project adheres to
   compatibility keys, and Boolean presence markers are not part of the official
   authoring surface. Presence-only markers and structured options are used
   instead.
-- This is an unreleased local pack-major migration. The output schema remains
-  `2.0.0`; sibling template publication, tags, pushes, and releases are separate
-  owner actions.
+- This is the embedded copy of template pack `v3.0.0`. The output schema
+  remains `2.0.0`; the removed detectors can return in later pack releases only
+  after generic semantic evidence proves their mechanisms.
 
 ### Added: deterministic semantic external-boundary evidence
 
@@ -89,8 +98,8 @@ All notable changes to w3goaudit are documented here. This project adheres to
 - Core remains offline, deterministic, and independent of models, credentials,
   providers, callbacks, or AI triage. External Assistants consume evidence but
   cannot modify official scanner findings.
-- The official rule pack changes described above are unreleased local work only;
-  this entry does not claim a tag, push, publication, or release.
+- Template pack `v3.0.0` is the separately versioned downloadable copy of the
+  same 20-detector inventory embedded in this release.
 
 ## v0.5.0 - 2026-09-01
 

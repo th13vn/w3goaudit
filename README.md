@@ -5,6 +5,9 @@
 
 A Go-based CLI & SDK for auditing Solidity smart contracts using rule-based templates with WQL query language.
 
+Current release: W3GoAudit `v0.6.0` with the 20-detector official template
+pack `v3.0.0`. Pack `v3.0.0` requires W3GoAudit `v0.6.0` or newer.
+
 ---
 
 ## Quick Start

@@ -39,7 +39,7 @@ result folder. There is **no `scan` subcommand**.
 - **No scanner-side AI review:** the CLI has no model transport, endpoint,
   credential, timeout, or review artifact. Strict WQL decoding rejects a
   top-level `ai` key before execution.
-- **Version:** `Version` (`root.go`) is the single source of truth — it feeds the `version` subcommand, `--version`, and the SARIF driver version. Bump it on release.
+- **Version:** `Version` (`root.go`) is the single source of truth – it feeds the `version` subcommand, `--version`, and the SARIF driver version. The current release is `0.6.0`; bump it on the next release.
 - **Extract identity:** contract queries accept exact `file#Contract` IDs or unique case-insensitive names. Function queries accept exact function IDs, `Contract.selector`, full selectors, 4-byte signatures, or unique bare names. Ambiguous queries fail; map order never selects a result. Inherited state/context/bundle data walks the selected contract's exact `LinearizedBaseIDs`, so duplicate base names cannot cross-wire an exact query.
 - **Extract diff identity:** contracts compare as slash-normalized source paths
   relative to each database's own `ProjectRoot`, plus `#Contract`; functions
