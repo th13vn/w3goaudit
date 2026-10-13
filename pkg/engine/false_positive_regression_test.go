@@ -331,6 +331,27 @@ contract FakeGuards {
 	}
 }
 
+func TestHighLevelSafeTransferFromCanExposeReentrancy(t *testing.T) {
+	source := `pragma solidity ^0.8.20;
+interface IERC777Like { function safeTransferFrom(address from, address to, uint256 amount) external returns (bool); }
+contract PullThenWrite {
+    IERC777Like token;
+    mapping(address => uint256) public balance;
+    function pull(uint256 amount) external {
+        token.safeTransferFrom(msg.sender, address(this), amount);
+        balance[msg.sender] += amount;
+    }
+}`
+	got := scanSourceWithPack(t, source)
+	var matches []string
+	for _, finding := range got {
+		if strings.HasPrefix(finding, "HIGH-REENTRANCY-PATTERN|") {
+			matches = append(matches, finding)
+		}
+	}
+	assertFindings(t, matches, []string{"HIGH-REENTRANCY-PATTERN|PullThenWrite.pull"})
+}
+
 // TestOneSiteIsReportedOnce covers the largest single source of perceived noise in
 // the real scan: 20 of 92 findings (22%) were repeat reports of a dangerous site
 // already reported, once per entry function that reaches it. A router with six
@@ -722,7 +743,7 @@ contract Unchecked {
 // TestFindingsAnchorOnTheDangerousStatementByDefault pins that a finding names the
 // place the bug IS, not the entry point that can reach it.
 //
-// With verifier attribution (the old default) `Location.File`/`Line` came from the
+// With legacy verifier attribution `Location.File`/`Line` came from the
 // matched node while `Location.Contract`/`Function` came from the entry function, so
 // an interprocedural finding read `LongPath.userCmd` while pointing at
 // `ProxyCaller.sol:163` — a line inside a different contract entirely. 8 of 52
@@ -1181,4 +1202,196 @@ contract Sidecars {
 	if strings.Join(reentrancy, "\n") != strings.Join(want, "\n") {
 		t.Errorf("reentrancy findings mismatch\n got: %v\nwant: %v", reentrancy, want)
 	}
+}
+
+// HIGH-REENTRANCY-PATTERN counts a raw call only when it can hand control to
+// the caller: it sends ETH, targets a caller-chosen address, or carries the
+// caller's identity or input in its calldata, as a token transfer to or from
+// msg.sender does. Euler's interest-rate-model call, a value-free call to a
+// governance-set address with contract-built calldata, is not a reentrancy
+// vector. The token-transfer controls pin the ERC777 hook shapes the rule must
+// keep: pay the caller before debiting them, and pull from the caller before
+// crediting the pot (Lendf.Me).
+func TestReentrancyPatternNeedsACallerControlledHandoff(t *testing.T) {
+	got := scanSourceWithPack(t, `pragma solidity ^0.8.20;
+contract Market {
+    address public irm;
+    address public token;
+    uint256 public interestRate;
+    uint256 public pot;
+    mapping(address => uint256) public shares;
+    function accrue() external {
+        (bool ok, bytes memory data) = irm.call(abi.encodeWithSignature("computeInterestRate(uint256)", interestRate));
+        require(ok);
+        interestRate = abi.decode(data, (uint256));
+    }
+    function withdraw(uint256 amount) external {
+        (bool ok, ) = token.call(abi.encodeWithSignature("transfer(address,uint256)", msg.sender, amount));
+        require(ok);
+        shares[msg.sender] -= amount;
+    }
+    function addToPot(uint256 amount) external {
+        (bool ok, ) = token.call(abi.encodeWithSignature("transferFrom(address,address,uint256)", msg.sender, address(this), amount));
+        require(ok);
+        pot += amount;
+    }
+    function refund(uint256 amount) external {
+        (bool ok, ) = msg.sender.call{value: amount}("");
+        require(ok);
+        shares[msg.sender] -= amount;
+    }
+}`)
+	var reentrancy []string
+	for _, finding := range got {
+		if strings.HasPrefix(finding, "HIGH-REENTRANCY-PATTERN|") {
+			reentrancy = append(reentrancy, finding)
+		}
+	}
+	assertFindings(t, reentrancy, []string{
+		"HIGH-REENTRANCY-PATTERN|Market.addToPot",
+		"HIGH-REENTRANCY-PATTERN|Market.refund",
+		"HIGH-REENTRANCY-PATTERN|Market.withdraw",
+	})
+}
+
+// tx.origin is flagged only as an operand of an equality check inside a guard.
+// CrocSwap assigns a tip receiver from it inside an `else if` body and Axelar
+// passes it to the gateway as a refund address; neither authenticates anyone.
+// A constant bound such as `(type(uint256).max / 10 ** 36) * 10 ** 18` (Solady
+// cbrtWad) is not a runtime divide-before-multiply precision loss.
+func TestTxOriginAndDivideRulesIgnoreNonAuthorizingShapes(t *testing.T) {
+	got := scanSourceWithPack(t, `pragma solidity ^0.8.20;
+interface IGateway { function callContract(string calldata chain, bytes calldata payload, address refund) external; }
+contract Relayer {
+    address owner;
+    address constant MAGIC = address(1);
+    uint256 public x;
+    function guarded(address to) external {
+        require(tx.origin == owner, "not owner");
+        payable(to).transfer(address(this).balance);
+    }
+    function tipReceiver(address recv) external view returns (address) {
+        if (recv == address(0)) {
+            recv = msg.sender;
+        } else if (recv == MAGIC) {
+            recv = tx.origin;
+        }
+        return recv;
+    }
+    function refundToOrigin(IGateway gateway, bytes calldata payload) external {
+        gateway.callContract("chain", payload, tx.origin);
+    }
+    function bound(uint256 v) external returns (bool) {
+        x = v;
+        return v <= (type(uint256).max / 10 ** 36) * 10 ** 18 - 1;
+    }
+    function lossy(uint256 a, uint256 b, uint256 c) external { x = (a / b) * c; }
+}`)
+	var matched []string
+	for _, finding := range got {
+		if strings.HasPrefix(finding, "MEDIUM-TX-ORIGIN-AUTH|") || strings.HasPrefix(finding, "MEDIUM-DIVIDE-BEFORE-MULTIPLY|") {
+			matched = append(matched, finding)
+		}
+	}
+	assertFindings(t, matched, []string{
+		"MEDIUM-DIVIDE-BEFORE-MULTIPLY|Relayer.lossy",
+		"MEDIUM-TX-ORIGIN-AUTH|Relayer.guarded",
+	})
+}
+
+func TestIntentionalDivideRoundingIsNotPrecisionLoss(t *testing.T) {
+	got := scanSourceWithPack(t, `pragma solidity ^0.8.20;
+contract Rounding {
+    function round(uint256 a, uint256 b) external pure returns (uint256) { return (a / b) * b; }
+    function distinct(address, uint256 a, uint256 b) external pure returns (uint256) { uint256 c = b; return (a / b) * c; }
+    function lossy(uint256 a, uint256 b, uint256 c) external returns (uint256) { return (a / b) * c; }
+}`)
+	var matched []string
+	for _, finding := range got {
+		if strings.HasPrefix(finding, "MEDIUM-DIVIDE-BEFORE-MULTIPLY|") {
+			matched = append(matched, finding)
+		}
+	}
+	assertFindings(t, matched, []string{"MEDIUM-DIVIDE-BEFORE-MULTIPLY|Rounding.distinct", "MEDIUM-DIVIDE-BEFORE-MULTIPLY|Rounding.lossy"})
+}
+
+// `gasBefore - gasleft()` in an unchecked block cannot underflow, because
+// gasleft() only decreases; KyberSwap's aggregation router meters gas this way
+// in every swap entry. A subtraction of a caller-controlled amount stays
+// reported.
+func TestUncheckedArithmeticIgnoresGasMetering(t *testing.T) {
+	got := scanSourceWithPack(t, `pragma solidity ^0.8.20;
+contract Router {
+    uint256 public gasUsed;
+    uint256 public balance;
+    function swap() external {
+        uint256 gasBefore = gasleft();
+        balance += 1;
+        unchecked { gasUsed = gasBefore - gasleft(); }
+    }
+    function debit(uint256 amount) external {
+        unchecked { balance = balance - amount; }
+    }
+}`)
+	var matched []string
+	for _, finding := range got {
+		if strings.HasPrefix(finding, "MEDIUM-UNCHECKED-ARITHMETIC|") {
+			matched = append(matched, finding)
+		}
+	}
+	assertFindings(t, matched, []string{"MEDIUM-UNCHECKED-ARITHMETIC|Router.debit"})
+}
+
+// A Uniswap V2 pair's `swap(amount0Out, amount1Out, to, data)` names exact
+// outputs, one of which is normally zero, and the pair enforces its invariant;
+// it is not an unbounded swap. A bare `swap(amountIn, 0)` still is.
+func TestNoSlippageIgnoresUniswapV2PairSwap(t *testing.T) {
+	got := scanSourceWithPack(t, `pragma solidity ^0.8.20;
+interface IPair { function swap(uint256 amount0Out, uint256 amount1Out, address to, bytes calldata data) external; }
+interface ISimpleRouter { function swap(uint256 amountIn, uint256 minOut) external returns (uint256); }
+contract Trader {
+    uint256 public last;
+    function flash(IPair pair, uint256 amount) external { pair.swap(amount, 0, address(this), hex"01"); last = amount; }
+    function dump(ISimpleRouter router, uint256 amount) external { last = router.swap(amount, 0); }
+}`)
+	var matched []string
+	for _, finding := range got {
+		if strings.HasPrefix(finding, "HIGH-NO-SLIPPAGE-CHECK|") {
+			matched = append(matched, finding)
+		}
+	}
+	assertFindings(t, matched, []string{"HIGH-NO-SLIPPAGE-CHECK|Trader.dump"})
+}
+
+// SafeERC20 on a caller-supplied token builds its calldata with
+// `token.transferFrom.selector`, a compile-time constant; the caller chooses
+// the token, not the function. A selector the caller supplies, or a whole
+// calldata blob, still makes the call arbitrary.
+func TestArbitraryLowLevelCallIgnoresConstantSelectorMembers(t *testing.T) {
+	got := scanSourceWithPack(t, `pragma solidity ^0.8.20;
+interface IERC20 { function transferFrom(address f, address t, uint256 v) external returns (bool); }
+contract Router {
+    function pullToken(IERC20 token, uint256 amount) external {
+        (bool ok, bytes memory ret) = address(token).call(abi.encodeWithSelector(token.transferFrom.selector, msg.sender, address(this), amount));
+        require(ok && (ret.length == 0 || abi.decode(ret, (bool))), "failed");
+    }
+    function chosenSelector(address target, bytes4 selector, uint256 amount) external {
+        (bool ok, ) = target.call(abi.encodeWithSelector(selector, msg.sender, amount));
+        require(ok, "failed");
+    }
+    function rawCalldata(address target, bytes calldata data) external {
+        (bool ok, ) = target.call(data);
+        require(ok, "failed");
+    }
+}`)
+	var matched []string
+	for _, finding := range got {
+		if strings.HasPrefix(finding, "HIGH-ARBITRARY-LOW-LEVEL-CALL|") {
+			matched = append(matched, finding)
+		}
+	}
+	assertFindings(t, matched, []string{
+		"HIGH-ARBITRARY-LOW-LEVEL-CALL|Router.chosenSelector",
+		"HIGH-ARBITRARY-LOW-LEVEL-CALL|Router.rawCalldata",
+	})
 }

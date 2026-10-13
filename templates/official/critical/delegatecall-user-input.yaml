@@ -2,7 +2,7 @@ meta:
   id: CRITICAL-DELEGATECALL-USER-INPUT
   title: Delegatecall to user-controlled address
   severity: CRITICAL
-  confidence: HIGH
+  confidence: MEDIUM
   description: >
     A delegatecall is executed with a target address controlled by the caller,
     either through a function parameter or caller identity. An attacker can supply
@@ -24,6 +24,36 @@ query:
         preset:
           authorization:
             type: protected
+    # Transparent and immutable-admin proxy dispatch:
+    # `modifier ifAdmin() { if (msg.sender == admin) { _; } else { _fallback(); } }`.
+    # A non-admin caller never reaches the body, but the authorization facts
+    # accept only an `if` whose other arm reverts, so this guard reads as
+    # absent. The principal must not itself be caller-controlled, which keeps
+    # `if (msg.sender == tx.origin) { _; }` (an EOA filter) reported.
+    - not:
+        guarded_by:
+          has:
+            and:
+              - block: if
+              - has:
+                  block: binary
+                  operator: "^==$"
+                  any:
+                    - and:
+                        - left:
+                            tainted: sender
+                        - right:
+                            not:
+                              tainted: user_controlled
+                    - and:
+                        - right:
+                            tainted: sender
+                        - left:
+                            not:
+                              tainted: user_controlled
+              - has:
+                  block: identifier
+                  name: ^_$
     # Match the delegatecall's own receiver. A descendant search could match a
     # nested receiver inside encoded arguments instead of the actual target.
     - receiver:

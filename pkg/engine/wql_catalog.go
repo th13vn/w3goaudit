@@ -151,6 +151,7 @@ var attrNameToIRTable = map[string]string{
 	"boundary_has_state_before":     "boundary_has_state_before",
 	"boundary_has_state_after":      "boundary_has_state_after",
 	"boundary_reachable_from_entry": "boundary_reachable_from_entry",
+	"intentional_divide_rounding":   "intentional_divide_rounding",
 
 	// Positive transaction-context accounting evidence.
 	"transaction_context_source":        "transaction_context_source",

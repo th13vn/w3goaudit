@@ -11,7 +11,7 @@ func TestCanonicalResultLayoutIsDocumented(t *testing.T) {
 	root := filepath.Clean(filepath.Join("..", ".."))
 	checks := map[string][]string{
 		"README.md":                {"consolidated `audit.md`", "audit.html", "one deep-dive Markdown report per main", "schema version 2.0.0"},
-		"CHANGELOG.md":             {"## v0.6.0 - 2026-09-07", "schema 2.0.0", "manifest compatibility aliases"},
+		"CHANGELOG.md":             {"## v0.7.0 - 2026-10-13", "schema 2.0.0", "manifest compatibility aliases"},
 		"docs/usage.md":            {"README.md · audit.md · results.sarif · run.log", "contracts/<source-path>__<Contract>.md", "Also emit audit.html"},
 		"docs/workflows.md":        {"README.md / audit.md", "one consolidated Markdown deep dive per main contract", "one deep-dive Markdown report per main contract", "also emit audit.html", "data/interactions.json"},
 		"docs/project-overview.md": {"README.md, audit.md", "one Markdown deep dive per main contract", "Opt-in audit.html"},
@@ -19,7 +19,7 @@ func TestCanonicalResultLayoutIsDocumented(t *testing.T) {
 		"docs/sdk.md":              {"FormatAuditMarkdown", "FormatAuditHTML", "FormatContractReportMarkdown", "standalone compatibility APIs", "BuildInteractionsJSON"},
 		"docs/extension-output.md": {"human reports are not an editor data dependency", "files.data", "files.data.interactions"},
 		"pkg/home/home.go":         {"html: false                      # also emit audit.html"},
-		"cmd/w3goaudit/root.go":    {"Version   = \"0.6.0\"", "Also emit audit.html into the result folder"},
+		"cmd/w3goaudit/root.go":    {"Version   = \"0.7.0\"", "Also emit audit.html into the result folder"},
 	}
 	for rel, wants := range checks {
 		content, err := os.ReadFile(filepath.Join(root, rel))

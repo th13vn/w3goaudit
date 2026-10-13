@@ -1,9 +1,10 @@
 # Extension Output — `nav.json` + `explorer.json` + `xref.json`
 
 Every scan's result folder (see [Result Folder Layout](./usage.md#result-folder-layout))
-writes three additional files under `data/` alongside `manifest.json`,
-`database.json`, `findings.json`, `overview.json`, `diagnostics.json`, and the
-Agent-facing `interactions.json`:
+writes navigation and semantic evidence files under `data/` alongside `manifest.json`,
+`database.json`, `findings.json`, `overview.json`, `diagnostics.json`, the
+Agent-facing `interactions.json`, hunter-facing `hunter.json`, and authorization
+evidence `authorization.json`:
 
 - **`data/nav.json`** — a flat, symbol-level navigation index: every
   declaration in the database, the reverse call graph, and
@@ -24,6 +25,9 @@ any other downstream tool — build jump-to-definition, find-references,
 Solidity**. They are read directly off disk; nothing here requires the CLI to
 run a server.
 
+`data/authorization.json` is the versioned authorization evidence artifact
+projected from exact database facts for downstream consumers.
+
 `data/interactions.json` is a separate protocol-neutral semantic boundary
 index discovered through `files.data.interactions`. It is additive and does not
 change the current editor dependency set: W3Solidity may ignore it until an
@@ -31,7 +35,7 @@ interaction view is implemented. The document is timestamp-free, reports its
 independent fact version and availability, and always uses arrays for facts and
 limitations.
 
-Its `schemaVersion` remains `"2.0.0"` and `factsVersion` is `"1.0.0"` when
+Its `schemaVersion` remains `"2.0.0"` and `factsVersion` is `"1.1.0"` when
 `ExternalBoundaryFactsVersion` is available. Each fact carries an exact
 function-or-modifier `scopeId` plus `scopeKind`; modifier facts leave the
 function-only `functionId` absent. A legacy cache emits `available: false`, an
@@ -44,7 +48,7 @@ Minimal available-artifact shape:
 ```jsonc
 {
   "schemaVersion": "2.0.0",
-  "factsVersion": "1.0.0",
+  "factsVersion": "1.1.0",
   "available": true,
   "analysisComplete": true,
   "diagnosticCounts": {
@@ -70,6 +74,152 @@ The complete fact also contains its exact source range, target, optional
 receiver/value/gas evidence, result handling, reentry class, and direct
 host-scope state relations. Consumers should preserve incomplete evidence and
 its limitations rather than treating a missing field as proof of safety.
+
+## `data/hunter.json`
+
+`data/hunter.json` is the **entry-point reading order**, discovered through
+`files.data.hunter`. It answers one question for an auditor or bug-bounty
+hunter opening an unfamiliar codebase: which entry point should I read first?
+
+> `hunter.json` is a reading order, not a finding list. A high rank means "read
+> this entry point first", never "this entry point is vulnerable". Do not render
+> tiers as severities.
+
+It runs no analysis of its own. Every value in it is a projection of the
+external-boundary and authorization facts already published in
+`data/interactions.json` and `data/authorization.json`, joined onto entry
+points and ordered. Nothing here affects `findings.json`, `results.sarif`, or
+the console output. Built by `report.BuildHunterJSON` (`pkg/report/hunter.go`),
+with the ranking model in `pkg/report/hunter_model.go`.
+
+### Row unit
+
+A row is one **(main contract, entry function)** pair. The pair is the unit,
+not the entry ID alone: an entry ID names the contract that *declares* the
+function, so one base function inherited by three main contracts produces three
+rows with three distinct `contractId` values and one shared
+`declaredContractId`. Both fields are always emitted, even when they are equal,
+so a consumer never has to infer inheritance from a missing field.
+
+Rows come from `MainContractEntry.EntryFunctions`, which admits only
+state-modifying `public`/`external` functions. **`view` and `pure` functions are
+not rows**, so read-only reentrancy cannot be surfaced through this artifact.
+
+### Signals
+
+Six dimensions, each carrying the underlying evidence enum verbatim in `value`,
+an `ordinal` used only for ordering, and the `factIds` that prove it. Ordinals
+are never summed, weighted, or averaged.
+
+| Signal | Source | Ordinals, highest first |
+|---|---|---|
+| `authorization` | `AuthorizationFact.Verdict` | `unprotected` 3, `unknown` 2, `self_scoped` 1, `protected` 0 |
+| `valueReach` | strongest `ExternalBoundaryFact.value.control` reached | `caller_controlled` 4, `state_derived` 3, `unknown` 2, `fixed` 1, `none` 0 |
+| `reentry` | strongest `reentryClass` reached | `delegate_context` 4, `possible` 3, `read_only_possible` 2, `unknown` 1, everything else 0 |
+| `stateAfterCall` | strongest `stateEffects[].relation` | `after` 2, (`unordered`, `unknown`, `incompatible`) 1, (`before`, `none`) 0 |
+| `targetResolution` | any `target.resolution` of `unresolved` | 1, else 0 |
+| `resultHandling` | any available result `discarded` or `none` | 1, else 0 |
+
+`authorization` additionally carries `dominance` and `principalKind`, which
+distinguish an owner guard from a role guard or a self scope.
+
+**An unproven state ranks high, not low.** `authorization: unknown` outranks
+both `self_scoped` and `protected`, and `reentry: unknown` outranks the classes
+that prove a bounded reentry. An unknown state is unproven, not safe, and an
+unexamined entry point is exactly what should be read first. A signal value of
+`none` means no observation raised that dimension; it is not a claim of safety.
+
+### Tiers and order
+
+`tier` comes from a decision table evaluated top to bottom, first match wins.
+A lower tier is read earlier.
+
+| tier | `tierName` | Condition |
+|---|---|---|
+| 0 | `open-value-surface` | `authorization >= 2` and (`valueReach >= 2` or the entry is `payable`) |
+| 1 | `open-reentry-or-arbitrary` | `authorization >= 2` and (`reentry >= 2` or an unresolved target) |
+| 2 | `open-external-surface` | `authorization >= 2` and at least one reachable boundary |
+| 3 | `guarded-external-surface` | `authorization <= 1` and at least one reachable boundary |
+| 4 | `no-boundary-surface` | no reachable boundary |
+
+Rows are ordered by `tier` ascending, then by the tuple (`authorization`,
+`valueReach`, `reentry`, `stateAfterCall`, `targetResolution`,
+`resultHandling`) descending compared lexicographically, then by `entryId` and
+`contractId` ascending. That is a total order, so the document is byte-stable
+across runs on an unchanged database. `rank` is the 1-based position in it.
+
+### Versions and availability
+
+`schemaVersion` is `"2.0.0"`, the shared result-folder version. `modelVersion`
+is separate and versions the ranking model itself, because later semantic-fact
+work changes how entries are ranked without moving the schema consumers pin.
+`factsVersions` reports the version of each input fact family.
+
+The document is timestamp-free and fail-closed. When either fact family is
+unavailable — a legacy cache, for instance — it emits `available: false`,
+`count: 0`, an empty `entries` array, and a rebuild limitation, rather than a
+ranking derived from partial evidence.
+
+Minimal available-artifact shape:
+
+```jsonc
+{
+  "schemaVersion": "2.0.0",
+  "modelVersion": "1.0.0",
+  "factsVersions": { "externalBoundary": "1.1.0", "authorization": "1.1.0" },
+  "available": true,
+  "analysisComplete": true,
+  "diagnosticCounts": { "info": 0, "warning": 0, "error": 0 },
+  "count": 1,
+  "limitations": [],
+  "entries": [{
+    "rank": 1,
+    "tier": 0,
+    "tierName": "open-value-surface",
+    "entryId": "/abs/Base.sol#BaseVault.withdraw(uint256)",
+    "contractId": "/abs/Vault.sol#Vault",
+    "contractName": "Vault",
+    "declaredContractId": "/abs/Base.sol#BaseVault",
+    "functionSelector": "withdraw(uint256)",
+    "range": { "file": "/abs/Base.sol", "startLine": 12, "startCol": 5, "endLine": 18, "endCol": 6 },
+    "payable": false,
+    "signals": {
+      "authorization": { "value": "unprotected", "ordinal": 3, "factIds": ["auth:..."], "dominance": "unknown", "principalKind": "unknown" },
+      "valueReach": { "value": "caller_controlled", "ordinal": 4, "factIds": ["eb:..."] },
+      "reentry": { "value": "possible", "ordinal": 3, "factIds": ["eb:..."] },
+      "stateAfterCall": { "value": "after", "ordinal": 2, "factIds": ["eb:..."] },
+      "targetResolution": { "value": "none", "ordinal": 0, "factIds": [] },
+      "resultHandling": { "value": "none", "ordinal": 0, "factIds": [] }
+    },
+    "boundaryIds": ["eb:..."],
+    "evidenceComplete": true,
+    "limitations": []
+  }]
+}
+```
+
+### Known limitations
+
+A row records these in its own `limitations` and clears `evidenceComplete`.
+Consumers should show them rather than treat a quiet row as a clean one.
+
+- **`view` and `pure` functions are not rows** (above), so read-only reentrancy
+  is out of reach here.
+- **A tier-4 row has no state-write signal.** Deriving state writes for an entry
+  that reaches no boundary would require analysis this artifact deliberately
+  does not perform; it is ranked by authorization and `payable` alone.
+- **Reachability is an under-approximation.** It is built only from resolved
+  call-graph edges, so a boundary may exist beyond the recorded reach. Rows in
+  files carrying parse-loss or unresolved-call diagnostics are flagged.
+- **A missing or ambiguous authorization binding becomes `unknown`**, recorded
+  as `hunter.authorization.missing` or `hunter.authorization.ambiguous`. It is
+  never silently treated as protected. A declaration inherited by several
+  deployed contracts has no single runtime; its fact is used for every row only
+  when all runtimes reached the same result (`runtime.alternatives.agree`,
+  empty `runtimeContractId`).
+- **Ranking is judgement over proven facts.** Each individual signal is
+  evidence, but "read this one first" is a heuristic. That is why this is a
+  separate document and not a field on `findings.json`.
 
 The three editor-navigation documents share a `schemaVersion` field, currently
 `"2.0.0"` (`report.SchemaVersion`), the same version used by `overview.json` /

@@ -57,6 +57,7 @@ type ManifestFiles struct {
 		Diagnostics   string `json:"diagnostics"`
 		Database      string `json:"database"`
 		Interactions  string `json:"interactions"`
+		Hunter        string `json:"hunter,omitempty"`
 		Authorization string `json:"authorization,omitempty"`
 		Nav           string `json:"nav,omitempty"`
 		Explorer      string `json:"explorer,omitempty"`
@@ -147,6 +148,7 @@ func BuildManifestAt(now time.Time, tool ToolMeta, summary *SummaryReport, findi
 	m.Files.Data.Diagnostics = "data/diagnostics.json"
 	m.Files.Data.Database = "data/database.json"
 	m.Files.Data.Interactions = "data/interactions.json"
+	m.Files.Data.Hunter = "data/hunter.json"
 	m.Files.Data.Authorization = "data/authorization.json"
 	m.Files.Data.Nav = "data/nav.json"
 	m.Files.Data.Explorer = "data/explorer.json"

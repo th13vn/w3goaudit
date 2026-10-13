@@ -503,6 +503,87 @@ func TestUsingForResolutionHonorsReceiverTypeArityAndAmbiguity(t *testing.T) {
 	}
 }
 
+// An elementary conversion such as address(t) names no contract, so a member
+// call on it can only be a builtin or a `using L for <type>` extension. The
+// OpenZeppelin idiom `address(t).functionDelegateCall(data)` is written this
+// way; it used to be classified as an unresolved external call, which cut the
+// entry point off from the library's delegatecall.
+func TestUsingForResolvesOnElementaryConversionReceiver(t *testing.T) {
+	db, file := buildSourceText(t, "pragma solidity ^0.8.20;\n"+
+		"library UintLib { function plus(uint256 self, uint256 x) internal pure returns (uint256) { return self + x; } }\n"+
+		"library AddressLib { function plus(address self, uint256 x) internal pure returns (address) { self; x; return self; } }\n"+
+		"library Addr { function functionDelegateCall(address target, bytes memory data) internal returns (bytes memory) { (bool ok, bytes memory ret) = target.delegatecall(data); require(ok); return ret; } }\n"+
+		"contract Uses { using UintLib for uint256; using AddressLib for address; using Addr for address;\n"+
+		"  function run(uint256 x, address a) external { uint256(x).plus(1); address(a).plus(1); }\n"+
+		"  function exec(address t, bytes memory b) external { address(t).functionDelegateCall(b); }\n"+
+		"  function low(address t, bytes memory b) external { (bool ok, ) = address(t).call(b); ok; }\n}\n")
+	assertExactTargets(t, db.CallGraph.GetCallees(types.MakeFunctionID(file, "Uses", "run(uint256,address)")),
+		types.MakeFunctionID(file, "UintLib", "plus(uint256,uint256)"),
+		types.MakeFunctionID(file, "AddressLib", "plus(address,uint256)"),
+	)
+	assertExactTargets(t, db.CallGraph.GetCallees(types.MakeFunctionID(file, "Uses", "exec(address,bytes)")),
+		types.MakeFunctionID(file, "Addr", "functionDelegateCall(address,bytes)"),
+	)
+	lowEdges := db.CallGraph.GetCallees(types.MakeFunctionID(file, "Uses", "low(address,bytes)"))
+	if len(lowEdges) != 1 || lowEdges[0].Type != types.CallTypeLowLevelCall {
+		t.Fatalf("address(t).call edge = %#v, want one low-level call", lowEdges)
+	}
+}
+
+// `using SafeERC20 for IERC20; token.safeTransfer(...)` names a member the
+// interface does not declare, so it can only be the attached library function.
+// It used to be recorded as an unresolved external call to
+// IERC20.safeTransfer, a function that does not exist, which cut every
+// SafeERC20 call off from the library body. A member the interface does
+// declare stays an external call.
+func TestUsingForResolvesMembersMissingFromContractReceiver(t *testing.T) {
+	db, file := buildSourceText(t, "pragma solidity ^0.8.20;\n"+
+		"interface IToken { function transfer(address to, uint256 v) external returns (bool); }\n"+
+		"library SafeCall { function safeTransfer(IToken token, address to, uint256 v) internal { require(token.transfer(to, v)); } }\n"+
+		"contract Uses { using SafeCall for IToken;\n"+
+		"  function pay(IToken token, address to, uint256 v) external { token.safeTransfer(to, v); }\n"+
+		"  function payCast(address t, address to, uint256 v) external { IToken(t).safeTransfer(to, v); }\n"+
+		"  function direct(IToken token, address to, uint256 v) external { token.transfer(to, v); }\n}\n")
+	safeTransfer := types.MakeFunctionID(file, "SafeCall", "safeTransfer(IToken,address,uint256)")
+	assertExactTargets(t, db.CallGraph.GetCallees(types.MakeFunctionID(file, "Uses", "pay(IToken,address,uint256)")), safeTransfer)
+	assertExactTargets(t, db.CallGraph.GetCallees(types.MakeFunctionID(file, "Uses", "payCast(address,address,uint256)")), safeTransfer)
+	direct := db.CallGraph.GetCallees(types.MakeFunctionID(file, "Uses", "direct(IToken,address,uint256)"))
+	if len(direct) != 1 || direct[0].Type != types.CallTypeExternal {
+		t.Fatalf("token.transfer edge = %#v, want one external call", direct)
+	}
+}
+
+// `super.f()` is written as a member call but jumps to the next
+// implementation in the linearization, so its AST node must not match WQL
+// `external_call`. It used to, which let an ERC20 override forwarding
+// `super.transferFrom(from, to, amount)` look like a contract spending a
+// caller-chosen account's allowance on another token. `this.f()` really is an
+// external self-call and stays one.
+func TestSuperMemberCallIsInternalInAST(t *testing.T) {
+	db, file := buildSourceText(t, "pragma solidity ^0.8.20;\n"+
+		"contract Base { function transferFrom(address f, address t, uint256 v) public virtual returns (bool) { f; t; v; return true; } }\n"+
+		"contract Token is Base {\n"+
+		"  function transferFrom(address f, address t, uint256 v) public override returns (bool) { return super.transferFrom(f, t, v); }\n"+
+		"  function viaThis(address f, address t, uint256 v) external returns (bool) { return this.transferFrom(f, t, v); }\n}\n")
+	token := db.Contracts[types.MakeContractID(file, "Token")]
+	kindOf := func(selector string) string {
+		t.Helper()
+		kind := ""
+		walkAST(findFunctionBySelector(t, token, selector).AST, func(node *types.ASTNode) {
+			if node != nil && node.Name == "transferFrom" && strings.HasPrefix(node.Kind, "call.") {
+				kind = node.Kind
+			}
+		})
+		return kind
+	}
+	if got := kindOf("transferFrom(address,address,uint256)"); got != types.KindCallInternal {
+		t.Errorf("super.transferFrom kind = %q, want %q", got, types.KindCallInternal)
+	}
+	if got := kindOf("viaThis(address,address,uint256)"); got != types.KindCallExternal {
+		t.Errorf("this.transferFrom kind = %q, want %q", got, types.KindCallExternal)
+	}
+}
+
 func assertExactTargets(t *testing.T, edges []*types.CallEdge, want ...string) {
 	t.Helper()
 	got := make(map[string]bool, len(edges))

@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 
@@ -108,6 +109,57 @@ func TestReadDirectorySkipsExcludedDirs(t *testing.T) {
 	}
 	if base := filepath.Base(got[0].Path); base != "Main.sol" {
 		t.Errorf("expected Main.sol, got %s", base)
+	}
+}
+
+// Foundry names test contracts `*.t.sol` and scripts `*.s.sol`, and projects
+// keep them outside `test/` and `script/` often enough (spark-spells keeps 82
+// spell tests next to the spells). Their `setUp()` fixtures read as
+// unprotected initializers. Directory discovery skips both suffixes; an
+// explicitly named file is still read.
+func TestReadDirectorySkipsFoundryTestAndScriptFiles(t *testing.T) {
+	root := t.TempDir()
+	mustWrite(t, filepath.Join(root, "Spell.sol"), "contract Spell {}\n")
+	mustWrite(t, filepath.Join(root, "Spell.t.sol"), "contract SpellTest {}\n")
+	mustWrite(t, filepath.Join(root, "Deploy.s.sol"), "contract Deploy {}\n")
+	mustWrite(t, filepath.Join(root, "Vault.sol"), "contract Vault {}\n")
+
+	got, err := New().ReadDirectory(root)
+	if err != nil {
+		t.Fatalf("ReadDirectory: %v", err)
+	}
+	var names []string
+	for _, sf := range got {
+		names = append(names, filepath.Base(sf.Path))
+	}
+	sort.Strings(names)
+	if strings.Join(names, ",") != "Spell.sol,Vault.sol" {
+		t.Fatalf("discovered %v, want [Spell.sol Vault.sol]", names)
+	}
+
+	explicit, err := New().Read(filepath.Join(root, "Spell.t.sol"))
+	if err != nil || len(explicit) != 1 {
+		t.Fatalf("explicit test file: %v (%d files)", err, len(explicit))
+	}
+}
+
+// Certora harnesses (`certora/helpers/TransferHarness.sol` in Lista moolah)
+// wrap production code for formal verification and are never deployed.
+func TestReadDirectorySkipsCertoraHarnesses(t *testing.T) {
+	root := t.TempDir()
+	mustWrite(t, filepath.Join(root, "Vault.sol"), "contract Vault {}\n")
+	harness := filepath.Join(root, "certora", "helpers")
+	if err := os.MkdirAll(harness, 0o755); err != nil {
+		t.Fatalf("mkdir certora: %v", err)
+	}
+	mustWrite(t, filepath.Join(harness, "TransferHarness.sol"), "contract TransferHarness {}\n")
+
+	got, err := New().ReadDirectory(root)
+	if err != nil {
+		t.Fatalf("ReadDirectory: %v", err)
+	}
+	if len(got) != 1 || filepath.Base(got[0].Path) != "Vault.sol" {
+		t.Fatalf("discovered %d files, want only Vault.sol", len(got))
 	}
 }
 

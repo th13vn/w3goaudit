@@ -134,7 +134,12 @@ type Database struct {
 
 // MainContractEntry represents a main contract with its resolved entry functions and inheritance
 type MainContractEntry struct {
-	// EntryFunctions are the resolved entry function IDs (format: absPath#ContractName.functionName)
+	// EntryFunctions are the resolved entry function IDs, in the exact form
+	// absPath#ContractName.selector(paramTypes) produced by MakeFunctionID.
+	// The ID names the contract that DECLARES the function, which for an
+	// inherited entry is a base of this main contract, not the main contract
+	// itself. Consumers keying on an entry must therefore pair the ID with the
+	// main contract ID to keep deployed identities distinct.
 	EntryFunctions []string `json:"entryFunctions"`
 
 	// LinearizedBases is the C3 linearization order (method resolution order)

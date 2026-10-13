@@ -168,7 +168,7 @@ Every flag has a long and short form.
 | `--ignore-invalid-templates` |       | bool   | Skip invalid templates in a directory instead of failing the scan                                                                                                |
 | `--strict-imports`           |       | bool   | Fail when any Solidity import is unresolved; applies identically to source builds and persisted `--db` diagnostics                                               |
 | `--strict-parse`             |       | bool   | Fail when any Solidity source could not be fully parsed (`parse.recovered`/`parse.skipped`); same source/`--db` parity                                            |
-| `--location-source`          |       | string | Where a finding points: `matched` (default — the dangerous statement) or `verifier` (the entry function)                                                           |
+| `--location-source`          |       | string | Where a finding points: `matched` (default — the dangerous statement) or `verifier` (legacy entry-function identity)                                                   |
 | `--update-templates`         | `-T`  | bool   | Refresh `~/.w3goaudit/templates` from the latest published release and exit                                                                                      |
 | `--update`                   | `-u`  | bool   | Update w3goaudit itself via `go install …@latest` and exit                                                                                                       |
 
@@ -178,7 +178,7 @@ Every flag has a long and short form.
 **Behavior notes:**
 
 - **Markdown is the human format and JSON lives in `data/`** — there are no
-  `--json`/`--md`/`--format` flags. SARIF (`results.sarif`) and the verbose
+  scan-format flags. SARIF (`results.sarif`) and the verbose
   `run.log` are always written.
 - The result folder is **overwritten in place** on a re-scan; the `contracts/`
   tree is regenerated wholesale, so no stale per-contract folders survive.
@@ -219,9 +219,8 @@ Every flag has a long and short form.
 - Columns are one-based, half-open Unicode code points. Bytes are zero-based,
   half-open UTF-8 offsets. These fields are not LSP positions.
 
-> **Removed in v0.3:** `--format`, `--json`, `--md`, `--html`-as-format,
-> `--fail-on`, and `--log`. `run.log` replaces `--log`;
-> format flags are gone because the folder always carries Markdown + SARIF + JSON.
+> The scan writes Markdown, SARIF, JSON, and `run.log` by default. Extract
+> commands retain their separate `--format=md|json` option.
 
 #### Examples
 
@@ -335,6 +334,9 @@ human auditor and stable machine consumers:
 │   ├── findings.json
 │   ├── overview.json
 │   ├── diagnostics.json    # analysis-quality diagnostics; [] when complete
+│   ├── interactions.json   # deterministic external-boundary evidence
+│   ├── hunter.json         # ranked entry-point reading order
+│   ├── authorization.json  # versioned authorization evidence
 │   ├── nav.json           # extension navigation index (symbols, callers, interfaceImpl)
 │   ├── explorer.json      # extension explorer model (per-contract constants/storage/entries/getters)
 │   └── xref.json          # extension cross-reference index (declarations[] + references[])
@@ -365,7 +367,7 @@ human auditor and stable machine consumers:
   `analysisComplete`, diagnostic counts, separate declaration-category counts,
   and only those optional HTML paths that were actually emitted. Canonical
   discovery uses `files.audit`, optional `files.auditHtml`, and
-  `contracts[].report`; v0.5.x compatibility aliases point to the same files.
+  `contracts[].report` is the canonical contract-report reference.
 
 Each `contracts/<source-path>__<Contract>.md` deep dive combines:
 
@@ -875,6 +877,9 @@ Machine-readable mirror; each carries `schemaVersion: "2.0.0"`.
 | `data/overview.json` | `{ schemaVersion, tool, generatedAt, projectRoot, scanTarget, analysisComplete, diagnosticCounts, stats, overview }` |
 | `data/findings.json` | `{ schemaVersion, tool, generatedAt, counts, findings[] }`        |
 | `data/diagnostics.json` | `{ schemaVersion, generatedAt, analysisComplete, counts, diagnostics[] }`; always emitted |
+| `data/interactions.json` | Timestamp-free external-boundary evidence; unavailable legacy caches are labeled instead of guessed |
+| `data/hunter.json` | Timestamp-free entry-point reading order projected from boundary and authorization facts |
+| `data/authorization.json` | Versioned authorization facts for exact function/scope consumers |
 | `data/nav.json` | `{ schemaVersion, symbols[], callers[], interfaceImpl[] }` — navigation index for the VSCode extension |
 | `data/explorer.json` | `{ schemaVersion, contracts[] }` — per-deployable-contract constants/storage/entryFunctions/getters, for the extension's explorer tab |
 | `data/xref.json` | `{ schemaVersion, declarations[], references[] }` — precise, type-resolved cross-reference index: jump targets plus every bound occurrence (`refId` + `refKind`), for regex-free go-to-definition and find-references |
@@ -992,7 +997,10 @@ W3GoAudit automatically detects:
 
 ### Excluded Directories
 
-Automatically skipped: `node_modules/`, `out/`, `artifacts/`, `cache/`, `test/`, `lib/`, `mocks/`, `broadcast/`
+Automatically skipped: `node_modules/`, `out/`, `artifacts/`, `cache/`, `test/`, `lib/`, `mocks/`, `broadcast/`, `certora/`
+
+Directory scans also skip Foundry test and script files by name (`*.t.sol`,
+`*.s.sol`) wherever they sit. A file passed explicitly is still scanned.
 
 ### Environment Variables
 

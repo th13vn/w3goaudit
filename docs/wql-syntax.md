@@ -3,8 +3,8 @@
 Complete reference for writing security templates using the W3GoAudit Query
 Language (WQL). A WQL document is meta plus one query: block. The block contains
 `select`/`from`/`where` or a query-level composition. The repository currently
-contains 20 official, 5 feature-test, and 76 benchmark templates using this
-syntax.
+contains 20 official and 5 feature-test templates in this repository. Benchmark
+fixtures live in the maintainer-only ignored harness.
 
 This reference is accurate to the **implementation** —
 [`pkg/engine/wql.go`](../pkg/engine/wql.go) (parser + lowering to evaluator
@@ -12,6 +12,31 @@ This reference is accurate to the **implementation** —
 (the exact block-kind and attribute name tables), with canonical presets
 validated through [`BuiltinPresets`](../pkg/engine/presets.go) — not just the
 design spec. Where the two ever disagree, the code wins.
+
+## Repeated structural matchers
+
+`has`, `in`, `receiver`, `left`, `right`, `statement_has`, and `guarded_by`
+each perform one structural search. The loader rejects repeated instances on
+the same matcher node because merging them would require the same related node
+to satisfy both searches. Use explicit `any:` or `and:` branches for
+independent searches.
+
+The official reentrancy detector also recognizes caller-controlled
+`safeTransferFrom` calls when the source argument is tainted from the caller
+and the receiver has a resolved type other than `IERC20`. This covers
+hook-capable token standards without treating ordinary ERC20 `transferFrom`
+calls, or SafeERC20 calls whose import did not resolve, as an interaction.
+
+```yaml
+where:
+  - any:
+      - has: {block: member, name: balance}
+      - has: {block: external_call, name: balanceOf}
+```
+
+The divide-before-multiply rule uses the semantic
+`intentional_divide_rounding` attribute to exclude a stable repeated divisor
+in `(a / b) * b`. Unresolved or effectful operands do not satisfy it.
 
 ---
 
@@ -268,6 +293,18 @@ root instead of being wrapped in `has:`. Its first step is the finding anchor:
 - a conflicting kind or a composite first-step anchor (`any:`/`and:`) is
   rejected instead of silently ignoring `select`.
 
+From an entry function, a sequence also sees steps inside internal helpers:
+callees are expanded at their call site, so `_send(msg.sender, amount);
+balances[msg.sender] -= amount;` orders the helper's call before the entry's
+write. Each expanded step is matched in its own helper's context, so
+`tainted:` and `arg.N` steps see the helper's parameters bound to the caller's
+arguments (`_send(msg.sender, ...)` and `_send(owner, ...)` differ). A
+sequence match through helpers still has to satisfy every other root-level
+constraint of the rule. The expansion applies to every sequence evaluated at
+the function root, including one under `not:`, so an exclusion written as
+`not: {sequence: [...]}` also sees a step that lives in a helper, which
+`not: {has: ...}` does not.
+
 ---
 
 ## 3. `from` — Scope to Search
@@ -339,7 +376,7 @@ a finding, such as access control or an initializer modifier.
 | `left: <matcher>` | Left operand of a binary/assignment/member-access node matches. |
 | `right: <matcher>` | Right operand matches. |
 | `statement_has: <matcher>` | AST sub-rule matched against the node's nearest enclosing statement (narrower than `in:`, wider than `has:`) — e.g. "no other bitwise operator in this same statement". Context-only fields such as `preset:` are rejected inside it. |
-| `unchecked_var:` | Presence-only marker on an arithmetic `binary` or `assign` node when no structurally pure preceding guard in the same function bounds every operand. The complete condition and all additional `require`/`assert` arguments must be effect-free. |
+| `unchecked_var:` | Presence-only marker on an arithmetic `binary` or `assign` node when no structurally pure preceding guard in the same function bounds every operand. The complete condition and all additional `require`/`assert` arguments must be effect-free; only declarations and events with effect-free values may separate the guard from the operation. |
 | `modifier: <regex>` | Function has a modifier whose name matches. |
 | `base: <regex>` | Contract-scope: the contract (or an ancestor in its inheritance chain) matches. |
 | `func_name: <regex>` | Function name matches (function-level precondition, independent of the AST node's own `name:`). |
@@ -429,12 +466,13 @@ to the same node:
 
 ```yaml
 - attr:
-    has_value: true
-    has_gas: true
+    receiver_type_is_address: true
+    boundary_result_checked: no
 ```
 
-This is equivalent to two bare-key matchers (`has_value: true`, `has_gas:
-true`) ANDed together.
+This is equivalent to two bare-key matchers ANDed together. To require a call
+option, match its child: `has: { call_option: value }` for `{value: ...}` and
+`has: { call_option: gas }` for `{gas: ...}`.
 
 ---
 
@@ -556,8 +594,6 @@ Resolved by `attrNameToIR` (`wql_catalog.go`). `name`, `visibility`,
 | `receiver` | bool — node is the receiver child of a member call | `call_receiver` |
 | `receiver_name` | anchored regex on the selected call node's direct receiver child name | `receiver_name` |
 | `signature` | anchored regex on the called function signature | `called_signature` |
-| `has_value` | bool — call carries `{value: ...}` | `has_value` |
-| `has_gas` | bool — call carries `{gas: ...}` | `has_gas` |
 | `call_option` | `"value"` or `"gas"` marker on a call-option child | `call_option` |
 | `operator` | anchored regex, e.g. `"=="`, `"/"`, `"\\*"` | `operator` |
 | `type` | anchored regex on the resolved type | `type` |
@@ -596,7 +632,7 @@ preset.
 | `receiver_type_kind` | resolved receiver type kind | `receiver_type_kind` |
 | `receiver_type_is_address` | bool | `receiver_type_is_address` |
 | `boundary_result_disposition` | anchored result handling value: `discarded`, `captured`, `returned`, `condition`, or `consumed` | `boundary_result_disposition` |
-| `boundary_result_checked` | anchored direct-check value: `yes` or `no`; incomplete internal evidence does not match a positive value | `boundary_result_checked` |
+| `boundary_result_checked` | anchored check value: `yes` or `no`. `yes` means a later `require`/`assert`/`if` tests the captured result, a local copied from it, or the matching parameter of an internal helper it is passed to; a result returned to the caller (directly or via a named return) has disposition `returned` instead. Incomplete internal evidence does not match a positive value | `boundary_result_checked` |
 | `transaction_context_source` | anchored transaction-level source; currently `msg_value` | `transaction_context_source` |
 | `transaction_context_use` | anchored proven effect: `state_write`, `call_value`, or `stateful_internal_call` | `transaction_context_use` |
 | `transaction_context_repeatability` | anchored loop proof: `possible` or `single_iteration` | `transaction_context_repeatability` |
@@ -665,8 +701,12 @@ intra-function dataflow (a bounded fixpoint over straight-line code and
 loops), interprocedural tracing through internal helper calls (with
 context-sensitive argument binding — `_deposit(from, amount)` vs.
 `_deposit(msg.sender, amount)` are distinguished), and simple local-alias
-propagation. It is **not** path-sensitive and does not track taint flowing
-out through a callee's return value.
+propagation. A value returned by a non-virtual internal helper carries the
+taint of what the helper returns, evaluated with the call's arguments, so
+`a = _lookup(token)` returning a registry entry is state-derived while
+`t = _passthrough(target)` stays caller-controlled. Virtual and recursive
+helpers fall back to the union of their arguments' taint. It is **not**
+path-sensitive.
 
 `_msgSender()` means an exact zero-argument internal helper. Recorded call
 metadata, when present, must identify an internal/inherited/super call with

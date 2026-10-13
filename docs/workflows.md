@@ -50,7 +50,7 @@ graph LR
 
 1. **Detect input type** (file or directory)
 2. **Recursively discover** `.sol` files
-3. **Skip excluded directories**: `node_modules`, `out`, `artifacts`, `test`, `lib`, etc.
+3. **Skip excluded directories**: `node_modules`, `out`, `artifacts`, `test`, `lib`, etc., and Foundry `*.t.sol`/`*.s.sol` files
 4. **Read file contents** into memory
 5. **Detect project root** and framework (Foundry/Hardhat/Truffle)
 6. **Resolve imports recursively** and persist each unresolved import as a
@@ -167,7 +167,7 @@ The builder constructs a comprehensive database through ordered phases:
 
 **Phase 8: Build External-Boundary Facts**
 - Walk exact function and modifier scopes in deterministic order
-- Build `ExternalBoundaryFactsVersion` `1.0.0` records with exact `ScopeID`,
+- Build `ExternalBoundaryFactsVersion` `1.1.0` records with exact `ScopeID`,
   source range, target/value/result/state/reentry evidence, and limitations
 - Trace exact entry reachability over resolved internal, inherited, library,
   `super`, modifier, and self edges without name or prefix fallback
@@ -298,6 +298,10 @@ graph TD
   context is populated in every mode.
 - **Location units**: columns are one-based, half-open Unicode code points;
   bytes are zero-based, half-open UTF-8 offsets. They are not LSP positions.
+- **Resolved library sites**: report locations use the exact caller expression
+  and its declaring file/function, even when reached through an inherited
+  internal helper. The inner library AST and entry-to-library reachability stay
+  available for evidence. Verifier mode retains entry labels only.
 
 #### Phase 5: Report Generation (Result Folder)
 **Component:** [`pkg/report`](../pkg/report) — `WriteBundle`
@@ -312,7 +316,7 @@ graph TD
     A[Findings + Database + Summary] --> B[WriteBundle]
     B --> C[README.md / audit.md]
     B --> D[results.sarif]
-    B --> E[data/ database.json, findings.json, overview.json, diagnostics.json, interactions.json, manifest.json, nav.json, explorer.json, xref.json]
+    B --> E[data/ database.json, findings.json, overview.json, diagnostics.json, interactions.json, hunter.json, authorization.json, manifest.json, nav.json, explorer.json, xref.json]
     B --> F[one consolidated Markdown deep dive per main contract]
     B -->|--html| G[audit.html]
     H[CLI] --> I[run.log: full verbose detail, always]
@@ -327,6 +331,10 @@ graph TD
 - `results.sarif` — SARIF 2.1.0 (always)
 - `data/{database.json,findings.json,overview.json,diagnostics.json}` — machine-readable mirror;
   the canonical database lives only here and is reusable via `--db`
+- `data/hunter.json` — timestamp-free entry-point reading order: every
+  (main contract, entry function) pair ranked from the boundary and
+  authorization facts. A reading order, not a finding list; see
+  [`docs/extension-output.md`](./extension-output.md)
 - `data/interactions.json` — timestamp-free semantic external-boundary facts
   for SDK, Agent, and downstream-tool consumption. It contains deterministic
   evidence plus analysis metadata; legacy caches receive `available: false`
@@ -493,9 +501,8 @@ The terminal shows staged progress (`▶ Reading sources`, `▶ Building databas
 references section, and the result-folder location. Full verbose detail is always
 captured in `<output>/run.log`.
 
-> **Removed in v0.3:** `--fail-on`,
-> `--format`/`--json`/`--md`/`--html`-as-format (the folder always
-> carries Markdown + SARIF + JSON), and `--log`. Location-source behavior is
+> The scan writes Markdown, SARIF, JSON, and `run.log` by default. Extract
+> commands retain their separate `--format=md|json` option. Location-source behavior is
 > selectable through `--location-source`, the SDK, and
 > `W3GOAUDIT_LOCATION_FROM_MATCHED_NODE`.
 

@@ -190,8 +190,17 @@ func (e *Engine) verifyAny(node *types.ASTNode, rules []Rule) bool {
 // order. A Solidity call's receiver, options, and explicit argument subtrees
 // all precede the call event, while distinct pre-call sibling subtrees remain
 // unordered because Solidity does not guarantee their relative order.
+//
+// At a function's own root, the sequence is first tried with internal callees
+// expanded at their call sites, so a positive sequence can span helpers and a
+// negated one (`not: {sequence: ...}`) sees a helper-hosted step too; each
+// expanded step is judged in its own function's taint context.
 func (e *Engine) verifySeq(node *types.ASTNode, rules []Rule) bool {
 	if len(rules) == 0 {
+		return true
+	}
+	if fn := e.currentFunction; fn != nil && fn.AST != nil && node == fn.AST &&
+		e.verifyInterproceduralSequence(fn, e.currentContract, e.currentTaintEnv, rules) {
 		return true
 	}
 	plan := newSequencePlan()
@@ -205,6 +214,14 @@ type sequenceEvent struct {
 	path          ipPath
 	arms          map[int]string
 	astOccurrence int
+	// fn, contract and env are the function, runtime contract and taint
+	// environment the event executes in. An event inlined from a callee
+	// carries the callee's context-sensitive taint, so `tainted:` and `arg.N`
+	// steps judge `_send(msg.sender)` and `_send(to)` differently. A nil fn
+	// (intra-function plans) keeps the caller's context.
+	fn       *types.Function
+	contract *types.Contract
+	env      map[string][]string
 }
 
 type sequencePlan struct {
@@ -222,6 +239,7 @@ type sequencePlanBuilder struct {
 	plan              *sequencePlan
 	inlineCallees     bool
 	visiting          map[string]bool
+	modifierResumes   map[*types.ASTNode][]func(map[int]string) sequenceRegion
 	nextArmOccurrence int
 	nextASTOccurrence int
 }
@@ -230,13 +248,16 @@ func newSequencePlan() *sequencePlan {
 	return &sequencePlan{edges: make(map[int]map[int]struct{})}
 }
 
-func (plan *sequencePlan) addEvent(node *types.ASTNode, path ipPath, arms map[int]string, astOccurrence int) int {
+func (plan *sequencePlan) addEvent(node *types.ASTNode, path ipPath, arms map[int]string, astOccurrence int, fn *types.Function, contract *types.Contract, env map[string][]string) int {
 	index := len(plan.events)
 	plan.events = append(plan.events, sequenceEvent{
 		node:          node,
 		path:          cloneIPPath(path),
 		arms:          cloneSequenceArms(arms),
 		astOccurrence: astOccurrence,
+		fn:            fn,
+		contract:      contract,
+		env:           env,
 	})
 	return index
 }
@@ -318,6 +339,9 @@ func (builder *sequencePlanBuilder) buildNode(node *types.ASTNode, fn *types.Fun
 	if node == nil {
 		return sequenceRegion{}
 	}
+	if resumes := builder.modifierResumes[node]; len(resumes) > 0 {
+		return resumes[len(resumes)-1](arms)
+	}
 	if isSequenceCallEventNode(node) {
 		return builder.buildCallNode(node, fn, contract, env, depth, chain, arms, astOccurrence)
 	}
@@ -325,7 +349,7 @@ func (builder *sequencePlanBuilder) buildNode(node *types.ASTNode, fn *types.Fun
 		return builder.buildEffectNode(node, fn, contract, env, depth, chain, arms, astOccurrence)
 	}
 
-	event := builder.plan.addEvent(node, chain, arms, astOccurrence)
+	event := builder.plan.addEvent(node, chain, arms, astOccurrence, fn, contract, env)
 	children := builder.buildChildren(node, fn, contract, env, depth, chain, arms, astOccurrence)
 	if len(children.entries) == 0 {
 		return sequenceRegion{entries: []int{event}, exits: []int{event}}
@@ -344,7 +368,7 @@ func (builder *sequencePlanBuilder) buildEffectNode(node *types.ASTNode, fn *typ
 		operands.entries = append(operands.entries, region.entries...)
 		operands.exits = append(operands.exits, region.exits...)
 	}
-	event := builder.plan.addEvent(node, chain, arms, astOccurrence)
+	event := builder.plan.addEvent(node, chain, arms, astOccurrence, fn, contract, env)
 	if len(operands.exits) == 0 {
 		return sequenceRegion{entries: []int{event}, exits: []int{event}}
 	}
@@ -391,7 +415,7 @@ func (builder *sequencePlanBuilder) buildCallNode(node *types.ASTNode, fn *types
 		prelude.exits = append(prelude.exits, region.exits...)
 	}
 
-	callEvent := builder.plan.addEvent(node, chain, arms, astOccurrence)
+	callEvent := builder.plan.addEvent(node, chain, arms, astOccurrence, fn, contract, env)
 	if len(prelude.exits) > 0 {
 		builder.plan.order(prelude.exits, []int{callEvent})
 	} else {
@@ -406,7 +430,7 @@ func (builder *sequencePlanBuilder) buildCallNode(node *types.ASTNode, fn *types
 	if callee == nil {
 		return result
 	}
-	seed := builder.engine.bindCalleeTaint(callee, callArgumentChildren(node), env)
+	seed := builder.engine.bindCalleeTaint(callee, calleeBindingArguments(node, callee, calleeContract), env)
 	calleeEnv := builder.engine.buildFunctionTaintEnv(callee, seed)
 	nextChain := ipPath{
 		Functions: append(append([]*types.Function{}, chain.Functions...), callee),
@@ -431,7 +455,84 @@ func (builder *sequencePlanBuilder) buildFunction(fn *types.Function, contract *
 	}
 	builder.visiting[key] = true
 	defer delete(builder.visiting, key)
-	return builder.buildChildren(fn.AST, fn, contract, env, depth, chain, arms, builder.newASTOccurrence())
+	return builder.buildFunctionExecution(fn, contract, env, depth, chain, arms)
+}
+
+// buildFunctionExecution models Solidity's modifier wrapping semantics for
+// sequence matching. Applied modifiers execute in declaration order, each
+// modifier's `_` placeholder yielding to the next modifier or the function
+// body, then suffix statements execute in reverse order. This keeps
+// modifier-hosted external interactions in the same execution-event partial
+// order as the function's state writes without adding detector-specific rules.
+func (builder *sequencePlanBuilder) buildFunctionExecution(fn *types.Function, contract *types.Contract, env map[string][]string, depth int, chain ipPath, arms map[int]string) sequenceRegion {
+	return builder.buildModifierExecution(fn, contract, env, depth, chain, arms, 0)
+}
+
+func (builder *sequencePlanBuilder) buildModifierExecution(fn *types.Function, contract *types.Contract, env map[string][]string, depth int, chain ipPath, arms map[int]string, modifierIndex int) sequenceRegion {
+	if modifierIndex >= len(fn.Modifiers) {
+		return builder.buildChildren(fn.AST, fn, contract, env, depth, chain, arms, builder.newASTOccurrence())
+	}
+	mod := builder.engine.appliedModifierDeclaration(contract, fn.Modifiers[modifierIndex])
+	if mod == nil {
+		return builder.buildModifierExecution(fn, contract, env, depth, chain, arms, modifierIndex+1)
+	}
+	occurrence := builder.newASTOccurrence()
+	if builder.modifierResumes == nil {
+		builder.modifierResumes = make(map[*types.ASTNode][]func(map[int]string) sequenceRegion)
+	}
+	resume := func(resumeArms map[int]string) sequenceRegion {
+		// Each placeholder executes the next modifier layer or wrapped
+		// function anew. Passing its active arm map preserves conditional
+		// co-execution constraints for placeholders nested at any AST depth.
+		return builder.buildModifierExecution(fn, contract, env, depth, chain, resumeArms, modifierIndex+1)
+	}
+	placeholders := modifierPlaceholderNodes(mod)
+	for _, placeholder := range placeholders {
+		builder.modifierResumes[placeholder] = append(builder.modifierResumes[placeholder], resume)
+	}
+	defer func() {
+		for _, placeholder := range placeholders {
+			resumes := builder.modifierResumes[placeholder]
+			if len(resumes) <= 1 {
+				delete(builder.modifierResumes, placeholder)
+			} else {
+				builder.modifierResumes[placeholder] = resumes[:len(resumes)-1]
+			}
+		}
+	}()
+	var result sequenceRegion
+	appendRegion := func(region sequenceRegion) {
+		if len(region.entries) == 0 {
+			return
+		}
+		if len(result.entries) == 0 {
+			result.entries = append([]int(nil), region.entries...)
+		} else {
+			builder.plan.order(result.exits, region.entries)
+		}
+		result.exits = append([]int(nil), region.exits...)
+	}
+	for _, child := range mod.Children {
+		if child == nil || child.Kind == types.KindDeclParameter {
+			continue
+		}
+		appendRegion(builder.buildNode(child, fn, contract, env, depth, chain, arms, occurrence))
+	}
+	return result
+}
+
+func modifierPlaceholderNodes(mod *types.ASTNode) []*types.ASTNode {
+	if mod == nil {
+		return nil
+	}
+	var placeholders []*types.ASTNode
+	mod.WalkDescendants(func(node *types.ASTNode) bool {
+		if node.Kind == types.KindExprIdentifier && node.Name == "_" && node.RefKind == "" && node.RefID == "" {
+			placeholders = append(placeholders, node)
+		}
+		return true
+	})
+	return placeholders
 }
 
 func cloneIPPath(path ipPath) ipPath {
@@ -520,7 +621,7 @@ func (e *Engine) findSequenceInEvents(plan *sequencePlan, rules []Rule, chosen [
 			chainCheckpoint = e.match.Chain
 			chainContractsCheckpoint = e.match.ChainContracts
 		}
-		if !e.verify(event.node, rules[0]) {
+		if !e.verifySequenceEvent(event, rules[0]) {
 			if e.match != nil {
 				e.match.Primary = primaryCheckpoint
 				e.match.primaryPriority = primaryPriorityCheckpoint
@@ -571,6 +672,20 @@ func (e *Engine) findSequenceInEvents(plan *sequencePlan, rules []Rule, chosen [
 	}
 
 	return false
+}
+
+// verifySequenceEvent matches one sequence step against an event inside the
+// event's own function, contract and taint environment.
+func (e *Engine) verifySequenceEvent(event sequenceEvent, rule Rule) bool {
+	if event.fn == nil {
+		return e.verify(event.node, rule)
+	}
+	prevFunction, prevContract, prevTaintEnv := e.currentFunction, e.currentContract, e.currentTaintEnv
+	e.currentFunction, e.currentContract, e.currentTaintEnv = event.fn, event.contract, event.env
+	defer func() {
+		e.currentFunction, e.currentContract, e.currentTaintEnv = prevFunction, prevContract, prevTaintEnv
+	}()
+	return e.verify(event.node, rule)
 }
 
 // isWithinSubtree reports whether node is ancestor itself or a descendant of
@@ -741,6 +856,12 @@ func (e *Engine) matchAtomic(node *types.ASTNode, r Rule) bool {
 	// Check attributes
 	if len(r.Attr) > 0 {
 		for key, expectedValue := range r.Attr {
+			if key == "intentional_divide_rounding" {
+				if expectedValue != true || !hasRepeatedDivisionOperand(node) {
+					return false
+				}
+				continue
+			}
 			if !e.matchAttributeValue(node, key, expectedValue) {
 				return false
 			}
@@ -845,6 +966,27 @@ func (e *Engine) matchLeftRight(node *types.ASTNode, r Rule) bool {
 		// If user specified left/right but node doesn't support it, return false
 		return false
 	}
+}
+
+// hasRepeatedDivisionOperand recognizes the intentional rounding idiom
+// `(a / b) * b` (and its commuted form) using stable AST identity. It returns
+// false when either operand is unresolved or effectful so the divide detector
+// remains conservative.
+func hasRepeatedDivisionOperand(node *types.ASTNode) bool {
+	if node == nil || node.Kind != types.KindExprBinaryOp || node.GetAttributeString("operator") != "*" || len(node.Children) != 2 {
+		return false
+	}
+	for _, divIndex := range []int{0, 1} {
+		div := node.Children[divIndex]
+		other := node.Children[1-divIndex]
+		if div == nil || div.Kind != types.KindExprBinaryOp || div.GetAttributeString("operator") != "/" || len(div.Children) != 2 {
+			continue
+		}
+		if sameBoundExpression(div.Children[1], other) {
+			return true
+		}
+	}
+	return false
 }
 
 // matchMemberAccessLeftRight checks left/right for member_access nodes
@@ -1191,6 +1333,28 @@ func callArgumentChildren(node *types.ASTNode) []*types.ASTNode {
 	return out
 }
 
+// calleeBindingArguments returns the expressions bound to callee's parameters,
+// in order. A `using L for T` extension call passes its receiver as the first
+// parameter: `token.safeTransferFrom(from, to, value)` binds `token` to
+// SafeERC20's `IERC20 token` and shifts the written arguments by one. Binding
+// the written arguments from parameter 0 instead gave the library's token the
+// caller's `from`, so a SafeERC20 call on a fixed token read as a
+// caller-controlled low-level call. A direct `Library.fn(a, b)` call has no
+// such offset.
+func calleeBindingArguments(node *types.ASTNode, callee *types.Function, calleeContract *types.Contract) []*types.ASTNode {
+	args := callArgumentChildren(node)
+	if node == nil || callee == nil || calleeContract == nil || calleeContract.Kind != types.ContractKindLibrary ||
+		len(callee.Parameters) != len(args)+1 {
+		return args
+	}
+	for _, child := range node.Children {
+		if child != nil && child.GetAttributeBool("call_receiver") {
+			return append([]*types.ASTNode{child}, args...)
+		}
+	}
+	return args
+}
+
 // checkTaint verifies if a node or any of its descendants comes from a specific
 // source. It consults the active taint environment first, so context-sensitive
 // internal calls can distinguish _helper(from) from _helper(msg.sender).
@@ -1223,6 +1387,14 @@ func (e *Engine) collectExpressionTaints(node *types.ASTNode, env map[string][]s
 	if node == nil {
 		return
 	}
+	if !e.isCallerIdentityNode(node) {
+		if returned, ok := e.helperReturnTaints(node, env); ok {
+			for _, source := range returned {
+				out[source] = true
+			}
+			return
+		}
+	}
 	for _, source := range e.directNodeTaints(node, env) {
 		if source != "" {
 			out[source] = true
@@ -1248,6 +1420,60 @@ func (e *Engine) collectExpressionTaints(node *types.ASTNode, env map[string][]s
 	for _, child := range node.Children {
 		e.collectExpressionTaints(child, env, out)
 	}
+}
+
+// helperReturnTaints summarizes a call to a non-virtual internal helper by the
+// taint of what the helper returns, evaluated under the call's argument
+// bindings: the union over its return statements and named return variables.
+// Without it the call's value was the union of its arguments' taint, so
+// Curve's `getOriginAndTarget(curve, _origin, _target)`, which returns entries
+// of an admin-maintained registry, read as caller-chosen. A virtual helper is
+// not summarized, since an override may return anything, and neither is a
+// recursive one; both keep the conservative argument union.
+func (e *Engine) helperReturnTaints(node *types.ASTNode, env map[string][]string) ([]string, bool) {
+	if e == nil || e.db == nil || node == nil || node.Kind != types.KindCallInternal ||
+		node.RefKind != "function" || node.RefID == "" {
+		return nil, false
+	}
+	callee, ok := e.db.GetFunctionByID(node.RefID)
+	if !ok || callee == nil || callee.IsVirtual || callee.AST == nil {
+		return nil, false
+	}
+	seed := e.bindCalleeTaint(callee, callArgumentChildren(node), env)
+	key := functionVisitKey(callee, seed)
+	if cached, ok := e.returnTaintCache[key]; ok {
+		return cached, true
+	}
+	if e.returnTaintVisiting[key] || len(e.returnTaintVisiting) >= MaxInterproceduralTaintDepth {
+		return nil, false
+	}
+	if e.returnTaintCache == nil {
+		e.returnTaintCache = make(map[string][]string)
+		e.returnTaintVisiting = make(map[string]bool)
+	}
+	e.returnTaintVisiting[key] = true
+	defer delete(e.returnTaintVisiting, key)
+
+	calleeEnv := e.buildFunctionTaintEnv(callee, seed)
+	set := make(map[string]bool)
+	callee.AST.WalkDescendants(func(n *types.ASTNode) bool {
+		if n.Kind == types.KindStmtReturn {
+			for _, child := range n.Children {
+				e.collectExpressionTaints(child, calleeEnv, set)
+			}
+		}
+		return true
+	})
+	for _, ret := range callee.Returns {
+		if ret != nil && ret.Name != "" {
+			for _, source := range calleeEnv[ret.Name] {
+				set[source] = true
+			}
+		}
+	}
+	result := sortedTaintSet(set)
+	e.returnTaintCache[key] = result
+	return result, true
 }
 
 // taintRelevantChildren returns the subset of children that carry a node's value
@@ -1418,8 +1644,13 @@ func (e *Engine) verifyAtFunctionWithCallees(fn *types.Function, r Rule, contrac
 		if callee == nil {
 			return true
 		}
-		calleeSeed := e.bindCalleeTaint(callee, callArgumentChildren(node), env)
+		calleeSeed := e.bindCalleeTaint(callee, calleeBindingArguments(node, callee, calleeContract), env)
 		if e.verifyAtFunctionWithCallees(callee, r, calleeContract, calleeSeed, visiting, depth+1, curChain, curContracts) {
+			if e.match != nil && e.match.OuterLibraryCall == nil && calleeContract != nil && calleeContract.Kind == types.ContractKindLibrary {
+				e.match.OuterLibraryCall = node
+				e.match.OuterLibraryFunction = fn
+				e.match.OuterLibraryContract = calleeContract
+			}
 			matched = true
 			return false
 		}
@@ -1506,16 +1737,10 @@ func (e *Engine) verifyAtFunctionWithEnv(fn *types.Function, r Rule, contract *t
 		astRule.Not = nil
 	}
 
-	// For pure structural sequence rules, expand internal callees at their call
-	// site before matching. This lets CEI-style templates catch
-	// `_sendETH(...); balances[msg.sender] -= amount;` where the outgoing call
-	// lives in an internal helper but the state write is in the entrypoint.
-	if len(astRule.Sequence) > 0 && !rulesUseContextSensitiveMatchers(astRule.Sequence) {
-		if e.verifyInterproceduralSequence(fn, contract, env, astRule.Sequence) {
-			return true
-		}
-	}
-
+	// Root-level sequences expand internal callees in verifySeq, so CEI-style
+	// templates catch `_sendETH(...); balances[msg.sender] -= amount;` where the
+	// call lives in a helper, while every other constraint of the rule is still
+	// checked against the function.
 	return e.verify(fn.AST, astRule)
 }
 
@@ -1533,22 +1758,6 @@ func (e *Engine) verifyInterproceduralSequence(fn *types.Function, contract *typ
 	}
 	builder.buildFunction(fn, contract, env, 0, chain, nil)
 	return e.findSequenceInEvents(plan, rules, nil, make(map[int]bool))
-}
-
-func rulesUseContextSensitiveMatchers(rules []Rule) bool {
-	usesContext := false
-	for i := range rules {
-		_ = walkRules(&rules[i], func(rule *Rule) error {
-			if rule.TaintedFrom != "" || len(rule.Args) > 0 || rule.ArgAny != nil {
-				usesContext = true
-			}
-			return nil
-		})
-		if usesContext {
-			return true
-		}
-	}
-	return false
 }
 
 func (e *Engine) buildFunctionTaintEnv(fn *types.Function, seed map[string][]string) map[string][]string {
@@ -2880,8 +3089,16 @@ func operandsGuardedBefore(node *types.ASTNode) bool {
 			if idx < 0 {
 				return false
 			}
-			if idx > 0 {
-				return precedingStatementProvesBound(parent.Children[idx-1], left, right)
+			// Walk back over statements that cannot change an operand
+			// (declarations, events) to the guard that bounds it.
+			for k := idx - 1; k >= 0; k-- {
+				previous := parent.Children[k]
+				if precedingStatementProvesBound(previous, left, right) {
+					return true
+				}
+				if !statementPreservesOperands(previous, left, right) {
+					return false
+				}
 			}
 		}
 		if parent.Kind == types.KindDeclFunction || parent.Kind == types.KindDeclModifier {
@@ -3122,7 +3339,7 @@ func ifArmProvesBound(statement, arm, subtraction, left, right *types.ASTNode) b
 	if statement == nil || len(statement.Children) < 2 {
 		return false
 	}
-	if !ifArmPathIsTransparent(arm, subtraction) {
+	if !ifArmPathIsTransparent(arm, subtraction, left, right) {
 		return false
 	}
 	idx := directChildIndex(statement, arm)
@@ -3137,8 +3354,9 @@ func ifArmProvesBound(statement, arm, subtraction, left, right *types.ASTNode) b
 }
 
 // ifArmPathIsTransparent accepts an if-arm proof only when the subtraction is
-// the first executable operation reached through block/unchecked wrappers.
-func ifArmPathIsTransparent(arm, subtraction *types.ASTNode) bool {
+// the first executable operation reached through block/unchecked wrappers,
+// apart from earlier statements that cannot change an operand.
+func ifArmPathIsTransparent(arm, subtraction, left, right *types.ASTNode) bool {
 	if arm == nil || subtraction == nil {
 		return false
 	}
@@ -3149,14 +3367,75 @@ func ifArmPathIsTransparent(arm, subtraction *types.ASTNode) bool {
 		}
 		switch parent.Kind {
 		case types.KindStmtBlock, types.KindStmtUnchecked:
-			if directChildIndex(parent, current) != 0 {
+			idx := directChildIndex(parent, current)
+			if idx < 0 {
 				return false
+			}
+			for k := 0; k < idx; k++ {
+				if !statementPreservesOperands(parent.Children[k], left, right) {
+					return false
+				}
 			}
 		case types.KindStmtIf, types.KindStmtLoop, types.KindStmtTryCatch:
 			return false
 		}
 	}
 	return true
+}
+
+// statementPreservesOperands reports whether a statement between a guard and
+// the subtraction it bounds provably leaves both operands unchanged: a bare
+// local declaration, a local declaration whose initializer is structurally
+// effect-free, or an event emission with effect-free arguments, none of which
+// declares a name the operands use. Anything else, including any call or
+// assignment, ends the walk.
+func statementPreservesOperands(statement, left, right *types.ASTNode) bool {
+	if statement == nil {
+		return false
+	}
+	names := map[string]bool{}
+	collectIdentifierNames(left, names)
+	collectIdentifierNames(right, names)
+	switch statement.Kind {
+	case types.KindDeclVariable:
+		return statement.Name == "" || !names[statement.Name]
+	case types.KindStmtAssign:
+		// A declaration with an initializer carries no assignment operator.
+		if statement.GetAttributeString("operator") != "" || len(statement.Children) < 2 {
+			return false
+		}
+		last := len(statement.Children) - 1
+		for _, target := range statement.Children[:last] {
+			if target == nil || target.Kind != types.KindExprIdentifier || names[target.Name] {
+				return false
+			}
+		}
+		return isStructurallyEffectFreeExpression(statement.Children[last])
+	case types.KindStmtEmit:
+		if len(statement.Children) != 1 || statement.Children[0] == nil ||
+			statement.Children[0].Kind != types.KindCallInternal {
+			return false
+		}
+		for _, arg := range statement.Children[0].Children {
+			if !isStructurallyEffectFreeExpression(arg) {
+				return false
+			}
+		}
+		return true
+	}
+	return false
+}
+
+func collectIdentifierNames(node *types.ASTNode, names map[string]bool) {
+	if node == nil {
+		return
+	}
+	if node.Kind == types.KindExprIdentifier && node.Name != "" {
+		names[node.Name] = true
+	}
+	for _, child := range node.Children {
+		collectIdentifierNames(child, names)
+	}
 }
 
 // survivingIfArmIsEffectFree accepts an exiting-arm fallthrough proof only

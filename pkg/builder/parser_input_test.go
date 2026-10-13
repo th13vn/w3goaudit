@@ -115,3 +115,66 @@ func TestNormalizeYulAssignmentsForParserProducesAssignmentNodeAtOriginalRange(t
 		t.Fatalf("original source at assignment range = %q, want :=", snippet)
 	}
 }
+
+func TestLegacyConstantFunctionModifierIsParsedWithoutRecovery(t *testing.T) {
+	db := buildFromSource(t, "pragma solidity ^0.4.24;\ncontract LegacyConstant {\n    function read() constant returns (uint256) {\n        return 1;\n    }\n    function after() public {\n    }\n}")
+	c := db.GetContractByName("LegacyConstant")
+	if c == nil {
+		t.Fatal("LegacyConstant contract missing")
+	}
+	var read, after *types.Function
+	for _, fn := range c.Functions {
+		switch fn.Name {
+		case "read":
+			read = fn
+		case "after":
+			after = fn
+		}
+	}
+	if read == nil || after == nil {
+		t.Fatalf("functions missing after legacy constant: read=%+v after=%+v", read, after)
+	}
+	if read.StateMutability != types.StateMutabilityView {
+		t.Fatalf("legacy constant mutability = %q, want view", read.StateMutability)
+	}
+	for _, diagnostic := range db.Diagnostics {
+		if types.IsParseLoss(diagnostic.Code) {
+			t.Fatalf("legacy constant produced parse loss: %+v", diagnostic)
+		}
+	}
+}
+
+func TestLegacyConstantNormalizationPreservesNonFunctionConstantText(t *testing.T) {
+	input := "pragma solidity ^0.4.24;\ncontract C {\n string constant text = \"function fake() constant\";\n // function fake() constant { }\n function read() constant returns(uint) { return 1; }\n}"
+	got := normalizeLegacyFunctionModifiersForParser(input)
+	if !strings.Contains(got, "string constant text") || !strings.Contains(got, "function fake() constant") {
+		t.Fatalf("non-function constant text changed: %q", got)
+	}
+	if !strings.Contains(got, "function read() view     returns") {
+		t.Fatalf("function constant was not width-preserving normalized: %q", got)
+	}
+	if len(got) != len(input) {
+		t.Fatalf("normalized length=%d, want %d", len(got), len(input))
+	}
+}
+
+func TestModernConstantFunctionModifierIsNotNormalized(t *testing.T) {
+	input := "pragma solidity ^0.8.20;\ncontract C { function read() constant returns(uint) { return 1; } }"
+	if got := normalizeLegacyFunctionModifiersForParser(input); got != input {
+		t.Fatalf("modern source was normalized: %q", got)
+	}
+}
+
+func TestCommentedLegacyPragmaDoesNotEnableConstantNormalization(t *testing.T) {
+	input := "// pragma solidity ^0.4.24;\npragma solidity ^0.8.20;\ncontract C { function read() constant returns(uint) { return 1; } }"
+	if got := normalizeLegacyFunctionModifiersForParser(input); got != input {
+		t.Fatalf("commented legacy pragma enabled normalization: %q", got)
+	}
+}
+
+func TestMixedPragmasDoNotEnableConstantNormalization(t *testing.T) {
+	input := "pragma solidity ^0.4.24;\npragma solidity ^0.8.20;\ncontract C { function read() constant returns(uint) { return 1; } }"
+	if got := normalizeLegacyFunctionModifiersForParser(input); got != input {
+		t.Fatalf("mixed compiler ranges enabled normalization: %q", got)
+	}
+}

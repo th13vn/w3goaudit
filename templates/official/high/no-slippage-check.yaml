@@ -37,9 +37,25 @@ query:
         # Token-in swaps take it as argument 1.
         - has:
             block: external_call
-            name: '^(swapExactTokensForTokens|swapExactTokensForTokensSupportingFeeOnTransferTokens|swapExactTokensForETH|swapExactTokensForETHSupportingFeeOnTransferTokens|swapTokensForExactTokens|swapTokensForExactETH|swap)$'
+            name: '^(swapExactTokensForTokens|swapExactTokensForTokensSupportingFeeOnTransferTokens|swapExactTokensForETH|swapExactTokensForETHSupportingFeeOnTransferTokens|swapTokensForExactTokens|swapTokensForExactETH)$'
             arg.1:
               any:
                 - block: literal
                   name: '^0$'
                 - name: '^(type|uint256|max)$'
+
+        # A bare `swap` with the same argument-1 shape, except a Uniswap V2
+        # pair's `swap(amount0Out, amount1Out, to, data)`: it names exact
+        # outputs, one of which is normally zero, takes the recipient third,
+        # and the pair itself enforces the invariant.
+        - has:
+            block: external_call
+            name: '^swap$'
+            arg.1:
+              any:
+                - block: literal
+                  name: '^0$'
+                - name: '^(type|uint256|max)$'
+            not:
+              arg.2:
+                type: '^address( payable)?$'

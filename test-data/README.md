@@ -11,6 +11,13 @@ Each behavior has one canonical fixture lane. Benchmark-family fixtures live
 under [`../scripts/benchmark/fixtures/`](../scripts/benchmark/fixtures/) instead
 of being duplicated as aggregate files here.
 
+Private detector and incident-specific matrices stay in the ignored candidates
+and incidents directories. They are not part of the public fixture inventory.
+
+The official fixture gate in `pkg/engine/official_pack_gate_test.go` treats the
+official scan as a labeled pack-quality check and fails when its finding count or
+identity shape changes unexpectedly.
+
 | Group | What it holds | Used by |
 |---|---|---|
 | [`security/`](security/) | W3GoAudit-native fixtures for the official pack in [`../templates/official/`](../templates/official/) — deep bug-class matrices, focused engine regressions including metadata/MRO-exact caller identity and structurally pure unchecked-subtraction bounds, and promoted-detector fixtures with their safe controls. See [`security/README.md`](security/README.md). | `pkg/engine/*_test.go`, the documented full-pack scan |

@@ -22,9 +22,9 @@ not as aggregate files in this directory.
 | File | Ownership | Coverage |
 |---|---|---|
 | `arbitrary-low-level-call.sol` | Promoted detector fixture | `HIGH-ARBITRARY-LOW-LEVEL-CALL`; vulnerable user-controlled target/calldata and authenticated safe control. |
-| `arbitrary-send-eth.sol` | Promoted detector fixture | `HIGH-ARBITRARY-SEND-ETH`; unprotected value transfer and owner-gated safe control. |
+| `arbitrary-send-eth.sol` | Candidate and historical fixture | `HIGH-ARBITRARY-SEND-ETH`; unprotected value transfer, owner-gated safe control, caller-self-scoped forwarding, and caller-controlled destination coverage. |
 | `arbitrary-transferfrom.sol` | Deep bug-class matrix | `HIGH-ARBITRARY-TRANSFERFROM`; 36 declarations covering aliases, helper hops, structs, arrays, returned values, argument reordering, invariants, and safe controls. |
-| `amm-integration.sol` | Promoted detector matrix | `HIGH-NO-SLIPPAGE-CHECK`, `HIGH-UNISWAP-CALLBACK-UNPROTECTED`, `HIGH-UNISWAP-V4-HOOK-UNPROTECTED`; zero/max slippage bounds and caller-supplied bounds, V2/V3 callbacks with and without a pool assertion (inline and via a `verifyCallback` helper), and V4 hooks with and without `onlyPoolManager`. |
+| `amm-integration.sol` | Official plus candidate matrix | `HIGH-NO-SLIPPAGE-CHECK` plus candidate `HIGH-UNISWAP-CALLBACK-UNPROTECTED` and historical V4-hook controls; zero/max slippage bounds and caller-supplied bounds, V2/V3 callbacks with and without a pool assertion (inline and via a `verifyCallback` helper), and V4 hooks with and without `onlyPoolManager`. |
 | `bidi-characters.sol` | Promoted detector fixture | `MEDIUM-BIDI-CHARACTERS`; contains **real** U+202E/U+202C control characters — do not "clean up" this file, the detector asserts on their presence. Plain-ASCII safe control alongside. |
 | `boolean-cst.sol` | Deferred engine fixture | Boolean-constant cases retained for parser and matcher regression; no official detector currently owns this file. |
 | `dataflow.sol` | Focused engine regression | Minimal interprocedural taint propagation independent of a detector-specific fixture. |

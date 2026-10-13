@@ -93,7 +93,7 @@ func (cgb *CallGraphBuilder) analyzeFile(sf *types.SourceFile) error {
 	}
 	result, ok := sf.AST.(*ast.SourceUnit)
 	if !ok || result == nil {
-		parsed, err := parser.Parse(normalizeYulAssignmentsForParser(sf.Content), &parser.Options{
+		parsed, err := parser.Parse(normalizeLegacyFunctionModifiersForParser(normalizeYulAssignmentsForParser(sf.Content)), &parser.Options{
 			Tolerant: true,
 			Loc:      true,
 			Range:    true,
@@ -463,7 +463,19 @@ func (cgb *CallGraphBuilder) analyzeCallAndArguments(call *ast.FunctionCall) {
 	// calls in a receiver (`helper().ping()`) or call options
 	// (`target.ping{gas: helper()}()`), so traverse that expression exactly once
 	// before the positional arguments.
-	cgb.analyzeNode(call.Expression)
+	if receiver, options, legacy := legacyLowLevelCallParts(call.Expression); legacy {
+		// Do not walk the nested modifier-call wrappers themselves: they are
+		// syntax for the outer low-level call, not independent call-graph
+		// edges. Still analyze the receiver and option operands so nested
+		// expressions such as `getTarget().call.value(compute())(data)` retain
+		// their ordinary internal edges and type information.
+		cgb.analyzeNode(receiver)
+		for _, option := range options {
+			cgb.analyzeNode(option.expression)
+		}
+	} else {
+		cgb.analyzeNode(call.Expression)
+	}
 	for _, arg := range call.Arguments {
 		cgb.analyzeNode(arg)
 	}
@@ -566,6 +578,12 @@ type functionCallDescriptor struct {
 
 func (cgb *CallGraphBuilder) classifyFunctionCall(call *ast.FunctionCall) (functionCallDescriptor, bool) {
 	descriptor := functionCallDescriptor{callType: types.CallTypeInternal}
+	if receiver, _, ok := legacyLowLevelCallParts(call.Expression); ok {
+		descriptor.calledName = "call"
+		descriptor.callType = types.CallTypeLowLevelCall
+		descriptor.receiverType = cgb.expressionType(receiver)
+		return descriptor, true
+	}
 	switch expression := call.Expression.(type) {
 	case *ast.Identifier:
 		return cgb.classifyIdentifierCall(call, expression, descriptor)
@@ -619,9 +637,42 @@ func (cgb *CallGraphBuilder) classifyMemberCall(call *ast.FunctionCall, member *
 	}
 	if descriptor.targetContract == nil && !descriptor.identityRequired {
 		descriptor = cgb.classifyLibraryExtension(call, descriptor)
+	} else if descriptor.targetContract != nil && descriptor.targetContract.Kind != types.ContractKindLibrary &&
+		!cgb.contractHasMember(descriptor.targetContract, descriptor.calledName) {
+		// `using SafeERC20 for IERC20; token.safeTransfer(...)` names a member
+		// the contract type does not declare, so it can only be the attached
+		// library function. Adopt the extension only when it resolves exactly;
+		// otherwise keep the external classification.
+		extension := descriptor
+		extension.targetContract, extension.targetContractName, extension.identityRequired = nil, "", false
+		if extension = cgb.classifyLibraryExtension(call, extension); extension.targetContract != nil {
+			descriptor = extension
+		}
 	}
 	descriptor.callType = cgb.checkLowLevelCall(descriptor.calledName, descriptor.callType)
 	return descriptor, true
+}
+
+// contractHasMember reports whether a contract or any contract in its
+// linearized hierarchy declares a function, or a public state variable getter,
+// with the given name.
+func (cgb *CallGraphBuilder) contractHasMember(contract *types.Contract, name string) bool {
+	for _, scope := range cgb.db.LinearizedContracts(contract) {
+		if scope == nil {
+			continue
+		}
+		for _, fn := range scope.Functions {
+			if fn != nil && fn.Name == name {
+				return true
+			}
+		}
+		for _, state := range scope.StateVariables {
+			if state != nil && state.Name == name && state.Visibility == string(types.VisibilityPublic) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func (cgb *CallGraphBuilder) classifyIdentifierReceiver(name string, descriptor functionCallDescriptor) functionCallDescriptor {
@@ -701,6 +752,16 @@ func (cgb *CallGraphBuilder) classifyCallReceiver(call *ast.FunctionCall, descri
 	switch {
 	case castType.IsPrimitiveAddress() && isETHTransferName(descriptor.calledName):
 		descriptor.callType = types.CallTypeTransferETH
+	case castType.Kind == types.TypeKindPrimitive:
+		// An elementary conversion such as address(x) or uint256(v) names no
+		// contract, so a member call on it is a builtin or a `using L for
+		// <type>` extension. Leave identity unrequired, exactly as for a typed
+		// identifier receiver, so classifyLibraryExtension can resolve it.
+		// Requiring contract identity here left the OpenZeppelin idiom
+		// `address(t).functionDelegateCall(data)` as an unresolved external
+		// call, cutting the entry point off from the library's delegatecall.
+		descriptor.callType = types.CallTypeExternal
+		descriptor.targetContractName = castType.BaseName
 	case castType.BaseName != "":
 		descriptor.callType = types.CallTypeExternal
 		descriptor.targetContractName = castType.BaseName

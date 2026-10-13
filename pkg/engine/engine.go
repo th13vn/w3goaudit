@@ -55,13 +55,13 @@ type Engine struct {
 	// match, when non-nil, captures matched-node provenance during Verify
 	// so the calling executeOn* function can build Finding.Location from the
 	// matched AST node (the dangerous statement) instead of the enclosing
-	// verifier function. nil by default — Engine.Verify() callers that don't
+	// verifier function. nil by default — direct Engine.Verify callers that do not
 	// want this capture pay zero cost.
 	match *matchTrace
 
 	// locationOverride is set by SetLocationSource and consulted via
-	// locationSource(); the env var WGAUDIT_LOCATION_FROM_MATCHED_NODE takes
-	// precedence so CI/scripts can opt in without touching code.
+	// locationSource(); W3GOAUDIT_LOCATION_FROM_MATCHED_NODE takes precedence.
+	// WGAUDIT_LOCATION_FROM_MATCHED_NODE remains a legacy alias.
 	locationOverride LocationSource
 
 	// contractASTContract / contractASTRoot are a SINGLE-slot memo of the
@@ -73,6 +73,12 @@ type Engine struct {
 	// contract is visited only once). Reset at the top of Execute.
 	contractASTContract *types.Contract
 	contractASTRoot     *types.ASTNode
+
+	// returnTaintCache memoizes helperReturnTaints by callee and argument
+	// taint; returnTaintVisiting breaks recursion between helpers. The
+	// database is immutable during execution, so the cache never goes stale.
+	returnTaintCache    map[string][]string
+	returnTaintVisiting map[string]bool
 
 	// modifierDeclContract / modifierDeclByName are a separate SINGLE-slot
 	// memo for guarded_by. It clones only modifier declarations from one exact
@@ -103,6 +109,12 @@ type matchTrace struct {
 	// ChainContracts parallels Chain — the contract each function lives in
 	// (an internal call into an inherited base picks up the base's contract).
 	ChainContracts []*types.Contract
+	// OuterLibraryCall is the protocol call expression that entered a resolved
+	// library. The matched node remains Primary for evidence, but the outer call
+	// is a better user-facing fix location.
+	OuterLibraryCall     *types.ASTNode
+	OuterLibraryFunction *types.Function
+	OuterLibraryContract *types.Contract
 }
 
 // ipPath is stored on each interprocedural sequence-event occurrence so reused
@@ -174,10 +186,10 @@ type Finding struct {
 // Location identifies where a finding was detected.
 //
 // Provenance depends on the LocationSource setting. With
-// LocationSourceMatchedNode (set via WGAUDIT_LOCATION_FROM_MATCHED_NODE=1 or
+// LocationSourceMatchedNode (set via W3GOAUDIT_LOCATION_FROM_MATCHED_NODE=1 or
 // --location-source matched), every field is derived from the matched AST
-// node — the dangerous statement. With LocationSourceVerifier (the default
-// today, preserved for backward compatibility), Function/Contract come from
+// node — the dangerous statement. With LocationSourceVerifier (the legacy
+// mode), Function/Contract come from
 // the verifier-function context while Line comes from the matched node, which
 // can be inconsistent across interprocedural matches.
 type Location struct {
@@ -1188,10 +1200,13 @@ func (e *Engine) matchContractWithTrace(contract *types.Contract, rule Rule) (*m
 // buildLocation chooses the Finding.Location fields based on the active
 // LocationSource. With LocationSourceMatchedNode, the precise range comes from
 // the matched AST node and host identity prefers the final trace hop; with
-// LocationSourceVerifier (the default today) the function/contract come from
-// the verifier-function context — preserving today's behavior for callers that
-// haven't opted in.
+// LocationSourceVerifier (the legacy mode) the function/contract come from
+// the verifier-function context. A resolved library call is promoted using its
+// exact caller file and span.
 func (e *Engine) buildLocation(trace *matchTrace, verifierFn *types.Function, verifierContract *types.Contract, fallbackFile string) Location {
+	if loc, ok := e.libraryCallLocation(trace, verifierFn); ok {
+		return loc
+	}
 	if trace != nil && trace.Primary != nil && e.locationSource() == LocationSourceMatchedNode {
 		var hostName, hostContract, hostFile string
 		if len(trace.Chain) > 0 {
@@ -1246,8 +1261,8 @@ func (e *Engine) buildLocation(trace *matchTrace, verifierFn *types.Function, ve
 		applyNodeSpan(&loc, trace.Primary)
 		return loc
 	}
-	// Default (today's behavior): verifier function/contract; matched-node line if
-	// available.
+	// Legacy verifier attribution, or a function-level fallback when no matched
+	// node exists.
 	loc := Location{File: fallbackFile}
 	if verifierFn != nil {
 		loc.Line = verifierFn.StartLine
@@ -1270,6 +1285,23 @@ func (e *Engine) buildLocation(trace *matchTrace, verifierFn *types.Function, ve
 		}
 	}
 	return loc
+}
+
+// libraryCallLocation promotes a resolved library match at the exact caller
+// expression. Matched-node mode uses the caller file/function; verifier mode
+// keeps the entry contract/function identity while still using the caller span.
+func (e *Engine) libraryCallLocation(trace *matchTrace, verifierFn *types.Function) (Location, bool) {
+	if trace == nil || trace.OuterLibraryCall == nil || trace.OuterLibraryFunction == nil ||
+		trace.OuterLibraryContract == nil || trace.OuterLibraryContract.Kind != types.ContractKindLibrary {
+		return Location{}, false
+	}
+	caller := trace.OuterLibraryFunction
+	loc := Location{File: caller.SourceFile, Contract: caller.ContractName, Function: caller.Name, Line: trace.OuterLibraryCall.StartLine}
+	if e.locationSource() == LocationSourceVerifier && verifierFn != nil {
+		loc.Contract, loc.Function = verifierFn.ContractName, verifierFn.Name
+	}
+	applyNodeSpan(&loc, trace.OuterLibraryCall)
+	return loc, true
 }
 
 // primaryNodeFile resolves the source file that actually contains the trace's

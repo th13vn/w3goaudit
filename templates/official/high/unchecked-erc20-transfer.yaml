@@ -26,7 +26,23 @@ query:
   from: entry_function
   select: external_call
   where:
-    - name: ^(transfer|transferFrom)$
+    # ERC20 arity: `transfer(to, amount)` and `transferFrom(from, to, amount)`.
+    # A multi-token ledger's `transfer(to, id, amount)` shares the name but not
+    # the boolean-return contract. `arg.N: {not: {block: function}}` is an
+    # existence test: no call argument is a function declaration.
+    - any:
+        - and:
+            - name: ^transfer$
+            - not:
+                arg.2:
+                  not:
+                    block: function
+        - and:
+            - name: ^transferFrom$
+            - not:
+                arg.3:
+                  not:
+                    block: function
     - any:
         - and:
             - boundary_result_disposition: ^discarded$

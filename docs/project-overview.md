@@ -180,7 +180,7 @@ w3goaudit/
 │   ├── benchmark_reporting.py # benchmark.md rendering
 │   ├── call_chain.py       # Internal-call reachability helper
 │   ├── assert_thresholds.py # Release-quality threshold gate
-│   ├── templates/          # 76 WQL benchmark detector ports
+│   ├── templates/          # the competitive WQL benchmark detector ports
 │   ├── corpus/             # Active answer keys + registry
 │   ├── fixtures/           # Split benchmark-family Solidity fixtures
 │   └── results/            # Sole host output mount; generated/ignored
@@ -288,7 +288,7 @@ w3goaudit/
    scope-ID order. Emit `ExternalBoundaryFact` records with `ScopeID`,
    `ScopeKind`, target/value/result/state/reentry evidence, exact entry
    reachability, and the WQL attribute bridge.
-   `ExternalBoundaryFactsVersion` is `1.0.0`. Unknown evidence remains unknown.
+   `ExternalBoundaryFactsVersion` is `1.1.0`. Unknown evidence remains unknown.
    Implementation:
    [pkg/builder/external_boundaries.go](../pkg/builder/external_boundaries.go)
 
@@ -319,9 +319,10 @@ dependency. An external Assistant may consume the emitted evidence but cannot
 alter the scanner's official finding set.
 
 **Capabilities:**
-- Load YAML templates as **WQL** (`meta` plus `query:` — `select`/`from`/
-  `where` or a query-level `and:`/`or:` composition; all 20 official,
-  benchmark, and feature-test templates use it). Unknown keys at any level
+- Load YAML templates as **WQL** (`meta` plus `query:`) with `select`/`from`/
+  `where` or a query-level `and:`/`or:` composition. All 20 official and 5
+  feature-test templates use it; benchmark templates live in the maintainer-only
+  harness. Unknown keys at any level
   are rejected by the strict parser. `TemplateDoc.lower()`
   (`pkg/engine/wql.go`) compiles the document into evaluator `Rule` IR
   before matching, taint, and reachability run. Full load-time validation includes:
@@ -491,8 +492,10 @@ byte offsets.
 - `results.sarif` — SARIF 2.1.0 (always)
 - `data/{database.json,findings.json,overview.json,diagnostics.json}` — machine-readable; the
   canonical database lives only here (reusable via `--db`)
+- `data/hunter.json` — ranked entry-point reading order projected from boundary and authorization facts
+- `data/authorization.json` — versioned authorization evidence for exact function/scope consumers
 - `data/interactions.json` — timestamp-free semantic external-boundary evidence
-  with schema `2.0.0`, independent fact version `1.0.0`, non-null arrays, and
+  with schema `2.0.0`, independent fact version `1.1.0`, non-null arrays, and
   explicit legacy-cache unavailability
 - `data/nav.json`, `data/explorer.json`, `data/xref.json` — extension-facing
   data layer for the VSCode Solidity extension: a flat symbol navigation index
@@ -584,7 +587,7 @@ newline-preserving Solidity sanitizer for declaration matching and brace
 counting. Comments, quoted strings, and escapes are masked so fake declarations
 and quoted braces cannot move a finding to the wrong scope.
 
-**Code:** [scripts/benchmark/](../benchmarks)
+**Code:** [scripts/benchmark/](../scripts/benchmark/)
 
 ---
 
@@ -778,10 +781,12 @@ function _processWithdraw() internal {
     indentation (`.`, `..`, `...`) and line numbers per hop; Markdown also
     renders `All matched sites` plus full function excerpts for
     `Finding.Related`
-- Finding locations default to verifier attribution with the matched node's
-  line. SDK callers or `WGAUDIT_LOCATION_FROM_MATCHED_NODE=1` can instead use
-  the matched node's enclosing declaration for every location field. Both
-  modes preserve precise primary-node spans, reachability, and fix-here context.
+- Finding locations default to matched-node attribution. Every `Location` field
+  describes the dangerous statement. SDK callers or
+  `W3GOAUDIT_LOCATION_FROM_MATCHED_NODE=verifier` can select the legacy verifier
+  mode, which keeps contract/function identity from the verifier context while
+  using the matched node's file and line. Both modes preserve precise primary
+  node spans, reachability, and fix-here context.
 
 **Configuration & Distribution**
 - `~/.w3goaudit/config.yml` (defaults overridable by flags), managed by `pkg/home`

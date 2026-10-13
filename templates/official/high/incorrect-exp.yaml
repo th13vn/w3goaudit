@@ -14,7 +14,10 @@ meta:
     real typos like `base ^ exp` while excluding genuine bit manipulation —
     `(a & b) + (a ^ b) / 2` (OpenZeppelin `Math.average`, has a `&` sibling),
     `(3 * denominator) ^ 2` (`Math.mulDiv` inverse seed, complex left operand),
-    and `x ^ 0xFF` (hex mask).
+    and `x ^ 0xFF` (hex mask). A `^` nested in another `^` (OpenZeppelin 5.1
+    branchless `Math.ternary`), a `^` on signed operands (a sign test; `**`
+    takes an unsigned exponent), and a `^` with a named mask or flag constant
+    are XOR by construction and are not reported.
   recommendation: >
     Replace `^` with `**` for exponentiation. If bitwise XOR is intentional,
     add a comment explaining what you're masking, and prefer a named bit-
@@ -55,3 +58,28 @@ query:
               operator: "&|\\||<<|>>"
             - block: unary
               operator: "~"
+    # A `^` inside another `^` is a branchless select or swap, not a power:
+    # OpenZeppelin 5.1 `Math.ternary` / `SignedMath.ternary` compute
+    # `b ^ ((a ^ b) * c)`, and every repo vendoring them got two findings.
+    - not:
+        in:
+          block: binary
+          operator: "\\^"
+    # `**` needs an unsigned exponent, so a `^` on a signed operand is never
+    # an exponentiation typo; it is a sign test such as `(a ^ b) < 0`.
+    - not:
+        any:
+          - left:
+              type: '^int[0-9]*$'
+          - right:
+              type: '^int[0-9]*$'
+    # XOR with a named mask or flag constant toggles marker bits
+    # (`slotValue ^ _CACHE_SET_MASK`). Name-based, so it only removes findings.
+    - not:
+        any:
+          - left:
+              block: identifier
+              name: '(?i)(mask|flag)'
+          - right:
+              block: identifier
+              name: '(?i)(mask|flag)'

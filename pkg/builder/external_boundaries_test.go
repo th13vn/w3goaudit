@@ -102,6 +102,88 @@ func TestBuildExternalBoundariesAnnotatesProtocolNeutralWQLAttributes(t *testing
 	}
 }
 
+func TestBuildExternalBoundariesClassifiesLegacyChainedLowLevelCalls(t *testing.T) {
+	db := buildFixture(t, externalBoundariesFixture)
+	abs := fixtureAbs(t, externalBoundariesFixture)
+	contractID := types.MakeContractID(abs, "ExternalBoundaryMatrix")
+	cases := []struct {
+		fn          string
+		hasValue    bool
+		hasGas      bool
+		disposition string
+		checked     string
+	}{
+		{"legacyCallValue(address,bytes)", true, false, types.BoundaryResultDiscarded, types.BoundaryResultNo},
+		{"legacyCallGas(address,bytes)", false, true, types.BoundaryResultDiscarded, types.BoundaryResultNo},
+		{"legacyCallGasValue(address,bytes)", true, true, types.BoundaryResultDiscarded, types.BoundaryResultNo},
+		{"legacyCallChecked(address,bytes)", true, false, types.BoundaryResultCaptured, types.BoundaryResultYes},
+	}
+	for _, tc := range cases {
+		fact := boundaryFact(t, db, contractID, tc.fn, types.KindCallLowlevelCall)
+		if fact == nil {
+			t.Fatalf("legacy fact %s missing", tc.fn)
+		}
+		if fact.Result.Disposition != tc.disposition || fact.Result.DirectCheck != tc.checked {
+			t.Errorf("%s result = %s / checked=%s, want %s / checked=%s", tc.fn, fact.Result.Disposition, fact.Result.DirectCheck, tc.disposition, tc.checked)
+		}
+		fn, ok := db.GetFunctionByID(fact.FunctionID)
+		if !ok {
+			t.Fatalf("function %s missing", fact.FunctionID)
+		}
+		node := findASTNodeByPath(fn.AST, fact.ASTPath)
+		if node == nil {
+			t.Fatalf("AST path %s missing for %s", fact.ASTPath, tc.fn)
+		}
+		if got := node.GetAttributeBool("has_value"); got != tc.hasValue {
+			t.Errorf("%s has_value=%v, want %v", tc.fn, got, tc.hasValue)
+		}
+		if got := node.GetAttributeBool("has_gas"); got != tc.hasGas {
+			t.Errorf("%s has_gas=%v, want %v", tc.fn, got, tc.hasGas)
+		}
+	}
+}
+
+func TestLegacyChainedLowLevelCallsDoNotEmitModifierEdges(t *testing.T) {
+	db := buildFixture(t, externalBoundariesFixture)
+	abs := fixtureAbs(t, externalBoundariesFixture)
+	contractID := types.MakeContractID(abs, "ExternalBoundaryMatrix")
+	contract := db.GetContractByID(contractID)
+	if contract == nil {
+		t.Fatalf("contract %s missing", contractID)
+	}
+	for _, selector := range []string{
+		"legacyCallValue(address,bytes)",
+		"legacyCallGas(address,bytes)",
+		"legacyCallGasValue(address,bytes)",
+	} {
+		var fn *types.Function
+		for _, candidate := range contract.Functions {
+			if candidate != nil && candidate.Selector == selector {
+				fn = candidate
+				break
+			}
+		}
+		if fn == nil {
+			t.Fatalf("function %s missing", selector)
+		}
+		lowLevel := 0
+		for _, call := range fn.Calls {
+			if call == nil {
+				continue
+			}
+			if call.CallType == types.CallTypeLowLevelCall {
+				lowLevel++
+			}
+			if call.Target == "value" || call.Target == "gas" {
+				t.Errorf("%s emitted legacy modifier edge %+v", selector, call)
+			}
+		}
+		if lowLevel != 1 {
+			t.Errorf("%s low-level call edges = %d, want 1; calls=%+v", selector, lowLevel, fn.Calls)
+		}
+	}
+}
+
 func TestBuildExternalBoundariesDeterministicAcrossBuilds(t *testing.T) {
 	first := buildFixture(t, externalBoundariesFixture)
 	second := buildFixture(t, externalBoundariesFixture)
@@ -416,4 +498,160 @@ func findASTNodeByPath(root *types.ASTNode, path string) *types.ASTNode {
 	}
 	walk(root, "0")
 	return found
+}
+
+// An internal library function is inlined, so calling one, as in
+// `Strings.toHexString(v)` or a `using L for address` extension, crosses no
+// contract boundary; only the external calls inside the library body do, and
+// those are indexed in the library's own scope. A public library function is
+// reached through DELEGATECALL and remains a boundary.
+func TestBuildExternalBoundariesSkipInternalLibraryCalls(t *testing.T) {
+	db, file := buildSourceText(t, `pragma solidity ^0.8.20;
+interface IToken { function transfer(address to, uint256 v) external returns (bool); }
+library Strings { function toHexString(uint256 v) internal pure returns (string memory) { v; return ""; } }
+library SafeCall {
+    function safeTransfer(IToken token, address to, uint256 v) internal { require(token.transfer(to, v)); }
+}
+library Linked { function run(uint256 v) public pure returns (uint256) { return v + 1; } }
+contract Uses {
+    using SafeCall for IToken;
+    function label(uint256 v) external pure returns (string memory) { return Strings.toHexString(v); }
+    function pay(IToken token, address to, uint256 v) external { token.safeTransfer(to, v); }
+    function linked(uint256 v) external pure returns (uint256) { return Linked.run(v); }
+}`)
+	count := func(scope string, name string) int {
+		n := 0
+		for _, fact := range db.Semantics.ExternalBoundaries {
+			if fact.ScopeID == scope && fact.Target.CalledName == name {
+				n++
+			}
+		}
+		return n
+	}
+	if n := count(types.MakeFunctionID(file, "Uses", "label(uint256)"), "toHexString"); n != 0 {
+		t.Errorf("internal library call Strings.toHexString indexed as %d boundary facts", n)
+	}
+	if n := count(types.MakeFunctionID(file, "Uses", "pay(IToken,address,uint256)"), "safeTransfer"); n != 0 {
+		t.Errorf("internal using-for extension safeTransfer indexed as %d boundary facts", n)
+	}
+	if n := count(types.MakeFunctionID(file, "SafeCall", "safeTransfer(IToken,address,uint256)"), "transfer"); n != 1 {
+		t.Errorf("the token.transfer inside the library = %d boundary facts, want 1", n)
+	}
+	if n := count(types.MakeFunctionID(file, "Uses", "linked(uint256)"), "run"); n != 1 {
+		t.Errorf("public library call Linked.run (DELEGATECALL) = %d boundary facts, want 1", n)
+	}
+}
+
+// A captured low-level call result is handled when it is checked directly,
+// through a local copy, by an internal helper it is passed to, later in the
+// same loop iteration, or when it is handed back to the caller. These are the
+// shapes of OpenZeppelin Address and SafeERC20, Axelar SafeTokenCall, Euler's
+// EVC and a KyberSwap-style router loop; each read as unchecked. The controls
+// must stay unchecked: a result only logged, passed to a helper that ignores
+// it, or returned only through such a helper.
+func TestBuildExternalBoundariesFollowCapturedResultHandling(t *testing.T) {
+	db, file := buildSourceText(t, `pragma solidity ^0.8.20;
+contract Calls {
+    event Logged(bool ok);
+    function _verify(bool ok, bytes memory data) internal pure returns (bytes memory) {
+        if (ok) return data;
+        revert("call failed");
+    }
+    function _ignore(bool ok, bytes memory data) internal pure returns (bytes memory) { ok; return data; }
+    function viaHelper(address t, bytes memory d) external returns (bytes memory) {
+        (bool success, bytes memory ret) = t.call(d);
+        return _verify(success, ret);
+    }
+    function viaAlias(address t, bytes memory d) external {
+        (bool success, bytes memory ret) = t.call(d);
+        bool ok = success && (ret.length == 0 || abi.decode(ret, (bool)));
+        if (!ok) revert("failed");
+    }
+    function returned(address t, bytes memory d) external returns (bool) {
+        (bool success, bytes memory ret) = t.call(d);
+        return success && ret.length == 0;
+    }
+    function namedReturn(address t, bytes memory d) external returns (bool success, bytes memory ret) {
+        (success, ret) = t.call(d);
+    }
+    function inLoop(address[] memory ts, bytes memory d) external {
+        for (uint256 i = 0; i < ts.length; i++) {
+            (bool success, ) = ts[i].call(d);
+            if (!success) revert("failed");
+        }
+    }
+    function logged(address t, bytes memory d) external {
+        (bool success, ) = t.call(d);
+        emit Logged(success);
+    }
+    function ignoredByHelper(address t, bytes memory d) external returns (bytes memory) {
+        (bool success, bytes memory ret) = t.call(d);
+        return _ignore(success, ret);
+    }
+}`)
+	contractID := types.MakeContractID(file, "Calls")
+	for selector, want := range map[string][2]string{
+		"viaHelper(address,bytes)":       {types.BoundaryResultCaptured, types.BoundaryResultYes},
+		"viaAlias(address,bytes)":        {types.BoundaryResultCaptured, types.BoundaryResultYes},
+		"returned(address,bytes)":        {types.BoundaryResultReturned, types.BoundaryResultNo},
+		"namedReturn(address,bytes)":     {types.BoundaryResultReturned, types.BoundaryResultNo},
+		"inLoop(address[],bytes)":        {types.BoundaryResultCaptured, types.BoundaryResultYes},
+		"logged(address,bytes)":          {types.BoundaryResultCaptured, types.BoundaryResultNo},
+		"ignoredByHelper(address,bytes)": {types.BoundaryResultCaptured, types.BoundaryResultNo},
+	} {
+		fact := boundaryFact(t, db, contractID, selector, types.KindCallLowlevelCall)
+		if fact.Result.Disposition != want[0] || fact.Result.DirectCheck != want[1] {
+			t.Errorf("%s result = %s/%s, want %s/%s", selector, fact.Result.Disposition, fact.Result.DirectCheck, want[0], want[1])
+		}
+	}
+}
+
+// OpenZeppelin TimelockController checks its low-level call with the
+// library-qualified `Address.verifyCallResult(success, returndata)`, and
+// `using Address for bool`-style extensions pass the result as the receiver.
+// Both are internal library calls, inlined like an internal helper, so the
+// helper's own check must count. A library helper that ignores the result
+// stays unchecked.
+func TestBuildExternalBoundariesFollowLibraryCheckedResults(t *testing.T) {
+	db, file := buildSourceText(t, `pragma solidity ^0.8.20;
+library AddressLike {
+    function verifyCallResult(bool success, bytes memory returndata) internal pure returns (bytes memory) {
+        if (success) return returndata;
+        revert("call failed");
+    }
+    function verified(bool success) internal pure returns (bool) {
+        require(success, "call failed");
+        return success;
+    }
+    function ignore(bool success, bytes memory returndata) internal pure returns (bytes memory) {
+        success;
+        return returndata;
+    }
+}
+contract Timelock {
+    using AddressLike for bool;
+    function qualified(address t, bytes memory d) external returns (bytes memory) {
+        (bool success, bytes memory returndata) = t.call(d);
+        return AddressLike.verifyCallResult(success, returndata);
+    }
+    function extension(address t, bytes memory d) external returns (bool) {
+        (bool success, ) = t.call(d);
+        return success.verified();
+    }
+    function ignored(address t, bytes memory d) external returns (bytes memory) {
+        (bool success, bytes memory returndata) = t.call(d);
+        return AddressLike.ignore(success, returndata);
+    }
+}`)
+	contractID := types.MakeContractID(file, "Timelock")
+	for selector, want := range map[string]string{
+		"qualified(address,bytes)": types.BoundaryResultYes,
+		"extension(address,bytes)": types.BoundaryResultYes,
+		"ignored(address,bytes)":   types.BoundaryResultNo,
+	} {
+		fact := boundaryFact(t, db, contractID, selector, types.KindCallLowlevelCall)
+		if fact.Result.Disposition != types.BoundaryResultCaptured || fact.Result.DirectCheck != want {
+			t.Errorf("%s result = %s/%s, want captured/%s", selector, fact.Result.Disposition, fact.Result.DirectCheck, want)
+		}
+	}
 }

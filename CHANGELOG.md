@@ -4,9 +4,262 @@ All notable changes to w3goaudit are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/). Output changes note the `data/*.json`
 `schemaVersion`.
 
-## Unreleased
+## v0.7.0 - 2026-10-13
 
-No changes yet.
+This release keeps output schema 2.0.0 and the existing CLI and SDK contracts.
+It pairs with the downloadable official template pack v3.0.1. The pack requires
+W3GoAudit v0.7.0 or newer for its new semantic matcher. Parser, reader, boundary,
+and report evidence fixes also ship in the engine and are not delivered by
+`--update-templates`. On the reconstructed real corpus, official findings fell
+from 416 to 208 while the five confirmed findings remained; the competitive gate
+remains 109 TP / 40 FP / 0 FN.
+
+### Added
+
+- `data/hunter.json`, an entry-point reading order for auditors and bug-bounty
+  hunters, indexed by `manifest.files.data.hunter`. Every externally-callable,
+  state-modifying entry point is emitted as one (main contract, entry function)
+  row, ranked into five tiers from the external-boundary and authorization facts
+  the scanner already computes: reachable value control, reentry class, state
+  writes after an external call, unresolved call targets, and discarded call
+  results. Each signal carries the underlying evidence enum and the fact IDs
+  that prove it; ordinals order rows and are never summed or weighted, so an
+  unproven authorization or reentry state ranks above a proven-safe one instead
+  of being averaged into the middle. The document is timestamp-free,
+  byte-stable, and fail-closed, reporting `available: false` with a rebuild
+  limitation rather than ranking from partial facts. Schema and limitations in
+  `docs/extension-output.md`.
+
+### Changed
+
+- Official-pack precision round from a real-corpus triage (on-chain-scripts plus
+  18 audited bug-bounty targets, 416 findings, about 5 real). Each rule change
+  is pinned by a regression in `pkg/engine/false_positive_corpus_regression_test.go`
+  that pairs the production false-positive shapes with the vulnerable shape the
+  rule must keep; the official fixture gate stays at 81 findings and the
+  competitive gate at TP 109 / FP 40 / FN 0. These are `.yaml` changes and
+  reach users through the template pack; the parser, reader and boundary fixes
+  below need the new binary.
+  - `HIGH-INCORRECT-EXP`: `^` nested in `^` (OpenZeppelin 5.1 `Math.ternary`),
+    on signed operands, or with a named mask/flag constant is not reported.
+  - `HIGH-UNPROTECTED-INITIALIZER`: Foundry's `setUp()` is not an initializer;
+    lowercase `setup` (Gnosis Safe) stays. Confidence HIGH to MEDIUM.
+  - `MEDIUM-TX-ORIGIN-AUTH`: `tx.origin` must be a direct operand of the
+    comparison and compared with a non-literal value.
+  - `HIGH-ENCODE-PACKED-COLLISION`: the packed arguments themselves must be
+    `bytes`, `string` or arrays.
+  - `MEDIUM-DANGEROUS-STRICT-EQUALITY`: struct fields named `balance`, same-tx
+    deltas, hashed block numbers and stored caches are not reported; clock
+    checks need `block.timestamp/number` against a non-state parameter of an
+    external function. Confidence HIGH to MEDIUM.
+  - `HIGH-REENTRANCY-PATTERN`: value, assembly and calldata triggers inside
+    SafeERC20-style wrappers no longer count for a token the caller did not
+    choose; assembly calls need a non-constant value; the hook-token
+    `safeTransferFrom` branch needs a resolved receiver type. Confidence MEDIUM
+    to LOW.
+  - `CRITICAL-DELEGATECALL-USER-INPUT`: an `ifAdmin`-style guard (`if
+    (msg.sender == admin) { _; } else { _fallback(); }`) is recognized.
+    Confidence HIGH to MEDIUM.
+  - `HIGH-ARBITRARY-LOW-LEVEL-CALL`: a reverting or required contract+selector
+    allowlist check (`bytes4` argument) excludes the call. Confidence MEDIUM to
+    LOW.
+  - `MEDIUM-UNCHECKED-ARITHMETIC`: products need a caller-controlled operand,
+    and sums that step by a literal or a literal-only ternary are excluded.
+    Confidence MEDIUM to LOW.
+  - `MEDIUM-DIVIDE-BEFORE-MULTIPLY`: divide-first overflow fallbacks under a
+    1e30+ magnitude check are excluded. Confidence HIGH to LOW.
+  - `HIGH-UNCHECKED-ERC20-TRANSFER`: ERC20 arity is required (`transfer` two
+    arguments, `transferFrom` three).
+  - `MEDIUM-UNCHECKED-LOWLEVEL-CALL`: the ERC-4337 prefund to msg.sender in
+    `validateUserOp`/`_payPrefund` is excluded.
+- Directory discovery skips Foundry `*.t.sol` and `*.s.sol` files wherever they
+  sit, and `certora/` verification harnesses; an explicitly named file is still
+  scanned.
+
+### Fixed
+
+- Parser bumped to solast-go v0.1.14, which accepts the pre-0.7 `szabo` and
+  `finney` ether units. One `1 finney` erased the rest of a file to tolerant
+  recovery (MUSystem: 195 `parse.recovered` diagnostics, now 0).
+- A low-level call result checked by an internal library function now counts
+  as checked when the library is called by name
+  (`Address.verifyCallResult(success, data)`, OpenZeppelin
+  TimelockController) or as a `using for` extension on the result.
+
+- Library-backed finding locations now keep caller file, source range, and
+  matched-mode caller identity together across files and inherited helpers.
+  Inner library evidence and entry reachability are preserved.
+
+- WQL now rejects repeated structural matcher fields instead of silently merging
+  them into an unsatisfiable same-node constraint.
+- The divide-before-multiply rule now excludes the intentional `(a / b) * b`
+  rounding form while retaining distinct-operand precision-loss findings.
+- `HIGH-REENTRANCY-PATTERN` now covers high-level caller-controlled
+  `safeTransferFrom` calls, including hook-capable token flows, while ordinary
+  ERC20 `transferFrom` remains excluded.
+- Resolved library-backed findings now point to the outer protocol call while
+  preserving the inner library node in primary AST and reachability evidence.
+- Added a tracked official-pack fixture gate that is independent of the
+  competitive benchmark's separate template set.
+
+- Parser bumped to solast-go v0.1.12. A statement that starts with an
+  elementary type conversion, such as `address(target).call(data);`,
+  `address(target).delegatecall(data);` or the OpenZeppelin idiom
+  `address(target).functionDelegateCall(data);`, was parsed as a variable
+  declaration, recovered on the `(`, and dropped: the enclosing function
+  carried no call, so the call graph, taint, external-boundary facts and every
+  detector missed it. Found through the Rarible DAO incident, where
+  `UpgradeExecutor.execute` parsed with no calls and its `delegatecall` was
+  invisible; it now yields a `call.lowlevel.delegatecall` boundary with a
+  `delegate_context` reentry class. The 507-file real corpus is unchanged at 46
+  findings and 166 parse diagnostics, because it writes these calls as
+  `(bool ok, ) = address(x).call(...)`, which begins with `(` and was never
+  affected.
+- Parser bumped again, to solast-go v0.1.13, which clears the real-corpus
+  parse-loss backlog: 166 tolerant parse diagnostics across 23 files of the
+  507-file corpus fall to 1 (a source file with no closing brace). The six
+  root causes were EVM builtins spelled like Solidity keywords inside assembly
+  (`address()`, `return(p, n)`, `revert(p, n)`, which also silently dropped
+  500 assembly calls from files that reported no error, including every
+  OpenZeppelin `Address.sol`), Yul functions with `->` return variables,
+  dotted `using { L.f } for T` entries, custom-error parameters named `error`,
+  identifier-led `for` initializers, dotted array locals, and tuple
+  assignments with `a[i].m` targets. Findings are unchanged; two
+  authorization facts move from `unprotected` to `unknown` because an
+  EVC `batchRevert` statement that calls the authentication helper is no
+  longer dropped.
+- A `using L for <type>` call on an elementary conversion receiver, such as
+  `address(target).functionDelegateCall(data)` or `uint256(v).toString()`, now
+  resolves to the library function. The cast receiver used to demand contract
+  identity, which a primitive type can never supply, so the call stayed an
+  unresolved external call and the library's `delegatecall` was unreachable
+  from the entry point. Together with the parser fix this makes the Rarible
+  `UpgradeExecutor.execute` delegatecall visible to taint and WQL. The real
+  corpus gains 8 resolved library edges and loses 12 unresolved external edges;
+  its findings are unchanged at 46.
+- Authorization facts now prove the OpenZeppelin `Ownable`, `AccessControl`
+  and UUPS guards they used to miss, and stop proving two kinds of check that
+  are not authorization. Every `onlyOwner`/`onlyRole` function built on
+  OpenZeppelin read as `unprotected` or `unknown`: `_msgSender()` was not caller
+  identity, `owner()` and `hasRole(...)` were opaque calls, the
+  `_roles[role].members[account]` struct field broke role recognition, helpers
+  declared below their modifier were read as running after `_;`, and an unnamed
+  override parameter blocked UUPS `_authorizeUpgrade`. Conversely a helper
+  parameter bound to a caller-selected value could stand in for the caller, so
+  `_checkAdmin(user)` with `require(a == admin)`, or `expectedFee != fee`,
+  proved "protected". On the real corpus `protected` facts rise from 58 to 100
+  and `self_scoped` falls from 14 to 9, and one CRITICAL false positive
+  (`CRITICAL-DELEGATECALL-USER-INPUT` on a UUPS `upgradeToAndCall`) is gone:
+  46 → 45 findings. Caller identity copied into a local (`address sender =
+  msg.sender`) is now followed while every write to the local is caller
+  identity, a principal local assigned once is read through its source, an
+  unclassifiable caller comparison fails closed as `unknown`, a declaration
+  inherited by several deployed contracts keeps its verdict when every runtime
+  agrees (`runtime.alternatives.agree`) instead of always reading as
+  ambiguous, an input-validation modifier such as `ensure(deadline)` no
+  longer blocks the proof the way an authorization modifier does, and neither
+  a `revert ERC20InvalidSender(...)` nor an `emit RoleSet(...)` payload
+  counts as an unresolved guard helper any more (an unguarded role or
+  ownership setter emitting such an event used to read as `unknown`, hiding
+  it from every negated authorization preset). `AuthorizationFactsVersion` is now `1.1.0`, so a database
+  cached by an older build reports authorization as unavailable and asks for a
+  rebuild instead of serving the old verdicts.
+- `using SafeERC20 for IERC20; token.safeTransfer(...)` and every other
+  `using L for T` call whose member the contract or interface type does not
+  declare now resolves to the library function. It was recorded as an
+  unresolved external call to a nonexistent `IERC20.safeTransfer`, so SafeERC20
+  bodies were unreachable from entry points. Resolving them exposed a taint
+  binding bug fixed with it: the extension's receiver is the library's first
+  parameter, but arguments were bound from parameter 0, so SafeERC20's `token`
+  received the caller's `from` and an ordinary deposit read as a
+  caller-targeted low-level call. Real corpus: +52 resolved library edges and
+  one added finding, `HIGH-REENTRANCY-PATTERN` in a Lottery `addToDailyPot`
+  that calls `safeTransferFrom` before writing `dailyPot` with no guard. The
+  rule deliberately treats any raw `.call` followed by a state write as a
+  reentrancy vector, SafeERC20's call is one, and the shape is the Lendf.Me
+  ERC777 pattern; it was hidden only because the call graph stopped at the
+  wrapper.
+- `data/interactions.json` no longer lists calls to internal library functions
+  (`Strings.toHexString`, `using SafeERC20` extensions) as external
+  boundaries. They are inlined, and the external calls inside the library body
+  are already indexed in the library's own scope. The real corpus loses 639
+  such pseudo-boundaries, which also stops them inflating `data/hunter.json`
+  tiers. A public library function, reached through DELEGATECALL, is still a
+  boundary. `ExternalBoundaryFactsVersion` is now `1.1.0`, so older cached
+  databases report the index as unavailable instead of serving stale facts.
+- `super.f()` calls are `call.internal` in the AST instead of
+  `call.external`, so WQL `external_call` no longer matches them. An ERC20
+  override forwarding `super.transferFrom(from, to, amount)` (Euler EVault)
+  now keeps the correct internal call classification. No official finding changes.
+- Taint now flows out of non-virtual internal helpers. A call's value used to
+  be the union of its arguments' taint, so Curve's
+  `(_o, _t) = getOriginAndTarget(curve, _origin, _target)`, which returns
+  entries of an admin-maintained assimilator registry, read as caller-chosen
+  and was one authorization fix away from a CRITICAL
+  `DELEGATECALL-USER-INPUT` false positive. The value now carries the taint of
+  what the helper returns under the call's argument bindings; virtual and
+  recursive helpers keep the old conservative union. Findings, official scan,
+  competitive gate and scan time are unchanged.
+- A captured low-level call result now counts as handled when it is checked
+  through a local copy, checked by an internal helper it is passed to, checked
+  later in the same loop body, or returned to the caller (directly or through
+  a named return). `MEDIUM-UNCHECKED-LOWLEVEL-CALL` was firing inside
+  OpenZeppelin `Address.functionCallWithValue` and
+  `SafeERC20._callOptionalReturnBool`, Axelar `SafeTokenCall.safeCall`, Euler's
+  EVC and a router loop with an `if (!success) revert` right after the call.
+  The real corpus drops from 46 to 30 findings: all 14 unchecked-low-level-call
+  sites and 2 `HIGH-UNCHECKED-ERC20-TRANSFER` on Curve, whose `transfer`
+  forwards an internal library result into its named return. The official scan
+  stays at 81 and the competitive gate at 109 TP / 40 FP / 0 FN.
+- `HIGH-REENTRANCY-PATTERN` (template change) now counts a raw call only when
+  it can hand control to the caller: it sends ETH, targets a caller-chosen
+  address, or its calldata carries the caller's identity or input, as a token
+  transfer to or from msg.sender does. A value-free call to a governance-set
+  address with contract-built calldata, such as Euler's interest-rate model,
+  no longer reads as reentrancy. The ERC777 hook shapes stay flagged (paying
+  the caller before debiting them, pulling from the caller before crediting a
+  pot). Official scan unchanged at 81; real corpus 30 -> 29.
+- `MEDIUM-TX-ORIGIN-AUTH` (template change) requires `tx.origin` to be an
+  operand of an equality check inside a guard; being anywhere under an `if`
+  also matched `recv = tx.origin` in a branch body and `tx.origin` passed as a
+  refund address. `MEDIUM-DIVIDE-BEFORE-MULTIPLY` (template change) skips
+  expressions with no variable, such as Solady's constant bound in `cbrtWad`.
+  Official scan unchanged at 81; real corpus 29 -> 26.
+- `HIGH-ARBITRARY-LOW-LEVEL-CALL` (template change) no longer treats
+  `token.transferFrom.selector` as a caller-chosen selector. It is a
+  compile-time constant even when the token is caller-supplied, which is how
+  OpenZeppelin v4 SafeERC20 builds its calldata; since SafeERC20 calls now
+  resolve, every router using it on a user-supplied token would otherwise have
+  reported a HIGH. A selector the caller passes, or a whole calldata blob, is
+  still reported.
+- `HIGH-NO-SLIPPAGE-CHECK` (template change) no longer reports a Uniswap V2
+  pair's `swap(amount0Out, amount1Out, to, data)`, which names exact outputs
+  and takes the recipient third; its bare-`swap` branch now requires a
+  non-address third argument. Named router swaps are unchanged.
+- `MEDIUM-UNCHECKED-ARITHMETIC` (template change) skips `x - gasleft()`: gas
+  metering cannot underflow. Real corpus 26 -> 23 (KyberSwap router swaps).
+- Interprocedural sequences: a `tainted:` or `arg.N` step no longer disables
+  the expansion through internal helpers (each step is judged in its helper's
+  taint context), a sequence matched through helpers still has to satisfy the
+  rule's other root-level constraints, and every sequence evaluated at the
+  function root is expanded, including a negated one, so
+  `not: {sequence: [...]}` sees helper-hosted steps.
+- `MainContractEntry.EntryFunctions` documented its ID format as
+  `absPath#ContractName.functionName`; `MakeFunctionID` has always produced the
+  full selector, and the ID names the declaring contract rather than the main
+  contract. Comment only, no behavior change.
+
+Output `schemaVersion` remains `2.0.0`: `data/hunter.json` and its manifest
+index are optional additions, so existing consumers are unaffected. Everything
+above ships in the binary and is therefore **not** delivered by
+`--update-templates`, except the entries marked "template change", which ship
+in the template pack too. The official scan of `test-data/security` is
+unchanged at 81 findings with every fixture true positive kept, the 507-file
+real corpus goes from 46 to 23 findings, and the competitive gate is unchanged
+at 109 TP / 40 FP / 0 FN (that gate runs the benchmark's own templates, so it
+guards engine semantics rather than the official pack). New incident-derived
+rules remain in local, ignored candidate and incident lanes. They are not
+included in the published pack or release archives.
 
 ## v0.6.0 - 2026-09-07
 

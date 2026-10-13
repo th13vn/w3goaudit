@@ -2,9 +2,11 @@ meta:
   id: HIGH-UNPROTECTED-INITIALIZER
   title: "Unprotected initializer (anyone can become owner)"
   severity: HIGH
-  confidence: HIGH
+  confidence: MEDIUM
   description: >
-    A function named initialize / initialise / init / __init / setup is callable
+    A function named initialize / initialise / init / __init (any case) or
+    `setup` (lowercase, as in Gnosis Safe; Foundry's `setUp` test hook is not
+    an initializer) is callable
     externally without an access modifier or `initializer` guard, and it writes
     state. In upgradeable / proxy contracts the initialize function replaces the
     constructor and must be callable exactly once by the deployer. Without
@@ -23,7 +25,10 @@ query:
   from: entry_function
   where:
     # Match common initializer names while excluding similarly named helpers.
-    - func_name: (?i)^(initialize|initialise|init|__init|setup)$
+    # `setup` stays lowercase-only: Gnosis Safe's initializer is `setup`, while
+    # Foundry's per-test fixture hook is exactly `setUp` and lives in test
+    # contracts (`*.t.sol`) that are not deployed.
+    - func_name: '^(?:(?i:initialize|initialise|init|__init)|setup)$'
     - preset:
         initializer:
           takeover: possible

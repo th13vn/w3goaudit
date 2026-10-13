@@ -704,6 +704,84 @@ contract MutationReceivers {
 	}
 }
 
+func TestLegacyVarStorageAliasKeepsCanonicalLocalIdentity(t *testing.T) {
+	db := buildFromSource(t, `pragma solidity ^0.4.24;
+contract LegacyAliasIdentity {
+    struct Account { uint256 balance; }
+    mapping(address => Account) accounts;
+    function withdraw() public {
+        var account = accounts[msg.sender];
+        account.balance -= 1;
+    }
+}`)
+	fn := funcByName(t, db, "LegacyAliasIdentity", "withdraw")
+	var alias, writeTarget *types.ASTNode
+	fn.AST.WalkDescendants(func(node *types.ASTNode) bool {
+		if node.Kind == types.KindExprIdentifier && node.Name == "account" {
+			if alias == nil {
+				alias = node
+			}
+		}
+		if node.Kind == types.KindStmtAssign && len(node.Children) > 0 {
+			if target := node.Children[0].FindDescendant(func(n *types.ASTNode) bool {
+				return n.Kind == types.KindExprIdentifier && n.Name == "account"
+			}); target != nil {
+				writeTarget = target
+			}
+		}
+		return true
+	})
+	if alias == nil || writeTarget == nil {
+		t.Fatalf("legacy storage alias nodes missing: alias=%+v target=%+v", alias, writeTarget)
+	}
+	if alias.RefKind != "local_var" || writeTarget.RefKind != "local_var" {
+		t.Fatalf("legacy alias RefKind = %q/%q, want local_var/local_var", alias.RefKind, writeTarget.RefKind)
+	}
+	if alias.RefID == "" || alias.RefID != writeTarget.RefID {
+		t.Fatalf("legacy alias RefID = %q/%q, want one canonical local identity", alias.RefID, writeTarget.RefID)
+	}
+	if alias.GetAttributeString("data_location") != "storage" || writeTarget.GetAttributeString("data_location") != "storage" {
+		t.Fatalf("legacy alias data locations = %q/%q, want storage/storage", alias.GetAttributeString("data_location"), writeTarget.GetAttributeString("data_location"))
+	}
+}
+
+func TestLegacyVarValueTypeRemainsLocal(t *testing.T) {
+	db := buildFromSource(t, `pragma solidity ^0.4.24;
+contract LegacyValueCopy {
+    mapping(address => uint256) balances;
+    function withdraw() public {
+        var balance = balances[msg.sender];
+        balance -= 1;
+    }
+}`)
+	fn := funcByName(t, db, "LegacyValueCopy", "withdraw")
+	var write *types.ASTNode
+	fn.AST.WalkDescendants(func(node *types.ASTNode) bool {
+		if node.Kind == types.KindStmtAssign && node.GetAttributeString("operator") == "-=" {
+			write = node
+		}
+		return true
+	})
+	if write == nil || len(write.Children) == 0 {
+		t.Fatalf("legacy value-copy assignment missing: %+v", write)
+	}
+	if write.GetAttributeBool("is_state_var") {
+		t.Fatalf("legacy value copy classified as state write: %+v", write)
+	}
+	target := write.Children[0]
+	if target.Kind != types.KindExprIdentifier || target.Name != "balance" {
+		target = target.FindDescendant(func(node *types.ASTNode) bool {
+			return node.Kind == types.KindExprIdentifier && node.Name == "balance"
+		})
+	}
+	if target == nil {
+		t.Fatal("legacy value-copy target missing")
+	}
+	if got := target.GetAttributeString("data_location"); got != "" {
+		t.Fatalf("legacy value-copy data location = %q, want empty", got)
+	}
+}
+
 func TestEffectsRejectLocalUnaryMutations(t *testing.T) {
 	db := buildFromSource(t, `// SPDX-License-Identifier: MIT
 pragma solidity ^0.8.0;
@@ -1032,6 +1110,32 @@ contract Derived is Base {
 	}
 }
 
+// A declaration inherited by several main contracts has no single runtime.
+// When every runtime reaches the same result through the same implementation
+// and evidence, that result holds wherever the function runs and is kept,
+// with RuntimeContractID left empty. The fail-closed test below pins the
+// disagreeing case.
+func TestAuthorizationFactsUseAgreedRuntimeAlternatives(t *testing.T) {
+	db := buildFromSource(t, `pragma solidity ^0.8.20;
+abstract contract Base {
+    address authority;
+    uint256 x;
+    modifier gate() { require(msg.sender == authority); _; }
+    function act() external gate { x = 1; }
+}
+contract First is Base {}
+contract Second is Base {}`)
+	id := types.MakeFunctionID("/tmp/T.sol", "Base", "act()")
+	fact, ok := db.GetAuthorizationFactByID(id)
+	if !ok {
+		t.Fatalf("missing shared runtime fact %q", id)
+	}
+	if fact.Verdict != types.AuthorizationProtected || fact.RuntimeContractID != "" ||
+		!containsString(fact.Reasons, "runtime.alternatives.agree") {
+		t.Fatalf("agreeing runtimes = %+v, want protected with no single runtime", fact)
+	}
+}
+
 func TestAuthorizationFactsFailClosedForAmbiguousRuntimeAlternatives(t *testing.T) {
 	db := buildFromSource(t, `pragma solidity ^0.8.20;
 abstract contract Base {
@@ -1057,6 +1161,372 @@ contract Second is Base {
 	if !containsString(fact.Reasons, "runtime.alternatives.ambiguous") ||
 		!containsString(fact.Limitations, types.DiagnosticIdentity) {
 		t.Fatalf("ambiguous runtime explanation missing: %+v", fact)
+	}
+}
+
+// OpenZeppelin AccessControl stores roles in a struct field,
+// `_roles[role].members[account]` (`hasRole[account]` since v5), not in a
+// nested mapping. The struct field adds no key, so the chain is the same role
+// lookup as `roles[role][account]`. Before this was recognized, every
+// onlyRole-gated function read as unprotected, which turned the Rarible
+// UpgradeExecutor's onlyRole(EXECUTOR_ROLE) delegatecall into a CRITICAL
+// "user-controlled delegatecall" finding.
+func TestAuthorizationFactsProveStructMemberRoleMapping(t *testing.T) {
+	db := buildFromSource(t, `pragma solidity ^0.8.20;
+abstract contract Context {
+    function _msgSender() internal view virtual returns (address) { return msg.sender; }
+}
+abstract contract AccessControl is Context {
+    struct RoleData { mapping(address => bool) members; bytes32 adminRole; }
+    mapping(bytes32 => RoleData) private _roles;
+    modifier onlyRole(bytes32 role) { _checkRole(role); _; }
+    function hasRole(bytes32 role, address account) public view virtual returns (bool) {
+        return _roles[role].members[account];
+    }
+    function _checkRole(bytes32 role) internal view virtual { _checkRole(role, _msgSender()); }
+    function _checkRole(bytes32 role, address account) internal view virtual {
+        if (!hasRole(role, account)) revert("AccessControl: missing role");
+    }
+    function _grantRole(bytes32 role, address account) internal virtual { _roles[role].members[account] = true; }
+}
+contract Executor is AccessControl {
+    bytes32 public constant EXECUTOR_ROLE = keccak256("EXECUTOR_ROLE");
+    function execute(address target, bytes memory data) external onlyRole(EXECUTOR_ROLE) {
+        (bool ok, ) = target.delegatecall(data);
+        require(ok);
+    }
+    function executeAs(bytes32 role, address target, bytes memory data) external onlyRole(role) {
+        (bool ok, ) = target.delegatecall(data);
+        require(ok);
+    }
+}`)
+	fixed, ok := db.GetAuthorizationFactByID(types.MakeFunctionID("/tmp/T.sol", "Executor", "execute(address,bytes)"))
+	if !ok || fixed.Verdict != types.AuthorizationProtected || fixed.Dominance != types.AuthorizationDominates {
+		t.Fatalf("fixed onlyRole over a struct role mapping = %+v, ok=%v, want dominating protected", fixed, ok)
+	}
+	selected, ok := db.GetAuthorizationFactByID(types.MakeFunctionID("/tmp/T.sol", "Executor", "executeAs(bytes32,address,bytes)"))
+	if !ok || selected.Verdict == types.AuthorizationProtected {
+		t.Fatalf("caller-selected role = %+v, ok=%v, must not be proven protected", selected, ok)
+	}
+}
+
+// OpenZeppelin Ownable compares a zero-argument getter with `_msgSender()` in
+// a helper that is declared below the modifier. Each of those three facts used
+// to break the proof on its own. The controls pin what must stay unproven: a
+// helper that runs after the placeholder, item self-scoping through a getter
+// with arguments, and a getter that just returns the caller.
+func TestAuthorizationFactsProveOpenZeppelinOwnable(t *testing.T) {
+	db := buildFromSource(t, `pragma solidity ^0.8.20;
+abstract contract Context {
+    function _msgSender() internal view virtual returns (address) { return msg.sender; }
+}
+abstract contract Ownable is Context {
+    address private _owner;
+    modifier onlyOwner() { _checkOwner(); _; }
+    modifier checkedAfter() { _; _checkOwner(); }
+    function owner() public view virtual returns (address) { return _owner; }
+    function _checkOwner() internal view virtual {
+        if (owner() != _msgSender()) revert("Ownable: caller is not the owner");
+    }
+}
+contract Vault is Ownable {
+    mapping(uint256 => address) private _owners;
+    uint256 x;
+    function ownerOf(uint256 id) public view returns (address) { return _owners[id]; }
+    function caller() internal view returns (address) { return msg.sender; }
+    function setX(uint256 v) external onlyOwner { x = v; }
+    function setLate(uint256 v) external checkedAfter { x = v; }
+    function setItem(uint256 id, uint256 v) external { require(ownerOf(id) == _msgSender(), "not item owner"); x = v; }
+    function setSelf(uint256 v) external { require(caller() == _msgSender(), "tautology"); x = v; }
+}`)
+	fact := func(selector string) *types.AuthorizationFact {
+		t.Helper()
+		f, ok := db.GetAuthorizationFactByID(types.MakeFunctionID("/tmp/T.sol", "Vault", selector))
+		if !ok {
+			t.Fatalf("missing authorization fact for %s", selector)
+		}
+		return f
+	}
+	if f := fact("setX(uint256)"); f.Verdict != types.AuthorizationProtected || f.Dominance != types.AuthorizationDominates {
+		t.Fatalf("onlyOwner = %+v, want dominating protected", f)
+	}
+	for _, selector := range []string{"setLate(uint256)", "setItem(uint256,uint256)", "setSelf(uint256)"} {
+		if f := fact(selector); f.Verdict == types.AuthorizationProtected {
+			t.Errorf("%s must not be proven protected: %+v", selector, f)
+		}
+	}
+}
+
+// A helper parameter bound to a caller-selected value may be compared against a
+// principal, but it never stands in for the caller. `_checkAdmin(user)` with
+// `require(a == admin)` used to read as protected, although the caller passes
+// user = admin and walks through. The same helper reached with msg.sender is a
+// real guard.
+func TestAuthorizationFactsNeverTreatCallerSelectedValueAsCaller(t *testing.T) {
+	db := buildFromSource(t, `pragma solidity ^0.8.20;
+contract P {
+    address admin;
+    uint256 x;
+    function _checkAdmin(address a) internal view { require(a == admin, "no"); }
+    function isAdmin(address a) internal view returns (bool) { return a == admin; }
+    function helperGuard(address user, uint256 v) external { _checkAdmin(user); x = v; }
+    function predicateGuard(address user, uint256 v) external { require(isAdmin(user), "no"); x = v; }
+    function helperSender(uint256 v) external { _checkAdmin(msg.sender); x = v; }
+    function predicateSender(uint256 v) external { require(isAdmin(msg.sender), "no"); x = v; }
+}`)
+	for selector, want := range map[string]bool{
+		"helperGuard(address,uint256)":    false,
+		"predicateGuard(address,uint256)": false,
+		"helperSender(uint256)":           true,
+		"predicateSender(uint256)":        true,
+	} {
+		fact, ok := db.GetAuthorizationFactByID(types.MakeFunctionID("/tmp/T.sol", "P", selector))
+		if !ok {
+			t.Fatalf("missing authorization fact for %s", selector)
+		}
+		if got := fact.Verdict == types.AuthorizationProtected; got != want {
+			t.Errorf("%s protected = %v, want %v: %+v", selector, got, want, fact)
+		}
+	}
+}
+
+// OpenZeppelin UUPS proxies authorize upgrades in an override written with an
+// unnamed parameter, `function _authorizeUpgrade(address) internal override
+// onlyOwner {}`. An unnamed parameter cannot be read, so it needs no binding;
+// refusing to bind it used to skip the helper and leave upgradeToAndCall
+// unprotected, which reported a CRITICAL user-controlled delegatecall on every
+// UUPS implementation.
+func TestAuthorizationFactsBindUnnamedHelperParameters(t *testing.T) {
+	db := buildFromSource(t, `pragma solidity ^0.8.20;
+abstract contract Ownable {
+    address private _owner;
+    modifier onlyOwner() { require(msg.sender == _owner, "not owner"); _; }
+}
+abstract contract UUPS {
+    function upgradeToAndCall(address newImplementation, bytes memory data) public payable virtual {
+        _authorizeUpgrade(newImplementation);
+        (bool ok, ) = newImplementation.delegatecall(data);
+        require(ok);
+    }
+    function _authorizeUpgrade(address newImplementation) internal virtual;
+}
+contract Impl is Ownable, UUPS {
+    function _authorizeUpgrade(address) internal override onlyOwner {}
+}`)
+	fact, ok := db.GetAuthorizationFactByID(types.MakeFunctionID("/tmp/T.sol", "UUPS", "upgradeToAndCall(address,bytes)"))
+	if !ok || fact.RuntimeContractID != "/tmp/T.sol#Impl" || fact.Verdict != types.AuthorizationProtected {
+		t.Fatalf("UUPS upgradeToAndCall through an unnamed-parameter override = %+v, ok=%v, want protected in Impl", fact, ok)
+	}
+}
+
+// Caller identity copied into a local stays caller identity only while every
+// write to that local is caller identity. The controls reassign the alias from
+// a parameter through plain Solidity, Yul, and tuple destructuring; each must
+// lose the self-scoping proof.
+func TestAuthorizationFactsFollowExactCallerIdentityAliases(t *testing.T) {
+	db := buildFromSource(t, `pragma solidity ^0.8.20;
+contract Vault {
+    mapping(uint256 => address) public ownerOf;
+    function _withdraw(address caller, uint256 id) internal {
+        if (ownerOf[id] != caller) revert("not owner");
+        delete ownerOf[id];
+    }
+    function direct(uint256 id) external { _withdraw(msg.sender, id); }
+    function aliased(uint256 id) external { address sender = msg.sender; _withdraw(sender, id); }
+    function aliasOfAlias(uint256 id) external { address a = msg.sender; address b = a; _withdraw(b, id); }
+    function reassigned(uint256 id, address user, bool flag) external {
+        address sender = msg.sender;
+        if (flag) sender = user;
+        _withdraw(sender, id);
+    }
+    function yulReassigned(uint256 id, address user) external {
+        address sender = msg.sender;
+        assembly { sender := user }
+        _withdraw(sender, id);
+    }
+    function tupleReassigned(uint256 id, address user) external {
+        address sender = msg.sender;
+        uint256 other;
+        (sender, other) = (user, id);
+        _withdraw(sender, other);
+    }
+}`)
+	for selector, want := range map[string]bool{
+		"direct(uint256)":                  true,
+		"aliased(uint256)":                 true,
+		"aliasOfAlias(uint256)":            true,
+		"reassigned(uint256,address,bool)": false,
+		"yulReassigned(uint256,address)":   false,
+		"tupleReassigned(uint256,address)": false,
+	} {
+		fact, ok := db.GetAuthorizationFactByID(types.MakeFunctionID("/tmp/T.sol", "Vault", selector))
+		if !ok {
+			t.Fatalf("missing authorization fact for %s", selector)
+		}
+		if got := fact.Verdict == types.AuthorizationSelfScoped; got != want {
+			t.Errorf("%s self_scoped = %v, want %v: %+v", selector, got, want, fact)
+		}
+	}
+}
+
+// `revert ERC20InvalidSender(...)` is recorded as a call to an unresolved
+// function whose name contains "sender". It is a revert payload, not a guard
+// helper, so an OpenZeppelin-style transfer that forwards an aliased
+// _msgSender() into _transfer must not become unknown because of it.
+func TestAuthorizationFactsIgnoreCustomErrorRevertPayloads(t *testing.T) {
+	db := buildFromSource(t, `pragma solidity ^0.8.20;
+interface IERC20Errors { error ERC20InvalidSender(address sender); }
+contract Token is IERC20Errors {
+    mapping(address => uint256) balances;
+    function _msgSender() internal view returns (address) { return msg.sender; }
+    function _transfer(address from, address to, uint256 value) internal {
+        if (from == address(0)) revert ERC20InvalidSender(address(0));
+        balances[from] -= value;
+        balances[to] += value;
+    }
+    function transfer(address to, uint256 value) external {
+        address owner = _msgSender();
+        _transfer(owner, to, value);
+    }
+}`)
+	fact, ok := db.GetAuthorizationFactByID(types.MakeFunctionID("/tmp/T.sol", "Token", "transfer(address,uint256)"))
+	if !ok || fact.Verdict == types.AuthorizationUnknown {
+		t.Fatalf("transfer = %+v, ok=%v; a custom-error revert payload must not make it unknown", fact, ok)
+	}
+}
+
+// Axelar's acceptOwnership loads the pending owner through an assembly getter
+// into a local and compares it with msg.sender. A zero-argument getter is a
+// contract-held principal, so the single-assignment local proves exactly what
+// comparing the getter directly proves. A local whose value is ambiguous (two
+// assignments) is still an authorization check and must fail closed as
+// unknown rather than vanish. An EOA check against tx.origin is not
+// authorization.
+// An `emit RoleSet(...)` is recorded as an unresolved call whose name passes
+// the guard-word test on "role". It is an event payload, not a guard helper:
+// an unguarded role setter must read as unprotected, not unknown, or every
+// negated authorization preset silently skips it.
+func TestAuthorizationFactsIgnoreEventPayloads(t *testing.T) {
+	db := buildFromSource(t, `pragma solidity ^0.8.20;
+contract Governor {
+    event RoleSet(bytes32 indexed role, address indexed account, bool status);
+    event OwnershipTransferred(address indexed previous, address indexed next);
+    address owner;
+    mapping(bytes32 => mapping(address => bool)) roles;
+    function setRole(bytes32 role, address account) external {
+        roles[role][account] = true;
+        emit RoleSet(role, account, true);
+    }
+    function transferOwnership(address next) external {
+        emit OwnershipTransferred(owner, next);
+        owner = next;
+    }
+    function guardedSetRole(bytes32 role, address account) external {
+        require(msg.sender == owner, "not owner");
+        roles[role][account] = true;
+        emit RoleSet(role, account, true);
+    }
+}`)
+	for selector, want := range map[string]types.AuthorizationVerdict{
+		"setRole(bytes32,address)":        types.AuthorizationUnprotected,
+		"transferOwnership(address)":      types.AuthorizationUnprotected,
+		"guardedSetRole(bytes32,address)": types.AuthorizationProtected,
+	} {
+		fact, ok := db.GetAuthorizationFactByID(types.MakeFunctionID("/tmp/T.sol", "Governor", selector))
+		if !ok {
+			t.Fatalf("missing authorization fact for %s", selector)
+		}
+		if fact.Verdict != want {
+			t.Errorf("%s verdict = %s, want %s: %+v", selector, fact.Verdict, want, fact)
+		}
+	}
+}
+
+func TestAuthorizationFactsClassifyLocalPrincipals(t *testing.T) {
+	db := buildFromSource(t, `pragma solidity ^0.8.20;
+contract Owned {
+    bytes32 internal constant _PENDING_SLOT = keccak256("pending");
+    address backup;
+    uint256 x;
+    function pendingOwner() public view returns (address owner) {
+        assembly { owner := sload(_PENDING_SLOT) }
+    }
+    function backupOwner() public view returns (address) { return backup; }
+    function acceptOwnership() external {
+        address newOwner = pendingOwner();
+        if (newOwner != msg.sender) revert("InvalidOwner");
+        x = 1;
+    }
+    function acceptDirect() external {
+        if (pendingOwner() != msg.sender) revert("InvalidOwner");
+        x = 2;
+    }
+    function acceptAmbiguous(bool flag) external {
+        address expected = pendingOwner();
+        if (flag) expected = backupOwner();
+        if (expected != msg.sender) revert("InvalidOwner");
+        x = 3;
+    }
+    function eoaOnly() external {
+        require(msg.sender == tx.origin, "no contracts");
+        x = 4;
+    }
+}`)
+	for selector, want := range map[string]types.AuthorizationVerdict{
+		"acceptOwnership()":     types.AuthorizationProtected,
+		"acceptDirect()":        types.AuthorizationProtected,
+		"acceptAmbiguous(bool)": types.AuthorizationUnknown,
+		"eoaOnly()":             types.AuthorizationUnprotected,
+	} {
+		fact, ok := db.GetAuthorizationFactByID(types.MakeFunctionID("/tmp/T.sol", "Owned", selector))
+		if !ok {
+			t.Fatalf("missing authorization fact for %s", selector)
+		}
+		if fact.Verdict != want {
+			t.Errorf("%s verdict = %s, want %s: %+v", selector, fact.Verdict, want, fact)
+		}
+	}
+}
+
+// A modifier that receives a caller-selected argument blocks the proof only
+// when it could be authorization. A Uniswap router's `ensure(deadline)` has no
+// authorization-shaped condition and calls nothing, so it is input
+// validation and leaves the function's own verdict alone. An account modifier
+// that delegates to a helper, as Euler's onlyOwnerOrOperator does, still
+// fails closed, and so does one whose helper cannot be resolved (here
+// `_verify`, as if inherited from a base missing from the sources), since the
+// helper may hold the guard.
+func TestAuthorizationFactsIgnoreInputValidationModifiers(t *testing.T) {
+	db := buildFromSource(t, `pragma solidity ^0.8.20;
+contract Router {
+    mapping(address => mapping(address => bool)) operators;
+    uint256 x;
+    error Expired();
+    modifier ensure(uint256 deadline) { require(deadline >= block.timestamp, "EXPIRED"); _; }
+    modifier ensureCustom(uint256 deadline) { if (deadline < block.timestamp) revert Expired(); _; }
+    modifier onlyOwnerOrOperator(address account) { _authenticate(account); _; }
+    modifier verified(address account) { _verify(account); _; }
+    function _authenticate(address account) internal view {
+        require(account == msg.sender || operators[account][msg.sender], "unauthorized");
+    }
+    function swap(uint256 deadline) external ensure(deadline) { x = 1; }
+    function swapCustom(uint256 deadline) external ensureCustom(deadline) { x = 2; }
+    function act(address account) external onlyOwnerOrOperator(account) { x = 3; }
+    function actVerified(address account) external verified(account) { x = 4; }
+}`)
+	for selector, want := range map[string]types.AuthorizationVerdict{
+		"swap(uint256)":        types.AuthorizationUnprotected,
+		"swapCustom(uint256)":  types.AuthorizationUnprotected,
+		"act(address)":         types.AuthorizationUnknown,
+		"actVerified(address)": types.AuthorizationUnknown,
+	} {
+		fact, ok := db.GetAuthorizationFactByID(types.MakeFunctionID("/tmp/T.sol", "Router", selector))
+		if !ok {
+			t.Fatalf("missing authorization fact for %s", selector)
+		}
+		if fact.Verdict != want {
+			t.Errorf("%s verdict = %s, want %s: %+v", selector, fact.Verdict, want, fact)
+		}
 	}
 }
 

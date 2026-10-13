@@ -93,8 +93,8 @@ query:
 	if err != nil {
 		t.Fatalf("parse template: %v", err)
 	}
-	// Default (verifier) location source — the production default; it anchors
-	// Line at the matched node and so carries the node's precise span.
+	// Matched-node location is the production default; it anchors Line at the
+	// dangerous node and carries the node's precise span.
 	findings := New(b.GetDatabase()).Execute(tmpl)
 	if len(findings) == 0 {
 		t.Fatal("expected a delegatecall finding")

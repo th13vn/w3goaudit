@@ -1391,6 +1391,28 @@ func mergeRuleArguments(dst, src *Rule) error {
 }
 
 func mergeRuleRelations(dst, src *Rule) error {
+	// Structural relation matchers each describe one existential relation from
+	// the current node. Merging two siblings into one child silently changes
+	// the authored meaning to "the same descendant/ancestor satisfies both".
+	// Reject that ambiguity and require an explicit `any:`/`and:` composition.
+	// The latter keeps the two searches independent and makes the intended
+	// cardinality visible in the template.
+	for _, repeated := range []struct {
+		name    string
+		present bool
+	}{
+		{name: "has", present: dst.Contains != nil && src.Contains != nil},
+		{name: "in", present: dst.Inside != nil && src.Inside != nil},
+		{name: "receiver", present: dst.Receiver != nil && src.Receiver != nil},
+		{name: "left", present: dst.Left != nil && src.Left != nil},
+		{name: "right", present: dst.Right != nil && src.Right != nil},
+		{name: "statement_has", present: dst.StatementContains != nil && src.StatementContains != nil},
+		{name: "guarded_by", present: dst.HasGuard != nil && src.HasGuard != nil},
+	} {
+		if repeated.present {
+			return fmt.Errorf("where: repeated structural matcher %q; use explicit any:/and: branches", repeated.name)
+		}
+	}
 	mergePtr := func(dstPtr **Rule, srcPtr *Rule) error {
 		if srcPtr == nil {
 			return nil

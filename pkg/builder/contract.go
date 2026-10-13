@@ -1,6 +1,10 @@
 package builder
 
 import (
+	"regexp"
+	"strconv"
+	"strings"
+
 	"github.com/th13vn/solast-go/pkg/ast"
 	"github.com/th13vn/w3goaudit/pkg/types"
 )
@@ -8,6 +12,7 @@ import (
 // ContractExtractor extracts contracts from AST
 type ContractExtractor struct {
 	sourceFile      string
+	db              *types.Database
 	locator         *sourceLocator
 	contracts       []*types.Contract
 	currentContract *types.Contract
@@ -120,11 +125,19 @@ func (ce *ContractExtractor) getContractKind(node *ast.ContractDefinition) types
 
 // extractFunction extracts a function from AST
 func (ce *ContractExtractor) extractFunction(node *ast.FunctionDefinition) *types.Function {
+	visibility := types.Visibility(node.Visibility)
+	// Solidity versions before 0.5.0 defaulted a function without an
+	// explicit visibility modifier to public. solast-go intentionally keeps
+	// the source omission as an empty string, so recover the language default
+	// here before entry-point and WQL context analysis.
+	if visibility == "" && ce.legacySolidityDefaults() {
+		visibility = types.VisibilityPublic
+	}
 	fn := &types.Function{
 		Name:            node.Name,
 		ContractName:    ce.currentContract.Name,
 		SourceFile:      ce.currentContract.SourceFile,
-		Visibility:      types.Visibility(node.Visibility),
+		Visibility:      visibility,
 		StateMutability: types.StateMutability(node.StateMutability),
 		IsConstructor:   node.IsConstructor,
 		IsReceive:       node.IsReceiveEther,
@@ -191,6 +204,138 @@ func (ce *ContractExtractor) extractFunction(node *ast.FunctionDefinition) *type
 	// after all structs are extracted (see builder.calculateFunctionSelectors)
 
 	return fn
+}
+
+var solidityVersionPattern = regexp.MustCompile(`^(>=|<=|==|>|<|=|\^|~)?\s*(\d+)(?:\.(\d+))?(?:\.(\d+))?$`)
+
+// legacyPragmaBefore05 reports whether every version range admitted by a
+// Solidity pragma is strictly before 0.5.0. Solidity 0.4.x had implicit
+// public function visibility; guessing it for an open range (>=0.4.0) or a
+// disjunction that also admits 0.5+ would create false entry points. Unknown
+// or malformed constraints therefore return false.
+func legacyPragmaBefore05(pragma string) bool {
+	branches := strings.Split(strings.TrimSpace(pragma), "||")
+	if len(branches) == 0 {
+		return false
+	}
+	for _, branch := range branches {
+		branch = strings.TrimSpace(branch)
+		if branch == "" || !legacyVersionBranchBefore05(branch) {
+			return false
+		}
+	}
+	return true
+}
+
+func legacyVersionBranchBefore05(branch string) bool {
+	tokens := strings.Fields(normalizeVersionBranchOperators(branch))
+	if len(tokens) == 0 {
+		return false
+	}
+	hasBound := false
+	for _, token := range tokens {
+		m := solidityVersionPattern.FindStringSubmatch(token)
+		if len(m) != 5 {
+			return false
+		}
+		major, err := strconv.Atoi(m[2])
+		if err != nil {
+			return false
+		}
+		minor := 0
+		if m[3] != "" {
+			minor, err = strconv.Atoi(m[3])
+			if err != nil {
+				return false
+			}
+		}
+		patch := 0
+		if m[4] != "" {
+			patch, err = strconv.Atoi(m[4])
+			if err != nil {
+				return false
+			}
+		}
+		legacy := major == 0 && minor < 5
+		switch m[1] {
+		case "^", "~":
+			if m[3] == "" || !legacy {
+				return false
+			}
+			hasBound = true
+		case "", "=", "==":
+			if m[3] == "" || !legacy {
+				return false
+			}
+			hasBound = true
+		case "<":
+			// An upper bound below 0.5.0 closes the range to legacy
+			// compilers. `<0.5` and `<0.5.0` are both accepted.
+			if major > 0 || minor > 5 || (minor == 5 && patch > 0) {
+				return false
+			}
+			hasBound = true
+		case "<=":
+			if !legacy {
+				return false
+			}
+			hasBound = true
+		case ">", ">=":
+			// Lower bounds alone leave the range open to modern Solidity.
+			// A separate legacy upper bound may still close it.
+			if major > 0 || minor >= 5 {
+				return false
+			}
+		default:
+			return false
+		}
+	}
+	return hasBound && branchHasLegacyUpperBound(tokens)
+}
+
+var spacedVersionOperatorPattern = regexp.MustCompile(`(>=|<=|==|>|<|=|\^|~)\s+(\d)`)
+
+func normalizeVersionBranchOperators(branch string) string {
+	return spacedVersionOperatorPattern.ReplaceAllString(branch, `$1$2`)
+}
+
+func branchHasLegacyUpperBound(tokens []string) bool {
+	for _, token := range tokens {
+		m := solidityVersionPattern.FindStringSubmatch(token)
+		if len(m) != 5 {
+			return false
+		}
+		major, _ := strconv.Atoi(m[2])
+		minor := 0
+		if m[3] != "" {
+			minor, _ = strconv.Atoi(m[3])
+		}
+		legacy := major == 0 && minor < 5
+		switch m[1] {
+		case "^", "~", "", "=", "==":
+			if legacy {
+				return true
+			}
+		case "<", "<=":
+			if legacy || (m[1] == "<" && major == 0 && minor == 5) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// legacySolidityDefaults reports whether the source pragma permits the
+// pre-0.5 implicit-public function visibility. Keeping this version-gated is
+// important because tolerant parsing can also produce an empty visibility for
+// malformed modern Solidity, where guessing public would create false entry
+// points.
+func (ce *ContractExtractor) legacySolidityDefaults() bool {
+	if ce == nil || ce.db == nil {
+		return false
+	}
+	sf := ce.db.SourceFiles[ce.sourceFile]
+	return sf != nil && legacyPragmaInSource(sf.Content)
 }
 
 // extractParameter extracts a parameter from AST

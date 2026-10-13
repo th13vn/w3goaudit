@@ -2,7 +2,7 @@ meta:
   id: HIGH-ARBITRARY-LOW-LEVEL-CALL
   title: "Arbitrary low-level call (user-controlled target and calldata)"
   severity: HIGH
-  confidence: MEDIUM
+  confidence: LOW
   description: >
     An unauthenticated entry point forwards a user-controlled address AND
     user-controlled calldata into a low-level `.call(...)`. The contract becomes
@@ -23,6 +23,33 @@ query:
           authorization:
             type: protected
 
+    # The enclosing function only proceeds when a contract+selector allowlist
+    # accepts the call: `if (!LibAllowList.contractSelectorIsAllowed(callTo,
+    # bytes4(data[:4]))) revert`, or the same check in a require. A `bytes4`
+    # argument ties the check to the call itself; an allowlist on a token or
+    # asset leaves the target and calldata free and does not count. This is a
+    # name-based stopgap until allowlist sanitizers are an engine fact.
+    - not:
+        in:
+          has:
+            any:
+              - and:
+                  - block: if
+                  - has:
+                      block: revert
+                  - has:
+                      block: call
+                      name: '(?i)(allow|whitelist)'
+                      arg.any:
+                        name: '^bytes4$'
+              - and:
+                  - block: require
+                  - has:
+                      block: call
+                      name: '(?i)(allow|whitelist)'
+                      arg.any:
+                        name: '^bytes4$'
+
     # Match the call's own target, not a receiver nested inside calldata.
     - receiver:
         tainted: user_controlled
@@ -38,6 +65,13 @@ query:
               block: external_call
               name: ^(encodeWithSelector|encodeWithSignature|encodeCall|encodePacked)$
           # The contract builds calldata, but the caller picks the selector.
+          # `token.transferFrom.selector` is a compile-time constant even when
+          # `token` is caller-chosen (SafeERC20 on a user-supplied token), so a
+          # `.selector` member does not count as a chosen selector.
           - block: external_call
             name: ^(encodeWithSelector|encodeWithSignature|encodeCall|encodePacked)$
-            arg.0: { tainted: user_controlled }
+            arg.0:
+              tainted: user_controlled
+              not:
+                block: member
+                name: ^selector$

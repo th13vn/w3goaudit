@@ -2,7 +2,7 @@ meta:
   id: HIGH-REENTRANCY-PATTERN
   title: "Potential reentrancy: state variable modification"
   severity: HIGH
-  confidence: MEDIUM
+  confidence: LOW
   description: >
     Detects functions where external calls occur before state variable updates.
     Recursively traces through internal function calls to find external calls.
@@ -13,16 +13,65 @@ meta:
     - https://swcregistry.io/docs/SWC-107
     - https://consensys.github.io/smart-contract-best-practices/attacks/reentrancy/
 
-# Require no recognized reentrancy guard, then match an ETH-bearing or raw call
-# before a state write. Typed ERC20 calls and delegatecall are intentionally
-# excluded because they are handled by their own semantic conditions.
+# Require no recognized reentrancy guard, then match a call that hands control
+# to code the attacker can influence, followed by a state write. Typed ERC20
+# calls and delegatecall are intentionally excluded because they are handled by
+# their own semantic conditions.
 query:
   from: entry_function
   where:
     - not: { preset: reentrancy_guarded }
     - sequence:
-        # eth_transfer matches .transfer/.send/.call{value:} AND raw .call(...)
-        # (call.builtin.transfer, call.builtin.send, call.lowlevel.call, asm.call)
-        # — i.e. every ETH-bearing or raw-call shape used in classical reentrancy.
-        - block: eth_transfer
+        # eth_transfer matches .transfer/.send/.call{value:}, raw .call(...) and
+        # asm call. A raw call counts when it can hand control to the caller:
+        # it sends ETH, its target is chosen by the caller, or its calldata
+        # carries the caller's identity or input, as a token transfer to or
+        # from msg.sender does (a hook token then calls the caller back; the
+        # Lendf.Me ERC777 drain). A value-free call to a contract-held address
+        # with contract-built calldata, such as a governance-set hook or
+        # interest-rate model, gives the caller nothing to re-enter with.
+        - any:
+            - and:
+                - block: eth_transfer
+                - any:
+                    - block: builtin_transfer
+                    - block: builtin_send
+                    - receiver:
+                        tainted: user_controlled
+                    # Inside a token-transfer wrapper (SafeERC20, TokenUtils,
+                    # TransferHelper, SafeTransferLib) the value, assembly and
+                    # calldata triggers describe the wrapper's own plumbing.
+                    # Moving a token the caller did not choose hands control to
+                    # that token, not to the caller; a caller-chosen token is
+                    # still caught by the receiver trigger above.
+                    - and:
+                        - not:
+                            in:
+                              block: function
+                              name: '^_?(safeTransfer|safeTransferFrom|safeApprove|safeIncreaseAllowance|safeDecreaseAllowance|forceApprove|safeBurnFrom|safePermit|callOptionalReturn|callOptionalReturnBool)$'
+                        - any:
+                            - has: { call_option: value }
+                            # Assembly calls stay included conservatively
+                            # unless the attached value is a proven constant.
+                            - and:
+                                - block: asm_call
+                                - not:
+                                    boundary_value_control: '^fixed$'
+                            - arg.0:
+                                tainted: user_controlled
+            # A hook-capable token (ERC777/ERC1155-style) pulled from the
+            # caller, even when the contract holds the token address. The
+            # receiver type must be resolved and not plain IERC20: with the
+            # SafeERC20 import unresolved, every IERC20 pull looked
+            # hook-capable.
+            - and:
+                - block: external_call
+                - name: '^safeTransferFrom$'
+                - attr:
+                    receiver_type: '.+'
+                - not:
+                    attr:
+                      receiver_type: '^(?i)IERC20$'
+                - arg.0:
+                    tainted: sender
         - block: state_write

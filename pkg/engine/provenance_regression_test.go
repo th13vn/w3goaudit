@@ -1,9 +1,15 @@
 package engine
 
 import (
+	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
+	"github.com/th13vn/w3goaudit/pkg/builder"
+	"github.com/th13vn/w3goaudit/pkg/reader"
 	"github.com/th13vn/w3goaudit/pkg/types"
 )
 
@@ -54,6 +60,165 @@ query:
 				loc.EndLine != want.EndLine || loc.EndCol != want.EndCol ||
 				loc.StartByte != want.StartByte || loc.EndByte != want.EndByte {
 				t.Fatalf("location = %+v, want exact AST/source span [%d,%d)", loc, want.StartByte, want.EndByte)
+			}
+		})
+	}
+}
+
+func TestLibraryBackedFindingUsesOuterProtocolCallSite(t *testing.T) {
+	const source = `pragma solidity ^0.8.20;
+library AddressLike {
+    function functionCall(address target, bytes memory data) internal {
+        (bool ok, ) = target.call(data);
+        require(ok);
+    }
+}
+contract Protocol {
+    function execute(address target, bytes calldata data) external {
+        AddressLike.functionCall(target, data);
+    }
+}`
+	db := buildDBFromSource(t, source).GetDatabase()
+	tmpl, err := ParseTemplate(`
+meta: {id: library-location, severity: HIGH}
+query:
+  select: lowlevel_call
+  from: entry_function
+  where:
+    - receiver: {tainted: parameter}
+`)
+	if err != nil {
+		t.Fatalf("ParseTemplate: %v", err)
+	}
+	findings := New(db).Execute(tmpl)
+	if len(findings) != 1 {
+		t.Fatalf("findings = %d, want one library-backed finding: %+v", len(findings), findings)
+	}
+	finding := findings[0]
+	if finding.Location.Contract != "Protocol" || finding.Location.Function != "execute" {
+		t.Fatalf("logical location = %+v, want Protocol.execute", finding.Location)
+	}
+	if finding.Location.File == "" || strings.Contains(finding.Location.File, "AddressLike") {
+		t.Fatalf("location file = %q, want outer protocol file", finding.Location.File)
+	}
+	if finding.PrimaryAST == nil || finding.PrimaryAST.Name != "call" {
+		t.Fatalf("primary AST = %+v, want inner low-level call evidence", finding.PrimaryAST)
+	}
+}
+
+// A promoted library call must use the caller's complete location, even
+// when that caller is an inherited internal helper in a different file.
+func TestLibraryLocationUsesExactCallerAcrossFilesAndCache(t *testing.T) {
+	t.Setenv("W3GOAUDIT_LOCATION_FROM_MATCHED_NODE", "")
+	t.Setenv("WGAUDIT_LOCATION_FROM_MATCHED_NODE", "")
+	dir := t.TempDir()
+	dir, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	libraryFile := filepath.Join(dir, "Library.sol")
+	helperFile := filepath.Join(dir, "Helper.sol")
+	entryFile := filepath.Join(dir, "Entry.sol")
+	sources := map[string]string{
+		libraryFile: `pragma solidity ^0.8.20;
+library AddressLike {
+    function functionCall(address target, bytes memory data) internal {
+        (bool ok,) = target.call(data);
+        require(ok);
+    }
+}`,
+		helperFile: `pragma solidity ^0.8.20;
+import "./Library.sol";
+abstract contract Helper {
+    function dispatch(address target, bytes memory data) internal {
+        AddressLike.functionCall(target, data);
+    }
+}`,
+		entryFile: `pragma solidity ^0.8.20;
+import "./Helper.sol";
+contract Entry is Helper {
+    function execute(address target, bytes calldata data) external {
+        dispatch(target, data);
+    }
+}`,
+	}
+	for file, content := range sources {
+		if err := os.WriteFile(file, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rdr := reader.New()
+	if _, err := rdr.Read(dir); err != nil {
+		t.Fatal(err)
+	}
+	if err := rdr.ResolveImports(dir); err != nil {
+		t.Fatal(err)
+	}
+	db, err := builder.New().Build(rdr.GetAllSources())
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := json.Marshal(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cacheFile := filepath.Join(dir, "database.json")
+	if err := os.WriteFile(cacheFile, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cached, err := types.LoadFromJSON(cacheFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpl, err := ParseTemplate(`
+meta: {id: cross-file-library, severity: HIGH}
+query:
+  select: lowlevel_call
+  from: entry_function
+  where:
+    - receiver: {tainted: parameter}
+`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name string
+		db   *types.Database
+	}{{"source", db}, {"cache", cached}} {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, mode := range []LocationSource{LocationSourceMatchedNode, LocationSourceVerifier} {
+				eng := New(tc.db)
+				eng.SetLocationSource(mode)
+				findings := eng.Execute(tmpl)
+				if len(findings) != 1 {
+					t.Fatalf("findings = %d, want 1", len(findings))
+				}
+				f := findings[0]
+				if f.Location.File != helperFile {
+					t.Fatalf("mode %v location = %+v, want caller file %s", mode, f.Location, helperFile)
+				}
+				if mode == LocationSourceMatchedNode && (f.Location.Contract != "Helper" || f.Location.Function != "dispatch") {
+					t.Fatalf("location = %+v, want Helper.dispatch", f.Location)
+				}
+				if mode == LocationSourceVerifier && (f.Location.Contract != "Entry" || f.Location.Function != "execute") {
+					t.Fatalf("legacy identity = %+v", f.Location)
+				}
+				if f.Location.Line != 5 || f.Location.Col != 9 {
+					t.Fatalf("caller span = %+v", f.Location)
+				}
+				content := sources[helperFile]
+				if f.Location.StartByte < 0 || f.Location.EndByte > len(content) || f.Location.EndByte <= f.Location.StartByte {
+					t.Fatalf("invalid byte range: %+v", f.Location)
+				}
+				if got := content[f.Location.StartByte:f.Location.EndByte]; got != "AddressLike.functionCall(target, data)" {
+					t.Fatalf("caller excerpt = %q", got)
+				}
+				if f.PrimaryAST == nil || f.PrimaryAST.Name != "call" || f.EntryPoint == nil || f.EntryPoint.Function != "execute" {
+					t.Fatalf("inner evidence/entry lost: %+v", f)
+				}
+				if f.Reachability == nil || len(f.Reachability.Steps) != 3 || f.Reachability.Steps[2].File != libraryFile {
+					t.Fatalf("inner trace lost: %+v", f.Reachability)
+				}
 			}
 		})
 	}

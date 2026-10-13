@@ -27,7 +27,10 @@ query:
         - visibility: public,external
         - regex: '(?s)function\s+\w+\([^)]*(?:bytes|string|address\[\]|uint256\[\])\s+\w+[^)]*(?:bytes|string|address\[\]|uint256\[\])\s+\w+'
     # The two shapes have different AST anchors, so the query intentionally omits
-    # `select:` and anchors each alternative explicitly.
+    # `select:` and anchors each alternative explicitly. The packed arguments
+    # themselves must be dynamic (`bytes`, `string`, or an array): the
+    # signature regex alone also accepted functions that pack only static
+    # values while their dynamic parameters go elsewhere.
     - any:
         - has:
             block: internal_call
@@ -35,13 +38,13 @@ query:
             has:
               block: external_call
               name: '^encodePacked$'
-              arg.0: { tainted: parameter }
-              arg.1: { tainted: parameter }
+              arg.0: { tainted: parameter, type: '^(bytes|string|.+\[\])$' }
+              arg.1: { tainted: parameter, type: '^(bytes|string|.+\[\])$' }
         - sequence:
             - block: external_call
               name: '^encodePacked$'
-              arg.0: { tainted: parameter }
-              arg.1: { tainted: parameter }
+              arg.0: { tainted: parameter, type: '^(bytes|string|.+\[\])$' }
+              arg.1: { tainted: parameter, type: '^(bytes|string|.+\[\])$' }
             - block: internal_call
               name: '^keccak256$'
               arg.0: { tainted: parameter }

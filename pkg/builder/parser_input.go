@@ -1,6 +1,9 @@
 package builder
 
-import "strings"
+import (
+	"regexp"
+	"strings"
+)
 
 const (
 	parserCode = iota
@@ -29,6 +32,185 @@ func normalizeYulAssignmentsForParser(source string) string {
 		normalizer.advance()
 	}
 	return string(normalizer.source)
+}
+
+// normalizeLegacyFunctionModifiersForParser adapts Solidity 0.4.x's
+// `constant` function mutability keyword to the `view` spelling accepted by
+// solast-go. Only standalone tokens in function declaration headers are
+// rewritten; state-variable declarations such as `string constant name` and
+// function-body occurrences remain untouched. Replacing `constant` with
+// `view` plus spaces preserves every byte offset reported by the parser.
+func normalizeLegacyFunctionModifiersForParser(source string) string {
+	if !strings.Contains(source, "constant") || !strings.Contains(source, "function") || !legacyPragmaInSource(source) {
+		return source
+	}
+	buf := []byte(source)
+	masked := maskParserProtectedText(source)
+	for i := 0; i < len(masked); {
+		if !isParserIdentifierStart(masked[i]) {
+			i++
+			continue
+		}
+		start := i
+		for i < len(masked) && isParserIdentifierPart(masked[i]) {
+			i++
+		}
+		if string(masked[start:i]) != "function" {
+			continue
+		}
+		end := functionHeaderEnd(masked, i)
+		if end <= i {
+			continue
+		}
+		normalizeConstantTokens(buf, masked, i, end)
+		i = end
+	}
+	return string(buf)
+}
+
+func maskParserProtectedText(source string) []byte {
+	masked := []byte(source)
+	state := parserCode
+	var quote byte
+	for i := 0; i < len(masked); i++ {
+		switch state {
+		case parserQuoted:
+			if masked[i] == '\\' {
+				if i+1 < len(masked) && masked[i+1] != '\n' && masked[i+1] != '\r' {
+					masked[i], masked[i+1] = ' ', ' '
+					i++
+				}
+				continue
+			}
+			if masked[i] == quote {
+				masked[i] = ' '
+				state = parserCode
+			} else if masked[i] != '\n' && masked[i] != '\r' {
+				masked[i] = ' '
+			}
+		case parserLineComment:
+			if masked[i] == '\n' || masked[i] == '\r' {
+				state = parserCode
+			} else {
+				masked[i] = ' '
+			}
+		case parserBlockComment:
+			if masked[i] == '*' && i+1 < len(masked) && masked[i+1] == '/' {
+				masked[i], masked[i+1] = ' ', ' '
+				i++
+				state = parserCode
+			} else if masked[i] != '\n' && masked[i] != '\r' {
+				masked[i] = ' '
+			}
+		default:
+			if masked[i] == '/' && i+1 < len(masked) && masked[i+1] == '/' {
+				masked[i], masked[i+1] = ' ', ' '
+				i++
+				state = parserLineComment
+			} else if masked[i] == '/' && i+1 < len(masked) && masked[i+1] == '*' {
+				masked[i], masked[i+1] = ' ', ' '
+				i++
+				state = parserBlockComment
+			} else if masked[i] == '\'' || masked[i] == '"' {
+				quote = masked[i]
+				masked[i] = ' '
+				state = parserQuoted
+			}
+		}
+	}
+	return masked
+}
+
+var solidityPragmaInSourcePattern = regexp.MustCompile(`(?m)\bpragma\s+solidity\s+([^;]+);`)
+
+func legacyPragmaInSource(source string) bool {
+	masked := maskParserProtectedText(source)
+	matches := solidityPragmaInSourcePattern.FindAllSubmatch(masked, -1)
+	if len(matches) == 0 {
+		return false
+	}
+	for _, match := range matches {
+		if len(match) != 2 || !legacyPragmaBefore05(string(match[1])) {
+			return false
+		}
+	}
+	return true
+}
+
+func functionHeaderEnd(source []byte, start int) int {
+	state := parserCode
+	var quote byte
+	parenDepth := 0
+	for i := start; i < len(source); i++ {
+		switch state {
+		case parserQuoted:
+			if source[i] == '\\' {
+				i++
+				continue
+			}
+			if source[i] == quote {
+				state = parserCode
+			}
+		case parserLineComment:
+			if source[i] == '\n' {
+				state = parserCode
+			}
+		case parserBlockComment:
+			if source[i] == '*' && i+1 < len(source) && source[i+1] == '/' {
+				i++
+				state = parserCode
+			}
+		default:
+			if source[i] == '/' && i+1 < len(source) && source[i+1] == '/' {
+				i++
+				state = parserLineComment
+				continue
+			}
+			if source[i] == '/' && i+1 < len(source) && source[i+1] == '*' {
+				i++
+				state = parserBlockComment
+				continue
+			}
+			if source[i] == '\'' || source[i] == '"' {
+				quote = source[i]
+				state = parserQuoted
+				continue
+			}
+			switch source[i] {
+			case '(':
+				parenDepth++
+			case ')':
+				if parenDepth > 0 {
+					parenDepth--
+				}
+			case '{', ';':
+				if parenDepth == 0 {
+					return i
+				}
+			}
+		}
+	}
+	return len(source)
+}
+
+func normalizeConstantTokens(source, masked []byte, start, end int) {
+	for i := start; i < end; {
+		if !isParserIdentifierStart(masked[i]) {
+			i++
+			continue
+		}
+		wordStart := i
+		for i < end && isParserIdentifierPart(masked[i]) {
+			i++
+		}
+		if i-wordStart != len("constant") || string(masked[wordStart:i]) != "constant" {
+			continue
+		}
+		copy(source[wordStart:wordStart+len("view")], "view")
+		for j := wordStart + len("view"); j < i; j++ {
+			source[j] = ' '
+		}
+	}
 }
 
 type yulAssignmentNormalizer struct {

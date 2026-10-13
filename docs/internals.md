@@ -262,7 +262,7 @@ host-scope/span/kind/AST-path identity, exact or explicitly unresolved target
 metadata, conservative receiver/value/gas/argument provenance, structural
 result disposition, direct check evidence, descriptive reentry class, and
 direct writes in the same function or modifier host.
-`ExternalBoundaryFactsVersion` is `1.0.0`. `ScopeID` and `ScopeKind` distinguish
+`ExternalBoundaryFactsVersion` is `1.1.0`. `ScopeID` and `ScopeKind` distinguish
 exact function and modifier hosts; `FunctionID` remains empty for a modifier
 fact rather than being overloaded with a modifier identity.
 
@@ -620,16 +620,21 @@ no deeper primary exists. Placement validation also recurses through
 - **`unchecked_var`** (`operandsGuardedBefore`): for unsigned `left - right` and
   `left -= right`, matches unless the local AST path proves `left >= right`.
   The proof structurally normalizes the actual stable operands, accepts exact
-  `left >= right` / `right <= left` relations in an immediately preceding
+  `left >= right` / `right <= left` relations in a preceding
   `require`/`assert`, a dominating safe `if` arm whose subtraction is the first
   executable operation through `stmt.block`/`stmt.unchecked` wrappers, or
   fallthrough after the unsafe arm unconditionally exits with no effect in the
-  surviving arm. At each sequential container, a prior sibling must itself be
-  the accepted proof; otherwise the search stops instead of trusting an outer
+  surviving arm. Between the proof and the subtraction (and before it inside a
+  safe arm) only operand-preserving statements may sit
+  (`statementPreservesOperands`): a bare local declaration, a local declaration
+  with a structurally effect-free initializer, or an `emit` with effect-free
+  arguments, none declaring an operand name. At each sequential container the
+  search walks back over such statements; any other prior sibling that is not
+  itself the accepted proof stops the search instead of trusting an outer
   condition. The complete condition and every additional `require`/`assert`
   argument must be structurally effect-free before any fact is accepted.
-  Assignments, declarations, emits, internal calls, external calls,
-  and nested control statements therefore fail closed. Before any proof is
+  Assignments, internal calls, external calls, effectful declarations or
+  emits, and nested control statements therefore fail closed. Before any proof is
   accepted, `subtractionExpressionPathIsEffectFree` validates the complete
   intra-statement path. Pure binary/member/index/tuple/conditional wrappers,
   non-mutating unary wrappers, returns, and simple assignments are allowlisted
@@ -650,7 +655,10 @@ aliases (`a = b; b = from;` reaches `a` on a later pass). **Strong updates**
 preserve precision: `from = msg.sender` leaves `from` as *sender identity*, not
 generic parameter taint. Interprocedural matching binds a callee's parameters to
 the taint of the caller's arguments (`bindCalleeTaint`), bounded by
-`MaxInterproceduralTaintDepth = 12`.
+`MaxInterproceduralTaintDepth = 12`. A `using L for T` extension call binds its
+receiver to the library's first parameter and shifts the written arguments by
+one (`calleeBindingArguments`); `token.safeTransferFrom(from, to, v)` binds
+`token`, not `from`, to SafeERC20's `IERC20 token`.
 
 Internal-callee resolution identifies the exact call site by UTF-8 byte, then
 line plus Unicode column, and uses line-only metadata only for one physical
@@ -739,7 +747,13 @@ The builder's versioned authorization facts apply the same evidence policy to
 modifier and helper parameters. Each exact callsite argument is classified as a
 caller identity, fixed state/literal principal, role membership expression, or
 incomplete. A caller-selected parameter never upgrades to protected; unresolved
-or ambiguous bindings remain incomplete with an identity limitation. Initializer
+or ambiguous bindings remain incomplete with an identity limitation. Facts
+version 1.1.0 brought the builder into line with this policy for the
+OpenZeppelin idioms: `_msgSender()` is caller identity, a zero-argument getter
+such as `owner()` is read through its single `return`, a boolean predicate
+helper such as `hasRole(role, account)` is evaluated under its bindings, a
+struct field inside a role mapping (`_roles[role].members[account]`) adds no
+key, and only a binding to caller identity itself may stand in for the caller. Initializer
 lifecycle fields remain internal evidence for reports and SDK consumers. Public
 templates use the parameterized `preset.authorization` and
 `preset.initializer` predicates instead; runtime dispatch is automatic and has
@@ -790,11 +804,16 @@ only `stmt.assign` collected the read and never the write, reporting
 
 `matchTrace` captures `Primary` (the matched node) and `Chain`/`ChainContracts`
 (the interprocedural path). From it the executor builds:
-- **`Location`** — by `LocationSource`: `LocationSourceVerifier` (default;
-  contract/function from verifier context, line from matched node) or
-  `LocationSourceMatchedNode` (everything from the matched node — SARIF/Slither
-  convention; opt-in via `WGAUDIT_LOCATION_FROM_MATCHED_NODE=1` or
-  `Engine.SetLocationSource`; there is no current CLI `--location-source` flag).
+- **`Location`** — by `LocationSource`: `LocationSourceMatchedNode` (default;
+  every field describes the dangerous statement, matching SARIF/Slither) or
+  `LocationSourceVerifier` (legacy contract/function identity from verifier
+  context, matched-node file and line). Select the mode with
+  `W3GOAUDIT_LOCATION_FROM_MATCHED_NODE` (with `WGAUDIT_LOCATION_FROM_MATCHED_NODE` as a legacy alias), `Engine.SetLocationSource`, or the CLI
+  `--location-source matched|verifier` flag.
+  Resolved library matches use the exact caller expression and caller file;
+  matched mode also uses that caller's contract/function, while verifier mode
+  retains entry labels. Inner library evidence stays in `PrimaryAST` and the
+  reachability chain.
 - **`Reachability`** (`enrichFindingFromTrace`) — entry→…→host `ReachStep`s.
 - **`EntryPoint`** — the auditor-actionable fix-here function.
 - **`Finding.Related`** (`enrichContractRelatedLocations`) — for contract-scope
@@ -857,7 +876,7 @@ Formatters:
 - **JSON** — additive structured fields (`reachability`, `entryPoint`,
   `primaryAst`, `related`), all `omitempty` so old consumers parse unchanged.
 - **Interactions JSON** (`BuildInteractionsJSON`) — schema `2.0.0`, fact version
-  `1.0.0`, no timestamp, normalized deep-copy facts, explicit analysis quality,
+  `1.1.0`, no timestamp, normalized deep-copy facts, explicit analysis quality,
   and arrays that never serialize as `null`. Legacy caches use
   `available: false` with a rebuild limitation.
 - **SARIF 2.1.0** (`FormatFindingsAsSARIF`) — **relative** `artifactLocation.uri`
@@ -1071,3 +1090,6 @@ Quick map:
 - [`workflows.md`](workflows.md) — scan/build/report pipelines
 - [`usage.md`](usage.md) / [`sdk.md`](sdk.md) — CLI & Go SDK
 - `pkg/*/AI.md` — per-package responsibilities, key types/functions, change checklists
+
+Resolved library-backed findings keep the matched library AST as evidence but
+use the outer protocol call as the primary report location.

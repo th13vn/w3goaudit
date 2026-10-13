@@ -27,6 +27,16 @@ query:
   from: function
   select: lowlevel_call
   where:
+    # ERC-4337 prefund: an account pays `missingAccountFunds` back to the
+    # EntryPoint (msg.sender) from `validateUserOp` / `_payPrefund` and ignores
+    # the result by design; the EntryPoint verifies the deposit itself.
+    - not:
+        and:
+          - in:
+              block: function
+              name: '^(validateUserOp|_payPrefund)$'
+          - receiver:
+              tainted: sender
     - any:
         - and:
             - boundary_result_disposition: ^discarded$

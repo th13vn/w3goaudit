@@ -157,6 +157,26 @@ contract ExternalBoundaryMatrix {
         }
     }
 
+    // Solidity 0.4.x legacy chained low-level call syntax. These forms are
+    // parsed as nested FunctionCall/MemberAccess nodes rather than modern
+    // FunctionCallOptions and must still be classified semantically.
+    function legacyCallValue(address target, bytes memory data) external {
+        target.call.value(1)(data);
+    }
+
+    function legacyCallGas(address target, bytes memory data) external {
+        target.call.gas(2300)(data);
+    }
+
+    function legacyCallGasValue(address target, bytes memory data) external {
+        target.call.gas(2300).value(1)(data);
+    }
+
+    function legacyCallChecked(address target, bytes memory data) external {
+        bool ok = target.call.value(1)(data);
+        require(ok, "legacy call failed");
+    }
+
     function _consumePair(bool sent, uint256 value) internal pure {
         sent;
         value;

@@ -2,7 +2,7 @@ meta:
   id: MEDIUM-UNCHECKED-ARITHMETIC
   title: Arithmetic in unchecked block (potential overflow)
   severity: MEDIUM
-  confidence: MEDIUM
+  confidence: LOW
   description: >
     Arithmetic operations (+ - * /) are performed inside an unchecked block of
     a STATE-MUTATING function compiled with Solidity >=0.8.0. The unchecked
@@ -14,6 +14,9 @@ meta:
     `SafeMath.tryAdd`, `Math.mulDiv`, `Math.log10` and `Strings.toString`. This
     scoping removes the bulk of the false positives this detector raised on
     vendored libraries while keeping real stateful-accounting overflows.
+    Subtractions are reported unless a preceding guard bounds them; products
+    and sums only when an operand is caller-controlled, and sums not when they
+    step by a constant.
   recommendation: >
     Remove the unchecked block if overflow/underflow protection is needed.
     If unchecked is used intentionally for gas optimization, add a comment
@@ -43,18 +46,46 @@ query:
 
     # Division cannot overflow, so only exploit-relevant arithmetic is included.
     - any:
-        # Multiplication and subtraction can wrap even with a constant operand.
-        - operator: "[*]"
+        # Subtraction can underflow even with a constant operand.
         - operator: "[-]"
-        # Addition is included only when an operand is caller-controlled; routine
-        # counter and nonce increments are not useful attacker-controlled wraps.
+        # Multiplication and addition are included only when an operand is
+        # caller-controlled. Products and sums of contract-held values were
+        # bounded by construction on every corpus site (bitmap offsets
+        # `(b % 8) * 32`, constant rescales, packed counters), and routine
+        # counter and nonce increments are not useful attacker-controlled
+        # wraps. Check an operand directly: a descendant search could mistake
+        # a caller-controlled mapping key for a caller-controlled operand.
         - and:
-            - operator: "[+]"
-            # Check an operand directly. A descendant search could mistake a
-            # caller-controlled mapping key for a caller-controlled sum operand.
+            - operator: "[*]"
             - any:
                 - left: { tainted: user_controlled }
                 - right: { tainted: user_controlled }
+        - and:
+            - operator: "[+]"
+            - any:
+                - left: { tainted: user_controlled }
+                - right: { tainted: user_controlled }
+            # `x + 1` and `q + (exact ? 0 : 1)` step by a constant.
+            - not:
+                left:
+                  block: literal
+            - not:
+                right:
+                  block: literal
+            - not:
+                right:
+                  block: ternary
+                  not:
+                    has:
+                      conditional_part: '^(true|false)$'
+                      not:
+                        block: literal
+
+    # `gasBefore - gasleft()` cannot underflow: gasleft() only decreases
+    # during execution, so the earlier reading is never smaller.
+    - not:
+        right:
+          name: "^gasleft$"
 
     # Exclude operations whose operands are bounded by a preceding guard.
     - unchecked_var:

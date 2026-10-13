@@ -20,3 +20,11 @@ __pycache__/
 # default and named runs must never be tracked.
 benchmarks/results/*
 !benchmarks/results/.gitkeep
+
+# Private template lanes. Never publish these local rules or fixtures:
+# candidates/ holds generic detectors under evaluation, incidents/ holds
+# protocol-named rules derived from one real exploit each.
+templates/candidates/
+test-data/candidates/
+templates/incidents/
+test-data/incidents/

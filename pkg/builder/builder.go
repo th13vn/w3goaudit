@@ -170,7 +170,8 @@ func (b *Builder) parseFile(sf *types.SourceFile) error {
 	// build — a silent false-negative source for every downstream detector. We
 	// keep the tolerant policy (build the rest of the project) but make the loss
 	// loud via a verbose warning so it is diagnosable instead of invisible.
-	result, parseErrs, err := parser.ParseWithErrors(normalizeYulAssignmentsForParser(sf.Content), &parser.Options{
+	parserInput := normalizeLegacyFunctionModifiersForParser(normalizeYulAssignmentsForParser(sf.Content))
+	result, parseErrs, err := parser.ParseWithErrors(parserInput, &parser.Options{
 		Tolerant: true,
 		Loc:      true,
 		Range:    true,
@@ -207,6 +208,7 @@ func (b *Builder) parseFile(sf *types.SourceFile) error {
 	// Extract contracts by manually walking AST (avoid visitor nil pointer issues)
 	extractor := &ContractExtractor{
 		sourceFile: sf.Path,
+		db:         b.db,
 		locator:    locator,
 		contracts:  make([]*types.Contract, 0),
 	}

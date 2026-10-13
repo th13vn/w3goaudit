@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -208,6 +209,31 @@ query:
 	wantStateWrite, _ := blockKindToIR("state_write")
 	if match.All[0].Not.Kind != wantStateWrite || match.All[0].Not.Name != "" {
 		t.Errorf("Match.Contains.All[0].Not = %+v, want only Kind=%s", match.All[0].Not, wantStateWrite)
+	}
+}
+
+func TestLowerRejectsRepeatedSiblingStructuralMatchers(t *testing.T) {
+	cases := []struct {
+		name  string
+		where string
+	}{
+		{name: "inside", where: "    - in: {block: function}\n    - in: {block: contract}"},
+		{name: "contains", where: "    - has: {block: state_write}\n    - has: {block: external_call}"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := ParseTemplate(fmt.Sprintf(`
+meta: {id: repeated-%s, severity: LOW}
+query:
+  select: function
+  from: entry_function
+  where:
+%s
+`, tc.name, tc.where))
+			if err == nil || !strings.Contains(err.Error(), "repeated structural matcher") {
+				t.Fatalf("error = %v, want repeated structural matcher", err)
+			}
+		})
 	}
 }
 

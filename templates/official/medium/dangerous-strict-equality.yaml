@@ -2,7 +2,7 @@ meta:
   id: MEDIUM-DANGEROUS-STRICT-EQUALITY
   title: "Dangerous strict equality on externally influenced balance"
   severity: MEDIUM
-  confidence: HIGH
+  confidence: MEDIUM
   description: >
     A strict equality (`==` or `!=`) is applied to a value that can be
     externally manipulated — most commonly `address(this).balance` or an
@@ -10,8 +10,11 @@ meta:
     a `selfdestruct(payable(victim))` from any external contract, defeating
     any `balance == X` guard. ERC20 balance can shift between blocks via
     transfers or rebasing. Logic that depends on EXACT balances is therefore
-    brittle and exploitable. Equivalent to Slither's incorrect-equality
-    detector.
+    brittle and exploitable. A caller-supplied value compared strictly with
+    `block.timestamp` or `block.number` hands the block producer the same
+    lever. Same-transaction deltas (`balanceOf(this) - before == amount`) and
+    struct fields that are merely named `balance` or `timestamp` are not
+    reported. Equivalent to Slither's incorrect-equality detector.
   recommendation: >
     Use `>=` or `<=` comparisons instead. Treat balances as a lower bound, not
     an exact value. If exact value matters, snapshot it into a state variable
@@ -21,20 +24,41 @@ meta:
     - https://swcregistry.io/docs/SWC-132
 
 # Match strict equality whose expression contains a balance-like read; the side
-# of the comparison does not matter. Timestamp/number checks additionally require
-# caller influence so same-block cache comparisons against stored state are safe.
+# of the comparison does not matter. Clock checks require the block value and a
+# caller-supplied parameter as the two operands, so same-block caches compared
+# against stored state are safe.
 query:
   from: function
   select: binary
   where:
     - operator: "(==|!=)"
     - any:
-        - has: { block: member, name: ^balance$ }
+        # A balance an outsider can move with a transfer or a donation. A
+        # struct field that happens to be named `balance` is the contract's
+        # own accounting.
+        - has:
+            block: member
+            name: ^balance$
+            not:
+              left:
+                type_kind: '^struct$'
         - has: { block: external_call, name: ^balanceOf$ }
-        # Timestamp/number comparisons are relevant only when the other operand
-        # is caller-influenced; stored cache timestamps are not attacker-controlled.
+        # The block clock compared strictly with a caller-supplied value. Both
+        # must be the direct operands: a block number hashed into a same-block
+        # guard, a struct field named `timestamp`, and a contract-written
+        # cache (state-derived, or an internal helper's parameter) give the
+        # caller no lever.
         - and:
-            - has: { block: member, name: ^(timestamp|number)$ }
             - any:
-                - left: { tainted: user_controlled }
-                - right: { tainted: user_controlled }
+                - left: { block: member, name: '^(timestamp|number)$', parent: '^block$' }
+                - right: { block: member, name: '^(timestamp|number)$', parent: '^block$' }
+            - any:
+                - left: { and: [ { tainted: parameter }, { not: { tainted: state_var } } ] }
+                - right: { and: [ { tainted: parameter }, { not: { tainted: state_var } } ] }
+            - in: { block: function, visibility: 'public,external' }
+    # A same-transaction delta (`balanceOf(this) - before == amount`) checks
+    # what this call moved, which a donation before the call cannot change.
+    - not:
+        any:
+          - left: { block: binary, operator: "-" }
+          - right: { block: binary, operator: "-" }

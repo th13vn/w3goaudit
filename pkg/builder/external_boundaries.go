@@ -44,6 +44,9 @@ func (b *Builder) buildExternalBoundaries() {
 					return
 				}
 				recorded := matchBoundaryCall(scope.calls, node)
+				if recorded == nil && b.isInternalLibraryCallSite(scope.calls, node) {
+					return
+				}
 				fact := b.externalBoundaryFact(contract, scope, node, path, recorded)
 				facts = append(facts, fact)
 				factNodes[fact.ID] = node
@@ -236,6 +239,52 @@ func matchBoundaryCall(calls []*types.FunctionCall, node *types.ASTNode) *types.
 	return nil
 }
 
+// isInternalLibraryCallSite reports whether an external-looking call node is a
+// resolved call to an internal or private library function, such as
+// `Strings.toHexString(v)` or a `using SafeERC20 for IERC20` extension. Those
+// are inlined and cross no contract boundary; any external call inside the
+// library body is indexed in the library's own scope and reached through the
+// call graph. A public or external library function runs through DELEGATECALL
+// and stays a boundary, and an unresolved library call is kept as well.
+func (b *Builder) isInternalLibraryCallSite(calls []*types.FunctionCall, node *types.ASTNode) bool {
+	return b.internalLibraryCallee(calls, node) != nil
+}
+
+// internalLibraryCallee returns the internal or private library function an
+// external-looking call node resolves to, or nil when the node is not such a
+// call (see isInternalLibraryCallSite).
+func (b *Builder) internalLibraryCallee(calls []*types.FunctionCall, node *types.ASTNode) *types.Function {
+	if node == nil || node.Kind != types.KindCallExternal {
+		return nil
+	}
+	for _, call := range calls {
+		if call == nil || call.CallType != types.CallTypeLibrary || !call.Resolved || call.Target != node.Name {
+			continue
+		}
+		if node.StartByte > 0 && call.Byte > 0 {
+			if node.StartByte != call.Byte {
+				continue
+			}
+		} else if node.StartLine > 0 && call.Line != node.StartLine {
+			continue
+		}
+		library := b.db.GetContractByID(call.ResolvedContractID)
+		if library == nil || library.Kind != types.ContractKindLibrary {
+			return nil
+		}
+		for _, fn := range library.Functions {
+			if fn != nil && fn.Selector == call.ResolvedFunction {
+				if fn.Visibility == types.VisibilityInternal || fn.Visibility == types.VisibilityPrivate {
+					return fn
+				}
+				return nil
+			}
+		}
+		return nil
+	}
+	return nil
+}
+
 func boundaryCallTypeMatchesNode(callType types.CallType, kind string) bool {
 	switch kind {
 	case types.KindCallExternal:
@@ -275,7 +324,7 @@ func (b *Builder) externalBoundaryFact(contract *types.Contract, scope externalB
 		Limitations:   []string{},
 	}
 	b.populateBoundaryValues(fact, scope.file, node)
-	b.populateBoundaryResult(fact, scope.file, scope.root, node)
+	b.populateBoundaryResult(fact, scope.file, scope.calls, scope.root, node)
 	b.populateBoundaryStateEffects(fact, scope.file, scope.root, node)
 	fact.ReentryClass = boundaryReentryClass(fact)
 	fact.Limitations = boundaryLimitations(fact)
@@ -555,7 +604,7 @@ func annotateExternalBoundaryNode(node *types.ASTNode, fact *types.ExternalBound
 	node.SetAttribute("boundary_reachable_from_entry", len(fact.ReachableFrom) > 0)
 }
 
-func (b *Builder) populateBoundaryResult(fact *types.ExternalBoundaryFact, file string, root, node *types.ASTNode) {
+func (b *Builder) populateBoundaryResult(fact *types.ExternalBoundaryFact, file string, calls []*types.FunctionCall, root, node *types.ASTNode) {
 	fact.Result.Availability = b.boundaryResultAvailability(fact)
 	if fact.Result.Availability == types.BoundaryResultNo {
 		fact.Result.Disposition = types.BoundaryResultNone
@@ -578,11 +627,31 @@ func (b *Builder) populateBoundaryResult(fact *types.ExternalBoundaryFact, file 
 		fact.Result.Disposition = types.BoundaryResultCaptured
 		fact.Result.Targets = b.boundaryResultTargets(file, assignment)
 		fact.Result.DirectCheck = types.BoundaryResultNo
+		var refIDs []string
 		for _, target := range fact.Result.Targets {
-			for _, check := range laterBoundaryChecks(root, node, target.RefIDs) {
-				fact.Result.CheckSites = append(fact.Result.CheckSites, boundaryRange(file, check))
-			}
+			refIDs = append(refIDs, target.RefIDs...)
 		}
+		// Follow the result through plain local copies such as
+		// `bool transferred = success && ...` (Axelar SafeTokenCall).
+		refIDs = boundaryResultAliases(root, node, refIDs)
+		for _, check := range laterBoundaryChecks(root, node, refIDs) {
+			fact.Result.CheckSites = append(fact.Result.CheckSites, boundaryRange(file, check))
+		}
+		if len(fact.Result.CheckSites) > 0 {
+			fact.Result.DirectCheck = types.BoundaryResultYes
+			return
+		}
+		// A result handed back to the caller is the caller's to check:
+		// `return success && ...` (OpenZeppelin _callOptionalReturnBool) or a
+		// named return variable (Euler EVC callWithContextInternal).
+		if b.boundaryResultReturned(fact, root, node, refIDs) {
+			fact.Result.Disposition = types.BoundaryResultReturned
+			return
+		}
+		// A result passed to an internal helper that checks it:
+		// `verifyCallResultFromTarget(target, success, ...)` (OpenZeppelin
+		// Address) tests `success` in its own body.
+		fact.Result.CheckSites = append(fact.Result.CheckSites, b.helperBoundaryChecks(calls, root, node, refIDs)...)
 		if len(fact.Result.CheckSites) > 0 {
 			fact.Result.DirectCheck = types.BoundaryResultYes
 		}
@@ -706,11 +775,202 @@ func laterBoundaryChecks(root, boundary *types.ASTNode, refIDs []string) []*type
 		if len(candidate.Children) == 0 || !subtreeReferencesAny(candidate.Children[0], refSet) {
 			return
 		}
-		if boundaryExecutionRelation(boundary, candidate) == types.BoundaryStateAfter {
+		if boundaryCheckFollows(boundary, candidate) {
 			checks = append(checks, candidate)
 		}
 	})
 	return checks
+}
+
+// boundaryResultAliases adds the locals assigned, after the call, from an
+// expression that uses a result variable directly (not merely as an argument
+// to another call), repeating until no new local appears.
+func boundaryResultAliases(root, boundary *types.ASTNode, refIDs []string) []string {
+	refSet := make(map[string]bool, len(refIDs))
+	for _, refID := range refIDs {
+		refSet[refID] = true
+	}
+	for changed := true; changed; {
+		changed = false
+		walkBoundaryAST(root, "0", func(candidate *types.ASTNode, _ string) {
+			if candidate == nil || candidate.Kind != types.KindStmtAssign || len(candidate.Children) < 2 ||
+				!boundaryCheckFollows(boundary, candidate) {
+				return
+			}
+			if !referencesOutsideCalls(candidate.Children[len(candidate.Children)-1], refSet) {
+				return
+			}
+			for _, lhs := range candidate.Children[:len(candidate.Children)-1] {
+				if lhs != nil && lhs.Kind == types.KindExprIdentifier && lhs.RefID != "" && !refSet[lhs.RefID] {
+					refSet[lhs.RefID] = true
+					changed = true
+				}
+			}
+		})
+	}
+	out := make([]string, 0, len(refSet))
+	for refID := range refSet {
+		out = append(out, refID)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// referencesOutsideCalls reports whether node uses one of refSet as part of its
+// own value, without looking inside call arguments: `success && ok` does,
+// `verify(success)` does not.
+func referencesOutsideCalls(node *types.ASTNode, refSet map[string]bool) bool {
+	if node == nil {
+		return false
+	}
+	if node.Kind == types.KindExprIdentifier {
+		return node.RefID != "" && refSet[node.RefID]
+	}
+	if strings.HasPrefix(node.Kind, "call.") {
+		return false
+	}
+	for _, child := range node.Children {
+		if referencesOutsideCalls(child, refSet) {
+			return true
+		}
+	}
+	return false
+}
+
+// boundaryResultReturned reports whether a result variable (or alias) is
+// returned to the caller after the call: directly inside a return expression,
+// or because it is one of the function's named return variables.
+func (b *Builder) boundaryResultReturned(fact *types.ExternalBoundaryFact, root, boundary *types.ASTNode, refIDs []string) bool {
+	refSet := make(map[string]bool, len(refIDs))
+	for _, refID := range refIDs {
+		refSet[refID] = true
+	}
+	returned := false
+	walkBoundaryAST(root, "0", func(candidate *types.ASTNode, _ string) {
+		if !returned && candidate != nil && candidate.Kind == types.KindStmtReturn &&
+			boundaryCheckFollows(boundary, candidate) && referencesOutsideCalls(candidate, refSet) {
+			returned = true
+		}
+	})
+	if returned {
+		return true
+	}
+	fn, ok := b.db.GetFunctionByID(fact.FunctionID)
+	if !ok || fn == nil || root == nil {
+		return false
+	}
+	named := make(map[string]bool, len(fn.Returns))
+	for _, ret := range fn.Returns {
+		if ret != nil && ret.Name != "" {
+			named[ret.Name] = true
+		}
+	}
+	bodyStart := -1
+	if len(root.Children) > 0 && root.Children[0] != nil {
+		bodyStart = root.Children[0].StartByte
+	}
+	found := false
+	walkBoundaryAST(root, "0", func(candidate *types.ASTNode, _ string) {
+		if !found && candidate != nil && candidate.Kind == types.KindExprIdentifier && refSet[candidate.RefID] &&
+			named[candidate.Name] && localDeclaredBefore(candidate.RefID, bodyStart) {
+			found = true
+		}
+	})
+	return found
+}
+
+// localDeclaredBefore reports whether a local RefID (`...:local:<start>:<end>:name`)
+// was declared before byte offset limit, which places a named return variable
+// in the function header rather than in its body.
+func localDeclaredBefore(refID string, limit int) bool {
+	parts := strings.Split(refID, ":local:")
+	if len(parts) != 2 || limit <= 0 {
+		return false
+	}
+	start, err := strconv.Atoi(strings.SplitN(parts[1], ":", 2)[0])
+	return err == nil && start < limit
+}
+
+// helperBoundaryChecks finds checks of a result variable performed by an
+// internal helper it is passed to after the call: the helper's parameter at
+// that position appears in one of its own require/assert/if conditions. An
+// internal library function counts like an internal helper, whether it is
+// called by name (`Address.verifyCallResult(success, data)`) or as a `using
+// for` extension on the result (`success.verified()`), where the receiver
+// binds to the first parameter.
+func (b *Builder) helperBoundaryChecks(calls []*types.FunctionCall, root, boundary *types.ASTNode, refIDs []string) []types.SemanticSourceRange {
+	refSet := make(map[string]bool, len(refIDs))
+	for _, refID := range refIDs {
+		refSet[refID] = true
+	}
+	var sites []types.SemanticSourceRange
+	walkBoundaryAST(root, "0", func(call *types.ASTNode, _ string) {
+		if call == nil || !boundaryCheckFollows(boundary, call) {
+			return
+		}
+		callee, bound := b.boundaryCheckCallee(calls, call)
+		if callee == nil || callee.AST == nil {
+			return
+		}
+		for index, arg := range bound {
+			if arg == nil || arg.Kind != types.KindExprIdentifier || !refSet[arg.RefID] || index >= len(callee.Parameters) {
+				continue
+			}
+			param := callee.Parameters[index]
+			if param == nil || param.Name == "" {
+				continue
+			}
+			paramRefs := map[string]bool{}
+			walkBoundaryAST(callee.AST, "0", func(node *types.ASTNode, _ string) {
+				if node != nil && node.Kind == types.KindExprIdentifier && node.RefKind == "parameter" && node.Name == param.Name {
+					paramRefs[node.RefID] = true
+				}
+			})
+			walkBoundaryAST(callee.AST, "0", func(node *types.ASTNode, _ string) {
+				if node == nil || len(node.Children) == 0 ||
+					(node.Kind != types.KindCheckRequire && node.Kind != types.KindCheckAssert && node.Kind != types.KindStmtIf) {
+					return
+				}
+				if subtreeReferencesAny(node.Children[0], paramRefs) {
+					sites = append(sites, boundaryRange(callee.SourceFile, node))
+				}
+			})
+		}
+	})
+	return sites
+}
+
+// boundaryCheckCallee resolves a call that may check a boundary result to the
+// function it runs inline, with its arguments in parameter order: an exact
+// internal helper, or an internal library function. For a `using for`
+// extension call the receiver is the first bound argument.
+func (b *Builder) boundaryCheckCallee(calls []*types.FunctionCall, call *types.ASTNode) (*types.Function, []*types.ASTNode) {
+	switch call.Kind {
+	case types.KindCallInternal:
+		if call.RefKind != "function" || call.RefID == "" {
+			return nil, nil
+		}
+		callee, ok := b.db.GetFunctionByID(call.RefID)
+		if !ok {
+			return nil, nil
+		}
+		return callee, solidityAuthorizationArgs(call)
+	case types.KindCallExternal:
+		callee := b.internalLibraryCallee(calls, call)
+		if callee == nil {
+			return nil, nil
+		}
+		args := solidityAuthorizationArgs(call)
+		if len(args)+1 == len(callee.Parameters) {
+			for _, child := range call.Children {
+				if child != nil && child.GetAttributeBool("call_receiver") {
+					return callee, append([]*types.ASTNode{child}, args...)
+				}
+			}
+		}
+		return callee, args
+	}
+	return nil, nil
 }
 
 func subtreeReferencesAny(node *types.ASTNode, refSet map[string]bool) bool {
@@ -810,6 +1070,30 @@ func boundaryExecutionRelation(boundary, effect *types.ASTNode) string {
 	if shareBoundaryLoop(boundary, effect) {
 		return types.BoundaryStateUnknown
 	}
+	return boundaryOrderRelation(boundary, effect)
+}
+
+// boundaryCheckFollows reports whether a check of the call's result runs after
+// the call. Unlike state effects, a check later in the same loop body runs
+// after the call within that iteration, so a shared loop only disqualifies it
+// when the loop node itself is where the two diverge (a check in the loop
+// condition or post-expression).
+func boundaryCheckFollows(boundary, check *types.ASTNode) bool {
+	if boundary == nil || check == nil || boundary == check {
+		return false
+	}
+	if !shareBoundaryLoop(boundary, check) {
+		return boundaryOrderRelation(boundary, check) == types.BoundaryStateAfter
+	}
+	lca, _, _ := boundaryLCA(boundary, check)
+	if lca == nil || lca.Kind == types.KindStmtLoop {
+		return false
+	}
+	return boundaryOrderRelation(boundary, check) == types.BoundaryStateAfter
+}
+
+// boundaryOrderRelation orders two nodes by AST position, ignoring loops.
+func boundaryOrderRelation(boundary, effect *types.ASTNode) string {
 	if nodeIsWithin(boundary, effect) {
 		return types.BoundaryStateAfter
 	}

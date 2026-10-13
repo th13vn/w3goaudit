@@ -180,6 +180,7 @@ func (r *Reader) ReadDirectory(dirPath string) ([]*types.SourceFile, error) {
 			// - typechain, typechain-types: TypeChain generated files
 			// - deployments: Hardhat deployment files
 			// - interfaces: often auto-generated or external interfaces
+			// - certora: formal-verification harnesses and specs
 			skipDirs := map[string]bool{
 				"node_modules":    true,
 				"out":             true,
@@ -200,6 +201,7 @@ func (r *Reader) ReadDirectory(dirPath string) ([]*types.SourceFile, error) {
 				"deployments":     true,
 				"logs":            true,
 				"dependencies":    true,
+				"certora":         true,
 			}
 			if skipDirs[name] {
 				r.logf("Skipping directory: %s", name)
@@ -207,8 +209,14 @@ func (r *Reader) ReadDirectory(dirPath string) ([]*types.SourceFile, error) {
 			}
 		}
 
-		// Only process .sol files
+		// Only process .sol files. Foundry test (`*.t.sol`) and script
+		// (`*.s.sol`) files are not deployed code even when they sit outside
+		// test/ and script/; a file named explicitly is still read by Read.
 		if !info.IsDir() && strings.HasSuffix(path, ".sol") {
+			if isFoundryTestOrScriptFile(info.Name()) {
+				r.logf("Skipping Foundry test/script file: %s", info.Name())
+				return nil
+			}
 			sf, err := r.ReadFile(path)
 			if err != nil {
 				return err
@@ -226,6 +234,12 @@ func (r *Reader) ReadDirectory(dirPath string) ([]*types.SourceFile, error) {
 	r.logf("Found %d Solidity files in directory", len(result))
 
 	return result, nil
+}
+
+// isFoundryTestOrScriptFile reports whether a file follows Foundry's test
+// (`Name.t.sol`) or script (`Name.s.sol`) naming convention.
+func isFoundryTestOrScriptFile(name string) bool {
+	return strings.HasSuffix(name, ".t.sol") || strings.HasSuffix(name, ".s.sol")
 }
 
 // Read reads from a path (automatically detects file or directory)

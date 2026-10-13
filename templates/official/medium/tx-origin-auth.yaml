@@ -4,7 +4,8 @@ meta:
   severity: MEDIUM
   confidence: HIGH
   description: >
-    tx.origin is used for authentication inside a conditional or require statement.
+    tx.origin is compared directly with a non-constant principal inside a
+    conditional or require statement, i.e. it is used for authentication.
     This is a phishing attack vector — an attacker can trick the legitimate
     tx.origin into calling a malicious contract that then calls this function,
     bypassing the intended access control.
@@ -24,9 +25,47 @@ query:
   where:
     - not: { regex: "(msg\\.sender\\s*==\\s*tx\\.origin|tx\\.origin\\s*==\\s*msg\\.sender)" }
     - name: "tx\\.origin"
-    - in:
-        any:
-          - block: require
-          - block: assert
-          - block: if
-          - block: ternary
+    # tx.origin must be an operand of an equality check, and that check must
+    # sit in a guard. Merely being somewhere under an `if` also matched
+    # `recv = tx.origin` in a branch body and tx.origin passed as a refund
+    # address, neither of which authenticates anyone.
+    #
+    # The two ancestor checks are independent, so they are grouped under an
+    # explicit `and:`: sibling `in:` items are merged into one ancestor that
+    # would have to be both the comparison and the guard.
+    #
+    # tx.origin must be a DIRECT operand of that comparison, compared with
+    # something other than a compile-time sentinel. Hashed with the block
+    # number (`keccak256(abi.encodePacked(tx.origin, block.number)) == last`,
+    # a same-block guard) it identifies nobody, and `tx.origin == address(0)`
+    # detects an eth_call simulation.
+    - and:
+        - in:
+            and:
+              - block: binary
+              - operator: "^(==|!=)$"
+              - any:
+                  - left:
+                      name: "^tx\\.origin$"
+                  - right:
+                      name: "^tx\\.origin$"
+              - not:
+                  any:
+                    - left:
+                        block: literal
+                    - right:
+                        block: literal
+                    - left:
+                        name: "^address$"
+                        arg.0:
+                          block: literal
+                    - right:
+                        name: "^address$"
+                        arg.0:
+                          block: literal
+        - in:
+            any:
+              - block: require
+              - block: assert
+              - block: if
+              - block: ternary

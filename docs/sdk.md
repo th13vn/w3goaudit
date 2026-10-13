@@ -123,7 +123,7 @@ func SetVerboseWriter(w io.Writer)  // Set custom verbose output writer
 - Resolve inheritance (C3 linearization)
 - Build call graphs
 - Identify entry points
-- Build `ExternalBoundaryFactsVersion` `1.0.0` evidence for exact function and
+- Build `ExternalBoundaryFactsVersion` `1.1.0` evidence for exact function and
   modifier host scopes
 
 ---
@@ -1186,7 +1186,7 @@ for _, f := range findings {
 External-boundary facts are a versioned, deterministic SDK surface for Agent
 and audit-tool consumers. They describe external calls, low-level operations,
 ETH sends, creates, and Yul boundaries without deciding whether the site is a
-vulnerability. `ExternalBoundaryFactsVersion` is currently `1.0.0`; output
+vulnerability. `ExternalBoundaryFactsVersion` is currently `1.1.0`; output
 schema remains `2.0.0`.
 
 ```go
@@ -1229,7 +1229,7 @@ limitations explicit; absence of proof is never exposed as a safe verdict.
 #### Exact authorization and initializer lifecycle queries
 
 Authorization facts are versioned independently at `AuthorizationFactsVersion`
-`1.0.0` and are queried by exact function/scope identity. They expose the
+`1.1.0` and are queried by exact function/scope identity. They expose the
 resolved implementation, guard/principal evidence,
 dominance, and fail-closed verdict. Initializer facts additionally expose
 `InitializerEntry`, `OneTimeMutex`, `FirstCallTakeover`,

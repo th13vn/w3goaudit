@@ -43,21 +43,30 @@ func authorizationFactForFunction(fn *types.Function, declared *types.Contract, 
 
 	populateInitializerLifecycle(fact, fn, declared, db)
 	runtime, selected, ambiguous := resolveAuthorizationRuntime(fn, declared, db)
+	var result authorizationResult
 	if ambiguous {
-		fact.Verdict = types.AuthorizationUnknown
-		fact.Reasons = append(fact.Reasons, "runtime.alternatives.ambiguous")
-		fact.Limitations = append(fact.Limitations, types.DiagnosticIdentity)
-		return fact
+		// Several main contracts inherit the declaration. Their verdicts are
+		// used only when they all agree; RuntimeContractID stays empty because
+		// no single runtime exists.
+		agreed, agreedSelected, ok := agreedAuthorizationAcrossRuntimes(fn, declared, db)
+		if !ok {
+			fact.Verdict = types.AuthorizationUnknown
+			fact.Reasons = append(fact.Reasons, "runtime.alternatives.ambiguous")
+			fact.Limitations = append(fact.Limitations, types.DiagnosticIdentity)
+			return fact
+		}
+		result, selected = agreed, agreedSelected
+		result.reasons = append(result.reasons, "runtime.alternatives.agree")
+	} else {
+		if runtime == nil {
+			runtime = declared
+		}
+		fact.RuntimeContractID = contractID(runtime)
+		if selected == nil {
+			selected = fn
+		}
+		result = analyzeAuthorizationTarget(selected, runtime, db, make(map[string]bool))
 	}
-	if runtime == nil {
-		runtime = declared
-	}
-	fact.RuntimeContractID = contractID(runtime)
-	if selected == nil {
-		selected = fn
-	}
-
-	result := analyzeAuthorizationTarget(selected, runtime, db, make(map[string]bool))
 	if selected != fn {
 		fact.SelectedFunctionID = authorizationFunctionID(selected, nil)
 		result = result.withGuardKind("virtual_override")

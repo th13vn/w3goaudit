@@ -6,7 +6,7 @@ import (
 	"sort"
 )
 
-const AuthorizationFactsVersion = "1.0.0"
+const AuthorizationFactsVersion = "1.1.0"
 
 const MaxAuthorizationQueryLimit = 200
 

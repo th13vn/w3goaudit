@@ -1,498 +1,78 @@
-# w3goaudit Project Index
+# w3goaudit project map
 
 ## Purpose
 
-`w3goaudit` is a Go CLI and SDK for static analysis of Solidity projects. It
-builds a contract database, executes WQL YAML templates, and writes an audit
-result folder with human-readable reports plus machine-readable artifacts.
+w3goaudit is a Go CLI and SDK for static analysis of Solidity projects. It reads Solidity sources, builds a deterministic contract database, executes WQL templates, and writes findings plus evidence for humans and editor tools.
 
-## Data Flow
+## Pipeline
 
-```mermaid
-graph LR
-    CLI[cmd/w3goaudit] --> Reader[pkg/reader]
-    Reader --> Builder[pkg/builder]
-    Builder --> Types[pkg/types Database]
-    Types --> Engine[pkg/engine]
-    Templates[templates/ WQL] --> Engine
-    Engine --> Report[pkg/report]
-    Report --> Evidence[data/interactions.json + database semantic facts + nav/explorer/xref]
-```
+Reader -> Builder -> Database -> Engine -> Report
 
-Canonical pipeline: `Reader -> Builder -> Database -> Engine -> Report`. Source
-locations (line/col/byte, from solast-go) are threaded from the builder onto
-AST nodes and declarations all the way through to `Report`, which also derives
-the timestamp-free `interactions.json` semantic boundary index and the
-extension-facing `nav.json`/`explorer.json`/`xref.json` artifacts from the
-finished `Database`/`Findings`. Versioned authorization and transaction-context
-facts remain part of `data/database.json`; selected positive facts are projected
-onto exact AST nodes for ordinary WQL matching.
+- reader discovers sources, project roots, imports, remappings, and git data.
+- builder parses sources and builds AST, inheritance, call graph, effects, type, authorization, transaction-context, and external-boundary facts.
+- types owns the serialized database and stable identities.
+- engine validates and executes canonical WQL templates.
+- report writes Markdown, HTML, SARIF, JSON artifacts, and contract deep dives.
+- cmd/w3goaudit composes the pipeline and exposes the CLI.
 
-The scanner owns no model transport, credentials, timeout, or AI review
-artifact. A future external Assistant may consume deterministic database,
-finding, navigation, cross-reference, extraction, and workflow artifacts, but
-it does not mutate the scanner's official findings.
+## Package map
 
-## Package Map
-
-| Path | Responsibility | Local Index |
+| Path | Responsibility | Guide |
 |---|---|---|
-| `cmd/w3goaudit/` | Cobra CLI: root scan, build, extract, update, completion, result-folder orchestration | `cmd/w3goaudit/AI.md` |
-| `pkg/reader/` | Discover/load `.sol` files, resolve imports/remappings, detect project/git info | `pkg/reader/AI.md` |
-| `pkg/logging/` | Immutable scan-local verbose logger with serialized writes | `pkg/logging/AI.md` |
-| `pkg/builder/` | Parse source into database, build simplified ASTs, C3 inheritance, call graph, selectors, effects, transaction-context facts, authorization facts, and Phase-8 external-boundary facts | `pkg/builder/AI.md` |
-| `pkg/types/` | Core serialized data structures: database, contracts, functions, AST, call graph, versioned semantic facts, and bounded Agent queries | `pkg/types/AI.md` |
-| `pkg/engine/` | WQL template loading, validation, execution, taint/reachability, finding construction | `pkg/engine/AI.md` |
-| `pkg/report/` | Consolidated Markdown/HTML, SARIF/JSON output, contract deep dives, state/workflow evidence, source excerpts | `pkg/report/AI.md` |
-| `pkg/home/` | `~/.w3goaudit` config/template-home management and release download | `pkg/home/AI.md` |
-| `templates/` | Official embedded WQL detector pack plus benchmark and feature-test templates | `templates/AI.md` |
-| `scripts/benchmark/` | **Dev-only, git-ignored** (not in a fresh clone): competitive analyzer benchmark harness, corpora, fixtures, adapters, and quality threshold gate. Benchmark-dependent Go tests skip when it is absent. | `scripts/benchmark/README.md` |
-| `benchmarks/` | Stored benchmark results: tracked dated reports (`yyyy-mm-dd-<commit-slug>.md`) plus the Git-ignored `results/` run-output scratch directory | `benchmarks/README.md` |
-| `test-data/` | Canonical Solidity fixtures: security matrices plus core builder/engine/extract/identity cases | `test-data/README.md` |
+| cmd/w3goaudit/ | CLI, scan/build/extract commands, output safety | cmd/w3goaudit/AI.md |
+| pkg/reader/ | Source discovery and import resolution | pkg/reader/AI.md |
+| pkg/logging/ | Scan-local serialized logging | pkg/logging/AI.md |
+| pkg/builder/ | Database construction and semantic facts | pkg/builder/AI.md |
+| pkg/types/ | Database, AST, identities, and fact schemas | pkg/types/AI.md |
+| pkg/engine/ | WQL loading, validation, matching, findings | pkg/engine/AI.md |
+| pkg/report/ | Result folders, JSON, Markdown, HTML, SARIF | pkg/report/AI.md |
+| pkg/home/ | User config and template home | pkg/home/AI.md |
+| templates/ | Embedded official WQL detector pack | templates/AI.md |
+| test-data/ | Security and core fixtures | test-data/README.md |
+| scripts/benchmark/ | Maintainer-local benchmark harness; ignored in fresh clones | scripts/benchmark/README.md |
+| scripts/solodit-etl/ | Standalone ingestion and publishing service | scripts/solodit-etl/AI.md |
 
-## Benchmark Harness Map
+## Current invariants
 
-> The benchmark harness lives under `scripts/`, which is **dev-only and
-> git-ignored** — it is not part of a fresh clone or the published release. The
-> module map below describes the maintainer-local harness; benchmark-dependent
-> Go tests skip automatically when it is absent.
+- Core v0.7.0 pairs with official pack v3.0.1. Private candidate and incident lanes are ignored, not embedded, and excluded from published history and release archives.
 
-The competitive benchmark keeps scanner and corpus-case execution sequential,
-with the Python harness divided into focused modules:
+- The root command is the scan: w3goaudit path. There is no scan subcommand.
+- Use the Go version declared in go.mod. Do not duplicate it in scripts or docs.
+- Function.Selector is canonical text such as transfer(address,uint256); Function.Signature is the four-byte Keccak value.
+- Source columns are one-based Unicode code points. Byte offsets are zero-based UTF-8 ranges. Both end positions are half-open and neither is an LSP position.
+- Exact contract identity is absPath#Contract; function identity includes the canonical selector. Never resolve duplicate names by map order.
+- Parse loss is loud. parse.recovered and parse.skipped diagnostics appear in stderr and report output. --strict-parse fails before report generation.
+- Output cannot overlap the selected source scope, including symlink aliases. Managed report paths are reset before exclusive creation.
+- WQL is canonical select/from/where, or one-level and/or composition. Unknown keys, merge keys, malformed required values, and unsupported aliases fail closed.
+- Template loading is fail-closed unless lenient loading is explicitly enabled.
+- The scanner has no model transport, credentials, AI callback, or AI review artifact. It emits deterministic evidence for external consumers.
+- A normal scan writes README.md, audit.md, results.sarif, run.log, data JSON, and one Markdown deep dive per main contract. --html adds audit.html.
+- Versioned fact surfaces include authorization, transaction context, and external boundaries. See docs/extension-output.md and docs/internals.md.
 
-| Path | Responsibility |
-|---|---|
-| `scripts/benchmark/run_benchmark.py` | CLI and sequential orchestration. |
-| `scripts/benchmark/benchmark_core.py` | Paths, source indexes, process I/O, aliases, and manifests. |
-| `scripts/benchmark/benchmark_adapters.py` | Scanner commands and native-output normalization. |
-| `scripts/benchmark/benchmark_scoring.py` | Exact/call-chain-relaxed matching and metrics. |
-| `scripts/benchmark/benchmark_reporting.py` | `benchmark.md` rendering. |
-| `scripts/benchmark/call_chain.py` | Internal-call reachability helper. |
-| `scripts/benchmark/assert_thresholds.py` | Release-quality threshold gate. |
+## Documentation map
 
-The primary workflow is the local CLI (no Docker):
+- README.md: quick start and command overview.
+- docs/usage.md: complete CLI usage, flags, artifacts, and troubleshooting.
+- docs/workflows.md: scan/build/report pipeline.
+- docs/project-overview.md: architecture and design decisions.
+- docs/internals.md: implementation and precision details.
+- docs/sdk.md: Go SDK/API reference.
+- docs/wql-syntax.md: WQL authoring reference.
+- docs/extension-output.md: editor-facing JSON artifacts.
 
-```bash
-go build -o /tmp/w3goaudit ./cmd/w3goaudit
-python3 scripts/benchmark/run_benchmark.py --suite competitive --tools w3goaudit \
-  --w3goaudit-bin /tmp/w3goaudit --out benchmarks/results/latest
-python3 scripts/benchmark/assert_thresholds.py benchmarks/results/latest/benchmark.json
-```
+Historical design and research records live under .vscode/specs/, .vscode/plans/, and .vscode/reports/. The active handoff is .vscode/.ai/STATUS.md; the append-only work log is .vscode/.ai/JOURNAL.md.
 
-Docker Compose is used only when comparing against the other scanners
-(Slither/Semgrep/4naly3er):
+## Change checklist
 
-```bash
-docker compose -f scripts/benchmark/compose.yaml run --rm benchmark
-```
+1. Read the relevant package AI.md and canonical user-facing guide.
+2. Add or update focused tests before changing behavior.
+3. Update every touched package guide and relevant canonical docs.
+4. Preserve source/cache parity, deterministic ordering, and exact identities.
+5. Run the focused test, then the full gates below.
+6. Rebuild the root w3goaudit binary after verification. Do not commit it.
 
-Durable results are stored as tracked dated reports in `benchmarks/`
-(`yyyy-mm-dd-<commit-slug>.md`); `benchmarks/results/` remains the Git-ignored
-run-output scratch directory.
+## Verification
 
-## Core Invariants
+Run gofmt, go mod tidy -diff, go test -count=1 ./..., go test -race -count=1 ./..., go test -shuffle=on -count=3 ./..., go vet ./..., staticcheck ./..., test -z "$(gocyclo -over 35 cmd pkg)", go build -trimpath -o w3goaudit ./cmd/w3goaudit, and ./w3goaudit --version.
 
-- Use the Go version declared by `go.mod` (currently Go 1.26.5). This is a
-  security floor: the standard-library fixes required by govulncheck need
-  Go >=1.25.12. Local and external build automation should read `go.mod`
-  directly rather than duplicating the version.
-- The w3goaudit-only benchmark quality gate runs through the local CLI
-  (`scripts/benchmark/run_benchmark.py` + `assert_thresholds.py`). The only
-  supported multi-tool benchmark workflow runs through
-  `scripts/benchmark/compose.yaml` on `linux/amd64`, fails before output when any
-  requested scanner is unavailable, and writes only beneath the mounted,
-  Git-ignored `benchmarks/results/` directory. The Dockerfile verifies the
-  reviewed generated-lock hash for its pinned 4naly3er commit, so the canonical
-  Compose command requires no build arguments. Slither and 4naly3er analyze
-  directory cases as sorted, independent Solidity fragments and aggregate the
-  successful reports. Missing Slither JSON is non-analyzable only when captured
-  output proves a solc/compiler failure; missing 4naly3er reports additionally
-  require both `Cannot compile AST for` and a structured Solidity compiler
-  error. Crashes, timeouts, unexplained missing output, nonzero 4naly3er exits
-  with a report, and other runtime failures count as benchmark errors. A case
-  where no fragment produces output is also an error.
-- Benchmark category keys describe vulnerability semantics rather than native
-  detector lineage. Synonymous rule families share one canonical category:
-  `SLITHER-SUICIDAL` and `DECURITY-ACCESSIBLE-SELFDESTRUCT` map to
-  `selfdestruct`, while `SLITHER-CONTROLLED-DELEGATECALL` and
-  `DECURITY-DELEGATECALL-TO-ARBITRARY-ADDRESS` map to
-  `controlled-delegatecall`.
-- The root command is the scan: `w3goaudit <path>`. There is no `scan` subcommand.
-- `Function.Selector` is canonical text such as
-  `transfer(address,uint256)`; `Function.Signature` is the four-byte Keccak
-  value. Source columns are one-based, half-open Unicode code points and byte
-  ranges are zero-based, half-open UTF-8 offsets. They are not LSP positions.
-- Solidity `for` AST children follow runtime order: initialization, condition,
-  body, then post. Storage-array `push`/`pop` are non-call
-  `stmt.state_mutation` nodes, and `state_write` also covers state assignment,
-  state-targeted `delete`/`++`/`--`, and `asm.sstore`.
-- Synthetic contract ASTs retain exact declaration kinds and spans. Active
-  inherited functions are deduplicated by canonical selector so the
-  most-derived override wins while overloads remain distinct. `guarded_by`
-  can match an inline guard or an exact applied modifier body; a modifier name
-  alone does not imply access control.
-- A where-only query with actionable AST evidence defaults to
-  `entry_function`; context-only where clauses are rejected because they
-  cannot anchor a finding.
-- Scan-local pipelines can inject one `pkg/logging.Logger` through reader,
-  builder, engine, database loading, template loading, and report generation.
-  Package-global verbose flags/writers remain deprecated compatibility wrappers
-  for legacy constructors only; scan-local objects never consult them.
-- Parse-coverage loss (`parse.recovered`/`parse.skipped`) is always surfaced
-  loudly — on stderr during the build and in the console result — because a
-  missing AST hides declarations from every detector, unlike an unresolved
-  reference which only makes the AST imprecise. `--strict-parse` (root and
-  `build`, plus `scan.strict_parse`) turns it into a pre-report failure.
-- The resolved report directory must not equal, contain, or be contained by the
-  selected source scope after canonical symlink resolution. This validation
-  runs before `run.log` or any report file is created. For `--db` scans, the
-  persisted `scanTarget` is authoritative, with `projectRoot` as the legacy
-  fallback.
-- A normal scan writes one result folder containing bounded `README.md`, consolidated `audit.md`, `results.sarif`, `run.log`, `data/` (with `manifest.json`, `database.json`, `findings.json`, `overview.json`, `diagnostics.json`, `interactions.json`, `authorization.json`, `nav.json`, `explorer.json`, and `xref.json`), and exactly one Markdown deep dive per main contract under `contracts/`. `--html` adds only `audit.html`; rescans remove the previous split human layout and write `manifest.json` last.
-- Phase 8 builds protocol-neutral `ExternalBoundaryFact` evidence for Solidity
-  and Yul boundaries hosted by exact function or modifier scopes.
-  `ExternalBoundaryFactsVersion` is `1.0.0`; `ScopeID` is canonical, while
-  `FunctionID` is empty for modifier-hosted facts. Targets are exact or
-  explicitly unresolved, unknown evidence remains unknown, entry reachability
-  uses resolved call-graph edges only, and state ordering never falls back to
-  source-line order. This evidence is descriptive, not a vulnerability verdict.
-- `Database.QueryExternalBoundaries` is the Agent-facing API. It requires a
-  caller-supplied limit from 1 through `MaxExternalBoundaryQueryLimit` (200),
-  validates exact contract/scope/function/entry identities, returns
-  deterministic deep copies, and reports legacy caches through
-  `ErrExternalBoundaryFactsUnavailable` instead of guessing weaker facts.
-- Phase 7.25 builds positive `TransactionContextFact` evidence for exact
-  transaction-level `msg.value` flows inside loops.
-  `TransactionContextFactsVersion` is `1.0.0`. Supported effects are
-  `state_write`, `call_value`, and `stateful_internal_call`; repeatability is
-  either `possible` or `single_iteration`. The source and effect AST nodes carry
-  the ordinary WQL attributes, while the loop remains only the structural
-  finding anchor. Exact Yul value positions for `sstore`, `call`, `create`, and
-  `create2` use the same bounded alias proof. Observational uses, conditional or
-  tuple provenance, `if`/ternary/`try` branch merges, uncertain aliases,
-  inner-loop-exit aliases, unresolved helpers, unsupported loop shapes, and
-  legacy caches do not synthesize positive evidence. Canonical
-  literal increasing/decreasing loops prove `single_iteration` only from
-  adjacent exclusive or equal inclusive bounds.
-  `TransactionContextFactsSnapshot` returns normalized deep copies or
-  `ErrTransactionContextFactsUnavailable`.
-- CLI/report-owned artifact paths are reset before exclusive creation and are
-  never followed through prepared symlinks, so rescanning an existing result
-  folder cannot redirect `run.log`, human reports, or structured data outside
-  the validated output boundary.
-- AST nodes and declarations (`Function`/`Modifier`/`Contract`/`StateVariable`/`Event`/`Struct`/`Enum`/`Parameter`) carry `StartCol`/`EndCol`/`StartByte`/`EndByte` alongside `StartLine`/`EndLine` (one-based Unicode-code-point columns and zero-based UTF-8 byte offsets; both end fields are half-open; zero/omitted for synthetic nodes). `FunctionCall`/`CallEdge` carry point `Col`/`Byte` fields too. The builder derives columns from a once-per-source sparse line/non-ASCII index instead of the parser's byte-oriented column field: O(log non-ASCII runes on the line) per endpoint and O(lines + non-ASCII runes) index memory. Invalid conversions retain lines/bytes, omit columns, and record `location.invalid`. Output schema remains `2.0.0`; the dependency floor is solast-go v0.1.11 so contextual-keyword local declarations cannot desynchronize tolerant parsing and hide later functions.
-- A WQL document is meta plus one query: block. The block holds
-  `select`/`from`/`where` or a one-level `and:`/`or:` query composition.
-  Unknown keys and YAML merge keys (`<<`) are rejected at every level.
-  Explicitly authored `select:`, `from:`, and branch `label:` values must be
-  non-null, non-empty scalars; explicitly authored `where:` values must be
-  non-null, non-empty matcher lists. Empty nested matcher maps/lists, empty
-  required matcher strings, `unchecked_var: false`, and non-decimal or signed
-  `arg.N` keys are rejected before execution.
-  Composition keys are validated by presence, so null or empty lists cannot
-  fall through as simple queries and explicitly present `and:`/`or:` keys
-  remain mutually exclusive. Documents are lowered into the
-  `Template`/`QueryBlock`/`Rule` evaluator IR (`TemplateDoc.lower()` in
-  `pkg/engine/wql.go`) — `and:` lowers to one block whose match uses labeled
-  `Rule.All` branches at the join scope and rejects any branch without a
-  positive reportable anchor and traceable AST evidence; regex may refine an
-  AST-anchored branch but cannot be its only evidence or own its provenance.
-  Positive-polarity nested select-less sequences are checked recursively and
-  must anchor on step one; sequences used only inside `not:` remain refinement
-  evidence. `or:` lowers to one
-  QueryBlock per branch (`Template.Queries`), executed as a union that
-  deduplicates only the same precise site across branches while retaining
-  intra-branch duplicates and imprecise findings. The canonical key is the
-  exact file and precise span plus an optional concrete kind: unknown-kind
-  provenance is provisional and is replaced when the first concrete kind
-  arrives at that span, so unknown-first and unknown-last orders agree while
-  two different known kinds remain distinct. Identity is independent of
-  whether provenance arrived through `PrimaryAST` or `Location` – so evaluator behavior
-  (taint/reachability/matching) is independent
-  of the authoring surface.
-- Template loading is fail-closed by default. Lenient loading is explicit via `--ignore-invalid-templates` or `TemplateLoadOptions{IgnoreInvalid:true}`.
-- In the evaluator `Rule` IR (what WQL lowers to), `filter:` is for context-level preconditions and `match:` is for AST/source matching; `validateRulePlacement` enforces this. Templates don't write `filter:`/`match:` directly — `from` supplies scope, `where` supplies matchers.
-- Deprecated programmatic `Rule` aliases are normalized on a recursive deep
-  copy at every exported evaluator entry point and template execution path.
-  The copy rejects active pointer cycles and nesting beyond depth 64 before
-  later recursive walkers run. Nested `Attr` maps and slices, including values
-  supplied through exported `Rule.IsStateVar`, share the same
-  depth budget and active-container cycle checks while shared DAGs remain
-  valid. Conflicts and malformed graphs fail closed
-  without mutating caller-owned maps, slices, or nested rules; WQL remains
-  canonical.
-- Contract scopes (`main_contract`, `all_contract`, `contract`, `library`, `abstract`) evaluate `match:` against a synthetic `decl.contract` AST containing resolved functions from the linearized inheritance chain.
-- Findings may include `reachability`, `entryPoint`, `primaryAst`, and `related` matched sites. These fields are additive JSON/SARIF/report context.
-- `Finding.Location` describes the dangerous statement by default (matched-node
-  attribution): file, line, columns, bytes, contract, and function all name one
-  place, and the externally-callable entry hop travels in `entryPoint` and
-  `reachability`. Verifier attribution mixed the two — entry `contract`/`function`
-  with matched-node `file`/`line` — and is selectable via `--location-source
-  verifier`, `W3GOAUDIT_LOCATION_FROM_MATCHED_NODE`, or `Engine.SetLocationSource`.
-- `Finding.Location` and `primaryAst` carry the matched node's precise span (`col`/`endLine`/`endCol`/`startByte`/`endByte`) when the location anchors on that node; SARIF declares `columnKind: unicodeCodePoints` and emits `startColumn`/`endColumn`/`endLine`, but never mislabels UTF-8 bytes as `charOffset`/`charLength`. Reachability steps carry a per-hop `file` so cross-contract traces render at the correct file.
-- Matched-node location mode always takes line, columns, and bytes from the
-  committed primary node. Host file/contract/function prefer the final
-  interprocedural trace hop, then the enclosing declaration, then verifier
-  fallbacks. Sequence backtracking restores abandoned primary anchors, and
-  member-side name matches plus contract-root joins retain their exact related
-  evidence.
-- Inherited entry scans retain the derived contract for runtime MRO and callee
-  resolution, but each reachability hop is attributed to the exact owning
-  function source. Contract-scope findings with a real primary span anchor on
-  the actual inherited or local matched node and exact owner context;
-  location-less primary matches remain at the verified contract/file level
-  instead of borrowing a nearby function or line.
-- Interprocedural traversal carries the current caller function explicitly for
-  recorded selector lookup and `super` binding. Solidity `call.*` nodes are
-  followed only for recorded internal, inherited, self, super, or library
-  calls; member receivers and call options are excluded from parameter binding.
-  Sequence matching uses an execution-event partial order: receiver, option,
-  argument, assignment-RHS, return, emit, check, and similar operand/value
-  subtrees precede their enclosing effect; calls precede inlined callees; and
-  distinct pre-effect sibling expressions may occur in either order. Every
-  event owns its exact inline occurrence path plus accumulated caller/callee
-  conditional-arm tokens, so mutually exclusive cross-function arms cannot
-  form a sequence and reused callee AST pointers retain the selected occurrence
-  reachability. Raw AST ancestry and execution-path checks apply only within
-  one function expansion; distinct expansions use the event partial order and
-  occurrence-specific arm tokens. Callgraph construction records nested
-  receiver/option calls exactly once so those helpers can be inlined.
-- One dangerous site yields one finding. Entry-point and function scopes visit
-  each scope item independently, so a statement inside a shared internal helper was
-  reported once per reaching entry function; findings with an exact file+span now
-  collapse to one and the other entry points move into
-  `Context["additionalEntryPoints"]`. `Finding.Location.File` always names the file
-  containing `Finding.Location.Line` — for a match inside an inlined callee both come
-  from the callee, never a mix of the entry file and the callee line.
-- Value provenance for an index or member access comes from the base/receiver chain
-  only, never the key: `from[i]` inherits the caller-supplied base's taint, while
-  `stateMapping[userIndex]` stays state-provenance.
-- `reentrancy_guarded` is proven from an applied modifier's body (check a state
-  variable and write it before `_;`), with name matching only as a fallback for an
-  unresolvable body. `preset.authorization` uses exact authorization evidence;
-  virtual internal calls are dispatched through the deploying contract MRO
-  automatically, and `super` calls keep their statically resolved base target.
-- Entry-function resolution gives each signature to the most-derived declaration
-  before filtering by entrypoint status, so an inherited interface stub can never
-  substitute for a `view`/`pure` override.
-- Finding output is deterministic: `Engine.ExecuteAll` applies a total-order sort (`SortFindings`) before returning, so `findings.json`, `results.sarif`, and the findings section of `audit.md` are byte-stable across runs despite map-order iteration internally.
-- A WQL document contains exactly `meta` plus one `query`. Unknown top-level
-  keys, including the removed `ai` key, fail strict decoding. Engine findings
-  are produced only by deterministic template execution.
-- Authorization/runtime-inheritance facts are versioned at `1.0.0` and remain
-  protocol-neutral. Exact modifier/helper argument bindings distinguish fixed
-  principals from caller-selected operands; unresolved or ambiguous bindings
-  fail closed. Generic success checks such as `require(ok)` are not authorization
-  barriers, while ambiguous overloaded helpers remain fail-closed even when
-  their body is not authorization-shaped. WQL exposes only the direct
-  parameterized authorization and initializer presets; lifecycle and dispatch
-  details remain internal evidence
-  for reports and SDK consumers. Programmatic `Rule.Attr` has no hidden semantic
-  interpretation. Official templates are maintained as one simple, explicit
-  authoring surface; mechanical cleanup preserves detector semantics, while
-  semantic merges and new detectors require separate evidence gates.
-- Generated timestamps are the one intentional source of report-byte variance.
-  `GeneratorOptions.Now` and `BundleOptions.Now` let SDK callers inject a fixed
-  clock; a complete fixed-clock bundle is byte-stable.
-- Identity-sensitive code uses exact contracts and exact C3 identities, never a
-  short-name or same-directory guess. `LinearizedBaseIDs` is canonical;
-  `LinearizedBases` remains display/compatibility data. `ResolveContractNameExact`
-  uses the current file plus serialized per-occurrence `ImportBindings` and
-  canonical `ResolvedImports`; named aliases and namespace-qualified names map
-  only to exact imported declarations. Missing or ambiguous bindings fail
-  closed instead of selecting a plausible candidate. `GetContractByName` and
-  `ResolveContractName` remain compatibility helpers only.
-- Contract and function IDs use absolute paths: `absPath#ContractName` and `absPath#ContractName.selector(argTypes)`.
-- Build-cache JSON must round-trip with `scan --db`; serialized AST parent links are restored by `Database.RestoreASTParents()`.
-- Recoverable analysis loss is durable: source and `--db` scans share the same
-  sorted `Database.Diagnostics`, warning summary, and `data/diagnostics.json`.
-  Default scans remain tolerant; `--strict-imports` fails before template
-  execution/report writing when any persisted unresolved-import diagnostic
-  exists, and `--strict-parse` does the same for any persisted
-  `parse.recovered`/`parse.skipped` diagnostic. Parse loss is additionally
-  always reported loudly — on stderr during the build and in the console result —
-  because a missing AST hides declarations from every detector rather than merely
-  making a reference imprecise. Legacy name-only MRO caches record one incomplete
-  `identity.unresolved` diagnostic for every base entry that exact source/import
-  resolution cannot materialize.
-- `data/manifest.json` distinguishes `projectRoot` from `scanTarget` (`target`
-  is the compatibility alias), exposes `analysisComplete`/`diagnosticCounts`,
-  counts contracts/interfaces/libraries/declarations separately, and indexes
-  every emitted data/HTML artifact. `files.data.interactions` always points to
-  `data/interactions.json`, including legacy-cache runs where that document
-  reports `available: false`; the output schema remains `2.0.0`.
-- The WQL bridge is additive and protocol-neutral. The exact boundary AST node
-  may expose `external_boundary_id`, `boundary_target_resolution`,
-  `boundary_receiver_control`, `boundary_value_control`,
-  `boundary_arguments_controlled`, `boundary_result_disposition`,
-  `boundary_result_checked`, `boundary_reentry_class`,
-  `boundary_has_state_before`, `boundary_has_state_after`, and
-  `boundary_reachable_from_entry`. Official templates are not changed merely
-  by adding these attributes.
-- A template `version:` constraint is intersected with the whole range the
-  file's pragma permits, not compared to its first version triple, so
-  `>=0.7.0 <0.9.0` satisfies `>=0.8.0`. Caret/tilde/comparator chains, `||`
-  alternatives, and partial versions are understood; an unparseable pragma or
-  constraint skips the check instead of excluding the file.
-- Storage-authority recognition for access control uses one closed vocabulary of
-  privileged-principal names (`types.accessControlNameRegex`), covering
-  owner/admin/govern/role/operator/manager/controller/keeper/trusted/signer/
-  validator and similar, and deliberately excluding value-bearing names
-  (balance/deposit/stake/share/nonce) and inverted denylists. Scalar
-  caller-vs-authority comparisons are name-agnostic.
-- Import discovery decodes valid Solidity string escapes before resolution and
-  rejects malformed escaped paths. Foundry remappings honor the active profile
-  and context relative to the importing file's owning sub-project; applicable
-  mappings rank by context specificity, then import-prefix specificity.
-- When remappings and the node_modules/lib/root stat fallbacks all fail, two
-  last-resort heuristics run before an import is recorded unresolved (for
-  block-explorer sources whose prefixes ship without a remappings file):
-  conventional dependency-layout rewriting of well-known prefixes
-  (`@openzeppelin/`, `@prb/`, `forge-std/`, `solmate/`, `solady/`, Uniswap, …),
-  then a unique longest-suffix match against the on-disk `lib/`/`node_modules/`
-  tree requiring ≥2 aligned path segments. Both accept only an existing regular
-  file contained within the owning sub-project and abstain on ambiguity;
-  explicit remappings always win. The suffix matcher also abstains when its
-  bounded walk is truncated, because uniqueness cannot be established from a
-  partial view of the tree.
-- Parsed calls with known arguments never resolve a same-name declaration of
-  the wrong arity. They retain no exact target and emit one durable
-  `identity.unresolved` diagnostic with the observed arity. Serialized
-  `FunctionCall.argCount` is presence-aware: an absent legacy field loads as
-  `-1`, while a genuine zero is emitted and round-trips as zero.
-- Benchmark fallback source attribution masks Solidity comments and quoted
-  strings with a length/newline-preserving lexer before declaration matching
-  and brace counting.
-
-## Documentation Map
-
-Compatibility/exactness repair notes:
-
-- Deprecated evaluator-IR JSON fields `source_regex`, `visibility_filter`, and
-  `mutability_filter` normalize into canonical fields before validation and
-  execution, while canonical WQL YAML rejects those keys.
-- Source-scoped exact contract resolution requires same-file or import
-  provenance even for a sole global candidate. Engine callee resolution uses
-  precise call sites, exact IDs, full selectors, and unique legacy fallback.
-- Report call graphs, state matrices, and workflow closure share one exact call
-  resolver: recorded contract IDs/full selectors win, and legacy arity/name
-  metadata succeeds only when one distinct runtime-MRO selector remains.
-- Navigation publishes caller edges only for resolved target IDs that map to an
-  existing exact function. `extract diff` compares slash-normalized
-  source-relative `path.sol#Contract` keys and full selectors across checkout
-  roots.
-- Display `LinearizedBases` and compact exact `LinearizedBaseIDs` are not
-  index-aligned by contract. Expression-statement AST ranges remain owned by
-  the semantic expression and exclude the terminating semicolon.
-
-| Doc | Use |
-|---|---|
-| `README.md` | User-facing quick start, feature overview, result-folder shape |
-| `docs/project-overview.md` | Architecture and package-level system design |
-| `docs/workflows.md` | Scan/build/report execution workflows |
-| `docs/wql-syntax.md` | WQL template language reference |
-| `docs/extension-output.md` | `data/nav.json` + `data/explorer.json` + `data/xref.json` schema for the VSCode extension |
-| `docs/usage.md` | Full CLI usage, flags, result artifacts |
-| `docs/sdk.md` | Go SDK package/type/function reference |
-
-## Current WQL/Report Notes
-
-- Contract-scope AST matching is designed for same-contract combination rules,
-  such as "payable `msg.value` accounting plus inherited `Multicall.multicall`".
-- For multi-condition function and contract findings, `Finding.Related` carries
-  each labeled contributing node with exact file, line/Unicode-column, and
-  UTF-8 byte provenance when available; a positive synthetic contract-root
-  branch contributes a contract/file record with no borrowed function or
-  precise byte/column span. Markdown renders `All matched sites` and full
-  function excerpts for each related site. Each public `and:` branch may carry an
-  optional `label:` that names its sites in that list (falling back to
-  `condition N`); WQL lowering stores these branches in internal `Rule.All`.
-- `Finding.Location` is still the primary anchor; `Finding.Related` is for the
-  complete contributing context.
-- Public templates use WQL (`query:` with `select`/`from`/`where`, or a
-  query-level `and:`/`or:` composition) with direct semantic presets.
-  `preset.authorization` accepts `protected` or `self_sender`, while
-  `preset.initializer` accepts `takeover: possible`; normal `not:` expresses a
-  property's absence.
-  `tainted: user_controlled` matches parameter or caller-identity taint, while
-  the narrower explicit sources remain available. Caller identity is limited
-  to `msg.sender`, `tx.origin`, and an exact zero-argument internal
-  `_msgSender()` helper confirmed by call metadata and exact MRO resolution
-  when those facts are available. A non-nil but empty or unresolvable database
-  is unavailable resolution context, so an exact synthetic zero-argument
-  `call.internal` retains the compatibility fallback; once an exact owner/MRO
-  is available, a missing helper or nonzero overload disproves the identity.
-  Same-named identifiers, state/local/parameter
-  names, external/self calls, unresolved calls, and nonzero overloads retain
-  their ordinary provenance. The repository currently contains 20 official plus
-  benchmark and feature-test templates. `select` is an optional
-  scalar; a fully specified sequence supplies its own anchor, and every
-  positive-polarity sequence nested under a select-less matcher must guarantee
-  positive actionable evidence in its first step.
-  `arg.any:` matches any positional call argument; repeated sibling
-  `arg.any:` predicates are independent existential checks and may match
-  different arguments. Repeated sibling `not:` predicates are also preserved
-  as independent implicit-conjunction checks, so `not: A` plus `not: B` means
-  `(not A) and (not B)`. `and:` is the only explicit public conjunction.
-- `unchecked_var` clears unsigned subtraction only when exact stable operands
-  are locally proven as `left >= right` by an enforced require/assert, a
-  dominating safe arm whose subtraction is the first executable operation
-  through block/unchecked wrappers, or fallthrough after an unsafe arm exits
-  with no surviving effect. The first intervening statement or call ends the
-  proof. Before any proof is accepted, the full expression path must contain
-  only allowlisted pure wrappers and structurally effect-free siblings. The
-  complete guard condition and every additional `require`/`assert` argument
-  must also be structurally effect-free; call
-  ancestors, assignment-expression siblings, creation, increment/decrement,
-  delete, and unknown evaluation order remain findings. Reversed or unrelated
-  inequalities, signed arithmetic, and unstable operands also fail closed.
-- `data/nav.json` is a flat symbol-level navigation index (definitions, caller
-  edges, interface→implementation map); `data/explorer.json` is a
-  per-main-contract model (ordered constants/storage, entry-callable functions,
-  view getters); `data/xref.json` is a precise, type-resolved cross-reference
-  index (`declarations[]` jump targets plus `references[]` occurrences carrying
-  the declaration `refId`) that gives regex-free go-to-definition and
-  find-references. All three are built in `pkg/report`
-  (`nav.go`/`explorer.go`/`xref.go`), manifest-indexed, and share the same
-  `schemaVersion` as `overview.json`/`findings.json`.
-- Xref references are only emitted for occurrences the builder can bind to an
-  exact declaration and pin to a real source span: identifiers (state vars,
-  parameters, locals), resolved internal/external/self/super and library
-  `using` calls, UDVT `wrap`/`unwrap`, type casts, `revert`/`emit` targets, and
-  applied modifiers. Interior operands and struct/enum member positions that
-  solast-go does not range are omitted rather than approximated, and an
-  ambiguous UDVT name binds to nothing. Both tables are total-order sorted, so
-  `xref.json` is byte-stable across runs.
-
-## Change Checklist
-
-Before changing code:
-
-- Read this file and the `AI.md` of every touched package.
-- Read relevant docs in `docs/` for WQL, workflow, SDK, or CLI changes.
-
-After changing code:
-
-- Update the touched package `AI.md` files.
-- Update user docs (`README.md`, `docs/*.md`) for behavior/API/output changes.
-- Add or update tests for the behavior, including safe/vulnerable cases for new security templates.
-- Run focused tests at minimum; for broad changes prefer `go test ./...`.
-
-## Verification Commands
-
-```bash
-go test ./pkg/engine ./pkg/types ./pkg/report -count=1
-go test ./pkg/... -count=1
-go build -o w3goaudit ./cmd/w3goaudit
-./w3goaudit test-data/security/ --template templates/official/ --verbose
-
-# Competitive quality gate via the local CLI (no Docker).
-go build -o /tmp/w3goaudit ./cmd/w3goaudit
-python3 scripts/benchmark/run_benchmark.py --suite competitive --tools w3goaudit \
-  --w3goaudit-bin /tmp/w3goaudit --out benchmarks/results/latest
-python3 scripts/benchmark/assert_thresholds.py benchmarks/results/latest/benchmark.json
-
-# Docker Compose only for the multi-tool comparison (Slither/Semgrep/4naly3er).
-# The Dockerfile derives and verifies the Go version directly from go.mod.
-docker compose -f scripts/benchmark/compose.yaml run --rm benchmark
-```
+For release or report changes, also run the official fixture scan and the maintainer-local competitive gate described in docs/usage.md.

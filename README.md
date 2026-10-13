@@ -5,8 +5,10 @@
 
 A Go-based CLI & SDK for auditing Solidity smart contracts using rule-based templates with WQL query language.
 
-Current release: W3GoAudit `v0.6.0` with the 20-detector official template
-pack `v3.0.0`. Pack `v3.0.0` requires W3GoAudit `v0.6.0` or newer.
+Current release: W3GoAudit `v0.7.0` with the 20-detector official template
+pack `v3.0.1`. Pack `v3.0.1` requires W3GoAudit `v0.7.0` or newer. The
+paired v0.7.0 engine is recommended for the latest parser, reader, and evidence
+fixes.
 
 ---
 
@@ -61,7 +63,7 @@ Example console output:
 ```
 
 Results land in a folder with bounded `README.md`, consolidated `audit.md`,
-`results.sarif`, `run.log`, unchanged machine-readable `data/`, and one
+`results.sarif`, `run.log`, machine-readable `data/`, and one
 Markdown deep dive per main contract under `contracts/`. `--html` adds one
 self-contained `audit.html`. See [Result folder layout](#result-folder-layout).
 
@@ -88,7 +90,7 @@ self-contained `audit.html`. See [Result folder layout](#result-folder-layout).
   `ExternalBoundaryFact` evidence. It records exact host scope, target
   resolution, value provenance, result handling, direct state-effect order,
   reentry class, entry reachability, and explicit unknowns without declaring a
-  vulnerability. `ExternalBoundaryFactsVersion` is `1.0.0`.
+  vulnerability. `ExternalBoundaryFactsVersion` is `1.1.0`.
 - **Semantic unchecked-result checks** - The ERC20 transfer, low-level-call, and
   `send` detectors use proven result disposition and direct-check evidence. They
   report discarded or captured-but-unchecked results, rather than treating an
@@ -108,7 +110,7 @@ self-contained `audit.html`. See [Result folder layout](#result-folder-layout).
   `charOffset`/`charLength`. These are not LSP positions; LSP lines and
   characters are zero-based and commonly use UTF-16 code units.
 - **WQL Templates** - Powerful query language for security pattern matching, with load-time validation (regex, scalar and parameterized presets, matcher placement) so typos fail fast instead of producing silent zero-finding scans. Authorization and initializer intent use small parameterized presets; inheritance and virtual dispatch are handled automatically by the engine. Raw authorization, lifecycle, and runtime attributes are not template or programmatic matcher surfaces. Generic checks such as `require(ok)` are not mistaken for caller authorization, so taint analysis continues through ordinary helpers while ambiguous overloads remain fail-closed. Includes a source-scope `regex` matcher for rare raw-source predicates and contract-scope AST matching for same-contract local/inherited combination rules.
-- **Result Folder** - One opinionated folder per scan: bounded `README.md`, consolidated `audit.md`, always-on `results.sarif` + `run.log`, machine-readable `data/` (`manifest.json`, reusable `database.json`, findings/overview, always-on `diagnostics.json`, deterministic `interactions.json`, plus nav/explorer/xref data for the editor extension), and one collision-safe Markdown deep dive per main contract under `contracts/`. Opt-in fully offline `audit.html` with `--html`.
+- **Result Folder** - One opinionated folder per scan: bounded `README.md`, consolidated `audit.md`, always-on `results.sarif` + `run.log`, machine-readable `data/` (`manifest.json`, reusable `database.json`, findings/overview, always-on `diagnostics.json`, deterministic `interactions.json`, ranked `hunter.json`, versioned `authorization.json`, plus nav/explorer/xref data for the editor extension), and one collision-safe Markdown deep dive per main contract under `contracts/`. Opt-in fully offline `audit.html` with `--html`.
 - **Agent-ready deterministic evidence** - The scanner remains offline and
   model-independent. A future external AI Assistant can consume findings, the
   database, exact source locations, reachability, navigation, cross-references,
@@ -234,10 +236,10 @@ timestamps vary unless SDK callers inject a fixed report/bundle clock.
 no timestamp, keeps `interactions`/`limitations` as arrays, and reports
 `available: false` plus a rebuild limitation for a legacy database that lacks
 the fact capability. The output schema version 2.0.0 remains unchanged; the
-fact surface has its own `factsVersion: "1.0.0"`. Existing editor-facing
+fact surface has its own `factsVersion: "1.1.0"`. Existing editor-facing
 shapes remain unchanged, so W3Solidity can ignore the additive manifest field.
 Canonical discovery uses `files.audit`, optional `files.auditHtml`, and
-`contracts[].report`; v0.5.x retains compatibility aliases to the same files.
+`contracts[].report` is the canonical contract-report reference.
 
 ---
 
@@ -439,8 +441,9 @@ query:
 
 This is **WQL** (W3GoAudit Query Language). A WQL document is meta plus one query: block.
 That block contains `select`/`from`/`where`, or a query-level
-`and:`/`or:` composition. The repository currently contains 20 official, 5
-feature-test, and 76 benchmark templates; see the
+`and:`/`or:` composition. The repository currently contains 20 official and 5
+feature-test templates; benchmark fixtures live in the maintainer-only harness.
+See the
 [WQL Syntax Guide](./docs/wql-syntax.md) for the full language reference.
 Official detectors use complete, mechanism-focused metadata and readable
 sentence-case titles. Detector changes require vulnerable and safe fixtures,

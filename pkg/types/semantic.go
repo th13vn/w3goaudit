@@ -19,7 +19,7 @@ const (
 )
 
 const (
-	ExternalBoundaryFactsVersion  = "1.0.0"
+	ExternalBoundaryFactsVersion  = "1.1.0"
 	MaxExternalBoundaryQueryLimit = 200
 )
 

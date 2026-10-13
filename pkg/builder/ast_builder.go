@@ -937,6 +937,14 @@ func (b *ASTBuilder) buildVariableDeclaration(stmt *ast.VariableDeclarationState
 		valueNode := b.buildExpression(stmt.InitialValue)
 		if valueNode != nil {
 			assignNode.AddChild(valueNode)
+			for _, child := range assignNode.Children {
+				if child != valueNode && child.Kind == types.KindExprIdentifier {
+					b.promoteLegacyStorageAlias(child.Name, valueNode)
+					if b.symbolLocations[child.Name] == "storage" {
+						child.SetAttribute("data_location", "storage")
+					}
+				}
+			}
 
 			// Propagate data-flow taint
 			rhsTaint := b.computeTaint(valueNode)
@@ -1389,92 +1397,129 @@ func (b *ASTBuilder) buildTupleExpression(expr *ast.TupleExpression) *types.ASTN
 }
 
 // buildFunctionCall builds AST for function call
-func (b *ASTBuilder) buildFunctionCall(call *ast.FunctionCall) *types.ASTNode {
-	// Determine call type and name
-	callType := types.KindCallExternal
-	callName := ""
-	calledSignature := ""
-	userTypeCastName := "" // set for a user-defined-type cast, e.g. IERC20(token)
-	var receiverExpr ast.Node
-	var receiverType types.TypeInfo
-	var resultType types.TypeInfo
+// callShape is buildFunctionCall's classification of a call expression,
+// computed before the node is built.
+type callShape struct {
+	callType         string
+	callName         string
+	calledSignature  string
+	userTypeCastName string // set for a user-defined-type cast, e.g. IERC20(token)
+	receiverExpr     ast.Node
+	receiverType     types.TypeInfo
+	resultType       types.TypeInfo
+	legacyOptions    []legacyCallOption
+}
 
+// classifyCallExpression determines a call's kind, name, receiver, and result
+// type from the shape of its callee expression.
+func (b *ASTBuilder) classifyCallExpression(call *ast.FunctionCall) callShape {
+	shape := callShape{callType: types.KindCallExternal}
 	switch expr := call.Expression.(type) {
 	case *ast.Identifier:
 		// Direct function call: foo()
-		callName = expr.Name
-		// Check for require/assert/revert (check.* kinds) and the
-		// builtin `selfdestruct`/`suicide` global functions.
-		switch callName {
-		case "require":
-			callType = types.KindCheckRequire
-		case "assert":
-			callType = types.KindCheckAssert
-		case "revert":
-			callType = types.KindCheckRevert
-		case "selfdestruct", "suicide":
-			// Solidity-level builtin (NOT inline-asm). The `selfdestruct`
-			// semantic group in matchKind unions this with asm.selfdestruct.
-			callType = types.KindCallBuiltinSelfdestruct
-		default:
-			callType = types.KindCallInternal
-			resultType = b.expressionType(call)
-			// A user-defined-type cast whose callee parses as a bare identifier,
-			// e.g. IToken(owner). Only flagged when the name is a known
-			// contract/interface/library so genuine internal calls are unaffected.
-			if b.isKnownUserType(callName) {
-				userTypeCastName = callName
-			}
-		}
+		shape.callName = expr.Name
+		b.classifyIdentifierCallee(call, &shape)
 
 	case *ast.ElementaryTypeName:
 		// Type conversion such as address(0), uint256(x), bytes32(y).
 		// This is not an external call and must not satisfy `outgoing_call`.
-		callName = expr.Name
-		callType = types.KindCallInternal
-		resultType = b.typeInfoFromTypeName(expr.Name, "type_cast")
+		shape.callName = expr.Name
+		shape.callType = types.KindCallInternal
+		shape.resultType = b.typeInfoFromTypeName(expr.Name, "type_cast")
 
 	case *ast.UserDefinedTypeName:
 		// Interface/contract casts such as IERC20(token). They may be receivers
 		// for later member calls, but the cast itself is not an external call.
-		callName = expr.NamePath
-		callType = types.KindCallInternal
-		resultType = b.typeInfoFromTypeName(expr.NamePath, "type_cast")
-		userTypeCastName = expr.NamePath
+		shape.callName = expr.NamePath
+		shape.callType = types.KindCallInternal
+		shape.resultType = b.typeInfoFromTypeName(expr.NamePath, "type_cast")
+		shape.userTypeCastName = expr.NamePath
 
 	case *ast.NewExpression:
 		// `new Contract(args)` — deploys and runs code. Classified as call.create
 		// so `kind: call.create` and the outgoing_call/any_call groups match it.
-		callName = getTypeName(expr.TypeName)
-		callType = types.KindCallCreate
-		resultType = b.typeInfoFromTypeName(callName, "new")
+		shape.callName = getTypeName(expr.TypeName)
+		shape.callType = types.KindCallCreate
+		shape.resultType = b.typeInfoFromTypeName(shape.callName, "new")
 
 	case *ast.MemberAccess:
 		// Member access call: token.transfer(), addr.call(), etc.
-		callName = expr.MemberName
-		receiverExpr = expr.Expression
-		receiverType = b.expressionType(receiverExpr)
-		callType = b.classifyMemberAccessCall(callName, len(call.Arguments), receiverType)
+		b.classifyMemberCallee(call, expr, &shape)
 
-		// Try to extract called signature for low-level calls
-		if callType == types.KindCallLowlevelCall {
-			calledSignature = b.extractCalledSignature(call.Arguments)
+	case *ast.FunctionCall:
+		// Solidity 0.4.x encodes low-level call modifiers as nested calls,
+		// for example `target.call.value(amount)(data)`. Normalize only the
+		// outer legacy chain; the inner modifier call is traversed separately
+		// by the call graph and is not itself a boundary.
+		if receiver, options, ok := legacyLowLevelCallParts(expr); ok {
+			shape.callName = "call"
+			shape.receiverExpr = receiver
+			shape.receiverType = b.expressionType(receiver)
+			shape.legacyOptions = options
+			shape.callType = types.KindCallLowlevelCall
+			shape.calledSignature = b.extractCalledSignature(call.Arguments)
 		}
 
 	case *ast.FunctionCallOptions:
 		// Calls with options like: addr.call{value: x}("")
 		if ma, ok := expr.Expression.(*ast.MemberAccess); ok {
-			callName = ma.MemberName
-			receiverExpr = ma.Expression
-			receiverType = b.expressionType(receiverExpr)
-			callType = b.classifyMemberAccessCall(callName, len(call.Arguments), receiverType)
-
-			// Try to extract called signature for low-level calls
-			if callType == types.KindCallLowlevelCall {
-				calledSignature = b.extractCalledSignature(call.Arguments)
-			}
+			b.classifyMemberCallee(call, ma, &shape)
 		}
 	}
+	return shape
+}
+
+// classifyIdentifierCallee classifies a direct call `foo(...)`: the
+// require/assert/revert checks, the builtin selfdestruct, and otherwise an
+// internal call or a user-defined-type cast.
+func (b *ASTBuilder) classifyIdentifierCallee(call *ast.FunctionCall, shape *callShape) {
+	switch shape.callName {
+	case "require":
+		shape.callType = types.KindCheckRequire
+	case "assert":
+		shape.callType = types.KindCheckAssert
+	case "revert":
+		shape.callType = types.KindCheckRevert
+	case "selfdestruct", "suicide":
+		// Solidity-level builtin (NOT inline-asm). The `selfdestruct`
+		// semantic group in matchKind unions this with asm.selfdestruct.
+		shape.callType = types.KindCallBuiltinSelfdestruct
+	default:
+		shape.callType = types.KindCallInternal
+		shape.resultType = b.expressionType(call)
+		// A user-defined-type cast whose callee parses as a bare identifier,
+		// e.g. IToken(owner). Only flagged when the name is a known
+		// contract/interface/library so genuine internal calls are unaffected.
+		if b.isKnownUserType(shape.callName) {
+			shape.userTypeCastName = shape.callName
+		}
+	}
+}
+
+// classifyMemberCallee classifies `receiver.member(...)`, with or without call
+// options.
+func (b *ASTBuilder) classifyMemberCallee(call *ast.FunctionCall, member *ast.MemberAccess, shape *callShape) {
+	shape.callName = member.MemberName
+	shape.receiverExpr = member.Expression
+	shape.receiverType = b.expressionType(member.Expression)
+	shape.callType = b.classifyMemberAccessCall(shape.callName, len(call.Arguments), shape.receiverType)
+	// `super.f()` jumps to the next implementation in the linearization; it
+	// never leaves the contract, so it is not an external call even though it
+	// is written as a member call.
+	if ident, ok := member.Expression.(*ast.Identifier); ok && ident.Name == "super" && shape.callType == types.KindCallExternal {
+		shape.callType = types.KindCallInternal
+	}
+	// Try to extract called signature for low-level calls
+	if shape.callType == types.KindCallLowlevelCall {
+		shape.calledSignature = b.extractCalledSignature(call.Arguments)
+	}
+}
+
+func (b *ASTBuilder) buildFunctionCall(call *ast.FunctionCall) *types.ASTNode {
+	shape := b.classifyCallExpression(call)
+	callType, callName, calledSignature := shape.callType, shape.callName, shape.calledSignature
+	userTypeCastName, receiverExpr, receiverType := shape.userTypeCastName, shape.receiverExpr, shape.receiverType
+	resultType, legacyOptions := shape.resultType, shape.legacyOptions
 	receiverLocation := b.expressionDataLocation(receiverExpr)
 	if isBuiltinStorageArrayMutation(callName, len(call.Arguments), receiverType, receiverLocation) {
 		callType = types.KindStmtStateMutation
@@ -1539,6 +1584,20 @@ func (b *ASTBuilder) buildFunctionCall(call *ast.FunctionCall) *types.ASTNode {
 			}
 		}
 	}
+	for _, option := range legacyOptions {
+		n := b.buildExpression(option.expression)
+		if n == nil {
+			continue
+		}
+		n.SetAttribute("call_option", option.name)
+		node.AddChild(n)
+		switch option.name {
+		case "value":
+			node.SetAttribute("has_value", true)
+		case "gas":
+			node.SetAttribute("has_gas", true)
+		}
+	}
 
 	// Set called signature if extracted
 	if calledSignature != "" {
@@ -1556,6 +1615,42 @@ func (b *ASTBuilder) buildFunctionCall(call *ast.FunctionCall) *types.ASTNode {
 	b.bindUDVTWrapRef(node, callName, receiverExpr)
 	b.bindTypeCastRef(node, userTypeCastName)
 	return node
+}
+
+type legacyCallOption struct {
+	name       string
+	expression ast.Node
+}
+
+// legacyLowLevelCallParts unwraps Solidity 0.4.x chained low-level call
+// syntax and returns the receiver plus options in source order.
+func legacyLowLevelCallParts(node ast.Node) (ast.Node, []legacyCallOption, bool) {
+	var options []legacyCallOption
+	var unwrap func(ast.Node) (ast.Node, bool)
+	unwrap = func(current ast.Node) (ast.Node, bool) {
+		switch n := current.(type) {
+		case *ast.MemberAccess:
+			if n.MemberName == "call" {
+				return n.Expression, n.Expression != nil
+			}
+		case *ast.FunctionCall:
+			ma, ok := n.Expression.(*ast.MemberAccess)
+			if !ok || (ma.MemberName != "value" && ma.MemberName != "gas") || len(n.Arguments) != 1 {
+				return nil, false
+			}
+			options = append(options, legacyCallOption{name: ma.MemberName, expression: n.Arguments[0]})
+			return unwrap(ma.Expression)
+		}
+		return nil, false
+	}
+	receiver, ok := unwrap(node)
+	if !ok {
+		return nil, nil, false
+	}
+	for i, j := 0, len(options)-1; i < j; i, j = i+1, j-1 {
+		options[i], options[j] = options[j], options[i]
+	}
+	return receiver, options, true
 }
 
 // bindTypeCastRef binds a user-defined-type conversion (`IERC20(token)`,
@@ -1719,6 +1814,9 @@ func (b *ASTBuilder) buildAssignmentFromBinary(op *ast.BinaryOperation) *types.A
 
 	// Check if this is a state variable assignment
 	isStateVarAssignment := b.isStateVariableReference(op.Left)
+	if !isStateVarAssignment {
+		isStateVarAssignment = b.isLegacyStorageAliasReference(op.Left)
+	}
 	node.SetAttribute("is_state_var", isStateVarAssignment)
 
 	var leftNode *types.ASTNode
@@ -1799,6 +1897,34 @@ func (b *ASTBuilder) buildAssignmentFromBinary(op *ast.BinaryOperation) *types.A
 	return node
 }
 
+func (b *ASTBuilder) isLegacyStorageAliasReference(expr ast.Node) bool {
+	if expr == nil || !b.legacySoliditySource() {
+		return false
+	}
+	var root ast.Node = expr
+	for {
+		switch n := root.(type) {
+		case *ast.MemberAccess:
+			root = n.Expression
+		case *ast.IndexAccess:
+			root = n.Base
+		default:
+			if id, ok := root.(*ast.Identifier); ok {
+				return b.symbolLocations[id.Name] == "storage" && b.symbolTable[id.Name] == "local_var"
+			}
+			return false
+		}
+	}
+}
+
+func (b *ASTBuilder) legacySoliditySource() bool {
+	if b == nil || b.db == nil || b.function == nil {
+		return false
+	}
+	sf := b.db.SourceFiles[b.function.SourceFile]
+	return sf != nil && legacyPragmaInSource(sf.Content)
+}
+
 // isStateVariableReference checks if an expression references a state variable
 // Returns true if the expression is or contains a state variable reference
 func (b *ASTBuilder) isStateVariableReference(expr ast.Node) bool {
@@ -1810,7 +1936,7 @@ func (b *ASTBuilder) isStateVariableReference(expr ast.Node) bool {
 	case *ast.Identifier:
 		// Use the active symbol classification so parameters and locals that
 		// shadow a state declaration win over the declaration-name cache.
-		return b.symbolTable[e.Name] == "state_var"
+		return b.symbolTable[e.Name] == "state_var" || (b.symbolTable[e.Name] == "local_var" && b.symbolLocations[e.Name] == "storage" && b.legacySoliditySource())
 
 	case *ast.IndexAccess:
 		// Array/mapping access: arr[index] or mapping[key]
@@ -2071,6 +2197,46 @@ func (b *ASTBuilder) buildNamedIdentifier(name string) *types.ASTNode {
 	}
 
 	return node
+}
+
+// promoteLegacyStorageAlias marks an implicit `var` local as a storage alias
+// when its initializer is rooted in a state mapping or struct access.
+func (b *ASTBuilder) promoteLegacyStorageAlias(name string, value *types.ASTNode) {
+	if b == nil || name == "" || value == nil || b.function == nil || b.db == nil {
+		return
+	}
+	sf := b.db.SourceFiles[b.function.SourceFile]
+	if sf == nil || !legacyPragmaInSource(sf.Content) {
+		return
+	}
+	base := value
+	for base != nil && (base.Kind == types.KindExprIndexAccess || base.Kind == types.KindExprMemberAccess) && len(base.Children) > 0 {
+		base = base.Children[0]
+	}
+	if base == nil || base.Kind != types.KindExprIdentifier || base.RefKind != "state_var" {
+		return
+	}
+	valueType := b.typeFromNode(value)
+	if !legacyImplicitStorageReferenceType(valueType) {
+		return
+	}
+	b.symbolLocations[name] = "storage"
+	if valueType.IsKnown() {
+		b.symbolTypes[name] = valueType
+	}
+}
+
+func legacyImplicitStorageReferenceType(ti types.TypeInfo) bool {
+	switch ti.Kind {
+	case types.TypeKindStruct, types.TypeKindArray, types.TypeKindMapping:
+		return true
+	case types.TypeKindPrimitive:
+		// Dynamic bytes and string are reference types even though the
+		// lightweight type model groups them with primitive spellings.
+		return ti.BaseName == "bytes" || ti.BaseName == "string"
+	default:
+		return false
+	}
 }
 
 func (b *ASTBuilder) buildAssemblyIdentifier(name string) *types.ASTNode {
